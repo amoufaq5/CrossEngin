@@ -1,0 +1,44 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vim/
+.history/
+
+# Node (in case we add a docs site or tooling later)
+node_modules/
+.npm/
+.yarn/
+.pnpm-store/
+
+# Build outputs (in case we add a docs site later)
+dist/
+build/
+.next/
+.nuxt/
+.cache/
+.turbo/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
