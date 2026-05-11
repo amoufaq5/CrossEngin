@@ -6,8 +6,8 @@
 | [0001](0001-platform-positioning-and-brand-architecture.md) | Platform positioning and brand architecture | 1 | Proposed | 2026-05-11 |
 | [0002](0002-multi-tenancy-model.md) | Multi-tenancy model | 1 | Proposed | 2026-05-11 |
 | [0003](0003-meta-schema-and-dynamic-entity-engine.md) | Meta-schema and dynamic entity engine | 1 | Proposed | 2026-05-11 |
-| 0004 | Manifest specification | 1 | Proposed | _pending_ |
-| 0005 | AI Architect contract | 1 | Proposed | _pending_ |
+| [0004](0004-manifest-specification.md) | Manifest specification | 1 | Proposed | 2026-05-11 |
+| [0005](0005-ai-architect-contract.md) | AI Architect contract | 1 | Proposed | 2026-05-11 |
 | 0006 | LLM provider router | 2 | Proposed | _pending_ |
 | 0007 | Workflow engine | 2 | Proposed | _pending_ |
 | 0008 | RBAC v2, ABAC, and audit | 1 | Proposed | _pending_ |
@@ -48,13 +48,13 @@ ADRs are written in three tiers reflecting how foundational they are:
 
 The 25 ADRs are written in 8 review-sized batches across multiple sessions:
 
-| Batch | ADRs | Approx. words |
-|---|---|---|
-| 1 | vision.md + 0001 + 0024 | 14,000 |
-| 2 | 0002 + 0003 | 10,000 |
-| 3 | 0004 + 0005 | 12,000 |
-| 4 | 0008 + 0009 + 0018 | 13,000 |
-| 5 | 0006 + 0007 + 0010 + 0011 | 16,000 |
-| 6 | 0012 + 0013 + 0014 + 0015 | 16,000 |
-| 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 17,000 |
-| 8 | 0019 + 0021 + 0022 | 10,000 |
+| Batch | ADRs | Approx. words | Status |
+|---|---|---|---|
+| 1 | vision.md + 0001 + 0024 | 14,000 | Drafted |
+| 2 | 0002 + 0003 | 10,000 | Drafted |
+| 3 | 0004 + 0005 | 12,000 | Drafted |
+| 4 | 0008 + 0009 + 0018 | 13,000 | Pending |
+| 5 | 0006 + 0007 + 0010 + 0011 | 16,000 | Pending |
+| 6 | 0012 + 0013 + 0014 + 0015 | 16,000 | Pending |
+| 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 17,000 | Pending |
+| 8 | 0019 + 0021 + 0022 | 10,000 | Pending |
