@@ -14,10 +14,10 @@
 | [0009](0009-security-model.md) | Security model | 1 | Proposed | 2026-05-11 |
 | [0010](0010-multi-region-and-data-residency.md) | Multi-region and data residency | 2 | Proposed | 2026-05-11 |
 | [0011](0011-integration-mesh.md) | Integration mesh | 2 | Proposed | 2026-05-11 |
-| 0012 | Compliance pack architecture | 2 | Proposed | _pending_ |
-| 0013 | Reporting and analytics | 2 | Proposed | _pending_ |
-| 0014 | Files and storage | 2 | Proposed | _pending_ |
-| 0015 | Jobs and async runtime | 2 | Proposed | _pending_ |
+| [0012](0012-compliance-pack-architecture.md) | Compliance pack architecture | 2 | Proposed | 2026-05-11 |
+| [0013](0013-reporting-and-analytics.md) | Reporting and analytics | 2 | Proposed | 2026-05-11 |
+| [0014](0014-files-and-storage.md) | Files and storage | 2 | Proposed | 2026-05-11 |
+| [0015](0015-jobs-and-async-runtime.md) | Jobs and async runtime | 2 | Proposed | 2026-05-11 |
 | 0016 | Search | 2 | Proposed | _pending_ |
 | 0017 | Observability and SLOs | 2 | Proposed | _pending_ |
 | [0018](0018-frontend-renderer-architecture.md) | Frontend renderer architecture | 1 | Proposed | 2026-05-11 |
@@ -55,6 +55,6 @@ The 25 ADRs are written in 8 review-sized batches across multiple sessions:
 | 3 | 0004 + 0005 | 12,000 | Drafted |
 | 4 | 0008 + 0009 + 0018 | 9,400 | Drafted |
 | 5 | 0006 + 0007 + 0010 + 0011 | 10,200 | Drafted |
-| 6 | 0012 + 0013 + 0014 + 0015 | 16,000 | Pending |
+| 6 | 0012 + 0013 + 0014 + 0015 | 10,200 | Drafted |
 | 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 17,000 | Pending |
 | 8 | 0019 + 0021 + 0022 | 10,000 | Pending |
