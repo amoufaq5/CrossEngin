@@ -288,14 +288,22 @@ Every entity is defined in a Prisma schema file. Manifests are just curated Pris
 
 ## Open questions
 
+### Resolved (2026-05-11)
+
+- **Enum representation:** text column with `CHECK (value IN (...))` constraint. ALTER on the constraint is trivial when enum values change; AI Architect can add/remove values without DDL drama. Slightly larger storage than native ENUM but planner handles CHECK well.
+- **Primary keys:** always single-column **UUID v7**. Time-sortable for index locality, globally unique, no coordination required. Composite uniqueness is expressed via `UNIQUE` constraints on multi-column tuples, not via composite PKs.
+- **Implicit index policy:** auto-index primary key + every `reference` field + every `unique` field + every `enum` field. No auto-indexing of high-selectivity text fields (those require explicit `indexed: true` in the manifest).
+- **Generated columns:** allowed in the meta-schema via `computed: <expression>` directive. Kernel emits Postgres `GENERATED ALWAYS AS (...) STORED` columns. Real DDL, real indexes, real query performance.
+- **Soft-delete trait composition:** the kernel provides a generic `softDeletable` trait (adds `deleted_at`, `deleted_by`). Compliance packs (e.g., `21-cfr-part-11`) override retention semantics — `gxpSigned` entities retain deleted records for 7 years and require eSignature to soft-delete. The compose order is: kernel trait fields first, then pack overrides applied on top.
+- **Schema-change approval gate:** per-tenant policy. Each tenant admin sets the threshold (additive-auto-apply-destructive-requires-OK; always-human; or agent-can-do-anything). Default for new tenants: tiered (additive automatic, destructive requires explicit human OK).
+
+### Still open
+
 | Question | Owner | Deadline |
 |---|---|---|
-| Native Postgres `ENUM` types vs. text-with-CHECK for `enum` fields. ENUMs are faster but harder to alter. | amoufaq5 | Phase 1 |
-| Composite primary keys (some time-series entities may want them) vs. always single-column UUID. | amoufaq5 | Phase 1 |
-| How aggressive should the kernel be about adding implicit indexes? Auto-index every `reference` field, but what about high-selectivity `text` fields? | amoufaq5 | Phase 2 |
-| Soft-delete semantics in the kernel vs. compliance pack: `soft_deletable` trait is generic; GxP requires specific retention. How do they compose? | _pending compliance hire_ | Phase 4 |
-| Generated columns and stored expressions in the meta-schema vs. computed in application. | amoufaq5 | Phase 2 |
-| Schema-change "approval gate" — should destructive changes always require human approval, even from the AI Architect? | amoufaq5 | Phase 3 |
+| `computed:` expression language — which Postgres expression dialect does the manifest spec accept? SQL-92 with a curated subset, or pass-through with kernel-side validation? Affects portability if we ever ship a non-Postgres adapter. | amoufaq5 | Phase 2 |
+| Multi-tenant DDL coordination at scale: when a kernel migration (not a tenant manifest change) must apply to all 10K+ tenant schemas, what's the batching strategy + rollback story? | amoufaq5 | Phase 5 |
+| UUID v7 library choice (uuid v9+ stable, or self-implemented based on the v7 draft RFC)? | amoufaq5 | Phase 1 |
 
 ## References
 

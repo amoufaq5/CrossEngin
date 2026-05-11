@@ -40,82 +40,100 @@ This is salvageable as a source of domain knowledge and individual building bloc
 
 ## Decision
 
-CrossEngin uses **two repositories**:
+CrossEngin uses **one repository**: `amoufaq5/CrossEngin`. It already exists as the docs repository (vision + ADRs) and will be expanded into a unified monorepo containing docs, code, manifests, infra, and tooling.
 
-1. **`amoufaq5/CrossEngin`** — the docs repository (vision + ADRs). Already created. Markdown only; no code.
-2. **A new monorepo for code** — to be created when the harness allowlist supports it. Working name: `amoufaq5/crossengine` (lowercase, mirrors the brand). Contains all engineering: apps, packages, manifests, infra, tooling.
+> **Update (2026-05-11):** the original two-repository plan (separate docs repo and separate code monorepo) was revised after the Round 1 decision review. Maintaining two repos for a solo-to-duo team produced more overhead than the doc/code separation justified. The unified-repo approach is described below.
 
-The existing **`amoufaq5/ERP`** repository becomes an **archive of pre-platform work** once migration completes. It is not deleted; it remains as historical record and as a source for any salvageable patterns missed in migration.
+The existing **`amoufaq5/ERP`** repository becomes an **archive of pre-platform work** once Phase 1 opens the monorepo's code surface — earlier than the original "after Phase 5" plan (Round 8 decision).
 
-### Monorepo layout
+### Monorepo layout (unified docs + code)
+
+The repository expands from its current docs-only state into:
 
 ```
-crossengine/
+CrossEngin/
+├── README.md
+├── LICENSE                          # Proprietary license at root (covers code, manifests, infra, tools)
+├── CONTRIBUTING.md
+├── .gitignore
+│
+├── docs/                            # MOVED from root in Phase 1 (was vision.md + adr/)
+│   ├── vision.md
+│   ├── LICENSE                      # CC-BY 4.0, scoped to this subtree
+│   └── adr/
+│       ├── 0000-template.md
+│       ├── index.md
+│       └── 0001..0025-*.md
+│
 ├── apps/
-│   ├── web/                          # Next.js — primary SaaS frontend (PWA-enabled)
-│   ├── marketing/                    # Public marketing site (crossengin.io)
-│   ├── docs/                         # Public developer docs (Nextra)
-│   └── ops/                          # Internal admin (tenant ops, billing, AI runs review)
+│   ├── web/                         # Next.js — primary SaaS frontend (PWA-enabled)
+│   ├── marketing/                   # Public marketing site (crossengin.com or .io)
+│   ├── docs-site/                   # Developer docs (Nextra)
+│   └── ops/                         # Internal admin (tenant ops, billing, AI runs review)
 │
 ├── packages/
-│   ├── kernel/                       # Meta-schema, dynamic entity engine, Postgres provisioning
-│   ├── kernel-prisma/                # Prisma adapter
-│   ├── kernel-supabase/              # Supabase adapter (alt path for OSS-friendly editions)
-│   ├── auth/                         # RBAC v2 + ABAC + audit + sessions
-│   ├── workflow/                     # React Flow designer + Inngest runtime + DSL
-│   ├── ai-architect/                 # Planner-executor agent, interview UI, kernel tools, RAG
-│   ├── ai-providers/                 # Together / Fireworks / OpenAI / Anthropic / vLLM adapters
-│   ├── ui/                           # shadcn design system + dashboard shell
-│   ├── ui-renderers/                 # Generic List / Record / Kanban / Calendar / Map / Dashboard / Form
-│   ├── integrations/                 # Webhooks, OAuth, HL7/FHIR/UBL/EDI/Stripe/QuickBooks
-│   ├── compliance/                   # 21 CFR Part 11 / HIPAA / GDPR / SOX / IFRS / GxP packs
-│   ├── reporting/                    # Report engine + OLAP (ClickHouse adapter)
-│   ├── files/                        # R2/S3 + signed URLs + virus scan
-│   ├── jobs/                         # Inngest wrapper + queue primitives
-│   ├── search/                       # Postgres FTS + pgvector + Typesense adapter
-│   ├── observability/                # OTel + Sentry + pino + per-tenant scoping
-│   ├── billing/                      # Stripe + metering
-│   ├── i18n/                         # Translation, currency, locale, RTL
-│   ├── pwa/                          # Service worker + IndexedDB sync + offline queue
-│   ├── capacitor-plugins/            # Native plugins (BLE/ESC-POS/NFC/camera) — Phase 7+
-│   ├── types/                        # Shared TS types
-│   ├── config/                       # ESLint / TS / Prettier presets
-│   └── testing/                      # Test utils, fixtures, factories
+│   ├── kernel/                      # Meta-schema, dynamic entity engine, Postgres provisioning
+│   ├── kernel-supabase/             # Supabase adapter (primary v1 — Round 1 decision)
+│   ├── kernel-prisma/               # Prisma adapter (used internally by kernel-supabase + on-prem)
+│   ├── auth/                        # RBAC v2 + ABAC (OPA Rego via opa-wasm) + audit + sessions
+│   ├── workflow/                    # React Flow designer + Inngest runtime + DSL
+│   ├── ai-architect/                # Planner-executor agent, interview UI, kernel tools, RAG
+│   ├── ai-providers/                # Fireworks (v1), Together, OpenAI, Anthropic, vLLM adapters
+│   ├── embeddings/                  # BGE-large/M3 self-hosted via inference container
+│   ├── ui/                          # shadcn design system + dashboard shell
+│   ├── ui-renderers/                # Generic List / Record / Kanban / Calendar / Map / Dashboard / Form
+│   ├── integrations/                # Webhooks, OAuth, HL7/FHIR/UBL/EDI/Stripe/QuickBooks
+│   ├── compliance/                  # 21 CFR Part 11 / EU GMP / UAE MoH / HIPAA / GDPR packs
+│   ├── reporting/                   # Report engine + OLAP (ClickHouse adapter)
+│   ├── files/                       # R2/S3 + signed URLs + virus scan
+│   ├── jobs/                        # Inngest wrapper + queue primitives
+│   ├── search/                      # Postgres FTS + pgvector + Typesense adapter
+│   ├── observability/               # OTel + Sentry + pino + per-tenant scoping
+│   ├── billing/                     # Stripe + per-tenant flat tier + AI usage metering
+│   ├── i18n/                        # Translation, currency, locale, RTL
+│   ├── pwa/                         # Service worker + IndexedDB sync + offline queue
+│   ├── capacitor-plugins/           # Native plugins (BLE/ESC-POS/NFC/camera) — Phase 7+
+│   ├── types/                       # Shared TS types
+│   ├── config/                      # ESLint / TS / Prettier presets
+│   └── testing/                     # Test utils, fixtures, factories
 │
-├── manifests/                        # Declarative app packs
-│   ├── _starter/                     # Template for new manifests
-│   ├── operate-pharma-healthcare/    # First-class citizen (v1 lighthouse)
+├── manifests/                       # Declarative app packs (proprietary)
+│   ├── _starter/                    # Template for new manifests
+│   ├── operate-pharma-healthcare/   # First-class citizen (v1 lighthouse)
 │   │   ├── community-pharmacy/
 │   │   ├── polyclinic/
 │   │   ├── hospital/
 │   │   └── pharma-manufacturer/
-│   ├── operate-retail-fnb/           # Post-v1
-│   ├── operate-construction-re-fm/   # Post-v1
-│   ├── operate-profserv-staffing/    # Post-v1
-│   ├── govern-procurement/           # Year 3
-│   ├── govern-citizen-services/      # Year 3+
-│   ├── heal-vaccination-registry/    # Year 3
-│   ├── educate-university/           # Year 4
-│   └── serve-ngo-program/            # Year 4
+│   ├── operate-retail-fnb/          # Post-v1
+│   ├── operate-construction-re-fm/  # Post-v1
+│   ├── operate-profserv-staffing/   # Post-v1
+│   ├── govern-procurement/          # Year 3
+│   ├── govern-citizen-services/     # Year 3+
+│   ├── heal-vaccination-registry/   # Year 3
+│   ├── educate-university/          # Year 4
+│   └── serve-ngo-program/           # Year 4
 │
 ├── infra/
-│   ├── terraform/                    # AWS/GCP/Azure modules for SaaS + BYOC
-│   ├── helm/                         # On-prem Kubernetes charts (Phase 6+)
-│   ├── docker/                       # Compose files + container definitions
-│   └── cdn/                          # Cloudflare worker scripts
+│   ├── terraform/                   # Supabase + Vercel + Cloudflare + GPU host modules
+│   ├── helm/                        # On-prem Kubernetes charts (Phase 6+)
+│   ├── docker/                      # Compose files + container definitions
+│   ├── inference/                   # BGE / future self-hosted LLM container definitions
+│   └── cdn/                         # Cloudflare worker scripts
 │
 ├── tools/
-│   ├── manifest-cli/                 # Generate / validate / apply manifests
-│   ├── kernel-migrate/               # Per-tenant schema migration runner
-│   ├── seed/                         # Seed data per manifest
-│   └── codemod/                      # Codemods for migrating /home/user/ERP code
+│   ├── manifest-cli/                # Generate / validate / apply manifests
+│   ├── kernel-migrate/              # Per-tenant schema migration runner
+│   ├── seed/                        # Seed data per manifest
+│   ├── architect-eval/              # AI Architect eval suite runner
+│   └── codemod/                     # Codemods for migrating /home/user/ERP code
 │
-├── docs-internal/                    # Optional mirror of CrossEngin ADRs for in-repo discoverability
-├── .github/workflows/                # CI/CD
-├── turbo.json                        # Turborepo
+├── .github/workflows/               # CI/CD
+├── turbo.json                       # Turborepo
 ├── pnpm-workspace.yaml
 └── package.json
 ```
+
+The docs are moved from the repository root into `docs/` when Phase 1 lands. `git mv` preserves history.
 
 ### Tooling choices
 
@@ -169,13 +187,15 @@ Steps:
 
 This work happens in `/home/user/ERP`, not in the new monorepo.
 
-**Phase 1 (Week 3+) — Open the new monorepo**
+**Phase 1 (Week 3+) — Open the monorepo's code surface**
 
-When the harness allowlist supports `amoufaq5/crossengine`, create the repo and initialize with the layout above. Initial contents: `packages/kernel`, `packages/auth`, `packages/types`, `packages/config`, `packages/testing`, `apps/web` (empty shell), `manifests/_starter`, root config files.
+`git mv vision.md docs/vision.md` and `git mv adr docs/adr` in `amoufaq5/CrossEngin`. Add `docs/LICENSE` (CC-BY 4.0) covering `docs/`. Replace the root `LICENSE` with proprietary terms covering code/manifests/infra/tools. Initialize package skeletons: `packages/kernel`, `packages/kernel-supabase`, `packages/auth`, `packages/types`, `packages/config`, `packages/testing`, `apps/web` (empty shell), `manifests/_starter`, root config files (`pnpm-workspace.yaml`, `turbo.json`, `package.json`).
+
+At Phase 1 opening, **archive `amoufaq5/ERP`** as read-only with the `archived-pre-crossengin` tag — earlier than the original "after Phase 5" plan (Round 8 decision).
 
 **Phase 2–3 (Months 2–5) — Kernel and AI Architect build-out**
 
-In the new monorepo. The existing `amoufaq5/ERP` remains untouched as historical record.
+In the unified monorepo. The archived `amoufaq5/ERP` remains as historical record and salvage reference.
 
 **Phase 4 (Months 5–7) — Migrate Pharma + Healthcare manifest**
 
@@ -183,28 +203,28 @@ Copy the GxP/QA-QC Prisma models into `manifests/operate-pharma-healthcare/_seed
 
 **Phase 5 (Months 7–8) — Launch SaaS**
 
-Vercel deploy of `apps/web`. Marketing site at `crossengin.io`. Pricing, Stripe billing, customer onboarding.
+Vercel deploy of `apps/web`. Marketing site at `crossengin.com` (primary if available) or `crossengin.io` (alternate). Pricing, Stripe billing, customer onboarding.
 
-After Phase 5, `amoufaq5/ERP` is archived. A README is added pointing to `amoufaq5/crossengine` as the current codebase.
+`amoufaq5/ERP` is already archived as of Phase 1. Its README points to `amoufaq5/CrossEngin` as the current codebase.
 
 ### Branch strategy
 
-In the new monorepo:
+In `amoufaq5/CrossEngin`:
 
-- **`main`** is always deployable. Vercel auto-deploys `apps/web` from main to production after green CI.
-- **`dev`** (optional, re-evaluated after Phase 5) — integration branch if the team grows beyond two.
+- **`main`** is always deployable. Vercel auto-deploys `apps/web` from main to production after green CI. The local-proxy push limitation observed during this session (proxy denies pushes to main) is worked around via PR + squash-merge for now; if the proxy is reconfigured, direct push to main is acceptable.
 - **Feature branches** named `<owner>/<short-description>` or `<owner>/<topic>/<sub-topic>`. Merged via squash PR.
 - **Release tags** on main: `v0.1.0` at end of Phase 1, `v0.x` through Year 1, `v1.0.0` at first paying customer.
 
-For the existing `/home/user/ERP`:
+For the archived `/home/user/ERP`:
 
-- Phase 0 work happens on **`claude/design-erp-system-OvuW9`** (the assigned branch). Merged to `main` of ERP repo before Phase 1 opens the new monorepo.
+- Phase 0 work happens on **`claude/design-erp-system-OvuW9`** (the assigned branch). Merged to `main` of ERP repo before Phase 1 archives ERP.
 
-### Docs vs. code separation
+### Docs and code coexistence in one repo
 
-- **`amoufaq5/CrossEngin`** holds vision.md and ADRs. Markdown only.
-- **`amoufaq5/crossengine/docs-internal/`** (in the monorepo) may mirror the ADRs for in-repo discoverability, but the authoritative copy lives in the docs repo. Mirror is one-way: docs → monorepo.
-- **`apps/docs/`** in the monorepo holds public-facing developer documentation (API reference, manifest cookbook, AI Architect prompt library). Distinct from ADRs.
+- **`/docs/`** holds vision.md and ADRs. Licensed CC-BY 4.0 (a `docs/LICENSE` file scopes the permissive license to this subtree).
+- **All other top-level directories** (`apps/`, `packages/`, `manifests/`, `infra/`, `tools/`) are covered by the proprietary `/LICENSE` at the root.
+- **`/apps/docs-site/`** is a Nextra-rendered public developer docs site, generated partly from `/packages` source comments and partly from hand-written prose. Distinct from `/docs/adr/` (architectural decision records) — `apps/docs-site` is API reference + manifest cookbook + AI Architect prompt library.
+- PR titles that touch only `docs/` may carry `docs:` prefix and skip code review by domain experts; PRs that touch any non-`docs/` path go through normal code review.
 
 ## Alternatives considered
 
@@ -260,7 +280,8 @@ Rename the repo `amoufaq5/ERP` → `amoufaq5/crossengine`, keep git history, evo
 
 ### Neutral
 
-- **Repository names:** docs repo is `CrossEngin` (matches the brand exactly); code monorepo will be `crossengine` (lowercase, matches package naming convention and most monorepo conventions). The slight mismatch is acceptable.
+- **One repository name, `amoufaq5/CrossEngin`,** matches the brand exactly. No naming mismatch between docs and code.
+- **Mixed-license repository:** unusual but well-tooled (npm `repository.directory`, GitHub linguist handles per-subtree licensing). The two LICENSE files are unambiguous.
 
 ### Reversibility
 
@@ -278,13 +299,22 @@ Rename the repo `amoufaq5/ERP` → `amoufaq5/crossengine`, keep git history, evo
 
 ## Open questions
 
+### Resolved (2026-05-11)
+
+- **Final monorepo name:** `amoufaq5/CrossEngin` (unified docs + code).
+- **ERP archive timing:** at Phase 1 monorepo-opening (was: after Phase 5 launch).
+- **Open-source vs. closed-source:** everything closed source. `docs/` subtree remains CC-BY 4.0 for transparency; code/manifests/infra/tools are proprietary.
+- **`packages/kernel-supabase`:** built alongside `packages/kernel-prisma` from day one (Round 1 picked Supabase as the v1 host).
+- **Internal ADR mirror:** moot — docs and code share one repo, so no mirror is needed.
+
+### Still open
+
 | Question | Owner | Deadline |
 |---|---|---|
-| Final name of the code monorepo (`crossengine` lowercase, vs. matching `CrossEngin` capitalization). | amoufaq5 | Start of Phase 1 |
-| When does `amoufaq5/ERP` get archived (read-only) vs. deleted? | amoufaq5 | After Phase 5 launch |
-| Open-source vs. closed-source for the kernel and AI Architect packages. | amoufaq5 | Start of Phase 1 (kernel) and Phase 3 (AI Architect) |
-| Should `packages/kernel-supabase` be built alongside `packages/kernel-prisma` from day one, or deferred? | amoufaq5 | Start of Phase 1 |
-| Internal ADR mirror (`docs-internal/` in monorepo) — keep in sync manually, automate via git submodule, or via CI? | _pending hire_ | After 5 ADRs accepted |
+| GPU host for the self-hosted embedding container (Fly Machines, RunPod, Lambda Labs, or AWS GPU spot). Latency to Frankfurt vs. cost. | amoufaq5 | Phase 2 |
+| LICENSE wording for the proprietary root license. Off-the-shelf (BSL with infinity date, modified Apache) or hand-written restrictive terms? | amoufaq5 | Phase 1 |
+| `apps/docs-site` framework: Nextra vs. Mintlify vs. custom Next.js. | amoufaq5 | Phase 4 |
+| Manifest authoring tooling location: under `tools/manifest-cli` only, or also a dedicated `apps/manifest-studio` for visual editing of compliance-grade manifests? | amoufaq5 | Phase 3 |
 
 ## References
 

@@ -38,6 +38,8 @@ Three technical realities also constrain:
 
 ## Decision
 
+> **v1 host (2026-05-11 decision):** Supabase Postgres (Frankfurt `eu-central-1`) is the Year-1 SaaS host. Supabase's Supavisor handles connection pooling. Multi-region UAE residency is deferred until a contract demands it; the multi-tenancy model below applies identically to any Postgres-compatible host.
+
 CrossEngin uses a **hybrid multi-tenancy model**:
 
 | Tenant tier | Isolation level | Postgres mechanism |
@@ -201,14 +203,22 @@ The hybrid model itself is forward-compatible: a SaaS tenant can be migrated fro
 
 ## Open questions
 
+### Resolved (2026-05-11)
+
+- **Postgres host for v1 SaaS:** Supabase. Year-1 region is Frankfurt (eu-central-1) since Supabase has no UAE region. A UAE-resident-data tenant triggers either self-hosted Supabase in-country or migration to AWS RDS in `me-south-1`.
+- **Connection pooling:** Supavisor (Supabase's built-in pooler), transaction mode by default, session mode for routes that need session-scoped state (RLS context, `SET search_path`).
+- **Threshold for dedicated-DB promotion:** any regulated tenant (pharma manufacturer, healthcare program, ministry, GxP-bound entity) gets a dedicated Postgres database from contract signing. Non-regulated tenants stay on shared cluster regardless of size for v1.
+- **Cross-tenant reporting strategy:** ClickHouse mirror only. No RLS-disabled read replica; the kernel never queries across tenant schemas in Postgres.
+- **Tenant deletion / GDPR right-to-erasure:** soft delete with **30-day retention**, then hard delete (`DROP SCHEMA t_<id> CASCADE` + meta cleanup). 30-day window is recoverable on tenant change-of-mind and aligns with GDPR Article 17 reasonable timeframes.
+- **Tenant cloning (sandbox):** hybrid — schema-only mock with synthetic seed data by default; full `pg_dump`/`pg_restore` copy available on demand for paid tiers (Round 5 decision).
+
+### Still open
+
 | Question | Owner | Deadline |
 |---|---|---|
-| Choice of Postgres host for Year 1 SaaS: Neon vs. Supabase vs. AWS RDS vs. CloudSQL. | amoufaq5 | Phase 1 |
-| Per-tenant connection pooling: PgBouncer (session vs. transaction mode), Supavisor, or custom? | amoufaq5 | Phase 1 |
-| Threshold for promoting a tenant from schema-in-shared-DB to dedicated-DB. Probably "first regulated industry contract" or "tenant exceeds X GB / Y RPS." | amoufaq5 + commercial hire | Phase 5 |
-| Cross-tenant reporting strategy for internal ops. ClickHouse mirror only, or also a read-replica-with-RLS-disabled for internal queries? | amoufaq5 | Phase 4 |
-| Tenant deletion / GDPR right-to-erasure: soft delete with schema retention period, hard delete immediately, or both with policy? | amoufaq5 | Phase 5 (before launch) |
-| Tenant cloning (e.g., create a sandbox tenant from a production tenant) for testing and demos. | amoufaq5 | Phase 4 |
+| UAE in-region inference and data residency. When does the first UAE-resident-data tenant arrive, and what migration path do we use — self-hosted Supabase in-country, or AWS RDS in `me-south-1`? | amoufaq5 | Phase 5 (or earlier if a contract demands) |
+| Schema-change "approval gate" — per-tenant admin policy controls whether the AI Architect can apply destructive changes without human OK (Round 3 decision). UI for setting this policy: where does the admin toggle live, and what's the default for new tenants? | amoufaq5 | Phase 3 |
+| Sandbox lifecycle for the full-copy variant: TTL (24h, 7d, until tenant deletes?), storage billing, and naming convention (`t_<id>_sandbox_<n>`)? | amoufaq5 | Phase 4 |
 
 ## References
 
