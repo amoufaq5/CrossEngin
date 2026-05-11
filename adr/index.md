@@ -21,10 +21,10 @@
 | [0016](0016-search.md) | Search | 2 | Proposed | 2026-05-11 |
 | [0017](0017-observability-and-slos.md) | Observability and SLOs | 2 | Proposed | 2026-05-11 |
 | [0018](0018-frontend-renderer-architecture.md) | Frontend renderer architecture | 1 | Proposed | 2026-05-11 |
-| 0019 | PWA and Capacitor mobile | 3 | Proposed | _pending_ |
+| [0019](0019-pwa-and-capacitor-mobile.md) | PWA and Capacitor mobile | 3 | Proposed | 2026-05-11 |
 | [0020](0020-build-packaging-and-deployment.md) | Build, packaging, and deployment | 2 | Proposed | 2026-05-11 |
-| 0021 | Billing and metering | 3 | Proposed | _pending_ |
-| 0022 | Internationalization and localization | 3 | Proposed | _pending_ |
+| [0021](0021-billing-and-metering.md) | Billing and metering | 3 | Proposed | 2026-05-11 |
+| [0022](0022-internationalization-and-localization.md) | Internationalization and localization | 3 | Proposed | 2026-05-11 |
 | [0023](0023-testing-strategy.md) | Testing strategy | 2 | Proposed | 2026-05-11 |
 | [0024](0024-repository-and-migration-strategy.md) | Repository and migration strategy | 1 | Proposed | 2026-05-11 |
 | [0025](0025-ai-architect-safety-and-governance.md) | AI Architect safety and governance | 2 | Proposed | 2026-05-11 |
@@ -57,4 +57,4 @@ The 25 ADRs are written in 8 review-sized batches across multiple sessions:
 | 5 | 0006 + 0007 + 0010 + 0011 | 10,200 | Drafted |
 | 6 | 0012 + 0013 + 0014 + 0015 | 10,200 | Drafted |
 | 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 12,200 | Drafted |
-| 8 | 0019 + 0021 + 0022 | 10,000 | Pending |
+| 8 | 0019 + 0021 + 0022 | 7,400 | Drafted |
