@@ -10,8 +10,8 @@
 | [0005](0005-ai-architect-contract.md) | AI Architect contract | 1 | Proposed | 2026-05-11 |
 | 0006 | LLM provider router | 2 | Proposed | _pending_ |
 | 0007 | Workflow engine | 2 | Proposed | _pending_ |
-| 0008 | RBAC v2, ABAC, and audit | 1 | Proposed | _pending_ |
-| 0009 | Security model | 1 | Proposed | _pending_ |
+| [0008](0008-rbac-abac-and-audit.md) | RBAC v2, ABAC, and audit | 1 | Proposed | 2026-05-11 |
+| [0009](0009-security-model.md) | Security model | 1 | Proposed | 2026-05-11 |
 | 0010 | Multi-region and data residency | 2 | Proposed | _pending_ |
 | 0011 | Integration mesh | 2 | Proposed | _pending_ |
 | 0012 | Compliance pack architecture | 2 | Proposed | _pending_ |
@@ -20,7 +20,7 @@
 | 0015 | Jobs and async runtime | 2 | Proposed | _pending_ |
 | 0016 | Search | 2 | Proposed | _pending_ |
 | 0017 | Observability and SLOs | 2 | Proposed | _pending_ |
-| 0018 | Frontend renderer architecture | 1 | Proposed | _pending_ |
+| [0018](0018-frontend-renderer-architecture.md) | Frontend renderer architecture | 1 | Proposed | 2026-05-11 |
 | 0019 | PWA and Capacitor mobile | 3 | Proposed | _pending_ |
 | 0020 | Build, packaging, and deployment | 2 | Proposed | _pending_ |
 | 0021 | Billing and metering | 3 | Proposed | _pending_ |
@@ -53,7 +53,7 @@ The 25 ADRs are written in 8 review-sized batches across multiple sessions:
 | 1 | vision.md + 0001 + 0024 | 14,000 | Drafted |
 | 2 | 0002 + 0003 | 10,000 | Drafted |
 | 3 | 0004 + 0005 | 12,000 | Drafted |
-| 4 | 0008 + 0009 + 0018 | 13,000 | Pending |
+| 4 | 0008 + 0009 + 0018 | 9,400 | Drafted |
 | 5 | 0006 + 0007 + 0010 + 0011 | 16,000 | Pending |
 | 6 | 0012 + 0013 + 0014 + 0015 | 16,000 | Pending |
 | 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 17,000 | Pending |
