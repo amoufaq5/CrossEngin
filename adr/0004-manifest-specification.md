@@ -477,15 +477,22 @@ The kernel will support reading at least the prior major spec version indefinite
 
 ## Open questions
 
+### Resolved (2026-05-11)
+
+- **Manifest signing:** required for compliance-pack manifests (Ed25519, kernel-signed on apply, signature stored in `meta.manifests`). Optional for non-compliance manifests; tenants on regulated tiers may opt-in repo-wide.
+- **Multi-file split:** allowed by convention via `$ref` pointers between sub-files. The resolver merges to a single canonical JSON document; the kernel stores only the merged form.
+- **Manifest-level secrets:** vault references only. Manifests carry `{ vault: "path.to.secret" }` pointers; never inline ciphertext, never plaintext. Resolver fetches secrets at apply time from Supabase Vault (v1) or an external KMS (later).
+- **Compliance-pack parameter inheritance:** parent values inherited by child manifests; child can override with explicit re-declaration. Compliance pack documentation can mark specific parameters as `noOverride: true` to lock them at the parent level.
+- **Permission expression language (ABAC predicates):** OPA Rego (embedded via opa-wasm). Cross-references ADR-0008 (RBAC v2 / ABAC / audit) which will detail the policy structure.
+
+### Still open
+
 | Question | Owner | Deadline |
 |---|---|---|
-| YAML round-trip with comments — use a custom merger that preserves comments, or accept that YAML edits lose comments on round-trip? | amoufaq5 | Phase 2 |
-| Manifest signing — should manifests be cryptographically signed for tamper-evidence (especially compliance-pack manifests)? | _pending compliance hire_ | Phase 4 |
-| Schema-evolution policy for `manifestVersion` bumps — strict backward-compat indefinitely, or sunset older versions after N kernel releases? | amoufaq5 | Phase 3 |
-| Splitting a large manifest across multiple files (e.g., one file per top-level section) — convention vs. enforced? | amoufaq5 | Phase 2 |
-| Permission expression language for ABAC predicates — embed an existing language (CEL, OPA Rego, JSONLogic) or define a small DSL? | amoufaq5 | Phase 2 (sequenced with ADR-0008) |
-| How to handle manifest-level secrets (API keys for integrations) — vault references only, or also encrypted-at-rest inline? | amoufaq5 | Phase 3 |
-| Compliance-pack parameter inheritance — must child manifest re-declare pack parameters, or are they inherited from parent? | _pending compliance hire_ | Phase 4 |
+| YAML round-trip with comments — use a custom merger that preserves comments, or accept comment loss on YAML edits? | amoufaq5 | Phase 2 |
+| `manifestVersion` evolution policy — strict backward-compat indefinitely, or sunset versions older than N kernel releases (e.g., N = 6)? Affects how aggressively we can deprecate spec features. | amoufaq5 | Phase 3 |
+| Signing key rotation cadence and authorization model. Compliance packs may demand specific rotation windows. | _pending compliance hire_ | Phase 4 |
+| Vault provider in production: Supabase Vault for v1, but at some scale we may want HashiCorp Vault or AWS Secrets Manager. When does the migration happen? | amoufaq5 | Phase 4 |
 
 ## References
 

@@ -99,7 +99,7 @@ Each user turn triggers the loop:
 3. **Reflect.** The agent reads the tool result and updates its working state. If the result is unexpected (validation error, ambiguity, missing data), it adjusts.
 4. **Decide.** The agent decides whether to continue (next tool call), ask the user a clarifying question, or end the turn with a narration.
 
-Total tool calls per user turn are capped (default 8, configurable per plan). When the cap is reached, the agent must either ask the user or end the turn. Pathological loops are prevented by step accounting in the loop runner.
+Total tool calls per user turn are capped (default **12**, configurable per plan; 2026-05-11 decision). When the cap is reached, the agent must either ask the user or end the turn. Pathological loops are prevented by step accounting in the loop runner.
 
 ### Tool surface
 
@@ -281,11 +281,11 @@ The fundamental shape — agent in service, tool surface, kernel-mediated change
 - **Streaming.** Agent responses stream to the chat UI via Server-Sent Events. Tool calls are not streamed (they are atomic).
 - **Tool dispatcher.** A central dispatcher routes tool calls to handlers. Each handler validates its input with Zod, calls the underlying kernel API, validates the output, and returns. Tools have explicit timeouts and retry policies.
 - **Prompt structure.** System prompt + tool schemas + retrieved context + conversation history + current user message. System prompt is short (under 2K tokens) and stable. Tool schemas are auto-generated from `packages/ai-architect/src/tools/`. Context is the variable part.
-- **Loop runner.** Implemented as a state machine in `packages/ai-architect/src/runner/`. Each iteration: plan → execute → reflect → decide. Configurable max-iterations (default 8), max-token budget, max-wall-clock (default 60s).
+- **Loop runner.** Implemented as a state machine in `packages/ai-architect/src/runner/`. Each iteration: plan → execute → reflect → decide. Configurable max-iterations (default **12** per Round 5 decision), max-token budget, max-wall-clock (default 60s).
 - **Conversation API.** A thin REST + WS API in `apps/web/api/v1/architect/`. Endpoints: `POST /sessions`, `POST /sessions/:id/messages`, `GET /sessions/:id`, `POST /sessions/:id/abort`.
 - **Permission model.** Conversations are scoped to a `userTenantMembership`. A tenant admin can review any conversation in their tenant. Cross-tenant access is forbidden (ADR-0002).
 - **Audit log.** Every applied manifest patch records the conversation session ID. Auditors can trace any manifest version to the conversation that produced it.
-- **Sandbox.** Before applying, the agent can apply to a `sandbox` tenant copy and let the user explore. Sandbox is a `pg_dump`/`pg_restore` of the active tenant into a disposable schema. Detail in ADR-0002's tenant cloning open question.
+- **Sandbox.** Before applying, the agent can apply to a `sandbox` tenant copy and let the user explore. **Hybrid model (Round 5 decision):** schema-only mock with synthetic seed data by default; full `pg_dump`/`pg_restore` copy of the active tenant available on demand for paid tiers. Schema-only is cheap and fast; full copy gives real-data fidelity at higher storage cost.
 - **Eval runner.** `tools/architect-eval` runs the eval suite against any agent version. Outputs a coverage report and a regression report compared to the prior version.
 - **Cost ceiling.** A per-session ceiling (configurable; default 50K total tokens, ~$5 at v1 hosted-OSS pricing) hard-stops the agent. The tenant is told why; the conversation can be resumed after a budget grant.
 - **Conversation UI.** Lives in `apps/web/architect`. Renders narration, tool-call summaries (collapsed by default), preview diffs, ask-user widgets, and approval flows. Streaming via SSE.
@@ -293,17 +293,23 @@ The fundamental shape — agent in service, tool surface, kernel-mediated change
 
 ## Open questions
 
+### Resolved (2026-05-11)
+
+- **Default LLM for v1:** Fireworks (hosted OSS — Qwen / DeepSeek). Anthropic and Together added as routable options through ADR-0006 when accuracy or cost shifts demand.
+- **Embedding model:** self-hosted BGE-large-en / BGE-M3. Requires a GPU inference container (host TBD: Fly Machines / RunPod / Lambda Labs).
+- **Tool-call cap:** 12 per user turn (raised from 8 default).
+- **Sandbox tenants:** hybrid — schema-only mock with synthetic seed data by default; full `pg_dump`/`pg_restore` copy on demand for paid tiers.
+- **Per-family agent specialization:** single general system prompt + per-family context-snippet injection at runtime. Per-family or per-sub-vertical prompts only introduced when measured eval gap justifies.
+- **User-facing diff explanation:** deterministic function from the structured diff. No LLM call required for the diff narration. Cheaper, predictable, testable.
+
+### Still open
+
 | Question | Owner | Deadline |
 |---|---|---|
-| Default LLM for v1 (Anthropic Sonnet 4.6 vs. Together-hosted Qwen 3 vs. Fireworks-hosted DeepSeek). Trade-off: quality vs. cost vs. data-residency. Sequenced with ADR-0006. | amoufaq5 | Phase 2 |
-| Embedding model (OpenAI vs. Cohere vs. open-source). Same trade-off. | amoufaq5 | Phase 2 |
-| Tool-call cap (default 8 per user turn) — is this too restrictive for complex manifests, or appropriately conservative? Empirical question, tune from eval data. | amoufaq5 | Phase 3 |
-| Cross-tenant similar-manifest search privacy — exact opt-in mechanism for tenants who want to contribute to the catalog. | _pending compliance hire_ | Phase 4 |
+| Cross-tenant similar-manifest search privacy — exact opt-in mechanism for tenants who want to contribute to the catalog. Compliance pack alignment with the AI Architect retrieval surface. | _pending compliance hire_ | Phase 4 |
 | Long-conversation summarization — model choice (use the chat model, or a cheaper summarizer?), summary structure (free text vs. structured JSON?). | amoufaq5 | Phase 3 |
-| Eval suite size and curation — how many conversations cover the v1 surface? Target 100 hand-crafted + 500 replayed? | amoufaq5 | Phase 4 |
-| Sandbox tenants — are they full-tenant copies (expensive, exact) or schema-only mocks (cheap, lossy)? | amoufaq5 | Phase 3 |
-| Per-family agent specialization — does CrossEngin Govern have a different system prompt than CrossEngin Operate? When does the cost of multiple prompts beat one general prompt? | amoufaq5 | Phase 5 |
-| User-facing diff explanation — auto-generated by the agent vs. computed deterministically from the structured diff? | amoufaq5 | Phase 3 |
+| Eval suite size and curation — how many conversations cover the v1 surface? Working target: 100 hand-crafted + 500 replayed by end of Phase 4. | amoufaq5 | Phase 4 |
+| GPU inference host for the BGE embedding container — latency from Frankfurt vs. cost. Same decision affects future self-hosted LLM (Year 3 trigger). | amoufaq5 | Phase 2 |
 
 ## References
 

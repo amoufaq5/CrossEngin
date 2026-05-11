@@ -76,12 +76,12 @@ The same engineering substrate (Core) powers all five families. The brand distin
 Two distribution sub-brands:
 
 - **CrossEngin Build** — the self-service builder. Any tenant on any family can spin up bespoke applications through the AI Architect. CrossEngin Build is the user-facing entrance to the platform's customization power. Sold as an add-on or bundled into higher-tier packages.
-- **CrossEngin Power** — the white-label / OEM channel. System integrators, consultancies, and reseller partners distribute CrossEngin under their own brand for their own customers. The substrate is identical; the surface bears the partner's identity with a "Powered by CrossEngin" mark.
+- **CrossEngin Partner** — the white-label / OEM channel. System integrators, consultancies, and reseller partners distribute CrossEngin under their own brand for their own customers. The substrate is identical; the surface bears the partner's identity with a "Powered by CrossEngin" mark. (Renamed from "Power" — see Open questions below.)
 
 ### Naming conventions
 
 - **One word per sub-brand.** Single-syllable preferred, two-syllable acceptable. Distinct meanings, no overlap.
-- **Verb-shaped where possible.** Operate, Govern, Heal, Educate, Serve, Build are all verbs. Core and Power are not, but they communicate role.
+- **Verb-shaped where possible.** Operate, Govern, Heal, Educate, Serve, Build are all verbs. Core is not, and Partner functions as a noun in this context — both communicate role rather than action.
 - **No marketing-speak suffixes.** No "Cloud," "Suite," or "Platform" appended to the sub-brand name. The sub-brand stands alone.
 - **English-first, internationalizable.** Each word translates cleanly into major regional languages or stands as a recognizable loanword. English is widely understood across our target buyer demographic in our target regions.
 
@@ -151,7 +151,7 @@ Original proposal. Sub-brands like "GovStack," "EduStack," "Impact" (for NGO).
 
 ### Decision
 
-**Verb slate.** CrossEngin Core / Operate / Govern / Heal / Educate / Serve / Build / Power.
+**Verb slate (with one noun for the channel).** CrossEngin Core / Operate / Govern / Heal / Educate / Serve / Build / Partner.
 
 ## Consequences
 
@@ -160,13 +160,13 @@ Original proposal. Sub-brands like "GovStack," "EduStack," "Impact" (for NGO).
 - **Buyer recognition.** A government CIO searching for procurement software finds CrossEngin Govern. The brand layer mirrors the buyer's mental model.
 - **Marketing pipeline structure.** Each family gets its own landing page, content marketing track, sales materials, and pricing — without fragmenting engineering.
 - **Pricing flexibility.** Each family can have its own pricing model. CrossEngin Operate may price per-tenant + per-seat; CrossEngin Govern may price per-project with deployment fees; CrossEngin Heal may price per-million-citizens; CrossEngin Serve may have a non-profit-discount tier.
-- **Channel clarity.** CrossEngin Power gives system integrators a clean white-label path without confusion about what they're reselling.
+- **Channel clarity.** CrossEngin Partner gives system integrators a clean white-label path without confusion about what they're reselling. Partner launches Year 2–3 (pulled forward from Year 5) to leverage MENA SI relationships.
 - **Hiring and partnerships.** The brand architecture tells potential hires and partners exactly which family they're working in.
 - **AI Architect cross-utility.** A CrossEngin Operate tenant (pharmacy chain) that acquires a charity arm doesn't need a new product — they spin up a CrossEngin Serve manifest within the same tenant.
 
 ### Negative
 
-- **Brand registration cost.** Each sub-brand (Core, Operate, Govern, Heal, Educate, Serve, Build, Power) ideally gets a trademark filing in the regions we operate. Approximate cost: USD 1,500–3,000 per word per region. Mitigation: file Core + the launched families first; defer others.
+- **Brand registration cost.** Each sub-brand (Core, Operate, Govern, Heal, Educate, Serve, Build, Partner) ideally gets a trademark filing in the regions we operate. Approximate cost: USD 1,500–3,000 per word per region. **Decision (2026-05-11):** all trademark filings deferred to Phase 5 launch; we accept the squatter-registration risk during the build year.
 - **Marketing surface expansion.** Each family needs its own homepage, demo, pricing, case studies. Mitigation: start with Operate-only marketing; add families when each ships.
 - **Buyer confusion if poorly executed.** "What's the difference between Operate and Govern?" must be answerable in one sentence. If marketing copy is sloppy the brand splits become noise.
 - **Domain name management.** `crossengin.io` is the primary domain. Sub-brand paths (`/operate`, `/govern`, etc.) handle most navigation; defensive registration of dedicated domains (`crossengin-govern.com`) is wise long-term.
@@ -184,22 +184,29 @@ Original proposal. Sub-brands like "GovStack," "EduStack," "Impact" (for NGO).
 
 ## Implementation notes
 
-- **Trademark searches.** Run USPTO and EUIPO trademark searches on all eight sub-brands before Phase 5 marketing site goes live. Resolve conflicts before launch.
-- **Domain portfolio.** Acquire `crossengin.io` (primary), `crossengin.com` (defensive), `crossengin.ai` (defensive), `crossengin.dev` (developer-facing). Sub-brand subdomains served via `crossengin.io/operate`, etc., unless a sub-brand grows large enough to warrant its own root domain.
+- **Trademark searches.** Run USPTO, EUIPO, and UAE Ministry of Economy trademark searches on all eight sub-brands before Phase 5 marketing site goes live. Resolve conflicts before launch. Filings themselves are deferred to Phase 5 (see Consequences → Brand registration cost).
+- **Domain portfolio.** Acquire `crossengin.com` (primary if available) and `crossengin.io` (alternate). Sub-brand subdomains served via `/operate`, `/govern`, etc., on the primary domain unless a sub-brand grows large enough to warrant its own root domain.
 - **Internal naming.** Engineering code uses sub-brand names in package or module names where they relate to family-specific manifests (e.g., `manifests/operate-pharma-healthcare/`). The kernel and shared packages use neutral names (`packages/kernel`, `packages/ai-architect`).
 - **Style guide.** A brand style guide will define logo treatment, color palette, typography, voice & tone for each sub-brand. Different families may have slightly different visual languages (e.g., Govern may favor a more conservative palette than Build). Common parent visual language across all.
 - **Internationalization.** Verb sub-brands ("Operate," "Govern," "Heal," "Educate," "Serve") translate cleanly into major target languages or stand as recognizable English loanwords.
 
 ## Open questions
 
+### Resolved (2026-05-11)
+
+- **White-label channel sub-brand:** renamed from "Power" to **"Partner."** Functions as a noun rather than a verb; clearer channel semantics; less ambiguous in MENA-region buyer conversations.
+- **Trademark filing scope and timing:** all eight sub-brand filings deferred to Phase 5 launch. Cost-deferred; squatter risk accepted.
+- **Domain portfolio:** `crossengin.com` is the primary target if available; `crossengin.io` is the alternate. `.ai` and `.dev` deferred.
+- **Per-family pricing differentiation:** confirmed. Operate gets per-tenant flat + AI usage metered. Govern, Heal, Educate, Serve each get their own pricing models, finalized at each family's ship time.
+- **Open-source kernel brand:** moot. Per the source-posture decision (everything closed source), there is no open-source kernel.
+
+### Still open
+
 | Question | Owner | Deadline |
 |---|---|---|
-| Trademark availability for all eight sub-brands across USPTO, EUIPO, UAE Ministry of Economy, Singapore IPOS. | _pending hire_ | Phase 4 (~Month 6) |
-| Final sub-brand for white-label channel: keep "Power" or replace? "Power" is the weakest of the eight. | amoufaq5 | Phase 5 launch |
-| Domain portfolio: which TLDs beyond `.io` are necessary? | amoufaq5 | Phase 5 launch |
 | Visual identity system: each sub-brand visually distinct, or share a single visual language with accents? | _pending hire_ | Phase 4 |
-| Pricing differentiation per family. | amoufaq5 + commercial hire | Phase 5 |
-| Should the open-source kernel use a different brand to avoid confusion with the commercial families? | amoufaq5 | Phase 1 |
+| Specific pricing structure per family beyond Operate (Govern per-project + deployment fee, Heal per-citizen-record, Educate per-student-FTE, Serve non-profit discount tier). | amoufaq5 + commercial hire | Per family at ship time |
+| Trademark squatter audit before Phase 5: how often during the build year do we re-check that `CrossEngin Operate`, `CrossEngin Govern`, etc. have not been filed defensively against us? | amoufaq5 | Phase 2 (start cadence) |
 
 ## References
 
