@@ -94,13 +94,13 @@ This is why **one kernel handles all of them**. It is also why **the AI Architec
 | **CrossEngin Educate** | App family | Education: K-12, university student lifecycle, vocational training, libraries, research-grant administration. |
 | **CrossEngin Serve** | App family | NGOs, non-profits, faith-based organizations: programs, grants, M&E, donor CRM. |
 | **CrossEngin Build** | Distribution | Self-service app builder for tenants and partners: AI-Architect-driven creation of bespoke apps alongside packaged verticals. |
-| **CrossEngin Power** | Distribution | White-label and OEM channel for system integrators and consultancies who deliver CrossEngin under their own brand. |
+| **CrossEngin Partner** | Distribution | White-label and OEM channel for system integrators and consultancies who deliver CrossEngin under their own brand. |
 
 The five app-family sub-brands (Operate, Govern, Heal, Educate, Serve) are organized by **buyer type**, not by technical capability. The same kernel powers all of them; the same AI Architect speaks to all their tenants; the same compliance packs are shared across families where they apply. The brand split exists for sales, marketing, and packaging — not for engineering.
 
 CrossEngin Build is the customer-facing entry to the AI Architect for ad-hoc apps. Any tenant on any family can spin up bespoke applications alongside their packaged vertical app.
 
-CrossEngin Power is the channel mechanism. A system integrator — say, a regional IT consultancy serving a country's health ministries — can package CrossEngin Heal + custom manifests + their own branding and deliver to public-sector buyers under a "Powered by CrossEngin" mark.
+CrossEngin Partner is the channel mechanism. A system integrator — say, a regional IT consultancy serving a country's health ministries — can package CrossEngin Heal + custom manifests + their own branding and deliver to public-sector buyers under a "Powered by CrossEngin" mark.
 
 ---
 
@@ -247,9 +247,9 @@ Ship CrossEngin Govern first manifest (e-procurement portal — easier sale than
 
 Ship CrossEngin Educate first manifests (university student lifecycle, K-12 chain administration). Ship CrossEngin Serve first manifest (NGO program + grant management with M&E). Ship BYOC edition (Terraform + Helm + control plane on customer cloud) once enterprise customers in regulated industries demand it. Move AI Architect to self-hosted LLM cluster (likely Qwen 3 or successor on owned or reserved GPUs) for cost, data residency, and regulated-tenant requirements.
 
-### Year 5 — CrossEngin Build, CrossEngin Power, platform velocity
+### Year 5 — CrossEngin Build, platform velocity
 
-Open CrossEngin Build self-service to all tenants. Launch CrossEngin Power channel for system integrators and consultancies.
+Open CrossEngin Build self-service to all tenants. (CrossEngin Partner channel launches earlier — Year 2–3 — to leverage MENA system-integrator relationships.)
 
 **Goal at end of Year 5:** Team 15–30 people, multi-region SaaS, on-prem and BYOC editions, $10–30M ARR target with healthy gross margins, 50–200 manifests in the public catalog (most contributed by partners using CrossEngin Build).
 
@@ -299,19 +299,33 @@ These non-goals will evolve. Each evolution must be a deliberate decision, not a
 
 ---
 
-## 10. Open questions
+## 10. Resolved decisions and remaining open questions
 
-Known unknowns. Each should have an owner and a resolution path before it blocks shipping.
+### Decisions made (2026-05-11 review)
 
-- **Open-source posture for the kernel.** Apache 2.0 vs. BSL with delayed Apache 2.0 conversion vs. closed source vs. SSPL. Trade-offs: ecosystem velocity (favors Apache 2.0) vs. revenue defense (favors BSL or closed). To be decided before Phase 1 ships kernel packages.
-- **Pricing model.** Per-tenant flat vs. per-seat vs. per-tenant + usage (AI Architect runs, jobs, storage). Different families likely need different models; need a defensible default for CrossEngin Operate v1. To be decided before Phase 5 launches.
-- **First region for SaaS deployment.** United States, EU (Frankfurt), Middle East (UAE), Singapore — each has different data-residency stories and regulatory friction. To be decided once first-design-partner geography is known.
-- **AI provider lock-in vs. independence.** Together and Fireworks are economic for Year 1, but they are external dependencies. When do we self-host? When do we add Anthropic, OpenAI, Google as routable options? To be detailed in ADR-0006.
-- **On-prem licensing model.** Per-CPU, per-tenant, per-named-user, or flat enterprise? To be decided before the first on-prem customer.
-- **Open-core vs. open-platform.** Is the kernel fully open with closed manifests + AI Architect? Or is the manifest spec open and the kernel closed? Or is everything closed and the SaaS is the product? Each has revenue and ecosystem implications.
-- **Trademark and brand protection.** "CrossEngin" should be registered (USPTO, EUIPO, plus operating regions) before public launch. Defensive domains beyond `crossengin.io` (`.com`, `.ai`, `.dev`). To be done in Phase 5.
-- **Partnership model with regulators.** For pharma and government work, do we pursue formal regulatory partnerships (FDA pre-submission, EMA, national health ministries)? When does the cost pay back? Revisit each year.
-- **Workforce around the founder.** When does the first hire happen, and in what role? Natural sequence: (a) senior backend engineer, then (b) product designer with vertical-domain experience, then (c) compliance officer, then (d) commercial/sales. Revisit as revenue lands.
+- **Source posture.** Everything closed source (kernel, manifest spec, AI Architect, manifests, compliance packs). Docs (`amoufaq5/CrossEngin`) remain CC-BY 4.0 for architectural transparency.
+- **Pricing.** Per-tenant flat tier + AI usage metered for CrossEngin Operate v1; different list pricing models per family (Operate vs. Govern vs. Heal vs. Educate vs. Serve).
+- **First region.** UAE / Middle East. Supabase has no UAE region directly; v1 deploys to Frankfurt (eu-central-1) until a UAE-resident contract justifies self-hosted Supabase in-country.
+- **LLM provider for v1.** Fireworks (hosted OSS — Qwen / DeepSeek). Anthropic and Together added as routable options through ADR-0006 when accuracy or cost demands shift.
+- **Embedding model.** Self-hosted BGE-large-en / BGE-M3 for multilingual retrieval. Requires a GPU container; runtime detailed in ADR-0006.
+- **Self-hosted LLM transition.** Triggered by ARR plus regulated-tenant in-region inference demand (likely Year 3+).
+- **On-prem and BYOC.** On-prem Year 3, BYOC Year 4 — pulled earlier if a MENA ministry contract requires sovereign deployment.
+- **Trademark + brand protection.** All sub-brand trademark filings deferred to Phase 5. `crossengin.com` is the primary domain target if available; `crossengin.io` is the alternate.
+- **Regulatory partnerships.** Standards certifications only (SOC 2, ISO 27001, HITRUST). No direct FDA / EMA / national-ministry partnerships in the five-year plan.
+- **Compliance pack roadmap.** Pharma + healthcare-led: 21 CFR Part 11, EU GMP, UAE MoH, HIPAA, GDPR.
+- **Workforce.** First hire is a senior backend engineer around Year 2 (revenue gated). Subsequent hires (product designer, compliance officer, commercial) sequence with ARR.
+- **CrossEngin Partner channel.** Renamed from "Power" to "Partner." Launches Year 2–3 (accelerated from Year 5) to leverage MENA system-integrator relationships.
+- **Year 5 ambition.** Independent profitable SaaS company (no acquisition track, no VC growth round, no sovereign-tech partnership track).
+- **Geography sequence after ME.** EU (Frankfurt) in Year 2; US in Year 3.
+- **AI Architect productization.** Internal to CrossEngin only; no standalone API or add-on SKUs.
+
+### Remaining open questions
+
+- **UAE in-region inference.** When does the first UAE-resident-data tenant arrive, and does it justify self-hosted Supabase + self-hosted LLM in-country before the standard ARR trigger? Revisit when first ME regulated tenant pipelines.
+- **On-prem licensing model.** Per-CPU, per-tenant, per-named-user, or flat enterprise. Decide before the first on-prem contract (Year 3).
+- **Pricing differentiation depth.** Each family has its own list pricing; the specific structure for Govern (per-project + deployment fee), Heal (per-million-citizen-record), Educate (per-student-FTE), Serve (per-program + non-profit discount) is sketched but not finalized. Decide per family when each ships.
+- **Visual identity per sub-brand.** Each sub-brand visually distinct, or shared visual language with accent colors? Decide in Phase 4 design pass.
+- **Mid-term funding posture.** Independent profitable target may still warrant opportunistic angel / strategic checks. Revisit at end of Year 1 when first revenue lands.
 
 ---
 
@@ -323,10 +337,10 @@ Known unknowns. Each should have an owner and a resolution path before it blocks
 - **AI Architect** — The conversational agent that interviews tenants and produces or modifies manifests.
 - **Sub-vertical** — A specific sub-type within a family (e.g., "community pharmacy" within Healthcare + Pharma + Life Sciences). Each sub-vertical typically has its own manifest.
 - **Vertical pack** — A bundle of related sub-vertical manifests sold as a unit (e.g., Pharma + Healthcare pack covers community pharmacy, polyclinic, hospital, pharma manufacturer).
-- **App family** — A go-to-market brand grouping (Operate, Govern, Heal, Educate, Serve, Build, Power). Distinct from "vertical" — a family contains multiple verticals.
+- **App family** — A go-to-market brand grouping (Operate, Govern, Heal, Educate, Serve, Build, Partner). Distinct from "vertical" — a family contains multiple verticals.
 - **Generic renderer** — A UI component that knows how to display a List, Record, Kanban, Calendar, Map, Dashboard, or Form for any entity defined in any manifest, without being hardcoded for that entity.
 - **Compliance pack** — A declarative bundle of rules, retention policies, audit hooks, e-signature requirements, validation rules, and required workflows that implement a regulatory standard (e.g., 21 CFR Part 11, HIPAA).
-- **Provider router** — The abstraction that routes AI Architect calls to one of several underlying LLM providers (Together, Fireworks, Anthropic, OpenAI, self-hosted vLLM).
+- **Provider router** — The abstraction that routes AI Architect calls to one of several underlying LLM providers (Fireworks at v1; later Anthropic, OpenAI, Together, self-hosted vLLM as routable options).
 
 ---
 
@@ -334,9 +348,9 @@ Known unknowns. Each should have an owner and a resolution path before it blocks
 
 | Field | Value |
 |---|---|
-| **Document status** | Draft 1 |
+| **Document status** | Draft 2 (decisions incorporated) |
 | **Last updated** | 2026-05-11 |
-| **Maintainer** | _to be assigned_ |
-| **Next review** | After ADRs 0001–0005 are accepted |
+| **Maintainer** | amoufaq5 |
+| **Next review** | After ADRs 0006–0025 are accepted |
 
 This document is revised after each batch of accepted ADRs, since each ADR may clarify or contradict a passage here. Where this document and an accepted ADR conflict, the ADR wins and this document is updated to match.

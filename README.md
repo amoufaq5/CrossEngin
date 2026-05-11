@@ -21,7 +21,7 @@ ERP is the first family of applications built on CrossEngin. The platform also t
 | **CrossEngin Educate** | Education — K-12 administration, university student lifecycle, vocational training, libraries. |
 | **CrossEngin Serve** | NGO, non-profit, and faith-based organizations — programs, grants, M&E, donor CRM. |
 | **CrossEngin Build** | Self-service app builder for customers and partners. |
-| **CrossEngin Power** | White-label and OEM channel for system integrators and consultancies. |
+| **CrossEngin Partner** | White-label and OEM channel for system integrators and consultancies. |
 
 ## Target families
 
