@@ -18,16 +18,16 @@
 | [0013](0013-reporting-and-analytics.md) | Reporting and analytics | 2 | Proposed | 2026-05-11 |
 | [0014](0014-files-and-storage.md) | Files and storage | 2 | Proposed | 2026-05-11 |
 | [0015](0015-jobs-and-async-runtime.md) | Jobs and async runtime | 2 | Proposed | 2026-05-11 |
-| 0016 | Search | 2 | Proposed | _pending_ |
-| 0017 | Observability and SLOs | 2 | Proposed | _pending_ |
+| [0016](0016-search.md) | Search | 2 | Proposed | 2026-05-11 |
+| [0017](0017-observability-and-slos.md) | Observability and SLOs | 2 | Proposed | 2026-05-11 |
 | [0018](0018-frontend-renderer-architecture.md) | Frontend renderer architecture | 1 | Proposed | 2026-05-11 |
 | 0019 | PWA and Capacitor mobile | 3 | Proposed | _pending_ |
-| 0020 | Build, packaging, and deployment | 2 | Proposed | _pending_ |
+| [0020](0020-build-packaging-and-deployment.md) | Build, packaging, and deployment | 2 | Proposed | 2026-05-11 |
 | 0021 | Billing and metering | 3 | Proposed | _pending_ |
 | 0022 | Internationalization and localization | 3 | Proposed | _pending_ |
-| 0023 | Testing strategy | 2 | Proposed | _pending_ |
+| [0023](0023-testing-strategy.md) | Testing strategy | 2 | Proposed | 2026-05-11 |
 | [0024](0024-repository-and-migration-strategy.md) | Repository and migration strategy | 1 | Proposed | 2026-05-11 |
-| 0025 | AI Architect safety and governance | 2 | Proposed | _pending_ |
+| [0025](0025-ai-architect-safety-and-governance.md) | AI Architect safety and governance | 2 | Proposed | 2026-05-11 |
 
 ## Tiers
 
@@ -56,5 +56,5 @@ The 25 ADRs are written in 8 review-sized batches across multiple sessions:
 | 4 | 0008 + 0009 + 0018 | 9,400 | Drafted |
 | 5 | 0006 + 0007 + 0010 + 0011 | 10,200 | Drafted |
 | 6 | 0012 + 0013 + 0014 + 0015 | 10,200 | Drafted |
-| 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 17,000 | Pending |
+| 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 12,200 | Drafted |
 | 8 | 0019 + 0021 + 0022 | 10,000 | Pending |
