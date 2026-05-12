@@ -18,6 +18,10 @@
     "./ddl": {
       "types": "./dist/ddl/index.d.ts",
       "import": "./dist/ddl/index.js"
+    },
+    "./manifest": {
+      "types": "./dist/manifest/index.d.ts",
+      "import": "./dist/manifest/index.js"
     }
   },
   "files": ["dist", "src"],

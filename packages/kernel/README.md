@@ -195,12 +195,118 @@ When the diff engine encounters one of these, it throws
 `UnsupportedDiffChangeError` with the affected entity / field and
 a description of the missing Phase 2 mechanism.
 
+### `@crossengin/kernel/manifest`
+
+The manifest interpreter per **ADR-0004**. v1 covers the four
+sections we have schemas for: `meta`, `entities`, `traits`,
+`relations`. Workflows, roles, views, integrations, compliance,
+files, etc. — deferred to their own ADRs.
+
+```ts
+import {
+  ManifestSchema,
+  validateManifest,
+  applyManifest,
+  computeManifestDiff,
+} from "@crossengin/kernel/manifest";
+
+// 1. Parse + structural validate
+const manifest = ManifestSchema.parse(rawJson);
+
+// 2. Cross-section integrity validate
+validateManifest(manifest);    // throws ManifestValidationError on issues
+
+// 3. Compute SQL to apply
+const sql = applyManifest(null, manifest, { schema: "t_acme" });
+//   first-time application: returns ordered CREATE TABLE + CREATE INDEX
+
+// 4. Or compute SQL to evolve
+const sql2 = applyManifest(oldManifest, newManifest, { schema: "t_acme" });
+//   evolution: returns DROP / ALTER / CREATE in dependency order
+
+// 5. Or inspect the diff first
+const diff = computeManifestDiff(oldManifest, newManifest);
+//   { addedEntities, removedEntities, modifiedEntities, destructive }
+```
+
+#### Top-level structure (v1)
+
+```jsonc
+{
+  "manifestVersion": "1.0",
+  "meta": {
+    "name": "Community Pharmacy",
+    "slug": "operate-pharma/community-pharmacy",
+    "version": "1.0.0",
+    "description": "..."
+  },
+  "entities":  [ /* Entity[] from @crossengin/types/meta-schema */ ],
+  "traits":    [ /* Trait[]  (custom; built-ins are kernel-provided) */ ],
+  "relations": [ /* Relation[] */ ]
+}
+```
+
+#### Cross-section validation (`validateManifest`)
+
+Throws `ManifestValidationError` (with a `path` like
+`entities[2].fields[0].type.target`) when:
+
+- An entity name appears twice
+- A custom trait name appears twice
+- A custom trait shadows a kernel built-in (`auditable`,
+  `soft_deletable`, `versioned`, `tenant_owned`, `gxp_signed`,
+  `part_11_compliant`)
+- An `entity.traits[]` entry is neither built-in nor declared in
+  the manifest's `traits`
+- A `reference` field targets an entity not in the manifest
+- A trait's reference field targets an entity not in the manifest
+- A `relation` references an entity not in the manifest
+
+#### DDL emission
+
+Three entry points:
+
+- `emitManifestCreate(manifest, ctx)` — first-time application; emits
+  CREATE TABLE for every entity in topological order (FK dependencies
+  first), then CREATE INDEX per entity.
+- `emitManifestDiff(manifest, diff, ctx)` — evolution; ordering:
+  1. `DROP TABLE ... CASCADE` for removed entities (in reverse topo)
+  2. Per-entity ALTERs from `emitDiff` (for each modified entity)
+  3. `CREATE TABLE` + indexes for added entities (in topo order)
+- `applyManifest(old | null, next, ctx)` — wraps both; null `old`
+  means first-time.
+
+#### Topological sort
+
+`topologicalSort(entities)` orders entities so each entity comes
+after its FK targets. Self-references are allowed (they're skipped
+in the dependency graph; the FK is resolved at row insert time).
+Cycles throw `CycleDetectedError` with the cycle path —
+deferred-FK constraint support to break cycles is a Phase 2
+extension.
+
+#### Not yet supported (Phase 2+)
+
+- `extends` composition (parent manifest inheritance + key-level
+  merge)
+- `manifestVersion` compatibility layer
+- Compliance packs (`meta.compliancePacks`) auto-inclusion
+- Workflows section (ADR-0007)
+- Roles + permissions section (ADR-0008)
+- Views / forms / dashboards section (ADR-0018)
+- Reports section (ADR-0013)
+- Integrations section (ADR-0011)
+- Files section (ADR-0014)
+- Notifications / events / jobs / search / i18n / theme / seed sections
+- Manifest signing (Ed25519, per ADR-0004 § Open questions resolved)
+- Manifest lifecycle states (Draft / Proposed / Active / Superseded
+  / Retired)
+
 ## Not yet implemented
 
 - Connection management (Postgres pool, `SET ROLE`, `SET search_path`,
   `SET LOCAL app.current_tenant_id`) — ADR-0010 +
   `@crossengin/kernel-supabase`.
-- Manifest interpretation (apply manifest to tenant schema) — ADR-0004.
 - Workflow runtime — ADR-0007.
 - Audit emission — ADR-0008.
 - Security primitives (encryption, signing) — ADR-0009.

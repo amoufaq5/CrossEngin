@@ -1,0 +1,28 @@
+import { z } from "zod";
+import { EntitySchema, RelationSchema, TraitSchema } from "@crossengin/types/meta-schema";
+
+const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
+const SEMVER_REGEX = /^\d+\.\d+\.\d+$/;
+
+export const ManifestMetaSchema = z.object({
+  name: z.string().min(1),
+  slug: z.string().min(1).regex(SLUG_REGEX, {
+    message: "slug must be kebab-case path (e.g. 'operate-pharma/community-pharmacy')",
+  }),
+  version: z.string().regex(SEMVER_REGEX, {
+    message: "version must be semver MAJOR.MINOR.PATCH",
+  }),
+  description: z.string().optional(),
+});
+
+export type ManifestMeta = z.infer<typeof ManifestMetaSchema>;
+
+export const ManifestSchema = z.object({
+  manifestVersion: z.literal("1.0"),
+  meta: ManifestMetaSchema,
+  entities: z.array(EntitySchema).optional(),
+  traits: z.array(TraitSchema).optional(),
+  relations: z.array(RelationSchema).optional(),
+});
+
+export type Manifest = z.infer<typeof ManifestSchema>;
