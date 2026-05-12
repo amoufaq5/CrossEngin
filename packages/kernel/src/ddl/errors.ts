@@ -32,3 +32,29 @@ export class ReservedFieldNameError extends Error {
     this.fieldName = fieldName;
   }
 }
+
+export class EntityRenameNotSupportedError extends Error {
+  override readonly name = "EntityRenameNotSupportedError";
+  readonly oldName: string;
+  readonly newName: string;
+  constructor(oldName: string, newName: string) {
+    super(
+      `entity rename '${oldName}' -> '${newName}' not supported by the v1 diff engine; use a manifest 'rename_from:' directive (Phase 2)`,
+    );
+    this.oldName = oldName;
+    this.newName = newName;
+  }
+}
+
+export class UnsupportedDiffChangeError extends Error {
+  override readonly name = "UnsupportedDiffChangeError";
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly reason: string;
+  constructor(entityName: string, fieldName: string, reason: string) {
+    super(`unsupported diff on entity '${entityName}', field '${fieldName}': ${reason}`);
+    this.entityName = entityName;
+    this.fieldName = fieldName;
+    this.reason = reason;
+  }
+}

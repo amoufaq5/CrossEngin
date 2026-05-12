@@ -143,16 +143,63 @@ constraint at table level.
   soft-delete logic)
 - Shadow tables (versioned `previous_versions`, gxp_signed `signatures`)
 - Generated columns (`computed:` expressions)
-- Type-change `ALTER` statements (driven by diff engine)
 - RLS policies for `tenant_owned`
 - Compliance-pack trait overrides (per ADR-0012)
+
+### Diff engine (in `@crossengin/kernel/ddl`)
+
+`computeEntityDiff(old, new, ctx?)` computes the structural diff
+between two versions of an entity; `emitDiff(diff, ctx)` turns the
+diff into ALTER statements. `diffAndEmit(old, new, ctx)` composes
+the two.
+
+```ts
+import { diffAndEmit } from "@crossengin/kernel/ddl";
+
+const statements = diffAndEmit(oldEntity, newEntity, { schema: "t_acme" });
+// e.g.
+//   ALTER TABLE "t_acme"."patient" ADD COLUMN "email" VARCHAR(320);
+//   ALTER TABLE "t_acme"."patient" ALTER COLUMN "name" TYPE VARCHAR(200);
+//   CREATE INDEX "idx_patient_email" ON "t_acme"."patient" ("email");
+```
+
+Emit order is fixed:
+
+1. `DROP INDEX` for removed indexes
+2. `DROP COLUMN` for removed fields
+3. `ADD COLUMN` for added fields (with inline NOT NULL / DEFAULT / FK)
+4. `ALTER COLUMN` for type / nullability / default changes
+5. `CREATE INDEX` for added indexes
+
+`diff.destructive` is `true` whenever the diff drops a column (whether
+from a manifest field removal or a trait being removed). Callers can
+gate destructive diffs behind a `confirm_destructive: true` flag at
+the manifest level (per ADR-0003 § Schema evolution rules); the diff
+engine itself does not gate.
+
+#### What the diff engine refuses to emit (Phase 2)
+
+- **Entity rename** (`old.name !== new.name`). The diff engine
+  expects pre-paired entities; manifest-level `rename_from:` is the
+  upstream mechanism.
+- **Field type kind change** (e.g., `text` → `integer`). Requires
+  a manifest-level `transform: SqlExpression` directive.
+- **Enum values change**. Requires named CHECK constraints, which
+  the v1 emitter doesn't emit.
+- **Integer / decimal range change**. Same — named CHECK constraints.
+- **Decimal precision / scale change**. Needs ALTER COLUMN TYPE
+  with a USING clause; deferred.
+- **Unique constraint change**. Requires named UNIQUE constraints.
+
+When the diff engine encounters one of these, it throws
+`UnsupportedDiffChangeError` with the affected entity / field and
+a description of the missing Phase 2 mechanism.
 
 ## Not yet implemented
 
 - Connection management (Postgres pool, `SET ROLE`, `SET search_path`,
   `SET LOCAL app.current_tenant_id`) — ADR-0010 +
   `@crossengin/kernel-supabase`.
-- Diff engine (oldEntity → newEntity → DDL ALTERs) — ADR-0003.
 - Manifest interpretation (apply manifest to tenant schema) — ADR-0004.
 - Workflow runtime — ADR-0007.
 - Audit emission — ADR-0008.
