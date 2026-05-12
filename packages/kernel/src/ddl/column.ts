@@ -43,9 +43,8 @@ export function emitColumn(field: Field, options: EmitColumnOptions): string {
 
   if (field.type.kind === "reference") {
     const targetTable = toTableName(field.type.target);
-    const onDelete = (field.type.onDelete ?? "restrict").toUpperCase();
     parts.push(
-      `REFERENCES ${quoteIdent(options.schema)}.${quoteIdent(targetTable)}("id") ON DELETE ${onDelete}`,
+      `REFERENCES ${quoteIdent(options.schema)}.${quoteIdent(targetTable)}("id") ON DELETE RESTRICT`,
     );
   }
 
