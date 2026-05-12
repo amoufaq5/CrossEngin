@@ -30,6 +30,8 @@ build/
 .cache/
 .turbo/
 out/
+*.tsbuildinfo
+coverage/
 
 # Environment
 .env

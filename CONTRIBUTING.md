@@ -4,11 +4,11 @@ This repository holds architectural decisions, not code. The contribution model 
 
 ## Proposing a new ADR
 
-1. Pick the next unused number `NNNN` from [`adr/index.md`](adr/index.md).
-2. Copy [`adr/0000-template.md`](adr/0000-template.md) to `adr/NNNN-<short-slug>.md`.
+1. Pick the next unused number `NNNN` from [`docs/adr/index.md`](docs/adr/index.md).
+2. Copy [`docs/adr/0000-template.md`](docs/adr/0000-template.md) to `docs/adr/NNNN-<short-slug>.md`.
    - `<short-slug>` is lowercase, hyphenated, derived from the title.
 3. Fill in every section. Skipped sections must be marked **N/A** with a reason.
-4. Add an entry to `adr/index.md` with status **Proposed**.
+4. Add an entry to `docs/adr/index.md` with status **Proposed**.
 5. Open a pull request. PR title: `ADR-NNNN: <title>`.
 
 ## ADR status lifecycle
@@ -50,6 +50,6 @@ Reviewers should push back on vague language, missing trade-offs, and hand-wavin
 - Implementation plans → live in code repos as PR descriptions, RFCs, or design docs.
 - Tactical bug fixes or refactors → PR descriptions.
 - Personnel or operational decisions → wiki or internal docs.
-- Vision / strategy → [`vision.md`](vision.md), not an ADR.
+- Vision / strategy → [`vision.md`](docs/vision.md), not an ADR.
 
 An ADR records a decision that **constrains future architecture** and that **someone in the future will want to understand the reasoning behind**.

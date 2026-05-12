@@ -1,14 +1,54 @@
 # CrossEngin
 
-> **Status:** In active design. ADRs in progress. No production code in this repository.
+> **Status:** Phase 1 in progress. Monorepo code surface opening
+> per ADR-0024. ADRs 0001–0025 drafted. No production code yet.
 
-This repository holds the vision, architecture decision records (ADRs), and design documents for **CrossEngin** — an AI-native application platform.
+This repository is the home of **CrossEngin** — an AI-native
+application platform. Three layers: a multi-tenant **kernel**,
+declarative **manifests** that tell the kernel what application to
+be, and an **AI Architect** agent that authors manifests through
+conversation.
 
-## What CrossEngin is
+ERP (under the **CrossEngin Operate** sub-brand) is the first
+family of applications built on CrossEngin. The platform also
+targets public-sector digitalization (**Govern**), national-scale
+healthcare digitalization (**Heal**), education (**Educate**), NGOs
+(**Serve**), bespoke self-service apps (**Build**), and a
+white-label channel for system integrators (**Partner**).
 
-CrossEngin is a meta-application platform. Tenants describe a business, regulation, mission, or process in natural language; the **AI Architect** provisions a complete, multi-tenant, compliant, integration-ready application on a shared **kernel** — covering data model, workflows, roles, forms, dashboards, reports, and integrations.
+## Repository layout
 
-ERP is the first family of applications built on CrossEngin. The platform also targets public-sector digitalization, healthcare digitalization at national scale, education, NGOs, and bespoke enterprise applications.
+The unified monorepo (per ADR-0024) is shaped as follows. `docs/`
+exists today; the remaining directories arrive as package skeletons
+land in subsequent Phase 1 commits.
+
+```
+CrossEngin/
+├── docs/             architecture decisions + vision  (CC BY 4.0)
+│   ├── vision.md
+│   └── adr/
+├── apps/             user-facing applications          [pending]
+├── packages/         kernel + auth + workflow + AI + UI [pending]
+├── manifests/        declarative app packs              [pending]
+├── infra/            terraform + helm + docker          [pending]
+├── tools/            CLI tooling, codemods, eval suite  [pending]
+└── (root config)     pnpm-workspace.yaml, turbo.json, package.json
+```
+
+The full target layout is in
+**[ADR-0024](docs/adr/0024-repository-and-migration-strategy.md)**.
+
+## How to read this repository
+
+Start with **[`docs/vision.md`](docs/vision.md)** — the north-star
+concept document.
+
+Then **[`docs/adr/index.md`](docs/adr/index.md)** — the running
+index of all 25 architecture decisions.
+
+Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
+the template at
+**[`docs/adr/0000-template.md`](docs/adr/0000-template.md)**.
 
 ## Sub-brand map
 
@@ -25,7 +65,9 @@ ERP is the first family of applications built on CrossEngin. The platform also t
 
 ## Target families
 
-Thirteen families of business and organizational types, ~150 specific sub-types. See [`vision.md`](vision.md) for the full map.
+Thirteen families of business and organizational types, ~150
+specific sub-types. See [`docs/vision.md`](docs/vision.md) for the
+full map.
 
 | # | Family | Brand |
 |---|---|---|
@@ -43,14 +85,6 @@ Thirteen families of business and organizational types, ~150 specific sub-types.
 | 12 | General Manufacturing | Operate |
 | 13 | Media + Entertainment + Membership | Operate or Build |
 
-## How to read this repository
-
-Start with [`vision.md`](vision.md) — the north-star concept document.
-
-Then [`adr/index.md`](adr/index.md) — the running index of all architecture decisions.
-
-Individual decisions live at `adr/NNNN-<slug>.md`. They follow the template at [`adr/0000-template.md`](adr/0000-template.md).
-
 ## ADR statuses
 
 | Status | Meaning |
@@ -60,12 +94,33 @@ Individual decisions live at `adr/NNNN-<slug>.md`. They follow the template at [
 | **Superseded by ADR-XXXX** | A later decision replaces this one. Both ADRs cross-reference each other. |
 | **Deprecated** | No longer applies, no replacement. |
 
-Accepted ADRs are not rewritten. If a decision changes, a new ADR supersedes the old one.
+Accepted ADRs are not rewritten. If a decision changes, a new ADR
+supersedes the old one.
+
+## Tooling
+
+The monorepo uses:
+
+- **pnpm** workspaces (`pnpm-workspace.yaml`)
+- **Turborepo** as the build orchestrator (`turbo.json`)
+- **TypeScript** strict mode across all packages
+- **Vitest** for unit tests, **Playwright** for E2E, **MSW** for HTTP mocks
+- **Node** ≥ 20, **pnpm** ≥ 9
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for ADR contribution
+guidance. Code contribution guidelines will land alongside the
+first package skeletons in subsequent Phase 1 commits.
 
 ## License
 
-All contents licensed under [Creative Commons Attribution 4.0 International (CC BY 4.0)](LICENSE).
+This repository is **dual-licensed**:
+
+- **`docs/`** subtree (vision, ADRs) — Creative Commons Attribution
+  4.0 International (CC BY 4.0). See
+  **[`docs/LICENSE`](docs/LICENSE)**.
+- **All other paths** (apps, packages, manifests, infra, tools,
+  root config) — proprietary. See **[`LICENSE`](LICENSE)**.
+
+Final proprietary license wording is pending per ADR-0024.
