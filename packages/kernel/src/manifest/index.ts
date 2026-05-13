@@ -6,3 +6,5 @@ export * from "./diff.js";
 export * from "./emit.js";
 export * from "./extends.js";
 export * from "./hash.js";
+export * from "./patch.js";
+export * from "./try-validate.js";

@@ -462,6 +462,42 @@ Deferred to Phase 2:
   the registry to return that exact key; slug@version semantics is
   deferred)
 
+### Patch + tool contract types (`@crossengin/kernel/manifest`)
+
+The kernel exposes the JSON contract types that the AI Architect
+(per ADR-0005) consumes on the kernel side:
+
+```ts
+import {
+  ManifestPatchSchema,
+  type ManifestPatch,
+  ValidationResultSchema,
+  type ValidationResult,
+  PreviewResultSchema,
+  type PreviewResult,
+  ApplyResultSchema,
+  type ApplyResult,
+  tryValidateManifest,
+} from "@crossengin/kernel/manifest";
+```
+
+- **`ManifestPatch`** — what the agent proposes:
+  `{ baseHash: string, manifest: Manifest }`. The `baseHash` is the
+  hash the patch was computed against (optimistic concurrency).
+- **`ValidationResult`** — non-throwing validation outcome:
+  `{ ok: true } | { ok: false, errors: ValidationError[] }`.
+- **`PreviewResult`** — what `previewManifestApply` returns:
+  `{ approvalToken, newHash, destructive, ddlStatements, warnings? }`.
+- **`ApplyResult`** — what `applyManifestPatch` returns:
+  `{ newHash, appliedAt, manifestVersion }`.
+- **`tryValidateManifest(manifest): ValidationResult`** — non-throwing
+  wrapper around `validateManifest`, suitable for the agent's
+  `validateManifest` tool. Returns a structured error list instead
+  of throwing (v1: one error per call; Phase 2 collects all).
+
+Approval-token signing + verification is a Phase 2 kernel runtime
+concern; the v1 types treat it as an opaque string.
+
 #### DDL emission
 
 Three entry points:
