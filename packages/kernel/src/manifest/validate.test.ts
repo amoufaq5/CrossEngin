@@ -180,3 +180,178 @@ describe("validateManifest — relations", () => {
     expect(() => validateManifest(m)).toThrow(/Doctor/);
   });
 });
+
+describe("validateManifest — roles", () => {
+  it("accepts a manifest with a flat role set", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: {
+        staff: { name: "staff" },
+        pharmacist: { name: "pharmacist", inherits: ["staff"] },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws when role.name doesn't match its record key", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: {
+        staff: { name: "pharmacist" },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/does not match record key/);
+  });
+
+  it("throws on a role inheritance cycle", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: {
+        a: { name: "a", inherits: ["b"] },
+        b: { name: "b", inherits: ["a"] },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/inheritance cycle/);
+  });
+
+  it("throws when inherits references an unknown role", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: {
+        pharmacist: { name: "pharmacist", inherits: ["mystery"] },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown role 'mystery'/);
+  });
+});
+
+describe("validateManifest — permissions", () => {
+  const baseRoles = {
+    pharmacist: { name: "pharmacist" as const },
+    manager: { name: "manager" as const, inherits: ["pharmacist"] },
+  };
+
+  it("accepts permissions for declared entities with declared roles", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      roles: baseRoles,
+      permissions: {
+        Prescription: {
+          read: { roles: ["pharmacist", "manager"] },
+          update: { roles: ["pharmacist"] },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws on a permission entry for an unknown entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      roles: baseRoles,
+      permissions: {
+        NonExistent: { read: { roles: ["pharmacist"] } },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown entity 'NonExistent'/);
+  });
+
+  it("throws when an operation grant references an unknown role", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      roles: baseRoles,
+      permissions: {
+        Prescription: { read: { roles: ["mystery"] } },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
+  });
+
+  it("throws when a transition grant references an unknown role", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      roles: baseRoles,
+      permissions: {
+        Prescription: {
+          transitions: { verify: { roles: ["mystery"] } },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
+  });
+
+  it("throws on a field-level permission for an unknown field", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      roles: baseRoles,
+      permissions: {
+        Prescription: {
+          fields: { mystery_field: { read: { roles: ["pharmacist"] } } },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown field 'mystery_field'/);
+  });
+
+  it("accepts a field-level permission for a trait-supplied field (e.g. auditable's created_at)", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        {
+          name: "Prescription",
+          fields: [{ name: "qty", type: { kind: "integer" } }],
+          traits: ["auditable"],
+        },
+      ],
+      roles: baseRoles,
+      permissions: {
+        Prescription: {
+          fields: { created_at: { read: { roles: ["pharmacist"] } } },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws when a field-level grant references an unknown role", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      roles: baseRoles,
+      permissions: {
+        Prescription: {
+          fields: { qty: { read: { roles: ["mystery"] } } },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
+  });
+});

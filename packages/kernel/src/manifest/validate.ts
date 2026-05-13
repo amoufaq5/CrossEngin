@@ -1,4 +1,12 @@
+import {
+  RoleInheritanceCycleError,
+  UnknownRoleError,
+  validateRoleGraph,
+  type RbacGrant,
+  type RoleDefinition,
+} from "@crossengin/auth";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
+import { expandTraits } from "../ddl/resolution.js";
 import { ManifestValidationError } from "./errors.js";
 import type { Manifest } from "./types.js";
 
@@ -97,6 +105,102 @@ export function validateManifest(manifest: Manifest): void {
           `relations[${i}].to`,
           `relation references unknown entity '${rel.to}'`,
         );
+      }
+    }
+  }
+
+  const roles = manifest.roles ?? {};
+  const rolesMap = new Map<string, RoleDefinition>();
+  for (const [key, role] of Object.entries(roles)) {
+    if (role.name !== key) {
+      throw new ManifestValidationError(
+        `roles.${key}.name`,
+        `role name '${role.name}' does not match record key '${key}'`,
+      );
+    }
+    rolesMap.set(key, role);
+  }
+
+  try {
+    validateRoleGraph(rolesMap);
+  } catch (err) {
+    if (err instanceof RoleInheritanceCycleError) {
+      throw new ManifestValidationError(
+        `roles.${err.cycle[0] ?? "*"}.inherits`,
+        `inheritance cycle: ${err.cycle.join(" -> ")}`,
+      );
+    }
+    if (err instanceof UnknownRoleError) {
+      throw new ManifestValidationError(
+        `roles.*.inherits`,
+        `inherits unknown role '${err.roleName}'`,
+      );
+    }
+    throw err;
+  }
+
+  const permissions = manifest.permissions ?? {};
+  const customTraits = manifest.traits ?? [];
+
+  const checkGrant = (path: string, grant: RbacGrant): void => {
+    for (const roleName of grant.roles) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          path,
+          `grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
+  };
+
+  for (const [entityName, entityPerms] of Object.entries(permissions)) {
+    if (!entityNames.has(entityName)) {
+      throw new ManifestValidationError(
+        `permissions.${entityName}`,
+        `permission entry for unknown entity '${entityName}'`,
+      );
+    }
+
+    for (const op of ["list", "read", "create", "update", "delete"] as const) {
+      const grant = entityPerms[op];
+      if (grant) checkGrant(`permissions.${entityName}.${op}.roles`, grant);
+    }
+
+    if (entityPerms.transitions) {
+      for (const [tName, grant] of Object.entries(entityPerms.transitions)) {
+        checkGrant(`permissions.${entityName}.transitions.${tName}.roles`, grant);
+      }
+    }
+
+    if (entityPerms.fields) {
+      const entity = entities.find((e) => e.name === entityName);
+      if (entity !== undefined) {
+        const traitFields = expandTraits(entity, customTraits);
+        const allFieldNames = new Set<string>([
+          ...entity.fields.map((f) => f.name),
+          ...traitFields.map((f) => f.name),
+        ]);
+
+        for (const [fieldName, fieldPerm] of Object.entries(entityPerms.fields)) {
+          if (!allFieldNames.has(fieldName)) {
+            throw new ManifestValidationError(
+              `permissions.${entityName}.fields.${fieldName}`,
+              `field-level permission for unknown field '${fieldName}' on entity '${entityName}'`,
+            );
+          }
+          if (fieldPerm.read) {
+            checkGrant(
+              `permissions.${entityName}.fields.${fieldName}.read.roles`,
+              fieldPerm.read,
+            );
+          }
+          if (fieldPerm.update) {
+            checkGrant(
+              `permissions.${entityName}.fields.${fieldName}.update.roles`,
+              fieldPerm.update,
+            );
+          }
+        }
       }
     }
   }

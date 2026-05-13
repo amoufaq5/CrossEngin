@@ -119,4 +119,33 @@ describe("ManifestSchema — entities / traits / relations", () => {
     };
     expect(() => ManifestSchema.parse(m)).not.toThrow();
   });
+
+  it("parses roles and permissions sections", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" as const } }] },
+      ],
+      roles: {
+        staff: { name: "staff" },
+        pharmacist: { name: "pharmacist", inherits: ["staff"] },
+      },
+      permissions: {
+        Prescription: {
+          read: { roles: ["pharmacist"] },
+          update: { roles: ["pharmacist"], abac: "data.access.allow_update" },
+          transitions: {
+            verify: { roles: ["pharmacist"] },
+          },
+          fields: {
+            qty: { read: { roles: ["pharmacist"] } },
+          },
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(parsed.roles?.pharmacist?.inherits).toEqual(["staff"]);
+    expect(parsed.permissions?.Prescription?.read?.roles).toEqual(["pharmacist"]);
+  });
 });

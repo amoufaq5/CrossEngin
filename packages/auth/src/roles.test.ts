@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
 import { RoleInheritanceCycleError, UnknownRoleError } from "./errors.js";
-import { resolveEffectiveRoles } from "./roles.js";
+import { resolveEffectiveRoles, validateRoleGraph } from "./roles.js";
 import type { Principal, RoleDefinition } from "./types.js";
 
 function principal(primary: string, secondary: string[] = []): Principal {
@@ -64,5 +64,39 @@ describe("resolveEffectiveRoles", () => {
     expect(() => resolveEffectiveRoles(principal("a"), ROLES)).toThrow(
       RoleInheritanceCycleError,
     );
+  });
+});
+
+describe("validateRoleGraph", () => {
+  it("accepts a flat role graph (no inheritance)", () => {
+    const r = new Map<string, RoleDefinition>([
+      ["staff", { name: "staff" }],
+      ["pharmacist", { name: "pharmacist" }],
+    ]);
+    expect(() => validateRoleGraph(r)).not.toThrow();
+  });
+
+  it("accepts a hierarchical role graph", () => {
+    const r = new Map<string, RoleDefinition>([
+      ["staff", { name: "staff" }],
+      ["pharmacist", { name: "pharmacist", inherits: ["staff"] }],
+      ["manager", { name: "manager", inherits: ["pharmacist"] }],
+    ]);
+    expect(() => validateRoleGraph(r)).not.toThrow();
+  });
+
+  it("throws on a 2-node cycle", () => {
+    const r = new Map<string, RoleDefinition>([
+      ["a", { name: "a", inherits: ["b"] }],
+      ["b", { name: "b", inherits: ["a"] }],
+    ]);
+    expect(() => validateRoleGraph(r)).toThrow(RoleInheritanceCycleError);
+  });
+
+  it("throws on an unknown inherits reference", () => {
+    const r = new Map<string, RoleDefinition>([
+      ["pharmacist", { name: "pharmacist", inherits: ["mystery"] }],
+    ]);
+    expect(() => validateRoleGraph(r)).toThrow(UnknownRoleError);
   });
 });

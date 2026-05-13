@@ -242,25 +242,38 @@ const diff = computeManifestDiff(oldManifest, newManifest);
   },
   "entities":  [ /* Entity[] from @crossengin/types/meta-schema */ ],
   "traits":    [ /* Trait[]  (custom; built-ins are kernel-provided) */ ],
-  "relations": [ /* Relation[] */ ]
+  "relations": [ /* Relation[] */ ],
+  "roles":     { /* Record<RoleName, RoleDefinition> from @crossengin/auth */ },
+  "permissions": { /* Record<EntityName, EntityPermissions> from @crossengin/auth */ }
 }
 ```
 
 #### Cross-section validation (`validateManifest`)
 
 Throws `ManifestValidationError` (with a `path` like
-`entities[2].fields[0].type.target`) when:
+`entities[2].fields[0].type.target` or
+`permissions.Prescription.fields.qty.read.roles`) when any of:
 
+**Entities / traits / relations**
 - An entity name appears twice
 - A custom trait name appears twice
-- A custom trait shadows a kernel built-in (`auditable`,
-  `soft_deletable`, `versioned`, `tenant_owned`, `gxp_signed`,
-  `part_11_compliant`)
-- An `entity.traits[]` entry is neither built-in nor declared in
-  the manifest's `traits`
-- A `reference` field targets an entity not in the manifest
-- A trait's reference field targets an entity not in the manifest
+- A custom trait shadows a kernel built-in
+- An `entity.traits[]` entry resolves to neither a built-in nor a
+  declared custom trait
+- A `reference` field (or trait field) targets an entity not in the manifest
 - A `relation` references an entity not in the manifest
+
+**Roles**
+- A role's `name` field doesn't match its record key
+- The role inheritance graph contains a cycle
+- A role's `inherits[]` references an unknown role
+
+**Permissions**
+- A permission entry's key references an entity not in the manifest
+- An operation, transition, or field-level grant references a role
+  not in `manifest.roles`
+- A field-level permission targets a field not on the entity
+  (including trait-supplied fields like `auditable`'s `created_at`)
 
 #### DDL emission
 

@@ -33,6 +33,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/auth": "workspace:*",
     "@crossengin/types": "workspace:*"
   },
   "devDependencies": {

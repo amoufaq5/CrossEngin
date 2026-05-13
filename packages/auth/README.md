@@ -20,13 +20,25 @@ import {
   type AuditLogEntry,
   type AuditEmitter,
 
+  // Zod schemas (also consumed by the manifest interpreter)
+  RoleDefinitionSchema,
+  EntityPermissionsSchema,
+  PermissionMapSchema,
+
   // Pure decision logic
   resolveEffectiveRoles,
+  validateRoleGraph,
   rbacCheck,
   computeFieldRedaction,
   validateWriteMask,
 } from "@crossengin/auth";
 ```
+
+`RoleDefinition`, `RbacGrant`, `FieldPermission`, `EntityPermissions`,
+and `PermissionMap` are defined as zod schemas with types derived via
+`z.infer`. The kernel's manifest interpreter (`@crossengin/kernel/manifest`)
+imports these schemas to validate the `roles` and `permissions`
+sections of a manifest.
 
 ## Role model
 
@@ -46,6 +58,11 @@ const roles: ReadonlyMap<string, RoleDefinition> = new Map([
 effective role set including inherited parents. Cycles throw
 `RoleInheritanceCycleError`; unknown role references throw
 `UnknownRoleError`.
+
+`validateRoleGraph(roles)` walks every role in the map (not just the
+ones referenced by a single principal) and throws the same errors if
+any cycle or unknown reference exists. Used by the manifest interpreter
+to validate the `roles` section at apply time.
 
 ## Permission model
 

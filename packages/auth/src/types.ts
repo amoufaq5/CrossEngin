@@ -1,6 +1,52 @@
+import { z } from "zod";
 import type { TenantId, UserId } from "@crossengin/types";
 
 export type RoleName = string;
+
+export const RoleNameSchema = z.string().min(1);
+
+export const RoleDefinitionSchema = z.object({
+  name: RoleNameSchema,
+  label: z.record(z.string(), z.string()).optional(),
+  description: z.string().optional(),
+  inherits: z.array(RoleNameSchema).optional(),
+  isAuditor: z.boolean().optional(),
+  abacAttributes: z.record(z.string(), z.string()).optional(),
+});
+
+export type RoleDefinition = z.infer<typeof RoleDefinitionSchema>;
+
+export const RbacGrantSchema = z.object({
+  roles: z.array(RoleNameSchema),
+  abac: z.string().optional(),
+});
+
+export type RbacGrant = z.infer<typeof RbacGrantSchema>;
+
+export const FieldPermissionSchema = z.object({
+  read: RbacGrantSchema.optional(),
+  update: RbacGrantSchema.optional(),
+});
+
+export type FieldPermission = z.infer<typeof FieldPermissionSchema>;
+
+export const EntityPermissionsSchema = z.object({
+  list: RbacGrantSchema.optional(),
+  read: RbacGrantSchema.optional(),
+  create: RbacGrantSchema.optional(),
+  update: RbacGrantSchema.optional(),
+  delete: RbacGrantSchema.optional(),
+  transitions: z.record(z.string(), RbacGrantSchema).optional(),
+  fields: z.record(z.string(), FieldPermissionSchema).optional(),
+});
+
+export type EntityPermissions = z.infer<typeof EntityPermissionsSchema>;
+
+export type EntityName = string;
+
+export const PermissionMapSchema = z.record(z.string(), EntityPermissionsSchema);
+
+export type PermissionMap = z.infer<typeof PermissionMapSchema>;
 
 export type PrincipalKind = "user" | "ai_architect" | "system";
 
@@ -14,41 +60,9 @@ export interface Principal {
   readonly mfaProofAgeSeconds: number | null;
 }
 
-export interface RoleDefinition {
-  readonly name: RoleName;
-  readonly label?: Readonly<Record<string, string>>;
-  readonly description?: string;
-  readonly inherits?: readonly RoleName[];
-  readonly isAuditor?: boolean;
-  readonly abacAttributes?: Readonly<Record<string, string>>;
-}
-
 export type OperationName = "list" | "read" | "create" | "update" | "delete";
 
 export type Operation = OperationName | { readonly kind: "transition"; readonly name: string };
-
-export interface RbacGrant {
-  readonly roles: readonly RoleName[];
-  readonly abac?: string;
-}
-
-export interface FieldPermission {
-  readonly read?: RbacGrant;
-  readonly update?: RbacGrant;
-}
-
-export interface EntityPermissions {
-  readonly list?: RbacGrant;
-  readonly read?: RbacGrant;
-  readonly create?: RbacGrant;
-  readonly update?: RbacGrant;
-  readonly delete?: RbacGrant;
-  readonly transitions?: Readonly<Record<string, RbacGrant>>;
-  readonly fields?: Readonly<Record<string, FieldPermission>>;
-}
-
-export type EntityName = string;
-export type PermissionMap = Readonly<Record<EntityName, EntityPermissions>>;
 
 export interface AuthorizationDecision {
   readonly allowed: boolean;
