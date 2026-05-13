@@ -1,5 +1,6 @@
 import { ExtendsCycleError, UnknownParentManifestError } from "./errors.js";
-import type { Manifest, ManifestMeta } from "./types.js";
+import { manifestHash } from "./hash.js";
+import type { Manifest, ManifestMeta, ManifestResolutionEntry } from "./types.js";
 
 export interface ManifestRegistry {
   getManifest(parentId: string): Promise<Manifest | null>;
@@ -13,14 +14,26 @@ export async function resolveManifest(
   manifest: Manifest,
   context: ResolveContext,
 ): Promise<Manifest> {
-  return resolveInternal(manifest, context, new Set());
+  const { manifest: resolved, parents } = await resolveInternal(manifest, context, new Set());
+  if (parents.length === 0) {
+    return resolved;
+  }
+  return {
+    ...resolved,
+    meta: { ...resolved.meta, manifestResolution: { parents } },
+  };
+}
+
+interface ResolveResult {
+  manifest: Manifest;
+  parents: ManifestResolutionEntry[];
 }
 
 async function resolveInternal(
   manifest: Manifest,
   context: ResolveContext,
   visited: ReadonlySet<string>,
-): Promise<Manifest> {
+): Promise<ResolveResult> {
   const slug = manifest.meta.slug;
   if (visited.has(slug)) {
     throw new ExtendsCycleError([...visited, slug]);
@@ -28,19 +41,31 @@ async function resolveInternal(
 
   const extendsList = manifest.meta.extends ?? [];
   if (extendsList.length === 0) {
-    return stripExtends(manifest);
+    return { manifest: stripExtends(manifest), parents: [] };
   }
 
   const newVisited = new Set(visited);
   newVisited.add(slug);
 
+  const entries: ManifestResolutionEntry[] = [];
   const resolvedParents: Manifest[] = [];
+
   for (const parentId of extendsList) {
     const parent = await context.registry.getManifest(parentId);
     if (parent === null) {
       throw new UnknownParentManifestError(parentId, slug);
     }
-    resolvedParents.push(await resolveInternal(parent, context, newVisited));
+
+    entries.push({
+      slug: parent.meta.slug,
+      version: parent.meta.version,
+      hash: manifestHash(parent),
+      parentId,
+    });
+
+    const parentResult = await resolveInternal(parent, context, newVisited);
+    entries.push(...parentResult.parents);
+    resolvedParents.push(parentResult.manifest);
   }
 
   let composed: Manifest = {
@@ -54,7 +79,7 @@ async function resolveInternal(
 
   composed = mergeContent(composed, manifest);
 
-  return composed;
+  return { manifest: composed, parents: entries };
 }
 
 function stripExtends(manifest: Manifest): Manifest {

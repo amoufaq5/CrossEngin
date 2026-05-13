@@ -414,7 +414,53 @@ Deferred to Phase 2:
   `inherits[]`).
 - Slug@version identifiers (the registry is opaque on identifier
   format for v1).
-- Audit storage of the resolution graph in `meta.manifestResolution`.
+
+### Resolution provenance + content hashing
+
+The resolver attaches `meta.manifestResolution.parents` to the
+resolved manifest — a depth-first traversal of contributors, each
+carrying:
+
+```ts
+{
+  slug:     string;   // the parent's own slug
+  version:  string;   // the parent's version
+  hash:     string;   // manifestHash(parent) — SHA-256 hex
+  parentId: string;   // the identifier used in the child's extends[]
+}
+```
+
+The hash function is deterministic and stable across reorderings:
+
+```ts
+import { manifestHash, canonicalManifestJson } from "@crossengin/kernel/manifest";
+
+const hash = manifestHash(manifest);   // 64-char hex SHA-256 digest
+```
+
+Canonicalization rules:
+- Object keys are sorted alphabetically before hashing
+- Arrays whose elements are all `{ name: string, ... }` objects are
+  sorted by `name` (entities, traits, fields, workflow states,
+  transitions, SLAs — anything with a `.name`)
+- Other arrays (relations, role `inherits[]`, transition guards)
+  preserve order
+- `meta.manifestResolution` is **excluded** from the hash, so a
+  resolved manifest hashes the same as its content-equivalent
+  pre-resolution form
+
+This lets callers use `manifestHash` as a cache key for:
+- DDL-generation caching (same content → same SQL)
+- Change detection (manifest hash unchanged → no manifest-apply work)
+- Audit (record which content version was active at a point in time)
+
+Deferred to Phase 2:
+- Dedup of repeated parents in the resolution graph (the same parent
+  reached via multiple paths currently appears multiple times)
+- Per-entry origin tracking ("this field came from manifest X")
+- Slug-only identifier resolution (currently `extends: ["slug"]` requires
+  the registry to return that exact key; slug@version semantics is
+  deferred)
 
 #### DDL emission
 

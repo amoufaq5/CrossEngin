@@ -6,6 +6,21 @@ import { WorkflowSchema } from "../workflow/types.js";
 const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
 const SEMVER_REGEX = /^\d+\.\d+\.\d+$/;
 
+export const ManifestResolutionEntrySchema = z.object({
+  slug: z.string(),
+  version: z.string(),
+  hash: z.string(),
+  parentId: z.string(),
+});
+
+export type ManifestResolutionEntry = z.infer<typeof ManifestResolutionEntrySchema>;
+
+export const ManifestResolutionSchema = z.object({
+  parents: z.array(ManifestResolutionEntrySchema),
+});
+
+export type ManifestResolution = z.infer<typeof ManifestResolutionSchema>;
+
 export const ManifestMetaSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1).regex(SLUG_REGEX, {
@@ -16,6 +31,7 @@ export const ManifestMetaSchema = z.object({
   }),
   description: z.string().optional(),
   extends: z.array(z.string().min(1)).optional(),
+  manifestResolution: ManifestResolutionSchema.optional(),
 });
 
 export type ManifestMeta = z.infer<typeof ManifestMetaSchema>;

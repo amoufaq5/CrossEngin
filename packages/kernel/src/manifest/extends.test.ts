@@ -353,3 +353,93 @@ describe("resolveManifest + validateManifest end-to-end", () => {
     expect(() => validateManifest(resolved)).not.toThrow();
   });
 });
+
+describe("resolveManifest — manifestResolution provenance", () => {
+  it("attaches manifestResolution.parents when there are parents", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(resolved.meta.manifestResolution).toBeDefined();
+    expect(resolved.meta.manifestResolution?.parents).toHaveLength(1);
+    expect(resolved.meta.manifestResolution?.parents[0]?.slug).toBe("base");
+    expect(resolved.meta.manifestResolution?.parents[0]?.parentId).toBe("base");
+  });
+
+  it("omits manifestResolution when no parents are extended", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Solo", slug: "solo", version: v },
+    };
+    const resolved = await resolveManifest(m, { registry: registryFrom({}) });
+    expect(resolved.meta.manifestResolution).toBeUndefined();
+  });
+
+  it("records the parent's hash matching manifestHash(parent)", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      entities: [{ name: "X", fields: [{ name: "a", type: { kind: "text" } }] }],
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    const { manifestHash } = await import("./hash.js");
+    expect(resolved.meta.manifestResolution?.parents[0]?.hash).toBe(manifestHash(parent));
+  });
+
+  it("records grandparents in depth-first order (parent first, then its parent)", async () => {
+    const grandparent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "GP", slug: "gp", version: v },
+    };
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "P", slug: "p", version: v, extends: ["gp"] },
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "C", slug: "c", version: v, extends: ["p"] },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ p: parent, gp: grandparent }),
+    });
+    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual([
+      "p",
+      "gp",
+    ]);
+  });
+
+  it("records multiple parents in left-to-right order", async () => {
+    const p1: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "P1", slug: "p1", version: v },
+    };
+    const p2: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "P2", slug: "p2", version: v },
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "C", slug: "c", version: v, extends: ["p1", "p2"] },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ p1, p2 }),
+    });
+    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual([
+      "p1",
+      "p2",
+    ]);
+  });
+});
