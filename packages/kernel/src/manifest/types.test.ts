@@ -148,4 +148,31 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(parsed.roles?.pharmacist?.inherits).toEqual(["staff"]);
     expect(parsed.permissions?.Prescription?.read?.roles).toEqual(["pharmacist"]);
   });
+
+  it("parses a workflows section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle" as const,
+          entity: "Prescription",
+          stateField: "status",
+          states: [
+            { name: "pending", category: "active" as const },
+            { name: "done", category: "terminal" as const },
+          ],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+        dailyCheck: {
+          kind: "scheduled" as const,
+          schedule: "0 6 * * *",
+          action: { kind: "runJob", job: "x" },
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.workflows ?? {})).toEqual(["lifecycle", "dailyCheck"]);
+  });
 });

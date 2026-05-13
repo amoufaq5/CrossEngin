@@ -7,10 +7,19 @@ import {
 } from "@crossengin/auth";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import { expandTraits } from "../ddl/resolution.js";
+import { WorkflowValidationError } from "../workflow/errors.js";
+import { validateWorkflow } from "../workflow/validate.js";
 import { ManifestValidationError } from "./errors.js";
 import type { Manifest } from "./types.js";
 
 export function validateManifest(manifest: Manifest): void {
+  const entityNames = validateEntitiesTraitsRelations(manifest);
+  const rolesMap = validateRoles(manifest);
+  const entityTransitions = validateWorkflows(manifest, entityNames);
+  validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
+}
+
+function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
   const entityNames = new Set<string>();
   const traitNames = new Set<string>();
 
@@ -109,6 +118,10 @@ export function validateManifest(manifest: Manifest): void {
     }
   }
 
+  return entityNames;
+}
+
+function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {
   const roles = manifest.roles ?? {};
   const rolesMap = new Map<string, RoleDefinition>();
   for (const [key, role] of Object.entries(roles)) {
@@ -139,8 +152,54 @@ export function validateManifest(manifest: Manifest): void {
     throw err;
   }
 
+  return rolesMap;
+}
+
+function validateWorkflows(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+): Map<string, Set<string>> {
+  const workflows = manifest.workflows ?? {};
+  const entityTransitions = new Map<string, Set<string>>();
+
+  for (const [name, workflow] of Object.entries(workflows)) {
+    try {
+      validateWorkflow(name, workflow);
+    } catch (err) {
+      if (err instanceof WorkflowValidationError) {
+        throw new ManifestValidationError(err.path, err.message);
+      }
+      throw err;
+    }
+
+    if (workflow.kind === "entityLifecycle") {
+      if (!entityNames.has(workflow.entity)) {
+        throw new ManifestValidationError(
+          `workflows.${name}.entity`,
+          `workflow references unknown entity '${workflow.entity}'`,
+        );
+      }
+
+      const existing = entityTransitions.get(workflow.entity) ?? new Set<string>();
+      for (const t of workflow.transitions) {
+        existing.add(t.name);
+      }
+      entityTransitions.set(workflow.entity, existing);
+    }
+  }
+
+  return entityTransitions;
+}
+
+function validatePermissions(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+  rolesMap: ReadonlyMap<string, RoleDefinition>,
+  entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
+): void {
   const permissions = manifest.permissions ?? {};
   const customTraits = manifest.traits ?? [];
+  const entities = manifest.entities ?? [];
 
   const checkGrant = (path: string, grant: RbacGrant): void => {
     for (const roleName of grant.roles) {
@@ -167,7 +226,14 @@ export function validateManifest(manifest: Manifest): void {
     }
 
     if (entityPerms.transitions) {
+      const declaredTransitions = entityTransitions.get(entityName) ?? new Set<string>();
       for (const [tName, grant] of Object.entries(entityPerms.transitions)) {
+        if (!declaredTransitions.has(tName)) {
+          throw new ManifestValidationError(
+            `permissions.${entityName}.transitions.${tName}`,
+            `transition '${tName}' is not declared in any workflow for entity '${entityName}'`,
+          );
+        }
         checkGrant(`permissions.${entityName}.transitions.${tName}.roles`, grant);
       }
     }

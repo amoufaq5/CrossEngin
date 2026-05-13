@@ -290,6 +290,16 @@ describe("validateManifest — permissions", () => {
       entities: [
         { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
       ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "verify", from: "pending", to: "done" }],
+        },
+      },
       roles: baseRoles,
       permissions: {
         Prescription: {
@@ -353,5 +363,136 @@ describe("validateManifest — permissions", () => {
       },
     };
     expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
+  });
+});
+
+describe("validateManifest — workflows", () => {
+  it("accepts a manifest with workflow + entity + permissions all consistent", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [
+            { name: "pending", category: "active" },
+            { name: "verified", category: "active" },
+            { name: "done", category: "terminal" },
+          ],
+          initialState: "pending",
+          transitions: [
+            { name: "verify", from: "pending", to: "verified" },
+            { name: "complete", from: "verified", to: "done" },
+          ],
+        },
+      },
+      roles: { pharmacist: { name: "pharmacist" } },
+      permissions: {
+        Prescription: {
+          transitions: {
+            verify: { roles: ["pharmacist"] },
+            complete: { roles: ["pharmacist"] },
+          },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws when workflow.entity is not a declared entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Mystery",
+          stateField: "status",
+          states: [{ name: "x", category: "terminal" }],
+          initialState: "x",
+          transitions: [],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown entity 'Mystery'/);
+  });
+
+  it("propagates workflow validation errors with the workflow path", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [{ name: "pending" }],
+          initialState: "mystery",
+          transitions: [],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/workflows\.lifecycle\.initialState/);
+  });
+
+  it("throws when permissions.transitions references a transition not in any workflow", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+      roles: { pharmacist: { name: "pharmacist" } },
+      permissions: {
+        Prescription: {
+          transitions: { verify: { roles: ["pharmacist"] } },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(
+      /transition 'verify' is not declared in any workflow/,
+    );
+  });
+
+  it("accepts a transition declared by a workflow even if no permission entry exists", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
   });
 });

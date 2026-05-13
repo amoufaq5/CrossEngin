@@ -22,6 +22,10 @@
     "./manifest": {
       "types": "./dist/manifest/index.d.ts",
       "import": "./dist/manifest/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
     }
   },
   "files": ["dist", "src"],

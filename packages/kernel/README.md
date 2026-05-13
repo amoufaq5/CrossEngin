@@ -268,12 +268,94 @@ Throws `ManifestValidationError` (with a `path` like
 - The role inheritance graph contains a cycle
 - A role's `inherits[]` references an unknown role
 
-**Permissions**
-- A permission entry's key references an entity not in the manifest
-- An operation, transition, or field-level grant references a role
-  not in `manifest.roles`
-- A field-level permission targets a field not on the entity
-  (including trait-supplied fields like `auditable`'s `created_at`)
+### `@crossengin/kernel/workflow`
+
+Workflow DSL + state-machine validator per **ADR-0007**. V1 fully
+validates `entityLifecycle` workflows; `orchestration` and
+`scheduled` workflows are accepted structurally (Inngest codegen +
+runtime execution + the React Flow designer are all Phase 2).
+
+```ts
+import {
+  WorkflowSchema,
+  validateWorkflow,
+  type Workflow,
+  type EntityLifecycleWorkflow,
+} from "@crossengin/kernel/workflow";
+
+const workflow = WorkflowSchema.parse(rawJson);   // structural validation
+validateWorkflow("prescriptionLifecycle", workflow); // state-machine invariants
+```
+
+#### Three workflow kinds
+
+- **`entityLifecycle`** — single-entity state machine. Has `entity`,
+  `stateField`, `states[]`, `initialState`, `transitions[]`,
+  optional `slas[]`.
+- **`orchestration`** — multi-entity / multi-step process; saga
+  pattern with compensations (v1: accepted structurally, no
+  step-level validation).
+- **`scheduled`** — time-triggered action; either cron `schedule` or
+  event `trigger` + `delay` (v1: accepted structurally).
+
+#### Triggers
+
+Per ADR-0007 § Transitions:
+- `userAction` (default; tied to a UI button)
+- `event { name, filter? }` (kernel-emitted)
+- `time { delay }` (after an ISO 8601 duration)
+- `automatic` (immediately on entering the from-state if guards pass)
+
+#### Guards
+
+- `permission { permission }` — references a permission path
+- `rego { rego }` — references an OPA Rego decision (per ADR-0008)
+
+#### `validateWorkflow` (entityLifecycle invariants)
+
+Throws `WorkflowValidationError` with a `path` like
+`workflows.prescriptionLifecycle.transitions[2].from` when any of:
+
+- State names are not unique
+- `initialState` is not declared in `states[]`
+- Transition names are not unique
+- A transition's `from` or `to` references a state not in `states[]`
+- A transition originates from a state with `category: "terminal"`
+- An SLA's `from` or `to` references an unknown state
+- A state is not reachable from `initialState` via transition paths
+
+Orchestrations and scheduled workflows skip semantic validation in v1.
+
+### Manifest integration
+
+The manifest now declares workflows in a top-level `workflows` field
+(record keyed by workflow name):
+
+```jsonc
+{
+  "workflows": {
+    "prescriptionLifecycle": {
+      "kind": "entityLifecycle",
+      "entity": "Prescription",
+      "stateField": "status",
+      "states": [/* ... */],
+      "initialState": "pending",
+      "transitions": [/* ... */]
+    }
+  }
+}
+```
+
+`validateManifest` adds two new cross-section checks:
+
+- An `entityLifecycle` workflow's `entity` must reference a declared
+  entity in `manifest.entities`.
+- Every `permissions.<entity>.transitions.<name>` must reference a
+  transition declared in some workflow for that entity. The reverse
+  is not required: a workflow can declare transitions without any
+  matching permission entry (no permission entry = no explicit role
+  grant; the workflow runtime is responsible for default-deny in that
+  case).
 
 #### DDL emission
 
