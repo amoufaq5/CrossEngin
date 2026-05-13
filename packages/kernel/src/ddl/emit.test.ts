@@ -253,7 +253,7 @@ describe("emitIndexes", () => {
     };
     const indexes = emitIndexes(entity, { schema });
     expect(indexes).toContain(
-      `CREATE INDEX "idx_visit_doctor_at" ON "t_acme"."visit" ("doctor_id", "at");`,
+      `CREATE INDEX "idx_visit_doctor_id_at" ON "t_acme"."visit" ("doctor_id", "at");`,
     );
   });
 

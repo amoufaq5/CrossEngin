@@ -78,9 +78,9 @@ describe("validateWriteMask", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects a patch touching a forbidden field (manager cannot update narcotic_schedule)", () => {
+  it("rejects a patch touching a forbidden field (technician cannot update narcotic_schedule)", () => {
     const r = validateWriteMask(
-      principal("manager"),
+      principal("technician"),
       PERMS,
       ROLES,
       ["narcotic_schedule"],
