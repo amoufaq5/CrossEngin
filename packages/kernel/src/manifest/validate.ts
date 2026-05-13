@@ -23,6 +23,7 @@ import {
   viewReferencedViews,
   viewReferencedWorkflows,
 } from "@crossengin/views";
+import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import { expandTraits } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
@@ -41,6 +42,7 @@ export function validateManifest(manifest: Manifest): void {
   const reportIds = validateReports(manifest, entityNames);
   const dashboardIds = validateDashboards(manifest, reportIds);
   validateViews(manifest, entityNames, reportIds, dashboardIds, entityTransitions);
+  validateSearch(manifest, entityNames);
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
@@ -447,6 +449,46 @@ function validateViews(
         throw new ManifestValidationError(
           `views.${key}`,
           `view references transition '${transition}' not declared on entity '${view.entity}'`,
+        );
+      }
+    }
+  }
+}
+
+function validateSearch(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+): void {
+  const search: SearchManifest | undefined = manifest.search;
+  if (search === undefined) return;
+  const entities = manifest.entities ?? [];
+  const fieldsByEntity = new Map<string, Set<string>>();
+  for (const entity of entities) {
+    fieldsByEntity.set(entity.name, new Set(entity.fields.map((f) => f.name)));
+  }
+  for (const [entityName, idx] of Object.entries(search.entities)) {
+    if (!entityNames.has(entityName)) {
+      throw new ManifestValidationError(
+        `search.entities.${entityName}`,
+        `search entry references unknown entity '${entityName}'`,
+      );
+    }
+    const declaredFields = fieldsByEntity.get(entityName) ?? new Set<string>();
+    for (const indexed of idx.indexedFields) {
+      const leaf = indexed.field.split(".")[0];
+      if (leaf !== undefined && !declaredFields.has(leaf)) {
+        throw new ManifestValidationError(
+          `search.entities.${entityName}.indexedFields`,
+          `indexed field '${indexed.field}' has no matching root field on entity '${entityName}'`,
+        );
+      }
+    }
+    for (const facet of idx.facets) {
+      const leaf = facet.split(".")[0];
+      if (leaf !== undefined && !declaredFields.has(leaf)) {
+        throw new ManifestValidationError(
+          `search.entities.${entityName}.facets`,
+          `facet '${facet}' has no matching root field on entity '${entityName}'`,
         );
       }
     }

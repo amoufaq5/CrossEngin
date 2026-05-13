@@ -237,6 +237,30 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(parsed.i18n?.en?.hello).toBe("Hello");
   });
 
+  it("parses a search section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "drug", type: { kind: "text" as const } }] },
+      ],
+      search: {
+        entities: {
+          Prescription: {
+            indexedFields: [{ field: "drug", weight: "A" as const }],
+            globalIndex: true,
+            displayInGlobalResults: { title: "$drug", url: "/p/$id" },
+            facets: ["drug"],
+          },
+        },
+        files: { globalIndex: true, ocr: true, embedding: true },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.search?.entities ?? {})).toEqual(["Prescription"]);
+    expect(parsed.search?.files?.ocr).toBe(true);
+  });
+
   it("parses a reports + dashboards section", () => {
     const m = {
       manifestVersion: "1.0" as const,

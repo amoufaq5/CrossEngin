@@ -860,3 +860,85 @@ describe("validateManifest — views", () => {
     );
   });
 });
+
+describe("validateManifest — search", () => {
+  const entityFixture = {
+    name: "Prescription",
+    fields: [
+      { name: "drug", type: { kind: "text" as const } },
+      { name: "status", type: { kind: "text" as const } },
+    ],
+  };
+
+  it("accepts a search section that references declared fields", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      search: {
+        entities: {
+          Prescription: {
+            indexedFields: [{ field: "drug", weight: "A" }],
+            facets: ["status"],
+          },
+        },
+        defaultDictionary: "simple",
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects a search entry for an unknown entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      search: {
+        entities: {
+          Missing: { indexedFields: [{ field: "x" }] },
+        },
+        defaultDictionary: "simple",
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/'Missing'/);
+  });
+
+  it("rejects an indexed field whose root is not declared on the entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      search: {
+        entities: {
+          Prescription: {
+            indexedFields: [{ field: "patient.name", weight: "A" }],
+          },
+        },
+        defaultDictionary: "simple",
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(
+      /indexed field 'patient.name' has no matching root field/,
+    );
+  });
+
+  it("rejects a facet path whose root is not declared on the entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      search: {
+        entities: {
+          Prescription: {
+            indexedFields: [{ field: "drug" }],
+            facets: ["unknown_facet"],
+          },
+        },
+        defaultDictionary: "simple",
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(
+      /facet 'unknown_facet' has no matching root field/,
+    );
+  });
+});

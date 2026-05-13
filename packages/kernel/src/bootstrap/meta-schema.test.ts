@@ -221,6 +221,13 @@ describe("table column shapes", () => {
     expect(residency?.type).toBe("JSONB");
   });
 
+  it("META_TENANTS has a search_locale column constrained to seven dictionaries", () => {
+    const col = META_TENANTS.columns.find((c) => c.name === "search_locale");
+    expect(col?.notNull).toBe(true);
+    expect(col?.check).toContain("'simple'");
+    expect(col?.check).toContain("'arabic'");
+  });
+
   it("META_REGIONS check-constrains region to the canonical eight", () => {
     const region = META_REGIONS.columns.find((c) => c.name === "region");
     expect(region?.check).toContain("eu-central");

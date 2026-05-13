@@ -117,6 +117,36 @@ function mergeContent(base: Manifest, overlay: Manifest): Manifest {
           i18n: mergeI18nBundles(base.i18n, overlay.i18n),
         }
       : {}),
+    ...(overlay.search !== undefined || base.search !== undefined
+      ? { search: mergeSearch(base.search, overlay.search) }
+      : {}),
+  };
+}
+
+function mergeSearch(
+  base: Manifest["search"],
+  overlay: Manifest["search"],
+): Manifest["search"] {
+  if (base === undefined && overlay === undefined) return undefined;
+  const baseEntities = base?.entities ?? {};
+  const overlayEntities = overlay?.entities ?? {};
+  const baseFiles = base?.files;
+  const overlayFiles = overlay?.files;
+  const mergedFiles =
+    overlayFiles !== undefined || baseFiles !== undefined
+      ? {
+          globalIndex: overlayFiles?.globalIndex ?? baseFiles?.globalIndex ?? false,
+          ocr: overlayFiles?.ocr ?? baseFiles?.ocr ?? false,
+          embedding: overlayFiles?.embedding ?? baseFiles?.embedding ?? false,
+          embeddingScope:
+            overlayFiles?.embeddingScope ?? baseFiles?.embeddingScope ?? "tenant",
+        }
+      : undefined;
+  return {
+    entities: { ...baseEntities, ...overlayEntities },
+    defaultDictionary:
+      overlay?.defaultDictionary ?? base?.defaultDictionary ?? "simple",
+    ...(mergedFiles !== undefined ? { files: mergedFiles } : {}),
   };
 }
 

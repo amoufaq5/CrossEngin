@@ -57,6 +57,14 @@ export const META_TENANTS: TableDefinition = {
       unique: { constraintName: "tenants_schema_name_key" },
     },
     { name: "residency", type: "JSONB" },
+    {
+      name: "search_locale",
+      type: "TEXT",
+      notNull: true,
+      default: "'simple'",
+      check:
+        "search_locale IN ('simple', 'english', 'french', 'spanish', 'arabic', 'german', 'portuguese')",
+    },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],

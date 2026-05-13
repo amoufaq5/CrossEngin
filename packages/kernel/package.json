@@ -46,6 +46,7 @@
     "@crossengin/integrations": "workspace:*",
     "@crossengin/jobs": "workspace:*",
     "@crossengin/reporting": "workspace:*",
+    "@crossengin/search": "workspace:*",
     "@crossengin/types": "workspace:*",
     "@crossengin/views": "workspace:*",
     "zod": "^3.23.0"

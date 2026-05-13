@@ -8,6 +8,7 @@ import {
   DashboardDeclarationSchema,
   ReportDeclarationSchema,
 } from "@crossengin/reporting";
+import { SearchManifestSchema } from "@crossengin/search";
 import {
   CustomWidgetDeclarationSchema,
   I18nBundleSchema,
@@ -71,6 +72,7 @@ export const ManifestSchema = z.object({
   customWidgets: z.record(z.string(), CustomWidgetDeclarationSchema).optional(),
   theme: ThemeOverlaySchema.optional(),
   i18n: I18nBundleSchema.optional(),
+  search: SearchManifestSchema.optional(),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;
