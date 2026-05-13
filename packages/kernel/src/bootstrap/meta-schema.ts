@@ -346,6 +346,74 @@ export const META_COMPLIANCE_ATTESTATIONS: TableDefinition = {
   },
 };
 
+export const META_INTEGRATION_CALLS: TableDefinition = {
+  schema: "meta",
+  name: "integration_calls",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "integration_id", type: "TEXT", notNull: true },
+    { name: "operation", type: "TEXT", notNull: true },
+    {
+      name: "direction",
+      type: "TEXT",
+      notNull: true,
+      check: "direction IN ('inbound', 'outbound')",
+    },
+    { name: "idempotency_key", type: "TEXT" },
+    { name: "request", type: "JSONB" },
+    { name: "response", type: "JSONB" },
+    {
+      name: "latency_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "latency_ms >= 0",
+    },
+    {
+      name: "retries",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "retries >= 0",
+    },
+    { name: "ok", type: "BOOLEAN", notNull: true },
+    { name: "error_message", type: "TEXT" },
+    {
+      name: "data_class",
+      type: "TEXT",
+      check:
+        "data_class IN ('public', 'internal', 'commercial_sensitive', 'pii', 'phi', 'regulated')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "integration_calls_idempotency_key",
+      columns: ["tenant_id", "integration_id", "operation", "idempotency_key"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_integration_calls_tenant_occurred_at",
+      columns: ["tenant_id", "occurred_at"],
+    },
+    {
+      name: "idx_integration_calls_integration",
+      columns: ["tenant_id", "integration_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "integration_calls_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_AI_PROVIDER_CALLS: TableDefinition = {
   schema: "meta",
   name: "ai_provider_calls",
@@ -419,4 +487,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_AUDIT_LOG,
   META_COMPLIANCE_ATTESTATIONS,
   META_AI_PROVIDER_CALLS,
+  META_INTEGRATION_CALLS,
 ];

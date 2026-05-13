@@ -42,6 +42,7 @@
   },
   "dependencies": {
     "@crossengin/auth": "workspace:*",
+    "@crossengin/integrations": "workspace:*",
     "@crossengin/types": "workspace:*"
   },
   "devDependencies": {

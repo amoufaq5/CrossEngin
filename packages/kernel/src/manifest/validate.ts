@@ -17,6 +17,7 @@ export function validateManifest(manifest: Manifest): void {
   const rolesMap = validateRoles(manifest);
   const entityTransitions = validateWorkflows(manifest, entityNames);
   validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
+  validateIntegrations(manifest);
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
@@ -196,8 +197,7 @@ function validatePermissions(
   entityNames: ReadonlySet<string>,
   rolesMap: ReadonlyMap<string, RoleDefinition>,
   entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
-): void {
-  const permissions = manifest.permissions ?? {};
+): void {  const permissions = manifest.permissions ?? {};
   const customTraits = manifest.traits ?? [];
   const entities = manifest.entities ?? [];
 
@@ -267,6 +267,24 @@ function validatePermissions(
             );
           }
         }
+      }
+    }
+  }
+}
+
+function validateIntegrations(manifest: Manifest): void {
+  const integrations = manifest.integrations ?? {};
+  for (const [id, integration] of Object.entries(integrations)) {
+    if (integration.kind === "outbound.http" || integration.kind === "outbound.graphql") {
+      const opNames = new Set<string>();
+      for (const [i, op] of integration.operations.entries()) {
+        if (opNames.has(op.name)) {
+          throw new ManifestValidationError(
+            `integrations.${id}.operations[${i}].name`,
+            `duplicate operation name '${op.name}'`,
+          );
+        }
+        opNames.add(op.name);
       }
     }
   }

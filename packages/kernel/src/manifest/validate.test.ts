@@ -496,3 +496,84 @@ describe("validateManifest — workflows", () => {
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
+
+describe("validateManifest — integrations", () => {
+  it("accepts a manifest with valid integrations", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      integrations: {
+        stripe: {
+          kind: "outbound.http",
+          auth: { kind: "bearer", token: { vault: "stripe.key" } },
+          endpoint: "https://api.stripe.com/v1",
+          operations: [
+            { name: "createCustomer", method: "POST", path: "/customers" },
+            { name: "createInvoice", method: "POST", path: "/invoices" },
+          ],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws on duplicate operation names within an outbound.http integration", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      integrations: {
+        stripe: {
+          kind: "outbound.http",
+          auth: { kind: "none" },
+          endpoint: "https://api.example.com",
+          operations: [
+            { name: "createCustomer", method: "POST", path: "/customers" },
+            { name: "createCustomer", method: "PUT", path: "/customers" },
+          ],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/duplicate operation name 'createCustomer'/);
+  });
+
+  it("throws on duplicate operation names within an outbound.graphql integration", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      integrations: {
+        gql: {
+          kind: "outbound.graphql",
+          auth: { kind: "none" },
+          endpoint: "https://api.example.com/graphql",
+          operations: [
+            { name: "fetchUser", operationType: "query", document: "query { user { id } }" },
+            { name: "fetchUser", operationType: "query", document: "query { user { name } }" },
+          ],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/duplicate operation name 'fetchUser'/);
+  });
+
+  it("does not enforce operation-name uniqueness across different integrations", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      integrations: {
+        a: {
+          kind: "outbound.http",
+          auth: { kind: "none" },
+          endpoint: "https://a.example.com",
+          operations: [{ name: "lookup", method: "GET", path: "/" }],
+        },
+        b: {
+          kind: "outbound.http",
+          auth: { kind: "none" },
+          endpoint: "https://b.example.com",
+          operations: [{ name: "lookup", method: "GET", path: "/" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+});

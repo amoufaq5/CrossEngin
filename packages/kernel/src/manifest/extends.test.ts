@@ -199,6 +199,37 @@ describe("resolveManifest — sections", () => {
     expect(resolved.roles?.admin?.description).toBe("child");
   });
 
+  it("merges integrations record (additive at key level)", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      integrations: {
+        stripe: {
+          kind: "outbound.http",
+          auth: { kind: "none" },
+          endpoint: "https://api.stripe.com",
+          operations: [{ name: "x", method: "GET", path: "/" }],
+        },
+      },
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      integrations: {
+        sendgrid: {
+          kind: "outbound.http",
+          auth: { kind: "none" },
+          endpoint: "https://api.sendgrid.com",
+          operations: [{ name: "y", method: "GET", path: "/" }],
+        },
+      },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(Object.keys(resolved.integrations ?? {}).sort()).toEqual(["sendgrid", "stripe"]);
+  });
+
   it("merges workflows record (additive at key level)", async () => {
     const parent: Manifest = {
       manifestVersion: "1.0",

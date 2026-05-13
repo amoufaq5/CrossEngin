@@ -185,6 +185,34 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(parsed.meta.extends).toEqual(["operate-pharma/_base"]);
   });
 
+  it("parses an integrations section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      integrations: {
+        stripe: {
+          kind: "outbound.http" as const,
+          auth: { kind: "bearer" as const, token: { vault: "stripe.secretKey" } },
+          endpoint: "https://api.stripe.com/v1",
+          operations: [
+            { name: "createCustomer", method: "POST" as const, path: "/customers" },
+          ],
+        },
+        stripeWebhook: {
+          kind: "inbound.webhook" as const,
+          endpoint: "/api/integrations/webhooks/stripe",
+          verification: {
+            kind: "hmac" as const,
+            header: "Stripe-Signature",
+            secret: { vault: "stripe.webhookSecret" },
+          },
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.integrations ?? {})).toEqual(["stripe", "stripeWebhook"]);
+  });
+
   it("parses compliancePacks + compliancePackParameters on meta", () => {
     const m = {
       manifestVersion: "1.0" as const,

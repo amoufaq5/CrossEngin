@@ -14,8 +14,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 9 tables", () => {
-    expect(META_TABLES).toHaveLength(9);
+  it("contains 10 tables", () => {
+    expect(META_TABLES).toHaveLength(10);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -34,6 +34,7 @@ describe("META_TABLES", () => {
       "audit_log",
       "compliance_attestations",
       "events",
+      "integration_calls",
       "manifests",
       "tenants",
       "user_tenant_membership",
