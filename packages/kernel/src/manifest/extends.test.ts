@@ -302,6 +302,29 @@ describe("resolveManifest — sections", () => {
     expect(Object.keys(resolved.jobs ?? {}).sort()).toEqual(["child-job", "parent-job"]);
   });
 
+  it("merges files record (additive at key level)", async () => {
+    const baseFile = {
+      allowedMimeTypes: ["application/pdf"],
+      maxSize: "20MB" as const,
+      storage: { bucket: "crossengin-files-eu", prefix: "x/" },
+      dataClass: "internal" as const,
+    };
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      files: { parentScan: baseFile },
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      files: { childScan: baseFile },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(Object.keys(resolved.files ?? {}).sort()).toEqual(["childScan", "parentScan"]);
+  });
+
   it("concatenates relations (additive, no dedup)", async () => {
     const parent: Manifest = {
       manifestVersion: "1.0",

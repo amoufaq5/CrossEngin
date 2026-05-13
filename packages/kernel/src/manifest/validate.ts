@@ -8,6 +8,7 @@ import {
   type RoleDefinition,
 } from "@crossengin/auth";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
+import type { FileTypeDeclaration } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
 import type { JobDeclaration } from "@crossengin/jobs";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
@@ -24,6 +25,7 @@ export function validateManifest(manifest: Manifest): void {
   validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
   validateIntegrations(manifest);
   validateJobs(manifest);
+  validateFiles(manifest);
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
@@ -321,5 +323,16 @@ function validateJobs(manifest: Manifest): void {
         `workflow trigger references unknown workflow '${job.trigger.workflow}'`,
       );
     }
+  }
+}
+
+function validateFiles(manifest: Manifest): void {
+  const files: Record<string, FileTypeDeclaration> = manifest.files ?? {};
+  const seen = new Set<string>();
+  for (const key of Object.keys(files)) {
+    if (seen.has(key)) {
+      throw new ManifestValidationError(`files.${key}`, `duplicate file type id '${key}'`);
+    }
+    seen.add(key);
   }
 }

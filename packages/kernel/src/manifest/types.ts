@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EntitySchema, RelationSchema, TraitSchema } from "@crossengin/types/meta-schema";
 import { EntityPermissionsSchema, RoleDefinitionSchema } from "@crossengin/auth";
+import { FileTypeDeclarationSchema } from "@crossengin/files";
 import { IntegrationDeclarationSchema } from "@crossengin/integrations";
 import { JobDeclarationSchema } from "@crossengin/jobs";
 import { WorkflowSchema } from "../workflow/types.js";
@@ -53,6 +54,7 @@ export const ManifestSchema = z.object({
   workflows: z.record(z.string(), WorkflowSchema).optional(),
   integrations: z.record(z.string(), IntegrationDeclarationSchema).optional(),
   jobs: z.record(z.string(), JobDeclarationSchema).optional(),
+  files: z.record(z.string(), FileTypeDeclarationSchema).optional(),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

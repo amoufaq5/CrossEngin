@@ -213,6 +213,25 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(Object.keys(parsed.integrations ?? {})).toEqual(["stripe", "stripeWebhook"]);
   });
 
+  it("parses a files section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      files: {
+        prescriptionScan: {
+          allowedMimeTypes: ["application/pdf", "image/jpeg"],
+          maxSize: "20MB",
+          storage: { bucket: "crossengin-files-eu", prefix: "prescriptions/" },
+          dataClass: "phi" as const,
+          ocr: { enabled: true, language: "eng+ara" },
+          embedding: { enabled: true, scope: "tenant" as const },
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.files ?? {})).toEqual(["prescriptionScan"]);
+  });
+
   it("parses a jobs section", () => {
     const m = {
       manifestVersion: "1.0" as const,

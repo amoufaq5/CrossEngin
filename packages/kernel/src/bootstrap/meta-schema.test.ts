@@ -7,18 +7,20 @@ import {
   META_COMPLIANCE_ATTESTATIONS,
   META_DEAD_LETTER_JOBS,
   META_EVENTS,
+  META_FILES,
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_MANIFESTS,
   META_TABLES,
+  META_TENANT_STORAGE_USAGE,
   META_TENANTS,
   META_USER_TENANT_MEMBERSHIP,
   META_USERS,
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 13 tables", () => {
-    expect(META_TABLES).toHaveLength(13);
+  it("contains 15 tables", () => {
+    expect(META_TABLES).toHaveLength(15);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -38,10 +40,12 @@ describe("META_TABLES", () => {
       "compliance_attestations",
       "dead_letter_jobs",
       "events",
+      "files",
       "integration_calls",
       "job_costs",
       "job_runs",
       "manifests",
+      "tenant_storage_usage",
       "tenants",
       "user_tenant_membership",
       "users",
@@ -178,6 +182,30 @@ describe("table column shapes", () => {
   it("META_JOB_COSTS uses NUMERIC(12, 6) for estimated_cost_usd", () => {
     const cost = META_JOB_COSTS.columns.find((c) => c.name === "estimated_cost_usd");
     expect(cost?.type).toBe("NUMERIC(12, 6)");
+  });
+
+  it("META_FILES enforces the six FileStatus values + (tenant_id, storage_key) uniqueness", () => {
+    const status = META_FILES.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("uploading");
+    expect(status?.check).toContain("quarantined");
+    expect(META_FILES.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "storage_key",
+    ]);
+  });
+
+  it("META_FILES check-constrains data_class to the DATA_CLASSES enum", () => {
+    const dc = META_FILES.columns.find((c) => c.name === "data_class");
+    expect(dc?.check).toContain("phi");
+    expect(dc?.check).toContain("regulated");
+  });
+
+  it("META_TENANT_STORAGE_USAGE tracks hot/archive/cold bytes separately", () => {
+    const cols = META_TENANT_STORAGE_USAGE.columns.map((c) => c.name);
+    expect(cols).toContain("hot_bytes");
+    expect(cols).toContain("archive_bytes");
+    expect(cols).toContain("cold_bytes");
+    expect(cols).toContain("file_count");
   });
 });
 

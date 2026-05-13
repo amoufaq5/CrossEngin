@@ -632,6 +632,119 @@ export const META_JOB_COSTS: TableDefinition = {
   },
 };
 
+export const META_FILES: TableDefinition = {
+  schema: "meta",
+  name: "files",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "storage_key", type: "TEXT", notNull: true },
+    { name: "filename", type: "TEXT", notNull: true },
+    { name: "mime_type", type: "TEXT", notNull: true },
+    { name: "size_bytes", type: "BIGINT", notNull: true, check: "size_bytes >= 0" },
+    {
+      name: "checksum_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "checksum_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('uploading', 'scanning', 'available', 'quarantined', 'archived', 'deleting')",
+    },
+    { name: "uploaded_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "uploaded_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "scanned_at", type: "TIMESTAMPTZ" },
+    {
+      name: "ocr_status",
+      type: "TEXT",
+      check: "ocr_status IS NULL OR ocr_status IN ('pending', 'done', 'skipped', 'failed')",
+    },
+    { name: "ocr_text_key", type: "TEXT" },
+    {
+      name: "embedding_status",
+      type: "TEXT",
+      check:
+        "embedding_status IS NULL OR embedding_status IN ('pending', 'done', 'skipped', 'failed')",
+    },
+    { name: "retention_class", type: "TEXT", notNull: true },
+    { name: "archive_after", type: "TIMESTAMPTZ" },
+    { name: "delete_after", type: "TIMESTAMPTZ" },
+    {
+      name: "data_class",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "data_class IN ('public', 'internal', 'commercial_sensitive', 'pii', 'phi', 'regulated')",
+    },
+    { name: "file_type_id", type: "TEXT", notNull: true },
+    { name: "region", type: "TEXT", notNull: true },
+    { name: "metadata", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "files_storage_key", columns: ["tenant_id", "storage_key"] },
+  ],
+  indexes: [
+    { name: "idx_files_tenant_uploaded_at", columns: ["tenant_id", "uploaded_at"] },
+    { name: "idx_files_status", columns: ["tenant_id", "status"] },
+    { name: "idx_files_file_type", columns: ["tenant_id", "file_type_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [{ name: "files_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
+export const META_TENANT_STORAGE_USAGE: TableDefinition = {
+  schema: "meta",
+  name: "tenant_storage_usage",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "measured_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "total_bytes", type: "BIGINT", notNull: true, check: "total_bytes >= 0" },
+    {
+      name: "hot_bytes",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "hot_bytes >= 0",
+    },
+    {
+      name: "archive_bytes",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "archive_bytes >= 0",
+    },
+    {
+      name: "cold_bytes",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "cold_bytes >= 0",
+    },
+    { name: "file_count", type: "BIGINT", notNull: true, check: "file_count >= 0" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_tenant_storage_usage_tenant_measured",
+      columns: ["tenant_id", "measured_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "tenant_storage_usage_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -646,4 +759,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_JOB_RUNS,
   META_DEAD_LETTER_JOBS,
   META_JOB_COSTS,
+  META_FILES,
+  META_TENANT_STORAGE_USAGE,
 ];
