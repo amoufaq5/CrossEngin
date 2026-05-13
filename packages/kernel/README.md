@@ -538,6 +538,77 @@ extension.
 - Manifest lifecycle states (Draft / Proposed / Active / Superseded
   / Retired)
 
+### Postgres meta-schema bootstrap (`@crossengin/kernel/bootstrap`)
+
+Canonical SQL definitions for the kernel's `meta.*` tables — the
+cross-tenant kernel data that lives outside any tenant schema (per
+ADR-0002 § Schema-per-tenant).
+
+```ts
+import { emitMetaBootstrapSql, META_TABLES } from "@crossengin/kernel/bootstrap";
+
+const statements: string[] = emitMetaBootstrapSql();
+// CREATE SCHEMA IF NOT EXISTS "meta";
+// CREATE TABLE "meta"."tenants" (...);
+// CREATE TABLE "meta"."users" (...);
+// ... 9 tables ...
+// CREATE INDEX ... ;
+// ALTER TABLE ... ENABLE ROW LEVEL SECURITY;
+// CREATE POLICY ..._tenant_isolation ON ... USING (...);
+```
+
+#### v1 tables (9)
+
+| Table | ADR | Purpose |
+|---|---|---|
+| `meta.tenants` | 0002 | Tenant registry (slug, name, status, tier, region, schema_name) |
+| `meta.users` | 0008 | Global user identity |
+| `meta.user_tenant_membership` | 0002 + 0008 | User-to-tenant link with primary + secondary roles + ABAC attrs |
+| `meta.manifests` | 0004 | Manifest history (tenant, slug, version, hash, status, content, compliance pack versions) |
+| `meta.ai_conversations` | 0005 | AI Architect session state (working manifest, summary, tokens, cost) |
+| `meta.events` | 0007 | Kernel events |
+| `meta.audit_log` | 0008 | Immutable audit trail (actor JSONB, operation, before/after/diff, e-signature, rego trace) |
+| `meta.compliance_attestations` | 0012 | Pack attestations |
+| `meta.ai_provider_calls` | 0006 | Cost telemetry |
+
+#### Tenant-scoped vs cross-tenant
+
+Tables with a `tenant_id` column get RLS enabled with the canonical
+`tenant_id = current_setting('app.current_tenant_id', true)::UUID`
+policy. `meta.tenants` and `meta.users` are cross-tenant — no RLS
+in v1 (application-layer access control).
+
+#### Emission order
+
+`emitMetaBootstrapSql()` returns statements in a deterministic order:
+
+1. `CREATE SCHEMA IF NOT EXISTS "meta"`
+2. Per table (in FK-dependency order):
+   - `CREATE TABLE meta.<name> (...)` with columns + PK + named UNIQUE
+     + composite UNIQUE
+   - `CREATE INDEX` per declared index (btree / gin / gist / hash)
+   - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` if tenant-scoped
+   - `CREATE POLICY <name>_tenant_isolation USING (...)` if tenant-scoped
+
+#### Preconditions
+
+- Postgres 15+
+- `uuid_generate_v7()` function — Postgres 18+ native (`uuidv7()`
+  alias) or kernel-installed plpgsql function. The bootstrap defaults
+  reference it; runtime ensures the function exists before applying.
+
+#### Deferred to Phase 2
+
+- Partitioning of `meta.audit_log` + `meta.events` by
+  `(tenant_id, occurred_at)` monthly
+- Per-tenant Postgres roles + schema provisioning (`CREATE SCHEMA
+  t_<id>`, `CREATE ROLE tenant_<id>`)
+- Forward FK from `meta.manifests.conversation_id` to
+  `meta.ai_conversations` (currently logical-only)
+- `meta.sessions`, `meta.signature_challenges`,
+  `meta.ai_provider_configs`, `meta.ai_task_policies`
+- Archive-to-R2 retention jobs
+
 ## Not yet implemented
 
 - Connection management (Postgres pool, `SET ROLE`, `SET search_path`,
