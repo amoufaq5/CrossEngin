@@ -577,3 +577,101 @@ describe("validateManifest — integrations", () => {
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
+
+describe("validateManifest — jobs", () => {
+  it("accepts a manifest with valid jobs", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      jobs: {
+        "notify-patient": {
+          id: "notify-patient",
+          name: "Notify Patient",
+          trigger: { kind: "event", eventName: "prescription.verified" },
+          onFailure: { strategy: "alert-and-dead-letter" },
+          idempotent: true,
+          inputDataClass: "phi",
+          outputDataClass: "internal",
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects jobs whose id doesn't match the record key", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      jobs: {
+        "notify-patient": {
+          id: "different-id",
+          name: "Notify Patient",
+          trigger: { kind: "event", eventName: "prescription.verified" },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/does not match its record key/);
+  });
+
+  it("rejects workflow-triggered jobs whose workflow isn't declared", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      jobs: {
+        runStep: {
+          id: "runStep",
+          name: "Run Step",
+          trigger: { kind: "workflow", workflow: "missing_wf", step: "humanTask" },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown workflow 'missing_wf'/);
+  });
+
+  it("accepts workflow-triggered jobs when the workflow is declared", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "status", type: { kind: "text" } }] },
+      ],
+      workflows: {
+        prescription_lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [
+            { name: "draft", category: "active" },
+            { name: "done", category: "terminal" },
+          ],
+          initialState: "draft",
+          transitions: [{ name: "complete", from: "draft", to: "done" }],
+        },
+      },
+      jobs: {
+        runStep: {
+          id: "runStep",
+          name: "Run Step",
+          trigger: {
+            kind: "workflow",
+            workflow: "prescription_lifecycle",
+            step: "humanTask",
+          },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+});

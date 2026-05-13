@@ -5,7 +5,10 @@ import {
   META_AI_PROVIDER_CALLS,
   META_AUDIT_LOG,
   META_COMPLIANCE_ATTESTATIONS,
+  META_DEAD_LETTER_JOBS,
   META_EVENTS,
+  META_JOB_COSTS,
+  META_JOB_RUNS,
   META_MANIFESTS,
   META_TABLES,
   META_TENANTS,
@@ -14,8 +17,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 10 tables", () => {
-    expect(META_TABLES).toHaveLength(10);
+  it("contains 13 tables", () => {
+    expect(META_TABLES).toHaveLength(13);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -33,8 +36,11 @@ describe("META_TABLES", () => {
       "ai_provider_calls",
       "audit_log",
       "compliance_attestations",
+      "dead_letter_jobs",
       "events",
       "integration_calls",
+      "job_costs",
+      "job_runs",
       "manifests",
       "tenants",
       "user_tenant_membership",
@@ -149,6 +155,29 @@ describe("table column shapes", () => {
     const idxNames = META_EVENTS.indexes?.map((i) => i.name) ?? [];
     expect(idxNames).toContain("idx_events_tenant_occurred_at");
     expect(idxNames).toContain("idx_events_event_name");
+  });
+
+  it("META_JOB_RUNS enforces (tenant_id, run_id) uniqueness and tenant-scoped indexes", () => {
+    expect(META_JOB_RUNS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "run_id"]);
+    const idxNames = META_JOB_RUNS.indexes?.map((i) => i.name) ?? [];
+    expect(idxNames).toContain("idx_job_runs_tenant_started_at");
+    expect(idxNames).toContain("idx_job_runs_status");
+  });
+
+  it("META_JOB_RUNS check-constrains status to the enum", () => {
+    const status = META_JOB_RUNS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("dead-lettered");
+  });
+
+  it("META_DEAD_LETTER_JOBS enforces reason in the four allowed values", () => {
+    const reason = META_DEAD_LETTER_JOBS.columns.find((c) => c.name === "reason");
+    expect(reason?.check).toContain("max-retries-exceeded");
+    expect(reason?.check).toContain("permanent-error");
+  });
+
+  it("META_JOB_COSTS uses NUMERIC(12, 6) for estimated_cost_usd", () => {
+    const cost = META_JOB_COSTS.columns.find((c) => c.name === "estimated_cost_usd");
+    expect(cost?.type).toBe("NUMERIC(12, 6)");
   });
 });
 

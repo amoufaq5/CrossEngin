@@ -9,6 +9,7 @@ import {
 } from "@crossengin/auth";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
+import type { JobDeclaration } from "@crossengin/jobs";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import { expandTraits } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
@@ -22,6 +23,7 @@ export function validateManifest(manifest: Manifest): void {
   const entityTransitions = validateWorkflows(manifest, entityNames);
   validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
   validateIntegrations(manifest);
+  validateJobs(manifest);
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
@@ -292,6 +294,32 @@ function validateIntegrations(manifest: Manifest): void {
         }
         opNames.add(op.name);
       }
+    }
+  }
+}
+
+function validateJobs(manifest: Manifest): void {
+  const jobs: Record<string, JobDeclaration> = manifest.jobs ?? {};
+  const seenJobIds = new Set<string>();
+  const workflowNames = new Set<string>(Object.keys(manifest.workflows ?? {}));
+
+  for (const [key, job] of Object.entries(jobs)) {
+    if (job.id !== key) {
+      throw new ManifestValidationError(
+        `jobs.${key}.id`,
+        `job id '${job.id}' does not match its record key '${key}'`,
+      );
+    }
+    if (seenJobIds.has(job.id)) {
+      throw new ManifestValidationError(`jobs.${key}.id`, `duplicate job id '${job.id}'`);
+    }
+    seenJobIds.add(job.id);
+
+    if (job.trigger.kind === "workflow" && !workflowNames.has(job.trigger.workflow)) {
+      throw new ManifestValidationError(
+        `jobs.${key}.trigger.workflow`,
+        `workflow trigger references unknown workflow '${job.trigger.workflow}'`,
+      );
     }
   }
 }

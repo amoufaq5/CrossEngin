@@ -213,6 +213,26 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(Object.keys(parsed.integrations ?? {})).toEqual(["stripe", "stripeWebhook"]);
   });
 
+  it("parses a jobs section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      jobs: {
+        "notify-patient": {
+          id: "notify-patient",
+          name: "Notify Patient",
+          trigger: { kind: "event" as const, eventName: "prescription.verified" },
+          onFailure: { strategy: "alert-and-dead-letter" as const },
+          idempotent: true,
+          inputDataClass: "phi" as const,
+          outputDataClass: "internal" as const,
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.jobs ?? {})).toEqual(["notify-patient"]);
+  });
+
   it("parses compliancePacks + compliancePackParameters on meta", () => {
     const m = {
       manifestVersion: "1.0" as const,

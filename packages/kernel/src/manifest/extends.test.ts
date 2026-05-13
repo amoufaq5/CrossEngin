@@ -265,6 +265,43 @@ describe("resolveManifest — sections", () => {
     expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual(["childFlow", "parentFlow"]);
   });
 
+  it("merges jobs record (additive at key level)", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      jobs: {
+        "parent-job": {
+          id: "parent-job",
+          name: "Parent",
+          trigger: { kind: "scheduled", cron: "0 6 * * *" },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+        },
+      },
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      jobs: {
+        "child-job": {
+          id: "child-job",
+          name: "Child",
+          trigger: { kind: "event", eventName: "thing.happened" },
+          onFailure: { strategy: "alert-and-dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+        },
+      },
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(Object.keys(resolved.jobs ?? {}).sort()).toEqual(["child-job", "parent-job"]);
+  });
+
   it("concatenates relations (additive, no dedup)", async () => {
     const parent: Manifest = {
       manifestVersion: "1.0",

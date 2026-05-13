@@ -477,6 +477,161 @@ export const META_AI_PROVIDER_CALLS: TableDefinition = {
 
 export const META_SCHEMA_NAME = "meta";
 
+export const META_JOB_RUNS: TableDefinition = {
+  schema: "meta",
+  name: "job_runs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "job_id", type: "TEXT", notNull: true },
+    {
+      name: "job_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "job_kind IN ('event', 'scheduled', 'delayed', 'userInvoked', 'workflow', 'cdc')",
+    },
+    { name: "run_id", type: "UUID", notNull: true },
+    { name: "trigger", type: "JSONB", notNull: true },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "duration_ms", type: "INTEGER", check: "duration_ms IS NULL OR duration_ms >= 0" },
+    {
+      name: "attempts",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "attempts >= 1",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('pending', 'running', 'completed', 'failed', 'dead-lettered', 'cancelled')",
+    },
+    { name: "input_redacted", type: "JSONB" },
+    { name: "output_redacted", type: "JSONB" },
+    {
+      name: "input_data_class",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "input_data_class IN ('public', 'internal', 'commercial_sensitive', 'pii', 'phi', 'regulated')",
+    },
+    {
+      name: "output_data_class",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "output_data_class IN ('public', 'internal', 'commercial_sensitive', 'pii', 'phi', 'regulated')",
+    },
+    { name: "error", type: "JSONB" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "job_runs_run_id_key", columns: ["tenant_id", "run_id"] },
+  ],
+  indexes: [
+    { name: "idx_job_runs_tenant_started_at", columns: ["tenant_id", "started_at"] },
+    { name: "idx_job_runs_job_id", columns: ["tenant_id", "job_id"] },
+    { name: "idx_job_runs_status", columns: ["tenant_id", "status"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "job_runs_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_DEAD_LETTER_JOBS: TableDefinition = {
+  schema: "meta",
+  name: "dead_letter_jobs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "job_id", type: "TEXT", notNull: true },
+    { name: "run_id", type: "UUID", notNull: true },
+    { name: "dead_lettered_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "reason",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "reason IN ('max-retries-exceeded', 'permanent-error', 'cancelled', 'timeout')",
+    },
+    {
+      name: "attempt_count",
+      type: "INTEGER",
+      notNull: true,
+      check: "attempt_count >= 1",
+    },
+    { name: "final_error", type: "JSONB", notNull: true },
+    { name: "input_redacted", type: "JSONB" },
+    {
+      name: "reprocessable",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "true",
+    },
+    { name: "reprocessed_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "dead_letter_jobs_run_id_key", columns: ["tenant_id", "run_id"] },
+  ],
+  indexes: [
+    {
+      name: "idx_dead_letter_jobs_tenant_dead_lettered_at",
+      columns: ["tenant_id", "dead_lettered_at"],
+    },
+    { name: "idx_dead_letter_jobs_job_id", columns: ["tenant_id", "job_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "dead_letter_jobs_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_JOB_COSTS: TableDefinition = {
+  schema: "meta",
+  name: "job_costs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "job_id", type: "TEXT", notNull: true },
+    { name: "run_id", type: "UUID", notNull: true },
+    {
+      name: "estimated_cost_usd",
+      type: "NUMERIC(12, 6)",
+      notNull: true,
+      check: "estimated_cost_usd >= 0",
+    },
+    {
+      name: "cost_basis",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "cost_basis IN ('inngest-execution', 'inngest-step', 'external-api', 'compute-seconds', 'storage')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_job_costs_tenant_occurred_at", columns: ["tenant_id", "occurred_at"] },
+    { name: "idx_job_costs_job_id", columns: ["tenant_id", "job_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "job_costs_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -488,4 +643,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_COMPLIANCE_ATTESTATIONS,
   META_AI_PROVIDER_CALLS,
   META_INTEGRATION_CALLS,
+  META_JOB_RUNS,
+  META_DEAD_LETTER_JOBS,
+  META_JOB_COSTS,
 ];

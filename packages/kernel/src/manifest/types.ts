@@ -2,6 +2,7 @@ import { z } from "zod";
 import { EntitySchema, RelationSchema, TraitSchema } from "@crossengin/types/meta-schema";
 import { EntityPermissionsSchema, RoleDefinitionSchema } from "@crossengin/auth";
 import { IntegrationDeclarationSchema } from "@crossengin/integrations";
+import { JobDeclarationSchema } from "@crossengin/jobs";
 import { WorkflowSchema } from "../workflow/types.js";
 
 const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
@@ -51,6 +52,7 @@ export const ManifestSchema = z.object({
   permissions: z.record(z.string(), EntityPermissionsSchema).optional(),
   workflows: z.record(z.string(), WorkflowSchema).optional(),
   integrations: z.record(z.string(), IntegrationDeclarationSchema).optional(),
+  jobs: z.record(z.string(), JobDeclarationSchema).optional(),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

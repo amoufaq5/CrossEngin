@@ -43,6 +43,7 @@
   "dependencies": {
     "@crossengin/auth": "workspace:*",
     "@crossengin/integrations": "workspace:*",
+    "@crossengin/jobs": "workspace:*",
     "@crossengin/types": "workspace:*",
     "zod": "^3.23.0"
   },
