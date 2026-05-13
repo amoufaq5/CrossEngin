@@ -357,6 +357,65 @@ The manifest now declares workflows in a top-level `workflows` field
   grant; the workflow runtime is responsible for default-deny in that
   case).
 
+### `extends` composition (`resolveManifest`)
+
+Per ADR-0004, a manifest can inherit from one or more parent manifests
+via `meta.extends`:
+
+```jsonc
+{
+  "meta": {
+    "slug": "operate-pharma/community-pharmacy",
+    "version": "1.0.0",
+    "extends": ["operate-pharma/_base", "shared/regulated-base"]
+  }
+}
+```
+
+The kernel resolves inheritance via a caller-provided registry:
+
+```ts
+import { resolveManifest, validateManifest, applyManifest } from "@crossengin/kernel/manifest";
+
+const resolved = await resolveManifest(manifest, {
+  registry: {
+    async getManifest(parentId) {
+      // your lookup — e.g., query meta.manifests by slug or slug@version
+      return parents[parentId] ?? null;
+    },
+  },
+});
+validateManifest(resolved);                         // run cross-section checks on resolved
+const sql = applyManifest(oldManifest, resolved, ctx); // apply
+```
+
+Merge semantics (depth-first, left-to-right; current wins):
+
+- **`entities` / `traits`** — merged by `.name`. Overlay entry with
+  the same name **replaces** the base entry (no deep merge within an
+  Entity).
+- **`relations`** — concatenated. No de-duplication (relations don't
+  have a stable identity beyond ordering for v1).
+- **`roles` / `permissions` / `workflows`** — merged at the record
+  key. Overlay key replaces the base value.
+- **`meta`** — current manifest's meta is kept entirely. Parent meta
+  fields are *not* inherited (each manifest has its own identity).
+- **`extends`** — stripped from the resolved manifest.
+
+Errors:
+- `ExtendsCycleError` — circular `extends` chain (e.g., A → B → A).
+- `UnknownParentManifestError` — `registry.getManifest(parentId)`
+  returned `null`.
+
+Deferred to Phase 2:
+- `null`-deletion syntax (`"views": { "deprecatedView": null }` to
+  drop a parent's entry).
+- Deep merge within an entry (e.g., extending a parent role's
+  `inherits[]`).
+- Slug@version identifiers (the registry is opaque on identifier
+  format for v1).
+- Audit storage of the resolution graph in `meta.manifestResolution`.
+
 #### DDL emission
 
 Three entry points:

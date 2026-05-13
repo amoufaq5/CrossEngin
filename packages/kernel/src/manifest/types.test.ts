@@ -175,4 +175,13 @@ describe("ManifestSchema — entities / traits / relations", () => {
     const parsed = ManifestSchema.parse(m);
     expect(Object.keys(parsed.workflows ?? {})).toEqual(["lifecycle", "dailyCheck"]);
   });
+
+  it("parses an extends field on meta", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: { ...validMeta, extends: ["operate-pharma/_base"] },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(parsed.meta.extends).toEqual(["operate-pharma/_base"]);
+  });
 });

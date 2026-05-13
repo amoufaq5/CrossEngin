@@ -15,6 +15,7 @@ export const ManifestMetaSchema = z.object({
     message: "version must be semver MAJOR.MINOR.PATCH",
   }),
   description: z.string().optional(),
+  extends: z.array(z.string().min(1)).optional(),
 });
 
 export type ManifestMeta = z.infer<typeof ManifestMetaSchema>;
