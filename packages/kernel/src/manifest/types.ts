@@ -31,6 +31,10 @@ export const ManifestMetaSchema = z.object({
   }),
   description: z.string().optional(),
   extends: z.array(z.string().min(1)).optional(),
+  compliancePacks: z.array(z.string().min(1)).optional(),
+  compliancePackParameters: z
+    .record(z.string(), z.record(z.string(), z.unknown()))
+    .optional(),
   manifestResolution: ManifestResolutionSchema.optional(),
 });
 

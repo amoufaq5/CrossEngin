@@ -184,4 +184,26 @@ describe("ManifestSchema — entities / traits / relations", () => {
     const parsed = ManifestSchema.parse(m);
     expect(parsed.meta.extends).toEqual(["operate-pharma/_base"]);
   });
+
+  it("parses compliancePacks + compliancePackParameters on meta", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: {
+        ...validMeta,
+        compliancePacks: ["21-cfr-part-11", "hipaa"],
+        compliancePackParameters: {
+          "21-cfr-part-11": {
+            signatureMethod: "smart-card-pin",
+            signatureMeaningStatement: { en: "I approve" },
+          },
+          hipaa: { allowPhiInNotifications: false },
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(parsed.meta.compliancePacks).toEqual(["21-cfr-part-11", "hipaa"]);
+    expect(parsed.meta.compliancePackParameters?.["21-cfr-part-11"]?.["signatureMethod"]).toBe(
+      "smart-card-pin",
+    );
+  });
 });
