@@ -751,3 +751,112 @@ describe("validateManifest — reports + dashboards", () => {
     expect(() => validateManifest(m)).toThrow(/unknown report 'phantom'/);
   });
 });
+
+describe("validateManifest — views", () => {
+  const entityFixture = {
+    name: "Prescription",
+    fields: [{ name: "qty", type: { kind: "integer" as const } }],
+  };
+
+  it("accepts a list view referencing a record view + workflow transition", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      workflows: {
+        prescriptionLifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "status",
+          states: [
+            { name: "pending", category: "active" },
+            { name: "verified", category: "terminal" },
+          ],
+          initialState: "pending",
+          transitions: [{ name: "verify", from: "pending", to: "verified" }],
+        },
+      },
+      views: {
+        prescriptionDetail: {
+          kind: "record",
+          entity: "Prescription",
+          sections: [{ id: "main", label: { en: "Main" }, fields: ["qty"] }],
+        },
+        prescriptionInbox: {
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "qty" }],
+          rowAction: { kind: "openRecord", view: "prescriptionDetail" },
+          bulkActions: [
+            { kind: "workflow", name: "verify", label: { en: "Verify" } },
+          ],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects a view referencing an unknown entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      views: {
+        bad: { kind: "list", entity: "Missing", columns: [{ field: "x" }] },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/'Missing' is not declared/);
+  });
+
+  it("rejects a row-action targeting a missing view", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      views: {
+        inbox: {
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "qty" }],
+          rowAction: { kind: "openRecord", view: "missingDetail" },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown view 'missingDetail'/);
+  });
+
+  it("rejects a dashboard-kind view referencing a missing dashboard", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      views: {
+        view1: {
+          kind: "dashboard",
+          entity: "Prescription",
+          dashboardRef: "phantomDashboard",
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown dashboard 'phantomDashboard'/);
+  });
+
+  it("rejects a workflow transition not declared on the entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      views: {
+        inbox: {
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "qty" }],
+          rowAction: { kind: "workflow", name: "verify" },
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(
+      /transition 'verify' not declared on entity 'Prescription'/,
+    );
+  });
+});

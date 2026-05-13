@@ -8,6 +8,12 @@ import {
   DashboardDeclarationSchema,
   ReportDeclarationSchema,
 } from "@crossengin/reporting";
+import {
+  CustomWidgetDeclarationSchema,
+  I18nBundleSchema,
+  ThemeOverlaySchema,
+  ViewDeclarationSchema,
+} from "@crossengin/views";
 import { WorkflowSchema } from "../workflow/types.js";
 
 const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
@@ -61,6 +67,10 @@ export const ManifestSchema = z.object({
   files: z.record(z.string(), FileTypeDeclarationSchema).optional(),
   reports: z.record(z.string(), ReportDeclarationSchema).optional(),
   dashboards: z.record(z.string(), DashboardDeclarationSchema).optional(),
+  views: z.record(z.string(), ViewDeclarationSchema).optional(),
+  customWidgets: z.record(z.string(), CustomWidgetDeclarationSchema).optional(),
+  theme: ThemeOverlaySchema.optional(),
+  i18n: I18nBundleSchema.optional(),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

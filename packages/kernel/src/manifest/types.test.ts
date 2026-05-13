@@ -213,6 +213,30 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(Object.keys(parsed.integrations ?? {})).toEqual(["stripe", "stripeWebhook"]);
   });
 
+  it("parses a views + theme + i18n section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" as const } }] },
+      ],
+      views: {
+        prescriptionInbox: {
+          kind: "list" as const,
+          entity: "Prescription",
+          label: { en: "Inbox" },
+          columns: [{ field: "qty" }],
+        },
+      },
+      theme: { brandColor: "#1e6f3f", density: "comfortable" as const },
+      i18n: { en: { hello: "Hello" } },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.views ?? {})).toEqual(["prescriptionInbox"]);
+    expect(parsed.theme?.brandColor).toBe("#1e6f3f");
+    expect(parsed.i18n?.en?.hello).toBe("Hello");
+  });
+
   it("parses a reports + dashboards section", () => {
     const m = {
       manifestVersion: "1.0" as const,

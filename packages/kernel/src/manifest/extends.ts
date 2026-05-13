@@ -107,7 +107,32 @@ function mergeContent(base: Manifest, overlay: Manifest): Manifest {
     files: mergeRecord(base.files, overlay.files),
     reports: mergeRecord(base.reports, overlay.reports),
     dashboards: mergeRecord(base.dashboards, overlay.dashboards),
+    views: mergeRecord(base.views, overlay.views),
+    customWidgets: mergeRecord(base.customWidgets, overlay.customWidgets),
+    ...(overlay.theme !== undefined || base.theme !== undefined
+      ? { theme: { ...(base.theme ?? {}), ...(overlay.theme ?? {}) } }
+      : {}),
+    ...(overlay.i18n !== undefined || base.i18n !== undefined
+      ? {
+          i18n: mergeI18nBundles(base.i18n, overlay.i18n),
+        }
+      : {}),
   };
+}
+
+function mergeI18nBundles(
+  base: Manifest["i18n"],
+  overlay: Manifest["i18n"],
+): Manifest["i18n"] {
+  if (base === undefined && overlay === undefined) return undefined;
+  const result: Record<string, Record<string, string>> = {};
+  for (const [locale, keys] of Object.entries(base ?? {})) {
+    result[locale] = { ...keys };
+  }
+  for (const [locale, keys] of Object.entries(overlay ?? {})) {
+    result[locale] = { ...(result[locale] ?? {}), ...keys };
+  }
+  return result;
 }
 
 function mergeNamedArray<T>(

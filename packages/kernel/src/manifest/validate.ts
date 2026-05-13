@@ -16,6 +16,13 @@ import type {
   ReportDeclaration,
 } from "@crossengin/reporting";
 import { widgetReferencedReports } from "@crossengin/reporting";
+import type { ViewDeclaration } from "@crossengin/views";
+import {
+  viewReferencedDashboards,
+  viewReferencedReports,
+  viewReferencedViews,
+  viewReferencedWorkflows,
+} from "@crossengin/views";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import { expandTraits } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
@@ -32,7 +39,8 @@ export function validateManifest(manifest: Manifest): void {
   validateJobs(manifest);
   validateFiles(manifest);
   const reportIds = validateReports(manifest, entityNames);
-  validateDashboards(manifest, reportIds);
+  const dashboardIds = validateDashboards(manifest, reportIds);
+  validateViews(manifest, entityNames, reportIds, dashboardIds, entityTransitions);
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
@@ -368,22 +376,77 @@ function validateReports(
 function validateDashboards(
   manifest: Manifest,
   reportIds: ReadonlySet<string>,
-): void {
+): Set<string> {
   const dashboards: Record<string, DashboardDeclaration> = manifest.dashboards ?? {};
-  const seen = new Set<string>();
+  const ids = new Set<string>();
   for (const [key, dashboard] of Object.entries(dashboards)) {
-    if (seen.has(key)) {
+    if (ids.has(key)) {
       throw new ManifestValidationError(
         `dashboards.${key}`,
         `duplicate dashboard id '${key}'`,
       );
     }
-    seen.add(key);
+    ids.add(key);
     for (const referenced of widgetReferencedReports(dashboard)) {
       if (!reportIds.has(referenced)) {
         throw new ManifestValidationError(
           `dashboards.${key}`,
           `dashboard widget references unknown report '${referenced}'`,
+        );
+      }
+    }
+  }
+  return ids;
+}
+
+function validateViews(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+  reportIds: ReadonlySet<string>,
+  dashboardIds: ReadonlySet<string>,
+  entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
+): void {
+  const views: Record<string, ViewDeclaration> = manifest.views ?? {};
+  const viewIds = new Set<string>(Object.keys(views));
+
+  for (const [key, view] of Object.entries(views)) {
+    if (!entityNames.has(view.entity)) {
+      throw new ManifestValidationError(
+        `views.${key}.entity`,
+        `view entity '${view.entity}' is not declared in manifest.entities`,
+      );
+    }
+
+    for (const reportRef of viewReferencedReports(view)) {
+      if (!reportIds.has(reportRef)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references unknown report '${reportRef}'`,
+        );
+      }
+    }
+    for (const dashRef of viewReferencedDashboards(view)) {
+      if (!dashboardIds.has(dashRef)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references unknown dashboard '${dashRef}'`,
+        );
+      }
+    }
+    for (const viewRef of viewReferencedViews(view)) {
+      if (!viewIds.has(viewRef)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references unknown view '${viewRef}'`,
+        );
+      }
+    }
+    const declared = entityTransitions.get(view.entity) ?? new Set<string>();
+    for (const transition of viewReferencedWorkflows(view)) {
+      if (!declared.has(transition)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references transition '${transition}' not declared on entity '${view.entity}'`,
         );
       }
     }
