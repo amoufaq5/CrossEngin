@@ -675,3 +675,79 @@ describe("validateManifest — jobs", () => {
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
+
+describe("validateManifest — reports + dashboards", () => {
+  const entityFixture = {
+    name: "Prescription",
+    fields: [{ name: "qty", type: { kind: "integer" as const } }],
+  };
+
+  it("accepts a manifest with valid reports + dashboards", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      reports: {
+        todayDispensed: {
+          kind: "kpi",
+          entity: "Prescription",
+          measure: { name: "count", kind: "count" },
+        },
+      },
+      dashboards: {
+        managerDaily: {
+          cells: [
+            {
+              x: 0,
+              y: 0,
+              w: 4,
+              h: 2,
+              widget: { kind: "kpi", report: "todayDispensed" },
+            },
+          ],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects a report referencing an unknown entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      reports: {
+        bad: {
+          kind: "tabular",
+          entity: "Missing",
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/'Missing' is not declared/);
+  });
+
+  it("rejects a dashboard widget pointing to an unknown report", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      reports: {
+        actual: { kind: "kpi", entity: "Prescription", measure: { name: "n", kind: "count" } },
+      },
+      dashboards: {
+        broken: {
+          cells: [
+            {
+              x: 0,
+              y: 0,
+              w: 4,
+              h: 2,
+              widget: { kind: "kpi", report: "phantom" },
+            },
+          ],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown report 'phantom'/);
+  });
+});

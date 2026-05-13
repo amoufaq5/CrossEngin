@@ -11,6 +11,11 @@ import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
 import type { JobDeclaration } from "@crossengin/jobs";
+import type {
+  DashboardDeclaration,
+  ReportDeclaration,
+} from "@crossengin/reporting";
+import { widgetReferencedReports } from "@crossengin/reporting";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import { expandTraits } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
@@ -26,6 +31,8 @@ export function validateManifest(manifest: Manifest): void {
   validateIntegrations(manifest);
   validateJobs(manifest);
   validateFiles(manifest);
+  const reportIds = validateReports(manifest, entityNames);
+  validateDashboards(manifest, reportIds);
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
@@ -334,5 +341,51 @@ function validateFiles(manifest: Manifest): void {
       throw new ManifestValidationError(`files.${key}`, `duplicate file type id '${key}'`);
     }
     seen.add(key);
+  }
+}
+
+function validateReports(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+): Set<string> {
+  const reports: Record<string, ReportDeclaration> = manifest.reports ?? {};
+  const reportIds = new Set<string>();
+  for (const [key, report] of Object.entries(reports)) {
+    if (reportIds.has(key)) {
+      throw new ManifestValidationError(`reports.${key}`, `duplicate report id '${key}'`);
+    }
+    reportIds.add(key);
+    if (!entityNames.has(report.entity)) {
+      throw new ManifestValidationError(
+        `reports.${key}.entity`,
+        `report entity '${report.entity}' is not declared in manifest.entities`,
+      );
+    }
+  }
+  return reportIds;
+}
+
+function validateDashboards(
+  manifest: Manifest,
+  reportIds: ReadonlySet<string>,
+): void {
+  const dashboards: Record<string, DashboardDeclaration> = manifest.dashboards ?? {};
+  const seen = new Set<string>();
+  for (const [key, dashboard] of Object.entries(dashboards)) {
+    if (seen.has(key)) {
+      throw new ManifestValidationError(
+        `dashboards.${key}`,
+        `duplicate dashboard id '${key}'`,
+      );
+    }
+    seen.add(key);
+    for (const referenced of widgetReferencedReports(dashboard)) {
+      if (!reportIds.has(referenced)) {
+        throw new ManifestValidationError(
+          `dashboards.${key}`,
+          `dashboard widget references unknown report '${referenced}'`,
+        );
+      }
+    }
   }
 }

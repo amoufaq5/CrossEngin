@@ -213,6 +213,33 @@ describe("ManifestSchema — entities / traits / relations", () => {
     expect(Object.keys(parsed.integrations ?? {})).toEqual(["stripe", "stripeWebhook"]);
   });
 
+  it("parses a reports + dashboards section", () => {
+    const m = {
+      manifestVersion: "1.0" as const,
+      meta: validMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" as const } }] },
+      ],
+      reports: {
+        todayDispensed: {
+          kind: "kpi" as const,
+          entity: "Prescription",
+          measure: { name: "count", kind: "count" as const },
+        },
+      },
+      dashboards: {
+        managerDaily: {
+          cells: [
+            { x: 0, y: 0, w: 4, h: 2, widget: { kind: "kpi" as const, report: "todayDispensed" } },
+          ],
+        },
+      },
+    };
+    const parsed = ManifestSchema.parse(m);
+    expect(Object.keys(parsed.reports ?? {})).toEqual(["todayDispensed"]);
+    expect(Object.keys(parsed.dashboards ?? {})).toEqual(["managerDaily"]);
+  });
+
   it("parses a files section", () => {
     const m = {
       manifestVersion: "1.0" as const,

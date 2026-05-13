@@ -4,6 +4,7 @@ import {
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
   META_AUDIT_LOG,
+  META_CDC_CHECKPOINTS,
   META_COMPLIANCE_ATTESTATIONS,
   META_DEAD_LETTER_JOBS,
   META_EVENTS,
@@ -12,6 +13,8 @@ import {
   META_JOB_RUNS,
   META_MANIFESTS,
   META_REGIONS,
+  META_REPORT_RUNS,
+  META_SCHEDULED_EXPORTS,
   META_TABLES,
   META_TENANT_STORAGE_USAGE,
   META_TENANTS,
@@ -20,8 +23,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 16 tables", () => {
-    expect(META_TABLES).toHaveLength(16);
+  it("contains 19 tables", () => {
+    expect(META_TABLES).toHaveLength(19);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -38,6 +41,7 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "audit_log",
+      "cdc_checkpoints",
       "compliance_attestations",
       "dead_letter_jobs",
       "events",
@@ -47,6 +51,8 @@ describe("META_TABLES", () => {
       "job_runs",
       "manifests",
       "regions",
+      "report_runs",
+      "scheduled_exports",
       "tenant_storage_usage",
       "tenants",
       "user_tenant_membership",
@@ -227,6 +233,28 @@ describe("table column shapes", () => {
     expect(status?.check).toContain("active");
     expect(status?.check).toContain("dr_replica");
     expect(status?.check).toContain("deprecated");
+  });
+
+  it("META_REPORT_RUNS enforces (tenant_id, run_id) uniqueness + status + engine enums", () => {
+    expect(META_REPORT_RUNS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "run_id",
+    ]);
+    const status = META_REPORT_RUNS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("throttled");
+    const engine = META_REPORT_RUNS.columns.find((c) => c.name === "engine");
+    expect(engine?.check).toContain("clickhouse");
+  });
+
+  it("META_SCHEDULED_EXPORTS enforces one schedule per (tenant_id, report_id)", () => {
+    expect(META_SCHEDULED_EXPORTS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "report_id",
+    ]);
+  });
+
+  it("META_CDC_CHECKPOINTS is keyed on (region, replication_slot)", () => {
+    expect(META_CDC_CHECKPOINTS.primaryKey).toEqual(["region", "replication_slot"]);
   });
 });
 

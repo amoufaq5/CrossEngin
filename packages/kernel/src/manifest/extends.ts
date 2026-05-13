@@ -105,6 +105,8 @@ function mergeContent(base: Manifest, overlay: Manifest): Manifest {
     integrations: mergeRecord(base.integrations, overlay.integrations),
     jobs: mergeRecord(base.jobs, overlay.jobs),
     files: mergeRecord(base.files, overlay.files),
+    reports: mergeRecord(base.reports, overlay.reports),
+    dashboards: mergeRecord(base.dashboards, overlay.dashboards),
   };
 }
 

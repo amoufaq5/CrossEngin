@@ -780,6 +780,135 @@ export const META_TENANT_STORAGE_USAGE: TableDefinition = {
   },
 };
 
+export const META_REPORT_RUNS: TableDefinition = {
+  schema: "meta",
+  name: "report_runs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "report_id", type: "TEXT", notNull: true },
+    { name: "run_id", type: "UUID", notNull: true },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "duration_ms", type: "INTEGER", check: "duration_ms IS NULL OR duration_ms >= 0" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('running', 'completed', 'failed', 'throttled', 'cancelled')",
+    },
+    {
+      name: "trigger",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger IN ('user_invoked', 'scheduled', 'dashboard_refresh', 'ai_architect', 'api')",
+    },
+    { name: "invoked_by", type: "UUID" },
+    {
+      name: "engine",
+      type: "TEXT",
+      notNull: true,
+      check: "engine IN ('postgres', 'clickhouse')",
+    },
+    { name: "parameters_redacted", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "row_count", type: "INTEGER", check: "row_count IS NULL OR row_count >= 0" },
+    { name: "cache_hit", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "error", type: "JSONB" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "report_runs_run_id_key", columns: ["tenant_id", "run_id"] },
+  ],
+  indexes: [
+    { name: "idx_report_runs_tenant_started", columns: ["tenant_id", "started_at"] },
+    { name: "idx_report_runs_report_id", columns: ["tenant_id", "report_id"] },
+    { name: "idx_report_runs_status", columns: ["tenant_id", "status"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [{ name: "report_runs_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
+export const META_SCHEDULED_EXPORTS: TableDefinition = {
+  schema: "meta",
+  name: "scheduled_exports",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "report_id", type: "TEXT", notNull: true },
+    { name: "cron", type: "TEXT", notNull: true },
+    { name: "timezone", type: "TEXT", notNull: true, default: "'UTC'" },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "last_run_at", type: "TIMESTAMPTZ" },
+    { name: "next_run_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "last_status",
+      type: "TEXT",
+      check:
+        "last_status IS NULL OR last_status IN ('pending', 'running', 'succeeded', 'failed', 'skipped_empty')",
+    },
+    {
+      name: "consecutive_failures",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "consecutive_failures >= 0",
+    },
+    { name: "last_delivery_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "scheduled_exports_report_key", columns: ["tenant_id", "report_id"] },
+  ],
+  indexes: [
+    { name: "idx_scheduled_exports_next_run", columns: ["next_run_at"] },
+    { name: "idx_scheduled_exports_tenant", columns: ["tenant_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "scheduled_exports_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_CDC_CHECKPOINTS: TableDefinition = {
+  schema: "meta",
+  name: "cdc_checkpoints",
+  columns: [
+    { name: "region", type: "TEXT", notNull: true },
+    { name: "replication_slot", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('running', 'paused', 'lagging', 'broken', 'snapshot')",
+    },
+    { name: "last_committed_lsn", type: "TEXT", notNull: true },
+    { name: "last_shipped_lsn", type: "TEXT", notNull: true },
+    {
+      name: "lag_bytes",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "lag_bytes >= 0",
+    },
+    {
+      name: "lag_seconds",
+      type: "NUMERIC(10, 3)",
+      notNull: true,
+      default: "0",
+      check: "lag_seconds >= 0",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_error_message", type: "TEXT" },
+  ],
+  primaryKey: ["region", "replication_slot"],
+  indexes: [{ name: "idx_cdc_checkpoints_status", columns: ["status"] }],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -797,4 +926,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_FILES,
   META_TENANT_STORAGE_USAGE,
   META_REGIONS,
+  META_REPORT_RUNS,
+  META_SCHEDULED_EXPORTS,
+  META_CDC_CHECKPOINTS,
 ];
