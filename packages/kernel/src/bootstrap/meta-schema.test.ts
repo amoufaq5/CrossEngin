@@ -11,6 +11,7 @@ import {
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_MANIFESTS,
+  META_REGIONS,
   META_TABLES,
   META_TENANT_STORAGE_USAGE,
   META_TENANTS,
@@ -19,8 +20,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 15 tables", () => {
-    expect(META_TABLES).toHaveLength(15);
+  it("contains 16 tables", () => {
+    expect(META_TABLES).toHaveLength(16);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -45,6 +46,7 @@ describe("META_TABLES", () => {
       "job_costs",
       "job_runs",
       "manifests",
+      "regions",
       "tenant_storage_usage",
       "tenants",
       "user_tenant_membership",
@@ -206,6 +208,25 @@ describe("table column shapes", () => {
     expect(cols).toContain("archive_bytes");
     expect(cols).toContain("cold_bytes");
     expect(cols).toContain("file_count");
+  });
+
+  it("META_TENANTS has a residency JSONB column", () => {
+    const residency = META_TENANTS.columns.find((c) => c.name === "residency");
+    expect(residency?.type).toBe("JSONB");
+  });
+
+  it("META_REGIONS check-constrains region to the canonical eight", () => {
+    const region = META_REGIONS.columns.find((c) => c.name === "region");
+    expect(region?.check).toContain("eu-central");
+    expect(region?.check).toContain("me-uae");
+    expect(region?.check).toContain("gcc-ksa");
+  });
+
+  it("META_REGIONS check-constrains status to the four lifecycle states", () => {
+    const status = META_REGIONS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("active");
+    expect(status?.check).toContain("dr_replica");
+    expect(status?.check).toContain("deprecated");
   });
 });
 

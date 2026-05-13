@@ -1,21 +1,14 @@
 import { z } from "zod";
+import { RegionSchema, REGIONS, type Region } from "@crossengin/residency";
 
 const TENANT_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const FILE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const PREFIX_REGEX = /^[a-z0-9][a-z0-9/_-]*\/$/;
 
-export const STORAGE_REGIONS = [
-  "eu-central",
-  "eu-west",
-  "us-east",
-  "us-west",
-  "me-uae",
-  "ap-southeast",
-  "ap-south",
-] as const;
-export type StorageRegion = (typeof STORAGE_REGIONS)[number];
+export const STORAGE_REGIONS = REGIONS;
+export type StorageRegion = Region;
 
-export const StorageRegionSchema = z.enum(STORAGE_REGIONS);
+export const StorageRegionSchema = RegionSchema;
 
 export const BUCKET_PER_REGION: Readonly<Record<StorageRegion, string>> = Object.freeze({
   "eu-central": "crossengin-files-eu",
@@ -23,7 +16,8 @@ export const BUCKET_PER_REGION: Readonly<Record<StorageRegion, string>> = Object
   "us-east": "crossengin-files-us",
   "us-west": "crossengin-files-us-west",
   "me-uae": "crossengin-files-uae",
-  "ap-southeast": "crossengin-files-apse",
+  "gcc-ksa": "crossengin-files-ksa",
+  "apac-sg": "crossengin-files-apac-sg",
   "ap-south": "crossengin-files-aps",
 });
 

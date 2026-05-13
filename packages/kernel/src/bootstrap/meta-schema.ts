@@ -56,6 +56,7 @@ export const META_TENANTS: TableDefinition = {
       notNull: true,
       unique: { constraintName: "tenants_schema_name_key" },
     },
+    { name: "residency", type: "JSONB" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
@@ -699,6 +700,40 @@ export const META_FILES: TableDefinition = {
   },
 };
 
+export const META_REGIONS: TableDefinition = {
+  schema: "meta",
+  name: "regions",
+  columns: [
+    {
+      name: "region",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "cloud_provider", type: "TEXT", notNull: true },
+    { name: "cloud_provider_region", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('planned', 'dr_replica', 'active', 'deprecated')",
+    },
+    {
+      name: "year_available",
+      type: "INTEGER",
+      notNull: true,
+      check: "year_available >= 2024 AND year_available <= 2100",
+    },
+    { name: "dr_replica_of", type: "TEXT" },
+    { name: "dr_replica_in", type: "TEXT" },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["region"],
+  indexes: [{ name: "idx_regions_status", columns: ["status"] }],
+};
+
 export const META_TENANT_STORAGE_USAGE: TableDefinition = {
   schema: "meta",
   name: "tenant_storage_usage",
@@ -761,4 +796,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_JOB_COSTS,
   META_FILES,
   META_TENANT_STORAGE_USAGE,
+  META_REGIONS,
 ];
