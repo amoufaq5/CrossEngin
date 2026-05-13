@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { CollisionError, PackParameterError, UnknownPackError } from "./errors.js";
 import { pack as part11Pack } from "./packs/21-cfr-part-11/pack.js";
+import { pack as hipaaPack } from "./packs/hipaa/pack.js";
+import { pack as gdprPack } from "./packs/gdpr/pack.js";
+import { pack as uaeMohPack } from "./packs/uae-moh/pack.js";
 import { resolveCompliancePacks, type ComplianceRegistry } from "./resolve.js";
 import type { CompliancePack } from "./types.js";
 
@@ -289,6 +292,179 @@ describe("resolveCompliancePacks — end-to-end with validateManifest", () => {
     const augmented = await resolveCompliancePacks(m, {
       registry: registryFrom({ "21-cfr-part-11": part11Pack }),
     });
+    const { validateManifest } = await import("@crossengin/kernel/manifest");
+    expect(() => validateManifest(augmented)).not.toThrow();
+  });
+});
+
+describe("resolveCompliancePacks — v1 showcase packs", () => {
+  const v1Registry = registryFrom({
+    hipaa: hipaaPack,
+    gdpr: gdprPack,
+    "uae-moh": uaeMohPack,
+  });
+
+  it("activates HIPAA with required officer parameters", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: {
+        name: "T",
+        slug: "t",
+        version: v,
+        compliancePacks: ["hipaa"],
+        compliancePackParameters: {
+          hipaa: {
+            coveredEntityType: "covered_entity",
+            privacyOfficerName: "Jane Doe",
+            securityOfficerName: "John Smith",
+          },
+        },
+      },
+    };
+    const result = await resolveCompliancePacks(m, { registry: v1Registry });
+    const names = (result.entities ?? []).map((e) => e.name).sort();
+    expect(names).toEqual(["BreachIncident", "BusinessAssociateAgreement", "PhiAccessLog"]);
+  });
+
+  it("rejects HIPAA activation that omits required coveredEntityType", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: {
+        name: "T",
+        slug: "t",
+        version: v,
+        compliancePacks: ["hipaa"],
+        compliancePackParameters: {
+          hipaa: {
+            privacyOfficerName: "Jane Doe",
+            securityOfficerName: "John Smith",
+          },
+        },
+      },
+    };
+    await expect(resolveCompliancePacks(m, { registry: v1Registry })).rejects.toBeInstanceOf(
+      PackParameterError,
+    );
+  });
+
+  it("rejects GDPR activation with breach window > 72 hours", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: {
+        name: "T",
+        slug: "t",
+        version: v,
+        compliancePacks: ["gdpr"],
+        compliancePackParameters: {
+          gdpr: {
+            dpoName: "Ana Müller",
+            dpoEmail: "dpo@example.eu",
+            breachNotificationHours: 96,
+          },
+        },
+      },
+    };
+    await expect(resolveCompliancePacks(m, { registry: v1Registry })).rejects.toBeInstanceOf(
+      PackParameterError,
+    );
+  });
+
+  it("rejects UAE-MoH activation with retention < 25 years", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: {
+        name: "T",
+        slug: "t",
+        version: v,
+        compliancePacks: ["uae-moh"],
+        compliancePackParameters: {
+          "uae-moh": {
+            mohRegistrationNumber: "MOH-12345",
+            facilityType: "polyclinic",
+            medicalDirectorName: "Dr. Hassan",
+            qualityOfficerName: "Dr. Aisha",
+            clinicalRecordRetentionYears: 10,
+          },
+        },
+      },
+    };
+    await expect(resolveCompliancePacks(m, { registry: v1Registry })).rejects.toBeInstanceOf(
+      PackParameterError,
+    );
+  });
+
+  it("composes HIPAA + GDPR + UAE-MoH onto a tenant manifest", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: {
+        name: "Multi",
+        slug: "multi",
+        version: v,
+        compliancePacks: ["hipaa", "gdpr", "uae-moh"],
+        compliancePackParameters: {
+          hipaa: {
+            coveredEntityType: "covered_entity",
+            privacyOfficerName: "Jane Doe",
+            securityOfficerName: "John Smith",
+          },
+          gdpr: { dpoName: "Ana Müller", dpoEmail: "dpo@example.eu" },
+          "uae-moh": {
+            mohRegistrationNumber: "MOH-12345",
+            facilityType: "hospital",
+            medicalDirectorName: "Dr. Hassan",
+            qualityOfficerName: "Dr. Aisha",
+          },
+        },
+      },
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+    };
+    const result = await resolveCompliancePacks(m, { registry: v1Registry });
+    const entityNames = (result.entities ?? []).map((e) => e.name).sort();
+    expect(entityNames).toEqual([
+      "AdverseEventReport",
+      "BreachIncident",
+      "BusinessAssociateAgreement",
+      "ClinicalEncounter",
+      "Consent",
+      "DataProcessingActivity",
+      "DataSubjectRequest",
+      "FacilityRegistration",
+      "PersonalDataBreach",
+      "PhiAccessLog",
+      "PractitionerLicense",
+      "Prescription",
+    ]);
+    const traitNames = (result.traits ?? []).map((t) => t.name).sort();
+    expect(traitNames).toEqual(["personal_data", "phi", "uae_clinical_record"]);
+  });
+
+  it("the composed manifest passes validateManifest", async () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: {
+        name: "Multi",
+        slug: "multi",
+        version: v,
+        compliancePacks: ["hipaa", "gdpr", "uae-moh"],
+        compliancePackParameters: {
+          hipaa: {
+            coveredEntityType: "covered_entity",
+            privacyOfficerName: "Jane Doe",
+            securityOfficerName: "John Smith",
+          },
+          gdpr: { dpoName: "Ana Müller", dpoEmail: "dpo@example.eu" },
+          "uae-moh": {
+            mohRegistrationNumber: "MOH-12345",
+            facilityType: "hospital",
+            medicalDirectorName: "Dr. Hassan",
+            qualityOfficerName: "Dr. Aisha",
+          },
+        },
+      },
+    };
+    const augmented = await resolveCompliancePacks(m, { registry: v1Registry });
     const { validateManifest } = await import("@crossengin/kernel/manifest");
     expect(() => validateManifest(augmented)).not.toThrow();
   });

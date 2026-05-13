@@ -2,9 +2,13 @@ import {
   RoleInheritanceCycleError,
   UnknownRoleError,
   validateRoleGraph,
+  type EntityPermissions,
+  type FieldPermission,
   type RbacGrant,
   type RoleDefinition,
 } from "@crossengin/auth";
+import type { Entity, Trait } from "@crossengin/types/meta-schema";
+import type { IntegrationDeclaration } from "@crossengin/integrations";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import { expandTraits } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
@@ -197,9 +201,10 @@ function validatePermissions(
   entityNames: ReadonlySet<string>,
   rolesMap: ReadonlyMap<string, RoleDefinition>,
   entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
-): void {  const permissions = manifest.permissions ?? {};
-  const customTraits = manifest.traits ?? [];
-  const entities = manifest.entities ?? [];
+): void {
+  const permissions: Record<string, EntityPermissions> = manifest.permissions ?? {};
+  const customTraits: Trait[] = manifest.traits ?? [];
+  const entities: Entity[] = manifest.entities ?? [];
 
   const checkGrant = (path: string, grant: RbacGrant): void => {
     for (const roleName of grant.roles) {
@@ -247,7 +252,8 @@ function validatePermissions(
           ...traitFields.map((f) => f.name),
         ]);
 
-        for (const [fieldName, fieldPerm] of Object.entries(entityPerms.fields)) {
+        const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
+        for (const [fieldName, fieldPerm] of Object.entries(fieldPerms)) {
           if (!allFieldNames.has(fieldName)) {
             throw new ManifestValidationError(
               `permissions.${entityName}.fields.${fieldName}`,
@@ -273,7 +279,7 @@ function validatePermissions(
 }
 
 function validateIntegrations(manifest: Manifest): void {
-  const integrations = manifest.integrations ?? {};
+  const integrations: Record<string, IntegrationDeclaration> = manifest.integrations ?? {};
   for (const [id, integration] of Object.entries(integrations)) {
     if (integration.kind === "outbound.http" || integration.kind === "outbound.graphql") {
       const opNames = new Set<string>();

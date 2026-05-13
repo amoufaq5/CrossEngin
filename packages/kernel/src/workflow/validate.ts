@@ -1,5 +1,10 @@
 import { WorkflowValidationError } from "./errors.js";
-import type { EntityLifecycleWorkflow, Transition, Workflow } from "./types.js";
+import type {
+  EntityLifecycleWorkflow,
+  Transition,
+  Workflow,
+  WorkflowState,
+} from "./types.js";
 
 export function validateWorkflow(workflowName: string, workflow: Workflow): void {
   if (workflow.kind === "entityLifecycle") {
@@ -29,7 +34,7 @@ function validateEntityLifecycle(name: string, w: EntityLifecycleWorkflow): void
   }
 
   const terminalStates = new Set<string>(
-    w.states.filter((s) => s.category === "terminal").map((s) => s.name),
+    w.states.filter((s: WorkflowState) => s.category === "terminal").map((s: WorkflowState) => s.name),
   );
 
   const transitionNames = new Set<string>();

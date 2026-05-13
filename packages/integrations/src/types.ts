@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const RATE_LIMIT_REGEX = /^\d+\/(sec|min|hour|day)$/;
-const ISO_DURATION_REGEX = /^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$/;
+const ISO_DURATION_REGEX = /^P(?=.)(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$/;
 const ENDPOINT_PATH_REGEX = /^\//;
 
 export const VaultReferenceSchema = z.object({
