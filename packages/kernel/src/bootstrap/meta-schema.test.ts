@@ -3,6 +3,7 @@ import { emitMetaBootstrapSql } from "./index.js";
 import {
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
+  META_API_KEYS,
   META_AUDIT_LOG,
   META_AUTOSCALING_EVENTS,
   META_BACKUP_RECORDS,
@@ -17,6 +18,7 @@ import {
   META_FAILOVER_RECORDS,
   META_FEATURE_FLAGS,
   META_FILES,
+  META_IDEMPOTENCY_RECORDS,
   META_INVOICES,
   META_JOB_COSTS,
   META_JOB_RUNS,
@@ -33,11 +35,13 @@ import {
   META_TENANTS,
   META_USER_TENANT_MEMBERSHIP,
   META_USERS,
+  META_WEBHOOK_DELIVERIES,
+  META_WEBHOOK_ENDPOINTS,
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 32 tables", () => {
-    expect(META_TABLES).toHaveLength(32);
+  it("contains 36 tables", () => {
+    expect(META_TABLES).toHaveLength(36);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -53,6 +57,7 @@ describe("META_TABLES", () => {
     expect(META_TABLES.map((t) => t.name).sort()).toEqual([
       "ai_conversations",
       "ai_provider_calls",
+      "api_keys",
       "audit_log",
       "autoscaling_events",
       "backup_records",
@@ -67,6 +72,7 @@ describe("META_TABLES", () => {
       "failover_records",
       "feature_flags",
       "files",
+      "idempotency_records",
       "integration_calls",
       "invoices",
       "job_costs",
@@ -83,6 +89,8 @@ describe("META_TABLES", () => {
       "tenants",
       "user_tenant_membership",
       "users",
+      "webhook_deliveries",
+      "webhook_endpoints",
     ]);
   });
 
@@ -457,6 +465,41 @@ describe("table column shapes", () => {
     expect(severity?.check).toContain("'info'");
     expect(severity?.check).toContain("'warning'");
     expect(severity?.check).toContain("'critical'");
+  });
+
+  it("META_API_KEYS enforces ce_live_/ce_test_ prefix and status enum", () => {
+    const prefix = META_API_KEYS.columns.find((c) => c.name === "key_prefix");
+    expect(prefix?.check).toContain("ce_(live|test)_");
+    const status = META_API_KEYS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'active'");
+    expect(status?.check).toContain("'revoked'");
+  });
+
+  it("META_WEBHOOK_ENDPOINTS enforces https:// URL prefix and unique endpoint_id", () => {
+    const url = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "url");
+    expect(url?.check).toContain("https://");
+    const eid = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "endpoint_id");
+    expect(eid?.unique?.constraintName).toBe("webhook_endpoints_endpoint_id_key");
+  });
+
+  it("META_WEBHOOK_DELIVERIES check-constrains status to the six delivery states", () => {
+    const status = META_WEBHOOK_DELIVERIES.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'pending'");
+    expect(status?.check).toContain("'delivered'");
+    expect(status?.check).toContain("'retrying'");
+    expect(status?.check).toContain("'dropped'");
+  });
+
+  it("META_IDEMPOTENCY_RECORDS enforces (tenant_id, key) uniqueness", () => {
+    expect(META_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "key",
+    ]);
+  });
+
+  it("META_IDEMPOTENCY_RECORDS check-constrains key pattern (8..64 chars)", () => {
+    const key = META_IDEMPOTENCY_RECORDS.columns.find((c) => c.name === "key");
+    expect(key?.check).toContain("[A-Za-z0-9_-]{8,64}");
   });
 });
 

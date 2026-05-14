@@ -1657,6 +1657,236 @@ export const META_BUDGET_BREACHES: TableDefinition = {
   ],
 };
 
+export const META_API_KEYS: TableDefinition = {
+  schema: "meta",
+  name: "api_keys",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "key_prefix",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "api_keys_prefix_key" },
+      check: "key_prefix ~ '^ce_(live|test)_[A-Za-z0-9]{8}$'",
+    },
+    {
+      name: "secret_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "secret_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "scopes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "tags", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      default: "'active'",
+      check: "status IN ('active', 'revoked', 'expired')",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "last_used_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_by", type: "UUID", references: USER_FK },
+    { name: "revoked_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_api_keys_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_api_keys_last_used", columns: ["tenant_id", "last_used_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "api_keys_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_WEBHOOK_ENDPOINTS: TableDefinition = {
+  schema: "meta",
+  name: "webhook_endpoints",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "endpoint_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "webhook_endpoints_endpoint_id_key" },
+      check: "endpoint_id ~ '^whk_[A-Za-z0-9]{8,32}$'",
+    },
+    {
+      name: "url",
+      type: "TEXT",
+      notNull: true,
+      check: "url ~ '^https://'",
+    },
+    { name: "events", type: "JSONB", notNull: true },
+    {
+      name: "signing_secret_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "signing_secret_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "signing_algorithm",
+      type: "TEXT",
+      notNull: true,
+      default: "'hmac-sha256'",
+      check: "signing_algorithm = 'hmac-sha256'",
+    },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "description", type: "TEXT" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "last_delivered_at", type: "TIMESTAMPTZ" },
+    { name: "last_failure_at", type: "TIMESTAMPTZ" },
+    {
+      name: "consecutive_failures",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "consecutive_failures >= 0",
+    },
+    { name: "disabled_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_webhook_endpoints_tenant_enabled", columns: ["tenant_id", "enabled"] },
+    { name: "idx_webhook_endpoints_consecutive_failures", columns: ["consecutive_failures"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "webhook_endpoints_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_WEBHOOK_DELIVERIES: TableDefinition = {
+  schema: "meta",
+  name: "webhook_deliveries",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "endpoint_id",
+      type: "TEXT",
+      notNull: true,
+      check: "endpoint_id ~ '^whk_[A-Za-z0-9]{8,32}$'",
+    },
+    { name: "event", type: "TEXT", notNull: true },
+    {
+      name: "payload_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "payload_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "signature", type: "TEXT", notNull: true },
+    { name: "signed_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('pending', 'delivering', 'delivered', 'retrying', 'failed', 'dropped')",
+    },
+    {
+      name: "attempt",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "attempt >= 1",
+    },
+    {
+      name: "max_attempts",
+      type: "INTEGER",
+      notNull: true,
+      default: "8",
+      check: "max_attempts >= 1",
+    },
+    { name: "response_status", type: "INTEGER" },
+    { name: "response_body_sha256", type: "CHAR(64)" },
+    { name: "delivered_at", type: "TIMESTAMPTZ" },
+    { name: "failed_at", type: "TIMESTAMPTZ" },
+    { name: "failure_reason", type: "TEXT" },
+    { name: "next_retry_at", type: "TIMESTAMPTZ" },
+    { name: "dropped_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_webhook_deliveries_endpoint_signed",
+      columns: ["endpoint_id", "signed_at"],
+    },
+    {
+      name: "idx_webhook_deliveries_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_webhook_deliveries_next_retry",
+      columns: ["next_retry_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "webhook_deliveries_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_IDEMPOTENCY_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "idempotency_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "key",
+      type: "TEXT",
+      notNull: true,
+      check: "key ~ '^[A-Za-z0-9_-]{8,64}$'",
+    },
+    { name: "method", type: "TEXT", notNull: true },
+    { name: "path", type: "TEXT", notNull: true },
+    {
+      name: "request_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "request_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "response_status", type: "INTEGER" },
+    { name: "response_body_sha256", type: "CHAR(64)" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "in_progress", type: "BOOLEAN", notNull: true, default: "true" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "idempotency_records_tenant_key", columns: ["tenant_id", "key"] },
+  ],
+  indexes: [
+    { name: "idx_idempotency_expires", columns: ["expires_at"] },
+    {
+      name: "idx_idempotency_tenant_created",
+      columns: ["tenant_id", "created_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "idempotency_records_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -1690,4 +1920,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_DR_DRILLS,
   META_AUTOSCALING_EVENTS,
   META_BUDGET_BREACHES,
+  META_API_KEYS,
+  META_WEBHOOK_ENDPOINTS,
+  META_WEBHOOK_DELIVERIES,
+  META_IDEMPOTENCY_RECORDS,
 ];
