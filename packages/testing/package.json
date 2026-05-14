@@ -14,16 +14,23 @@
     "./vitest": {
       "types": "./dist/vitest-preset.d.ts",
       "import": "./dist/vitest-preset.js"
+    },
+    "./strategy": {
+      "types": "./dist/strategy/index.d.ts",
+      "import": "./dist/strategy/index.js"
     }
   },
   "files": ["dist", "src"],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "@crossengin/config": "workspace:*",
