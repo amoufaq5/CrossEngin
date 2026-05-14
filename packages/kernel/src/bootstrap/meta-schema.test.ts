@@ -4,18 +4,23 @@ import {
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
   META_AUDIT_LOG,
+  META_BILLING_EVENTS,
   META_CDC_CHECKPOINTS,
   META_COMPLIANCE_ATTESTATIONS,
   META_DEAD_LETTER_JOBS,
   META_EVENTS,
   META_FILES,
+  META_INVOICES,
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_MANIFESTS,
+  META_PLANS,
   META_REGIONS,
   META_REPORT_RUNS,
   META_SCHEDULED_EXPORTS,
+  META_SUBSCRIPTIONS,
   META_TABLES,
+  META_TENANT_CREDITS,
   META_TENANT_STORAGE_USAGE,
   META_TENANTS,
   META_USER_TENANT_MEMBERSHIP,
@@ -23,8 +28,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 19 tables", () => {
-    expect(META_TABLES).toHaveLength(19);
+  it("contains 24 tables", () => {
+    expect(META_TABLES).toHaveLength(24);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -41,18 +46,23 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "audit_log",
+      "billing_events",
       "cdc_checkpoints",
       "compliance_attestations",
       "dead_letter_jobs",
       "events",
       "files",
       "integration_calls",
+      "invoices",
       "job_costs",
       "job_runs",
       "manifests",
+      "plans",
       "regions",
       "report_runs",
       "scheduled_exports",
+      "subscriptions",
+      "tenant_credits",
       "tenant_storage_usage",
       "tenants",
       "user_tenant_membership",
@@ -262,6 +272,46 @@ describe("table column shapes", () => {
 
   it("META_CDC_CHECKPOINTS is keyed on (region, replication_slot)", () => {
     expect(META_CDC_CHECKPOINTS.primaryKey).toEqual(["region", "replication_slot"]);
+  });
+
+  it("META_PLANS check-constrains family + tier + billing_interval", () => {
+    const family = META_PLANS.columns.find((c) => c.name === "family");
+    expect(family?.check).toContain("'operate'");
+    const tier = META_PLANS.columns.find((c) => c.name === "tier");
+    expect(tier?.check).toContain("'enterprise'");
+    const interval = META_PLANS.columns.find((c) => c.name === "billing_interval");
+    expect(interval?.check).toContain("'month'");
+    expect(interval?.check).toContain("'year'");
+  });
+
+  it("META_SUBSCRIPTIONS FK-references META_PLANS.id with RESTRICT", () => {
+    const planFk = META_SUBSCRIPTIONS.columns.find((c) => c.name === "plan_id");
+    expect(planFk?.references?.table).toBe("plans");
+    expect(planFk?.references?.onDelete).toBe("RESTRICT");
+  });
+
+  it("META_INVOICES enforces (tenant_id, number) uniqueness + status enum", () => {
+    expect(
+      META_INVOICES.uniqueConstraints?.some((u) =>
+        u.columns.includes("tenant_id") && u.columns.includes("number"),
+      ),
+    ).toBe(true);
+    const status = META_INVOICES.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'paid'");
+    expect(status?.check).toContain("'refunded'");
+  });
+
+  it("META_TENANT_CREDITS enforces remaining_cents <= amount_cents at the row level", () => {
+    const remaining = META_TENANT_CREDITS.columns.find((c) => c.name === "remaining_cents");
+    expect(remaining?.check).toContain("amount_cents");
+  });
+
+  it("META_BILLING_EVENTS check-constrains kind to the 20 documented events", () => {
+    const kind = META_BILLING_EVENTS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'invoice_paid'");
+    expect(kind?.check).toContain("'refund_issued'");
+    expect(kind?.check).toContain("'dunning_advanced'");
+    expect(kind?.check).toContain("'usage_synced'");
   });
 });
 

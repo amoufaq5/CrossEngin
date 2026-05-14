@@ -917,6 +917,251 @@ export const META_CDC_CHECKPOINTS: TableDefinition = {
   indexes: [{ name: "idx_cdc_checkpoints_status", columns: ["status"] }],
 };
 
+export const META_PLANS: TableDefinition = {
+  schema: "meta",
+  name: "plans",
+  columns: [
+    { name: "id", type: "TEXT", notNull: true },
+    {
+      name: "family",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "family IN ('operate', 'govern', 'heal', 'educate', 'serve', 'build', 'partner')",
+    },
+    {
+      name: "tier",
+      type: "TEXT",
+      notNull: true,
+      check: "tier IN ('trial', 'base', 'professional', 'enterprise', 'non_profit')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "currency", type: "CHAR(3)", notNull: true, check: "currency ~ '^[A-Z]{3}$'" },
+    {
+      name: "base_price_cents",
+      type: "INTEGER",
+      notNull: true,
+      check: "base_price_cents >= 0",
+    },
+    {
+      name: "billing_interval",
+      type: "TEXT",
+      notNull: true,
+      check: "billing_interval IN ('month', 'year')",
+    },
+    { name: "stripe_product_id", type: "TEXT", notNull: true },
+    { name: "stripe_base_price_id", type: "TEXT", notNull: true },
+    { name: "included_quotas", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "metered_prices", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "available_in_regions", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "min_kernel_version", type: "TEXT", notNull: true },
+    {
+      name: "trial_days",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "trial_days >= 0",
+    },
+    { name: "deprecated", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_plans_family", columns: ["family"] },
+    { name: "idx_plans_deprecated", columns: ["deprecated"] },
+  ],
+};
+
+export const META_SUBSCRIPTIONS: TableDefinition = {
+  schema: "meta",
+  name: "subscriptions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "plan_id", type: "TEXT", notNull: true, references: { schema: "meta", table: "plans", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('trialing', 'active', 'past_due', 'paused', 'canceled', 'unpaid', 'incomplete')",
+    },
+    { name: "stripe_subscription_id", type: "TEXT" },
+    { name: "stripe_customer_id", type: "TEXT", notNull: true },
+    { name: "current_period_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "current_period_end", type: "TIMESTAMPTZ", notNull: true },
+    { name: "trial_end", type: "TIMESTAMPTZ" },
+    { name: "cancel_at_period_end", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "canceled_at", type: "TIMESTAMPTZ" },
+    { name: "paused_at", type: "TIMESTAMPTZ" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "subscriptions_stripe_id_key", columns: ["stripe_subscription_id"] },
+  ],
+  indexes: [
+    { name: "idx_subscriptions_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_subscriptions_plan_id", columns: ["plan_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [{ name: "subscriptions_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
+export const META_INVOICES: TableDefinition = {
+  schema: "meta",
+  name: "invoices",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "subscription_id", type: "UUID", notNull: true },
+    { name: "number", type: "TEXT", notNull: true },
+    { name: "stripe_invoice_id", type: "TEXT" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'open', 'paid', 'uncollectible', 'void', 'refunded')",
+    },
+    { name: "currency", type: "CHAR(3)", notNull: true },
+    { name: "subtotal_cents", type: "INTEGER", notNull: true },
+    {
+      name: "tax_cents",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "tax_cents >= 0",
+    },
+    {
+      name: "discount_cents",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "discount_cents >= 0",
+    },
+    { name: "total_cents", type: "INTEGER", notNull: true },
+    {
+      name: "amount_paid_cents",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "amount_paid_cents >= 0",
+    },
+    {
+      name: "amount_remaining_cents",
+      type: "INTEGER",
+      notNull: true,
+      check: "amount_remaining_cents >= 0",
+    },
+    { name: "issued_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "due_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "paid_at", type: "TIMESTAMPTZ" },
+    { name: "voided_at", type: "TIMESTAMPTZ" },
+    { name: "period_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end", type: "TIMESTAMPTZ", notNull: true },
+    { name: "line_items", type: "JSONB", notNull: true },
+    { name: "pdf_url", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "invoices_number_key", columns: ["tenant_id", "number"] },
+    { name: "invoices_stripe_id_key", columns: ["stripe_invoice_id"] },
+  ],
+  indexes: [
+    { name: "idx_invoices_tenant_issued", columns: ["tenant_id", "issued_at"] },
+    { name: "idx_invoices_status", columns: ["tenant_id", "status"] },
+    { name: "idx_invoices_subscription", columns: ["subscription_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [{ name: "invoices_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
+export const META_TENANT_CREDITS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_credits",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "amount_cents",
+      type: "INTEGER",
+      notNull: true,
+      check: "amount_cents > 0",
+    },
+    {
+      name: "remaining_cents",
+      type: "INTEGER",
+      notNull: true,
+      check: "remaining_cents >= 0 AND remaining_cents <= amount_cents",
+    },
+    { name: "currency", type: "CHAR(3)", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('sla_credit', 'goodwill', 'promotional', 'migration_assist', 'manual_adjustment')",
+    },
+    { name: "reason", type: "TEXT", notNull: true },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "issued_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "issued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "applied_to_invoice_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_tenant_credits_tenant_remaining", columns: ["tenant_id", "remaining_cents"] },
+    { name: "idx_tenant_credits_kind", columns: ["kind"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "tenant_credits_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_BILLING_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "billing_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('subscription_created', 'subscription_changed', 'subscription_canceled', 'subscription_paused', 'subscription_resumed', 'trial_started', 'trial_converted', 'trial_expired', 'invoice_issued', 'invoice_paid', 'invoice_failed', 'invoice_voided', 'payment_method_added', 'payment_method_removed', 'refund_issued', 'credit_applied', 'credit_issued', 'plan_changed', 'dunning_advanced', 'usage_synced')",
+    },
+    { name: "actor", type: "JSONB", notNull: true },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "subscription_id", type: "UUID" },
+    { name: "invoice_id", type: "UUID" },
+    { name: "amount_cents", type: "INTEGER" },
+    { name: "currency", type: "CHAR(3)" },
+    { name: "payload", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_billing_events_tenant_occurred", columns: ["tenant_id", "occurred_at"] },
+    { name: "idx_billing_events_kind", columns: ["tenant_id", "kind"] },
+    { name: "idx_billing_events_subscription", columns: ["subscription_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "billing_events_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -937,4 +1182,9 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_REPORT_RUNS,
   META_SCHEDULED_EXPORTS,
   META_CDC_CHECKPOINTS,
+  META_PLANS,
+  META_SUBSCRIPTIONS,
+  META_INVOICES,
+  META_TENANT_CREDITS,
+  META_BILLING_EVENTS,
 ];
