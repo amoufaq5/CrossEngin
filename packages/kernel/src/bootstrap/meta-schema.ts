@@ -2135,6 +2135,293 @@ export const META_PACK_REVIEWS: TableDefinition = {
   },
 };
 
+export const META_IMPORT_SOURCES: TableDefinition = {
+  schema: "meta",
+  name: "import_sources",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "source_id",
+      type: "TEXT",
+      notNull: true,
+      check: "source_id ~ '^[a-z][a-z0-9-]*$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('csv', 'jsonl', 'json', 'excel_xlsx', 'parquet', 'salesforce', 'servicenow', 'sql_dump_postgres', 'sql_dump_mysql', 'http_api', 'hl7_v2', 'fhir_r4')",
+    },
+    { name: "location", type: "TEXT", notNull: true },
+    { name: "auth", type: "JSONB", notNull: true },
+    {
+      name: "schedule",
+      type: "TEXT",
+      notNull: true,
+      default: "'one_shot'",
+      check:
+        "schedule IN ('one_shot', 'interval', 'cron', 'webhook_driven')",
+    },
+    { name: "interval_seconds", type: "INTEGER" },
+    { name: "cron", type: "TEXT" },
+    {
+      name: "sample_size",
+      type: "INTEGER",
+      notNull: true,
+      default: "100",
+      check: "sample_size BETWEEN 1 AND 10000",
+    },
+    { name: "primary_entity", type: "TEXT" },
+    { name: "source_schema_url", type: "TEXT" },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "last_fetched_at", type: "TIMESTAMPTZ" },
+    {
+      name: "last_fetch_status",
+      type: "TEXT",
+      check: "last_fetch_status IS NULL OR last_fetch_status IN ('ok', 'error', 'rate_limited')",
+    },
+    { name: "last_fetch_error", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "import_sources_tenant_source_id_key", columns: ["tenant_id", "source_id"] },
+  ],
+  indexes: [
+    { name: "idx_import_sources_tenant_enabled", columns: ["tenant_id", "enabled"] },
+    { name: "idx_import_sources_kind", columns: ["kind"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "import_sources_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_BACKFILL_JOBS: TableDefinition = {
+  schema: "meta",
+  name: "backfill_jobs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "source_id",
+      type: "TEXT",
+      notNull: true,
+      check: "source_id ~ '^[a-z][a-z0-9-]*$'",
+    },
+    {
+      name: "mapping_id",
+      type: "TEXT",
+      notNull: true,
+      check: "mapping_id ~ '^[a-z][a-z0-9-]*$'",
+    },
+    { name: "preview_run_id", type: "UUID" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'running', 'paused', 'completed', 'completed_with_errors', 'failed', 'cancelled')",
+    },
+    {
+      name: "conflict_resolution",
+      type: "TEXT",
+      notNull: true,
+      default: "'skip_duplicate'",
+      check:
+        "conflict_resolution IN ('skip_duplicate', 'overwrite_existing', 'fail_on_conflict', 'merge_fields')",
+    },
+    {
+      name: "batch_size",
+      type: "INTEGER",
+      notNull: true,
+      default: "500",
+      check: "batch_size BETWEEN 1 AND 10000",
+    },
+    {
+      name: "parallelism",
+      type: "INTEGER",
+      notNull: true,
+      default: "4",
+      check: "parallelism BETWEEN 1 AND 64",
+    },
+    { name: "rate_limit_rows_per_second", type: "INTEGER" },
+    { name: "queued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    {
+      name: "total_rows_estimate",
+      type: "BIGINT",
+      check: "total_rows_estimate IS NULL OR total_rows_estimate >= 0",
+    },
+    {
+      name: "rows_processed",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "rows_processed >= 0",
+    },
+    {
+      name: "rows_inserted",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "rows_inserted >= 0",
+    },
+    {
+      name: "rows_updated",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "rows_updated >= 0",
+    },
+    {
+      name: "rows_skipped",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "rows_skipped >= 0",
+    },
+    {
+      name: "rows_failed",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "rows_failed >= 0",
+    },
+    { name: "last_error", type: "TEXT" },
+    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "cancelled_by", type: "UUID", references: USER_FK },
+    { name: "cancelled_reason", type: "TEXT" },
+    { name: "checkpoint_token", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_backfill_jobs_tenant_queued", columns: ["tenant_id", "queued_at"] },
+    { name: "idx_backfill_jobs_status", columns: ["status"] },
+    { name: "idx_backfill_jobs_source", columns: ["source_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "backfill_jobs_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_BACKFILL_LEDGER: TableDefinition = {
+  schema: "meta",
+  name: "backfill_ledger",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "backfill_job_id", type: "UUID", notNull: true },
+    {
+      name: "source_row_index",
+      type: "BIGINT",
+      notNull: true,
+      check: "source_row_index >= 0",
+    },
+    { name: "idempotency_key", type: "TEXT", notNull: true },
+    {
+      name: "source_row_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "source_row_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "target_entity", type: "TEXT", notNull: true },
+    { name: "target_row_id", type: "TEXT" },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('inserted', 'updated', 'skipped', 'failed', 'merged')",
+    },
+    { name: "outcome_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "error_message", type: "TEXT" },
+    {
+      name: "retry_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "retry_count >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "backfill_ledger_job_idempotency_key",
+      columns: ["backfill_job_id", "idempotency_key"],
+    },
+  ],
+  indexes: [
+    { name: "idx_backfill_ledger_tenant_outcome", columns: ["tenant_id", "outcome"] },
+    { name: "idx_backfill_ledger_job_outcome_at", columns: ["backfill_job_id", "outcome_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "backfill_ledger_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_ONBOARDING_RUNS: TableDefinition = {
+  schema: "meta",
+  name: "onboarding_runs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "path",
+      type: "TEXT",
+      notNull: true,
+      check: "path IN ('bring_my_data', 'vertical_template', 'blank_workspace')",
+    },
+    {
+      name: "current_stage",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "current_stage IN ('workspace_setup', 'plan_selection', 'schema_design', 'user_invites', 'first_import', 'validate', 'go_live')",
+    },
+    { name: "stages", type: "JSONB", notNull: true },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "started_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "abandoned_at", type: "TIMESTAMPTZ" },
+    { name: "abandoned_reason", type: "TEXT" },
+    { name: "source_pack_id", type: "TEXT" },
+    { name: "source_import_id", type: "UUID" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "onboarding_runs_one_active_per_tenant", columns: ["tenant_id"] },
+  ],
+  indexes: [
+    { name: "idx_onboarding_runs_current_stage", columns: ["current_stage"] },
+    { name: "idx_onboarding_runs_started", columns: ["started_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "onboarding_runs_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -2176,4 +2463,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_PACK_VERSIONS,
   META_PACK_INSTALLATIONS,
   META_PACK_REVIEWS,
+  META_IMPORT_SOURCES,
+  META_BACKFILL_JOBS,
+  META_BACKFILL_LEDGER,
+  META_ONBOARDING_RUNS,
 ];

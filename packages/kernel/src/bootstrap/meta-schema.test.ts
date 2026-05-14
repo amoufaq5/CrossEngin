@@ -6,6 +6,8 @@ import {
   META_API_KEYS,
   META_AUDIT_LOG,
   META_AUTOSCALING_EVENTS,
+  META_BACKFILL_JOBS,
+  META_BACKFILL_LEDGER,
   META_BACKUP_RECORDS,
   META_BILLING_EVENTS,
   META_BUDGET_BREACHES,
@@ -20,10 +22,12 @@ import {
   META_FEATURE_FLAGS,
   META_FILES,
   META_IDEMPOTENCY_RECORDS,
+  META_IMPORT_SOURCES,
   META_INVOICES,
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_MANIFESTS,
+  META_ONBOARDING_RUNS,
   META_PACK_INSTALLATIONS,
   META_PACK_REVIEWS,
   META_PACK_VERSIONS,
@@ -44,8 +48,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 40 tables", () => {
-    expect(META_TABLES).toHaveLength(40);
+  it("contains 44 tables", () => {
+    expect(META_TABLES).toHaveLength(44);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -64,6 +68,8 @@ describe("META_TABLES", () => {
       "api_keys",
       "audit_log",
       "autoscaling_events",
+      "backfill_jobs",
+      "backfill_ledger",
       "backup_records",
       "billing_events",
       "budget_breaches",
@@ -78,11 +84,13 @@ describe("META_TABLES", () => {
       "feature_flags",
       "files",
       "idempotency_records",
+      "import_sources",
       "integration_calls",
       "invoices",
       "job_costs",
       "job_runs",
       "manifests",
+      "onboarding_runs",
       "pack_installations",
       "pack_reviews",
       "pack_versions",
@@ -567,6 +575,65 @@ describe("table column shapes", () => {
   it("META_PACK_REVIEWS check-constrains rating to 1..5", () => {
     const rating = META_PACK_REVIEWS.columns.find((c) => c.name === "rating");
     expect(rating?.check).toContain("BETWEEN 1 AND 5");
+  });
+
+  it("META_IMPORT_SOURCES check-constrains kind to the 12 source kinds", () => {
+    const kind = META_IMPORT_SOURCES.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'csv'");
+    expect(kind?.check).toContain("'salesforce'");
+    expect(kind?.check).toContain("'fhir_r4'");
+  });
+
+  it("META_IMPORT_SOURCES enforces (tenant_id, source_id) uniqueness", () => {
+    expect(META_IMPORT_SOURCES.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "source_id",
+    ]);
+  });
+
+  it("META_BACKFILL_JOBS check-constrains status to the seven lifecycle states", () => {
+    const status = META_BACKFILL_JOBS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'queued'");
+    expect(status?.check).toContain("'completed_with_errors'");
+    expect(status?.check).toContain("'paused'");
+  });
+
+  it("META_BACKFILL_JOBS check-constrains conflict_resolution to four strategies", () => {
+    const cr = META_BACKFILL_JOBS.columns.find((c) => c.name === "conflict_resolution");
+    expect(cr?.check).toContain("'skip_duplicate'");
+    expect(cr?.check).toContain("'merge_fields'");
+  });
+
+  it("META_BACKFILL_LEDGER enforces (backfill_job_id, idempotency_key) uniqueness", () => {
+    expect(META_BACKFILL_LEDGER.uniqueConstraints?.[0]?.columns).toEqual([
+      "backfill_job_id",
+      "idempotency_key",
+    ]);
+  });
+
+  it("META_BACKFILL_LEDGER check-constrains outcome to the five outcomes", () => {
+    const outcome = META_BACKFILL_LEDGER.columns.find((c) => c.name === "outcome");
+    expect(outcome?.check).toContain("'inserted'");
+    expect(outcome?.check).toContain("'merged'");
+  });
+
+  it("META_ONBOARDING_RUNS enforces one active run per tenant", () => {
+    expect(META_ONBOARDING_RUNS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+    ]);
+  });
+
+  it("META_ONBOARDING_RUNS check-constrains current_stage to the seven stages", () => {
+    const stage = META_ONBOARDING_RUNS.columns.find((c) => c.name === "current_stage");
+    expect(stage?.check).toContain("'workspace_setup'");
+    expect(stage?.check).toContain("'go_live'");
+  });
+
+  it("META_ONBOARDING_RUNS check-constrains path to the three onboarding paths", () => {
+    const path = META_ONBOARDING_RUNS.columns.find((c) => c.name === "path");
+    expect(path?.check).toContain("'bring_my_data'");
+    expect(path?.check).toContain("'vertical_template'");
+    expect(path?.check).toContain("'blank_workspace'");
   });
 });
 
