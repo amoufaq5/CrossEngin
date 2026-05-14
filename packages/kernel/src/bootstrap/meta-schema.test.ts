@@ -15,6 +15,7 @@ import {
   META_DEPLOYMENTS,
   META_DR_DRILLS,
   META_EVENTS,
+  META_EXTENSION_PACKS,
   META_FAILOVER_RECORDS,
   META_FEATURE_FLAGS,
   META_FILES,
@@ -23,6 +24,9 @@ import {
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_MANIFESTS,
+  META_PACK_INSTALLATIONS,
+  META_PACK_REVIEWS,
+  META_PACK_VERSIONS,
   META_PLANS,
   META_REGIONS,
   META_REPORT_RUNS,
@@ -40,8 +44,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 36 tables", () => {
-    expect(META_TABLES).toHaveLength(36);
+  it("contains 40 tables", () => {
+    expect(META_TABLES).toHaveLength(40);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -69,6 +73,7 @@ describe("META_TABLES", () => {
       "deployments",
       "dr_drills",
       "events",
+      "extension_packs",
       "failover_records",
       "feature_flags",
       "files",
@@ -78,6 +83,9 @@ describe("META_TABLES", () => {
       "job_costs",
       "job_runs",
       "manifests",
+      "pack_installations",
+      "pack_reviews",
+      "pack_versions",
       "plans",
       "regions",
       "report_runs",
@@ -500,6 +508,65 @@ describe("table column shapes", () => {
   it("META_IDEMPOTENCY_RECORDS check-constrains key pattern (8..64 chars)", () => {
     const key = META_IDEMPOTENCY_RECORDS.columns.find((c) => c.name === "key");
     expect(key?.check).toContain("[A-Za-z0-9_-]{8,64}");
+  });
+
+  it("META_EXTENSION_PACKS check-constrains kind to the eight pack kinds", () => {
+    const kind = META_EXTENSION_PACKS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'vertical_template'");
+    expect(kind?.check).toContain("'ai_tool'");
+    expect(kind?.check).toContain("'data_connector'");
+  });
+
+  it("META_EXTENSION_PACKS check-constrains author_kind to four types", () => {
+    const ak = META_EXTENSION_PACKS.columns.find((c) => c.name === "author_kind");
+    expect(ak?.check).toContain("'crossengin_official'");
+    expect(ak?.check).toContain("'certified_partner'");
+    expect(ak?.check).toContain("'private_tenant'");
+  });
+
+  it("META_PACK_VERSIONS enforces (pack_id, version) uniqueness + status enum", () => {
+    expect(META_PACK_VERSIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "pack_id",
+      "version",
+    ]);
+    const status = META_PACK_VERSIONS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'published'");
+    expect(status?.check).toContain("'withdrawn'");
+  });
+
+  it("META_PACK_VERSIONS check-constrains security_review_status to the five states", () => {
+    const review = META_PACK_VERSIONS.columns.find((c) => c.name === "security_review_status");
+    expect(review?.check).toContain("'pending'");
+    expect(review?.check).toContain("'passed'");
+    expect(review?.check).toContain("'exempt'");
+  });
+
+  it("META_PACK_INSTALLATIONS check-constrains status to eight lifecycle states", () => {
+    const status = META_PACK_INSTALLATIONS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'requested'");
+    expect(status?.check).toContain("'permission_pending'");
+    expect(status?.check).toContain("'installed'");
+    expect(status?.check).toContain("'uninstalled'");
+  });
+
+  it("META_PACK_INSTALLATIONS check-constrains update_policy to the four policies", () => {
+    const policy = META_PACK_INSTALLATIONS.columns.find((c) => c.name === "update_policy");
+    expect(policy?.check).toContain("'manual'");
+    expect(policy?.check).toContain("'patch_auto'");
+    expect(policy?.check).toContain("'track_latest'");
+  });
+
+  it("META_PACK_REVIEWS enforces (pack_id, tenant_id, author_id) uniqueness", () => {
+    expect(META_PACK_REVIEWS.uniqueConstraints?.[0]?.columns).toEqual([
+      "pack_id",
+      "tenant_id",
+      "author_id",
+    ]);
+  });
+
+  it("META_PACK_REVIEWS check-constrains rating to 1..5", () => {
+    const rating = META_PACK_REVIEWS.columns.find((c) => c.name === "rating");
+    expect(rating?.check).toContain("BETWEEN 1 AND 5");
   });
 });
 

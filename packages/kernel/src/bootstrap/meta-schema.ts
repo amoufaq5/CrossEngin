@@ -1887,6 +1887,254 @@ export const META_IDEMPOTENCY_RECORDS: TableDefinition = {
   },
 };
 
+export const META_EXTENSION_PACKS: TableDefinition = {
+  schema: "meta",
+  name: "extension_packs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "pack_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "extension_packs_pack_id_key" },
+      check: "pack_id ~ '^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*){1,3}$'",
+    },
+    { name: "name", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('vertical_template', 'integration_bundle', 'ai_tool', 'ui_extension', 'workflow_pack', 'compliance_addon', 'data_connector', 'theme')",
+    },
+    {
+      name: "author_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "author_kind IN ('crossengin_official', 'certified_partner', 'community', 'private_tenant')",
+    },
+    { name: "author_name", type: "TEXT", notNull: true },
+    { name: "author_email", type: "TEXT" },
+    { name: "license", type: "TEXT", notNull: true },
+    { name: "homepage_url", type: "TEXT" },
+    { name: "repository_url", type: "TEXT" },
+    { name: "keywords", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "min_platform_version", type: "TEXT", notNull: true },
+    { name: "max_platform_version", type: "TEXT" },
+    {
+      name: "requires_phi_access",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "handles_user_data",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "private_tenant_id",
+      type: "UUID",
+      references: TENANT_FK,
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_extension_packs_kind", columns: ["kind"] },
+    { name: "idx_extension_packs_author_kind", columns: ["author_kind"] },
+    { name: "idx_extension_packs_private_tenant", columns: ["private_tenant_id"] },
+  ],
+};
+
+export const META_PACK_VERSIONS: TableDefinition = {
+  schema: "meta",
+  name: "pack_versions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "pack_id",
+      type: "TEXT",
+      notNull: true,
+      check: "pack_id ~ '^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*){1,3}$'",
+    },
+    { name: "version", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('draft', 'in_review', 'published', 'deprecated', 'withdrawn')",
+    },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check: "channel IN ('stable', 'beta', 'canary', 'internal')",
+    },
+    {
+      name: "bundle_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "bundle_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "bundle_size_bytes",
+      type: "BIGINT",
+      notNull: true,
+      check: "bundle_size_bytes > 0",
+    },
+    {
+      name: "manifest_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "manifest_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "signature", type: "JSONB", notNull: true },
+    { name: "changelog", type: "TEXT", notNull: true },
+    { name: "published_at", type: "TIMESTAMPTZ" },
+    { name: "published_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "deprecated_reason", type: "TEXT" },
+    { name: "withdrawn_at", type: "TIMESTAMPTZ" },
+    { name: "withdrawn_reason", type: "TEXT" },
+    { name: "superseded_by", type: "TEXT" },
+    {
+      name: "security_review_status",
+      type: "TEXT",
+      notNull: true,
+      default: "'pending'",
+      check:
+        "security_review_status IN ('pending', 'in_progress', 'passed', 'failed', 'exempt')",
+    },
+    { name: "security_reviewed_at", type: "TIMESTAMPTZ" },
+    { name: "security_reviewer", type: "UUID", references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "pack_versions_pack_version_key", columns: ["pack_id", "version"] },
+  ],
+  indexes: [
+    { name: "idx_pack_versions_pack_status", columns: ["pack_id", "status"] },
+    { name: "idx_pack_versions_channel", columns: ["channel"] },
+    { name: "idx_pack_versions_security_review", columns: ["security_review_status"] },
+  ],
+};
+
+export const META_PACK_INSTALLATIONS: TableDefinition = {
+  schema: "meta",
+  name: "pack_installations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "pack_id",
+      type: "TEXT",
+      notNull: true,
+      check: "pack_id ~ '^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*){1,3}$'",
+    },
+    { name: "installed_version", type: "TEXT" },
+    { name: "pinned_version", type: "TEXT" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('requested', 'permission_pending', 'installing', 'installed', 'updating', 'failed', 'uninstalling', 'uninstalled')",
+    },
+    {
+      name: "update_policy",
+      type: "TEXT",
+      notNull: true,
+      default: "'manual'",
+      check:
+        "update_policy IN ('manual', 'patch_auto', 'minor_auto', 'track_latest')",
+    },
+    { name: "config", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "permission_grants", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "installed_at", type: "TIMESTAMPTZ" },
+    { name: "installed_by", type: "UUID", references: USER_FK },
+    { name: "last_updated_at", type: "TIMESTAMPTZ" },
+    { name: "uninstalled_at", type: "TIMESTAMPTZ" },
+    { name: "uninstalled_by", type: "UUID", references: USER_FK },
+    { name: "failure_reason", type: "TEXT" },
+    { name: "isolation_sandbox", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_pack_installations_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_pack_installations_pack", columns: ["pack_id"] },
+    {
+      name: "idx_pack_installations_tenant_pack_active",
+      columns: ["tenant_id", "pack_id", "status"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "pack_installations_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_PACK_REVIEWS: TableDefinition = {
+  schema: "meta",
+  name: "pack_reviews",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "pack_id",
+      type: "TEXT",
+      notNull: true,
+      check: "pack_id ~ '^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*){1,3}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "author_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "rating",
+      type: "INTEGER",
+      notNull: true,
+      check: "rating BETWEEN 1 AND 5",
+    },
+    { name: "title", type: "TEXT", notNull: true },
+    { name: "body", type: "TEXT", notNull: true },
+    { name: "verified_install", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "submitted_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "edited_at", type: "TIMESTAMPTZ" },
+    {
+      name: "moderation_status",
+      type: "TEXT",
+      notNull: true,
+      default: "'published'",
+      check: "moderation_status IN ('published', 'pending', 'hidden')",
+    },
+    { name: "hidden_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "pack_reviews_one_per_author",
+      columns: ["pack_id", "tenant_id", "author_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_pack_reviews_pack_submitted", columns: ["pack_id", "submitted_at"] },
+    { name: "idx_pack_reviews_moderation", columns: ["moderation_status"] },
+    { name: "idx_pack_reviews_tenant", columns: ["tenant_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "pack_reviews_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -1924,4 +2172,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_WEBHOOK_ENDPOINTS,
   META_WEBHOOK_DELIVERIES,
   META_IDEMPOTENCY_RECORDS,
+  META_EXTENSION_PACKS,
+  META_PACK_VERSIONS,
+  META_PACK_INSTALLATIONS,
+  META_PACK_REVIEWS,
 ];
