@@ -4,12 +4,15 @@ import {
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
   META_AUDIT_LOG,
+  META_BACKUP_RECORDS,
   META_BILLING_EVENTS,
   META_CDC_CHECKPOINTS,
   META_COMPLIANCE_ATTESTATIONS,
   META_DEAD_LETTER_JOBS,
   META_DEPLOYMENTS,
+  META_DR_DRILLS,
   META_EVENTS,
+  META_FAILOVER_RECORDS,
   META_FEATURE_FLAGS,
   META_FILES,
   META_INVOICES,
@@ -31,8 +34,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 27 tables", () => {
-    expect(META_TABLES).toHaveLength(27);
+  it("contains 30 tables", () => {
+    expect(META_TABLES).toHaveLength(30);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -49,12 +52,15 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "audit_log",
+      "backup_records",
       "billing_events",
       "cdc_checkpoints",
       "compliance_attestations",
       "dead_letter_jobs",
       "deployments",
+      "dr_drills",
       "events",
+      "failover_records",
       "feature_flags",
       "files",
       "integration_calls",
@@ -378,6 +384,47 @@ describe("table column shapes", () => {
     );
     expect(triggeredBy?.references?.table).toBe("users");
     expect(triggeredBy?.references?.onDelete).toBe("RESTRICT");
+  });
+
+  it("META_BACKUP_RECORDS check-constrains kind to the five backup kinds", () => {
+    const kind = META_BACKUP_RECORDS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'full'");
+    expect(kind?.check).toContain("'wal_archive'");
+    expect(kind?.check).toContain("'object_snapshot'");
+  });
+
+  it("META_BACKUP_RECORDS check-constrains status to the six lifecycle states", () => {
+    const status = META_BACKUP_RECORDS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'scheduled'");
+    expect(status?.check).toContain("'verified'");
+    expect(status?.check).toContain("'expired'");
+  });
+
+  it("META_FAILOVER_RECORDS check-constrains tier to the five DR tiers", () => {
+    const tier = META_FAILOVER_RECORDS.columns.find((c) => c.name === "tier");
+    expect(tier?.check).toContain("'tier_0_mission_critical'");
+    expect(tier?.check).toContain("'tier_4_best_effort'");
+  });
+
+  it("META_FAILOVER_RECORDS check-constrains trigger to the five trigger kinds", () => {
+    const trigger = META_FAILOVER_RECORDS.columns.find((c) => c.name === "trigger");
+    expect(trigger?.check).toContain("'planned_drill'");
+    expect(trigger?.check).toContain("'primary_outage'");
+    expect(trigger?.check).toContain("'regional_failure'");
+  });
+
+  it("META_DR_DRILLS check-constrains outcome to the five outcomes", () => {
+    const outcome = META_DR_DRILLS.columns.find((c) => c.name === "outcome");
+    expect(outcome?.check).toContain("'passed'");
+    expect(outcome?.check).toContain("'passed_with_findings'");
+    expect(outcome?.check).toContain("'not_executed'");
+  });
+
+  it("META_DR_DRILLS check-constrains kind to the five drill kinds", () => {
+    const kind = META_DR_DRILLS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'tabletop'");
+    expect(kind?.check).toContain("'failover_test'");
+    expect(kind?.check).toContain("'chaos_injection'");
   });
 });
 

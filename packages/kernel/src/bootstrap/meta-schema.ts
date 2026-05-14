@@ -1375,6 +1375,188 @@ export const META_DEPLOYMENTS: TableDefinition = {
   ],
 };
 
+export const META_BACKUP_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "backup_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "policy_id", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('full', 'incremental', 'wal_archive', 'logical_dump', 'object_snapshot')",
+    },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('scheduled', 'running', 'succeeded', 'failed', 'verified', 'expired')",
+    },
+    { name: "size_bytes", type: "BIGINT", check: "size_bytes IS NULL OR size_bytes >= 0" },
+    { name: "sha256", type: "CHAR(64)", check: "sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$'" },
+    {
+      name: "storage_region",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "storage_region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    {
+      name: "copied_to_regions",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
+    { name: "verified_at", type: "TIMESTAMPTZ" },
+    { name: "verified_by", type: "TEXT" },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "error_message", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_backup_records_policy_started", columns: ["policy_id", "started_at"] },
+    { name: "idx_backup_records_status", columns: ["status"] },
+    { name: "idx_backup_records_expires_at", columns: ["expires_at"] },
+  ],
+};
+
+export const META_FAILOVER_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "failover_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "tier",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "tier IN ('tier_0_mission_critical', 'tier_1_business_critical', 'tier_2_important', 'tier_3_recoverable', 'tier_4_best_effort')",
+    },
+    {
+      name: "trigger",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger IN ('planned_drill', 'primary_outage', 'regional_failure', 'maintenance_window', 'manual_promotion')",
+    },
+    { name: "triggered_by", type: "TEXT", notNull: true },
+    { name: "triggered_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "from_region",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "from_region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    {
+      name: "to_region",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "to_region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    { name: "affected_apps", type: "JSONB", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'in_progress', 'succeeded', 'failed', 'aborted', 'reverted')",
+    },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    {
+      name: "actual_rpo_seconds",
+      type: "INTEGER",
+      check: "actual_rpo_seconds IS NULL OR actual_rpo_seconds >= 0",
+    },
+    {
+      name: "actual_rto_seconds",
+      type: "INTEGER",
+      check: "actual_rto_seconds IS NULL OR actual_rto_seconds >= 0",
+    },
+    { name: "reverted_at", type: "TIMESTAMPTZ" },
+    { name: "reverted_to_failover_id", type: "UUID" },
+    { name: "incident_ticket_id", type: "TEXT" },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_failover_records_triggered_at", columns: ["triggered_at"] },
+    { name: "idx_failover_records_status", columns: ["status"] },
+    { name: "idx_failover_records_from_to", columns: ["from_region", "to_region"] },
+  ],
+};
+
+export const META_DR_DRILLS: TableDefinition = {
+  schema: "meta",
+  name: "dr_drills",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('tabletop', 'restore_test', 'failover_test', 'full_regional', 'chaos_injection')",
+    },
+    {
+      name: "tier",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "tier IN ('tier_0_mission_critical', 'tier_1_business_critical', 'tier_2_important', 'tier_3_recoverable', 'tier_4_best_effort')",
+    },
+    { name: "scheduled_for", type: "TIMESTAMPTZ", notNull: true },
+    { name: "executed_at", type: "TIMESTAMPTZ" },
+    { name: "executed_by", type: "TEXT" },
+    { name: "scope_regions", type: "JSONB", notNull: true },
+    { name: "scope_apps", type: "JSONB", notNull: true },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('passed', 'passed_with_findings', 'failed', 'aborted', 'not_executed')",
+    },
+    {
+      name: "measured_rpo_seconds",
+      type: "INTEGER",
+      check: "measured_rpo_seconds IS NULL OR measured_rpo_seconds >= 0",
+    },
+    {
+      name: "measured_rto_seconds",
+      type: "INTEGER",
+      check: "measured_rto_seconds IS NULL OR measured_rto_seconds >= 0",
+    },
+    { name: "findings", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "report_url", type: "TEXT" },
+    { name: "next_drill_due_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_dr_drills_kind_scheduled", columns: ["kind", "scheduled_for"] },
+    { name: "idx_dr_drills_tier", columns: ["tier"] },
+    { name: "idx_dr_drills_next_due", columns: ["next_drill_due_at"] },
+    { name: "idx_dr_drills_outcome", columns: ["outcome"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -1403,4 +1585,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_TENANT_AI_SETTINGS,
   META_FEATURE_FLAGS,
   META_DEPLOYMENTS,
+  META_BACKUP_RECORDS,
+  META_FAILOVER_RECORDS,
+  META_DR_DRILLS,
 ];
