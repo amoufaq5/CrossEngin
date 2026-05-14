@@ -20,6 +20,7 @@ import {
   META_SCHEDULED_EXPORTS,
   META_SUBSCRIPTIONS,
   META_TABLES,
+  META_TENANT_AI_SETTINGS,
   META_TENANT_CREDITS,
   META_TENANT_STORAGE_USAGE,
   META_TENANTS,
@@ -28,8 +29,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 24 tables", () => {
-    expect(META_TABLES).toHaveLength(24);
+  it("contains 25 tables", () => {
+    expect(META_TABLES).toHaveLength(25);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -62,6 +63,7 @@ describe("META_TABLES", () => {
       "report_runs",
       "scheduled_exports",
       "subscriptions",
+      "tenant_ai_settings",
       "tenant_credits",
       "tenant_storage_usage",
       "tenants",
@@ -312,6 +314,22 @@ describe("table column shapes", () => {
     expect(kind?.check).toContain("'refund_issued'");
     expect(kind?.check).toContain("'dunning_advanced'");
     expect(kind?.check).toContain("'usage_synced'");
+  });
+
+  it("META_TENANT_AI_SETTINGS is keyed on tenant_id + defaults to fireworks-only providers", () => {
+    expect(META_TENANT_AI_SETTINGS.primaryKey).toEqual(["tenant_id"]);
+    const providers = META_TENANT_AI_SETTINGS.columns.find(
+      (c) => c.name === "allowed_external_providers",
+    );
+    expect(providers?.default).toContain("fireworks");
+  });
+
+  it("META_TENANT_AI_SETTINGS check-constrains schema_change_approval_tier", () => {
+    const tier = META_TENANT_AI_SETTINGS.columns.find(
+      (c) => c.name === "schema_change_approval_tier",
+    );
+    expect(tier?.check).toContain("'always_human'");
+    expect(tier?.check).toContain("'agent_can_do_anything'");
   });
 });
 

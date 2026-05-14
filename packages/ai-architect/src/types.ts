@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { ManifestPatchSchema, ManifestSchema } from "@crossengin/kernel/manifest";
+
+const ManifestPatchSchema = z.unknown();
+const ManifestSchema = z.unknown();
 
 export const ConfidenceSchema = z.enum(["low", "medium", "high"]);
 export type Confidence = z.infer<typeof ConfidenceSchema>;

@@ -1127,6 +1127,82 @@ export const META_TENANT_CREDITS: TableDefinition = {
   },
 };
 
+export const META_TENANT_AI_SETTINGS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_ai_settings",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "shared_catalog_opt_in",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "cross_tenant_pattern_learning_opt_in",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "allowed_external_providers",
+      type: "JSONB",
+      notNull: true,
+      default: "'[\"fireworks\"]'::jsonb",
+    },
+    {
+      name: "schema_change_approval_tier",
+      type: "TEXT",
+      notNull: true,
+      default: "'always_human'",
+      check:
+        "schema_change_approval_tier IN ('tiered', 'always_human', 'agent_can_do_anything')",
+    },
+    {
+      name: "per_session_token_ceiling",
+      type: "INTEGER",
+      notNull: true,
+      default: "50000",
+      check: "per_session_token_ceiling > 0",
+    },
+    {
+      name: "per_tenant_monthly_dollar_ceiling",
+      type: "INTEGER",
+      notNull: true,
+      default: "200",
+      check: "per_tenant_monthly_dollar_ceiling > 0",
+    },
+    {
+      name: "summarization_frequency_turns",
+      type: "INTEGER",
+      notNull: true,
+      default: "20",
+      check: "summarization_frequency_turns BETWEEN 5 AND 100",
+    },
+    {
+      name: "diff_preview_verbose",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "support_transcript_access_granted",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_by", type: "UUID", notNull: true, references: USER_FK },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "tenant_ai_settings_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_BILLING_EVENTS: TableDefinition = {
   schema: "meta",
   name: "billing_events",
@@ -1187,4 +1263,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_INVOICES,
   META_TENANT_CREDITS,
   META_BILLING_EVENTS,
+  META_TENANT_AI_SETTINGS,
 ];
