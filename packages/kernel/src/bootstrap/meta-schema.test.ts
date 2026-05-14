@@ -4,8 +4,10 @@ import {
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
   META_AUDIT_LOG,
+  META_AUTOSCALING_EVENTS,
   META_BACKUP_RECORDS,
   META_BILLING_EVENTS,
+  META_BUDGET_BREACHES,
   META_CDC_CHECKPOINTS,
   META_COMPLIANCE_ATTESTATIONS,
   META_DEAD_LETTER_JOBS,
@@ -34,8 +36,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 30 tables", () => {
-    expect(META_TABLES).toHaveLength(30);
+  it("contains 32 tables", () => {
+    expect(META_TABLES).toHaveLength(32);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -52,8 +54,10 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "audit_log",
+      "autoscaling_events",
       "backup_records",
       "billing_events",
+      "budget_breaches",
       "cdc_checkpoints",
       "compliance_attestations",
       "dead_letter_jobs",
@@ -425,6 +429,34 @@ describe("table column shapes", () => {
     expect(kind?.check).toContain("'tabletop'");
     expect(kind?.check).toContain("'failover_test'");
     expect(kind?.check).toContain("'chaos_injection'");
+  });
+
+  it("META_AUTOSCALING_EVENTS check-constrains signal to the seven scaling signals", () => {
+    const signal = META_AUTOSCALING_EVENTS.columns.find((c) => c.name === "signal");
+    expect(signal?.check).toContain("'cpu_pct'");
+    expect(signal?.check).toContain("'p99_latency_ms'");
+    expect(signal?.check).toContain("'queue_depth'");
+  });
+
+  it("META_AUTOSCALING_EVENTS check-constrains decision to the four decisions", () => {
+    const decision = META_AUTOSCALING_EVENTS.columns.find((c) => c.name === "decision");
+    expect(decision?.check).toContain("'scale_up'");
+    expect(decision?.check).toContain("'scale_down'");
+    expect(decision?.check).toContain("'throttled'");
+  });
+
+  it("META_BUDGET_BREACHES check-constrains percentile to p50/p95/p99", () => {
+    const percentile = META_BUDGET_BREACHES.columns.find((c) => c.name === "percentile");
+    expect(percentile?.check).toContain("'p50'");
+    expect(percentile?.check).toContain("'p95'");
+    expect(percentile?.check).toContain("'p99'");
+  });
+
+  it("META_BUDGET_BREACHES check-constrains severity to info/warning/critical", () => {
+    const severity = META_BUDGET_BREACHES.columns.find((c) => c.name === "severity");
+    expect(severity?.check).toContain("'info'");
+    expect(severity?.check).toContain("'warning'");
+    expect(severity?.check).toContain("'critical'");
   });
 });
 

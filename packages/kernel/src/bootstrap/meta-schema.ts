@@ -1557,6 +1557,106 @@ export const META_DR_DRILLS: TableDefinition = {
   ],
 };
 
+export const META_AUTOSCALING_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "autoscaling_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "policy_id", type: "TEXT", notNull: true },
+    { name: "app_id", type: "TEXT", notNull: true },
+    {
+      name: "region",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    {
+      name: "signal",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "signal IN ('cpu_pct', 'memory_pct', 'rps', 'p99_latency_ms', 'queue_depth', 'error_rate_pct', 'concurrent_connections')",
+    },
+    { name: "observed_value", type: "NUMERIC(14, 4)", notNull: true },
+    {
+      name: "decision",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "decision IN ('scale_up', 'scale_down', 'hold', 'throttled')",
+    },
+    {
+      name: "reason",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "reason IN ('threshold_exceeded', 'threshold_recovered', 'cooldown_active', 'min_replicas_reached', 'max_replicas_reached', 'manual_override')",
+    },
+    { name: "from_replicas", type: "INTEGER", notNull: true, check: "from_replicas >= 0" },
+    { name: "to_replicas", type: "INTEGER", notNull: true, check: "to_replicas >= 0" },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_ms",
+      type: "INTEGER",
+      check: "duration_ms IS NULL OR duration_ms >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_autoscaling_app_occurred", columns: ["app_id", "occurred_at"] },
+    { name: "idx_autoscaling_policy", columns: ["policy_id"] },
+    { name: "idx_autoscaling_decision", columns: ["decision"] },
+  ],
+};
+
+export const META_BUDGET_BREACHES: TableDefinition = {
+  schema: "meta",
+  name: "budget_breaches",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "route_id", type: "TEXT", notNull: true },
+    {
+      name: "percentile",
+      type: "TEXT",
+      notNull: true,
+      check: "percentile IN ('p50', 'p95', 'p99')",
+    },
+    { name: "budget_ms", type: "NUMERIC(12, 3)", notNull: true, check: "budget_ms > 0" },
+    {
+      name: "observed_ms",
+      type: "NUMERIC(12, 3)",
+      notNull: true,
+      check: "observed_ms > 0",
+    },
+    {
+      name: "severity",
+      type: "TEXT",
+      notNull: true,
+      check: "severity IN ('info', 'warning', 'critical')",
+    },
+    { name: "observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "window_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "window_end", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "sample_count",
+      type: "INTEGER",
+      notNull: true,
+      check: "sample_count > 0",
+    },
+    { name: "alert_sent", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "paged_at", type: "TIMESTAMPTZ" },
+    { name: "resolved_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_budget_breaches_route_observed", columns: ["route_id", "observed_at"] },
+    { name: "idx_budget_breaches_severity", columns: ["severity"] },
+    { name: "idx_budget_breaches_unresolved", columns: ["resolved_at"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -1588,4 +1688,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_BACKUP_RECORDS,
   META_FAILOVER_RECORDS,
   META_DR_DRILLS,
+  META_AUTOSCALING_EVENTS,
+  META_BUDGET_BREACHES,
 ];
