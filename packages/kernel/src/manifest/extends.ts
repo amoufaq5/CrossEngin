@@ -154,15 +154,33 @@ function mergeI18nBundles(
   base: Manifest["i18n"],
   overlay: Manifest["i18n"],
 ): Manifest["i18n"] {
-  if (base === undefined && overlay === undefined) return undefined;
-  const result: Record<string, Record<string, string>> = {};
-  for (const [locale, keys] of Object.entries(base ?? {})) {
-    result[locale] = { ...keys };
+  if (base === undefined) return overlay;
+  if (overlay === undefined) return base;
+  const translations: Record<string, Record<string, string>> = {};
+  for (const [locale, keys] of Object.entries(base.translations)) {
+    translations[locale] = { ...keys };
   }
-  for (const [locale, keys] of Object.entries(overlay ?? {})) {
-    result[locale] = { ...(result[locale] ?? {}), ...keys };
+  for (const [locale, keys] of Object.entries(overlay.translations)) {
+    translations[locale] = { ...(translations[locale] ?? {}), ...keys };
   }
-  return result;
+  const mergedSupported = Array.from(
+    new Set([...base.supportedLocales, ...overlay.supportedLocales]),
+  );
+  return {
+    defaultLocale: overlay.defaultLocale ?? base.defaultLocale,
+    supportedLocales: mergedSupported,
+    rtlLocales: overlay.rtlLocales ?? base.rtlLocales,
+    currency: overlay.currency ?? base.currency,
+    alternativeCurrencies: Array.from(
+      new Set([...base.alternativeCurrencies, ...overlay.alternativeCurrencies]),
+    ),
+    timezone: overlay.timezone ?? base.timezone,
+    firstDayOfWeek: overlay.firstDayOfWeek ?? base.firstDayOfWeek,
+    weekendDays: overlay.weekendDays ?? base.weekendDays,
+    numberingSystem: overlay.numberingSystem ?? base.numberingSystem,
+    calendar: overlay.calendar ?? base.calendar,
+    translations,
+  };
 }
 
 function mergeNamedArray<T>(

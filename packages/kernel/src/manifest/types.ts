@@ -9,9 +9,9 @@ import {
   ReportDeclarationSchema,
 } from "@crossengin/reporting";
 import { SearchManifestSchema } from "@crossengin/search";
+import { TenantI18nConfigSchema } from "@crossengin/i18n";
 import {
   CustomWidgetDeclarationSchema,
-  I18nBundleSchema,
   ThemeOverlaySchema,
   ViewDeclarationSchema,
 } from "@crossengin/views";
@@ -71,7 +71,7 @@ export const ManifestSchema = z.object({
   views: z.record(z.string(), ViewDeclarationSchema).optional(),
   customWidgets: z.record(z.string(), CustomWidgetDeclarationSchema).optional(),
   theme: ThemeOverlaySchema.optional(),
-  i18n: I18nBundleSchema.optional(),
+  i18n: TenantI18nConfigSchema.optional(),
   search: SearchManifestSchema.optional(),
 });
 

@@ -155,6 +155,25 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  packages/i18n:
+    dependencies:
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/integrations:
     dependencies:
       zod:
@@ -201,6 +220,9 @@ importers:
       '@crossengin/files':
         specifier: workspace:*
         version: link:../files
+      '@crossengin/i18n':
+        specifier: workspace:*
+        version: link:../i18n
       '@crossengin/integrations':
         specifier: workspace:*
         version: link:../integrations
@@ -383,6 +405,9 @@ importers:
       '@crossengin/auth':
         specifier: workspace:*
         version: link:../auth
+      '@crossengin/i18n':
+        specifier: workspace:*
+        version: link:../i18n
       zod:
         specifier: ^3.23.0
         version: 3.25.76

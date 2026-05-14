@@ -229,12 +229,12 @@ describe("ManifestSchema — entities / traits / relations", () => {
         },
       },
       theme: { brandColor: "#1e6f3f", density: "comfortable" as const },
-      i18n: { en: { hello: "Hello" } },
+      i18n: { translations: { en: { hello: "Hello" } } },
     };
     const parsed = ManifestSchema.parse(m);
     expect(Object.keys(parsed.views ?? {})).toEqual(["prescriptionInbox"]);
     expect(parsed.theme?.brandColor).toBe("#1e6f3f");
-    expect(parsed.i18n?.en?.hello).toBe("Hello");
+    expect(parsed.i18n?.translations?.en?.hello).toBe("Hello");
   });
 
   it("parses a search section", () => {
