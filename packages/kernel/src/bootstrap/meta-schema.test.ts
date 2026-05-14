@@ -8,7 +8,9 @@ import {
   META_CDC_CHECKPOINTS,
   META_COMPLIANCE_ATTESTATIONS,
   META_DEAD_LETTER_JOBS,
+  META_DEPLOYMENTS,
   META_EVENTS,
+  META_FEATURE_FLAGS,
   META_FILES,
   META_INVOICES,
   META_JOB_COSTS,
@@ -29,8 +31,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 25 tables", () => {
-    expect(META_TABLES).toHaveLength(25);
+  it("contains 27 tables", () => {
+    expect(META_TABLES).toHaveLength(27);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -51,7 +53,9 @@ describe("META_TABLES", () => {
       "cdc_checkpoints",
       "compliance_attestations",
       "dead_letter_jobs",
+      "deployments",
       "events",
+      "feature_flags",
       "files",
       "integration_calls",
       "invoices",
@@ -330,6 +334,50 @@ describe("table column shapes", () => {
     );
     expect(tier?.check).toContain("'always_human'");
     expect(tier?.check).toContain("'agent_can_do_anything'");
+  });
+
+  it("META_FEATURE_FLAGS check-constrains kind to the four flag types", () => {
+    const kind = META_FEATURE_FLAGS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'boolean'");
+    expect(kind?.check).toContain("'string'");
+    expect(kind?.check).toContain("'number'");
+    expect(kind?.check).toContain("'json'");
+  });
+
+  it("META_FEATURE_FLAGS enforces unique flag keys with snake-case dotted check", () => {
+    const key = META_FEATURE_FLAGS.columns.find((c) => c.name === "key");
+    expect(key?.unique?.constraintName).toBe("feature_flags_key_key");
+    expect(key?.check).toContain("[a-z]");
+  });
+
+  it("META_DEPLOYMENTS check-constrains status to the six lifecycle states", () => {
+    const status = META_DEPLOYMENTS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'queued'");
+    expect(status?.check).toContain("'in_progress'");
+    expect(status?.check).toContain("'rolled_back'");
+    expect(status?.check).toContain("'cancelled'");
+  });
+
+  it("META_DEPLOYMENTS check-constrains region to the canonical eight", () => {
+    const region = META_DEPLOYMENTS.columns.find((c) => c.name === "region");
+    expect(region?.check).toContain("eu-central");
+    expect(region?.check).toContain("me-uae");
+    expect(region?.check).toContain("ap-south");
+  });
+
+  it("META_DEPLOYMENTS check-constrains target to the ten deploy targets", () => {
+    const target = META_DEPLOYMENTS.columns.find((c) => c.name === "target");
+    expect(target?.check).toContain("'vercel_edge'");
+    expect(target?.check).toContain("'fly_machine'");
+    expect(target?.check).toContain("'helm_release'");
+  });
+
+  it("META_DEPLOYMENTS triggered_by FK-references META_USERS with RESTRICT", () => {
+    const triggeredBy = META_DEPLOYMENTS.columns.find(
+      (c) => c.name === "triggered_by",
+    );
+    expect(triggeredBy?.references?.table).toBe("users");
+    expect(triggeredBy?.references?.onDelete).toBe("RESTRICT");
   });
 });
 

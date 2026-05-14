@@ -1238,6 +1238,143 @@ export const META_BILLING_EVENTS: TableDefinition = {
   },
 };
 
+export const META_FEATURE_FLAGS: TableDefinition = {
+  schema: "meta",
+  name: "feature_flags",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "key",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "feature_flags_key_key" },
+      check: "key ~ '^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check: "kind IN ('boolean', 'string', 'number', 'json')",
+    },
+    { name: "description", type: "TEXT", notNull: true },
+    { name: "default_value", type: "JSONB", notNull: true },
+    {
+      name: "environments",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
+    {
+      name: "rules",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "archived_at", type: "TIMESTAMPTZ" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_feature_flags_enabled", columns: ["enabled"] },
+    { name: "idx_feature_flags_archived_at", columns: ["archived_at"] },
+  ],
+};
+
+export const META_DEPLOYMENTS: TableDefinition = {
+  schema: "meta",
+  name: "deployments",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "app_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "app_kind IN ('web', 'marketing', 'docs_site', 'ops', 'cdc_shipper', 'hl7_listener', 'virus_scanner', 'gpu_inference', 'mobile_shell')",
+    },
+    { name: "app_id", type: "TEXT", notNull: true },
+    {
+      name: "environment",
+      type: "TEXT",
+      notNull: true,
+      check: "environment IN ('preview', 'staging', 'production', 'sandbox')",
+    },
+    {
+      name: "region",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    {
+      name: "target",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "target IN ('vercel_edge', 'vercel_node', 'fly_machine', 'fly_gpu', 'supabase_functions', 'cloudflare_worker', 'appstore_connect', 'play_console', 'helm_release', 'docs_pages')",
+    },
+    {
+      name: "strategy",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "strategy IN ('rolling', 'blue_green', 'canary', 'recreate')",
+    },
+    {
+      name: "version",
+      type: "TEXT",
+      notNull: true,
+      check: "version ~ '^v?[0-9]+\\.[0-9]+\\.[0-9]+'",
+    },
+    {
+      name: "commit_sha",
+      type: "CHAR(40)",
+      notNull: true,
+      check: "commit_sha ~ '^[0-9a-f]{40}$'",
+    },
+    { name: "artifact_ref", type: "TEXT", notNull: true },
+    {
+      name: "trigger",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger IN ('merge_to_main', 'manual_promotion', 'scheduled_release', 'rollback', 'live_update')",
+    },
+    { name: "triggered_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "queued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'in_progress', 'succeeded', 'failed', 'rolled_back', 'cancelled')",
+    },
+    { name: "previous_version", type: "TEXT" },
+    { name: "rolled_back_to_deployment_id", type: "UUID" },
+    { name: "health_check_passed", type: "BOOLEAN" },
+    { name: "sentry_release_id", type: "TEXT" },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_deployments_app_environment_queued",
+      columns: ["app_kind", "environment", "queued_at"],
+    },
+    { name: "idx_deployments_status", columns: ["status"] },
+    { name: "idx_deployments_commit_sha", columns: ["commit_sha"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -1264,4 +1401,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_TENANT_CREDITS,
   META_BILLING_EVENTS,
   META_TENANT_AI_SETTINGS,
+  META_FEATURE_FLAGS,
+  META_DEPLOYMENTS,
 ];
