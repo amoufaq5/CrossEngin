@@ -27,6 +27,10 @@ import {
   META_GDPR_DELETION_REQUESTS,
   META_IDEMPOTENCY_RECORDS,
   META_IMPORT_SOURCES,
+  META_INCIDENTS,
+  META_INCIDENT_COMMUNICATIONS,
+  META_INCIDENT_POSTMORTEMS,
+  META_INCIDENT_RUNBOOK_EXECUTIONS,
   META_INVOICES,
   META_JOB_COSTS,
   META_JOB_RUNS,
@@ -62,8 +66,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 58 tables", () => {
-    expect(META_TABLES).toHaveLength(58);
+  it("contains 62 tables", () => {
+    expect(META_TABLES).toHaveLength(62);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -103,6 +107,10 @@ describe("META_TABLES", () => {
       "gdpr_deletion_requests",
       "idempotency_records",
       "import_sources",
+      "incident_communications",
+      "incident_postmortems",
+      "incident_runbook_executions",
+      "incidents",
       "integration_calls",
       "invoices",
       "job_costs",
@@ -831,6 +839,53 @@ describe("table column shapes", () => {
     expect(kind?.check).toContain("'tenant_deletion'");
     expect(kind?.check).toContain("'data_subject_erasure'");
     expect(kind?.check).toContain("'abandoned_export_purge'");
+  });
+
+  it("META_INCIDENTS enforces unique incident_id with INC-YYYY-NNNN pattern", () => {
+    const iid = META_INCIDENTS.columns.find((c) => c.name === "incident_id");
+    expect(iid?.unique?.constraintName).toBe("incidents_incident_id_key");
+    expect(iid?.check).toContain("INC-");
+  });
+
+  it("META_INCIDENTS check-constrains severity to sev1..sev5", () => {
+    const sev = META_INCIDENTS.columns.find((c) => c.name === "severity");
+    expect(sev?.check).toContain("'sev1'");
+    expect(sev?.check).toContain("'sev5'");
+  });
+
+  it("META_INCIDENTS check-constrains status to the eight lifecycle states", () => {
+    const status = META_INCIDENTS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'declared'");
+    expect(status?.check).toContain("'mitigated'");
+    expect(status?.check).toContain("'postmortem_pending'");
+  });
+
+  it("META_INCIDENT_RUNBOOK_EXECUTIONS check-constrains status to six values", () => {
+    const status = META_INCIDENT_RUNBOOK_EXECUTIONS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'queued'");
+    expect(status?.check).toContain("'succeeded'");
+    expect(status?.check).toContain("'aborted'");
+  });
+
+  it("META_INCIDENT_POSTMORTEMS enforces PM-YYYY-NNNN pattern + four-status enum", () => {
+    const pid = META_INCIDENT_POSTMORTEMS.columns.find((c) => c.name === "postmortem_id");
+    expect(pid?.check).toContain("PM-");
+    const status = META_INCIDENT_POSTMORTEMS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'drafting'");
+    expect(status?.check).toContain("'amended'");
+  });
+
+  it("META_INCIDENT_COMMUNICATIONS check-constrains audience to seven values", () => {
+    const audience = META_INCIDENT_COMMUNICATIONS.columns.find((c) => c.name === "audience");
+    expect(audience?.check).toContain("'status_page_public'");
+    expect(audience?.check).toContain("'regulators'");
+    expect(audience?.check).toContain("'law_enforcement'");
+  });
+
+  it("META_INCIDENT_COMMUNICATIONS check-constrains kind to seven values incl breach_notification", () => {
+    const kind = META_INCIDENT_COMMUNICATIONS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'breach_notification'");
+    expect(kind?.check).toContain("'postmortem_published'");
   });
 });
 

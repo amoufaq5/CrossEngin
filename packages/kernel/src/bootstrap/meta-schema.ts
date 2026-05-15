@@ -3514,6 +3514,274 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
   },
 };
 
+export const META_INCIDENTS: TableDefinition = {
+  schema: "meta",
+  name: "incidents",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "incident_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "incidents_incident_id_key" },
+      check: "incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    { name: "title", type: "TEXT", notNull: true },
+    {
+      name: "severity",
+      type: "TEXT",
+      notNull: true,
+      check: "severity IN ('sev1', 'sev2', 'sev3', 'sev4', 'sev5')",
+    },
+    {
+      name: "category",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "category IN ('availability', 'performance', 'data_integrity', 'security', 'compliance', 'billing', 'dependency_failure', 'human_error', 'scheduled_change_impact')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('declared', 'triaged', 'mitigating', 'mitigated', 'resolved', 'postmortem_pending', 'closed', 'cancelled')",
+    },
+    { name: "affected_tenant_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "affected_regions", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "publicly_visible", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "declared_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "declared_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "acked_at", type: "TIMESTAMPTZ" },
+    { name: "mitigated_at", type: "TIMESTAMPTZ" },
+    { name: "resolved_at", type: "TIMESTAMPTZ" },
+    { name: "closed_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_reason", type: "TEXT" },
+    { name: "root_cause", type: "TEXT" },
+    { name: "customer_impact_summary", type: "TEXT" },
+    { name: "role_assignments", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "timeline", type: "JSONB", notNull: true },
+    { name: "runbook_execution_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "related_deployment_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "security_incident", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "breach_data_classes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "postmortem_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_incidents_severity", columns: ["severity"] },
+    { name: "idx_incidents_status", columns: ["status"] },
+    { name: "idx_incidents_declared_at", columns: ["declared_at"] },
+    { name: "idx_incidents_security", columns: ["security_incident"] },
+  ],
+};
+
+export const META_INCIDENT_RUNBOOK_EXECUTIONS: TableDefinition = {
+  schema: "meta",
+  name: "incident_runbook_executions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "incident_id",
+      type: "TEXT",
+      notNull: true,
+      check: "incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "runbook_id",
+      type: "TEXT",
+      notNull: true,
+      check: "runbook_id ~ '^RB-[0-9]{4}$'",
+    },
+    { name: "runbook_version", type: "TEXT", notNull: true },
+    { name: "invoked_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "invoked_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'running', 'paused', 'succeeded', 'failed', 'aborted')",
+    },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    { name: "steps", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "aborted_at", type: "TIMESTAMPTZ" },
+    { name: "aborted_reason", type: "TEXT" },
+    {
+      name: "page_oncall_triggered",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "incident_commander_approval_user_id", type: "UUID", references: USER_FK },
+    { name: "artifact_storage_uri", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_incident_runbook_executions_incident",
+      columns: ["incident_id", "invoked_at"],
+    },
+    { name: "idx_incident_runbook_executions_runbook", columns: ["runbook_id"] },
+    { name: "idx_incident_runbook_executions_status", columns: ["status"] },
+  ],
+};
+
+export const META_INCIDENT_POSTMORTEMS: TableDefinition = {
+  schema: "meta",
+  name: "incident_postmortems",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "postmortem_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "incident_postmortems_postmortem_id_key" },
+      check: "postmortem_id ~ '^PM-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "incident_id",
+      type: "TEXT",
+      notNull: true,
+      check: "incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    { name: "title", type: "TEXT", notNull: true },
+    {
+      name: "severity",
+      type: "TEXT",
+      notNull: true,
+      check: "severity IN ('sev1', 'sev2', 'sev3', 'sev4', 'sev5')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('drafting', 'review', 'published', 'amended')",
+    },
+    { name: "summary", type: "TEXT", notNull: true },
+    { name: "root_cause", type: "TEXT", notNull: true },
+    { name: "contributing_factors", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "detection", type: "TEXT", notNull: true },
+    { name: "response", type: "TEXT", notNull: true },
+    { name: "impact", type: "TEXT", notNull: true },
+    { name: "what_went_well", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "what_went_wrong", type: "JSONB", notNull: true },
+    { name: "lessons_learned", type: "JSONB", notNull: true },
+    { name: "action_items", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "timeline_summary", type: "TEXT", notNull: true },
+    { name: "author_user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "reviewers", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "published_at", type: "TIMESTAMPTZ" },
+    { name: "amended_at", type: "TIMESTAMPTZ" },
+    { name: "blameless_attested", type: "BOOLEAN", notNull: true, default: "true" },
+    {
+      name: "confidentiality_class",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "confidentiality_class IN ('public', 'customer_facing', 'internal_only', 'security_restricted')",
+    },
+    { name: "storage_uri", type: "TEXT" },
+    { name: "storage_sha256", type: "CHAR(64)" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_incident_postmortems_status", columns: ["status"] },
+    { name: "idx_incident_postmortems_incident", columns: ["incident_id"] },
+    { name: "idx_incident_postmortems_severity", columns: ["severity"] },
+  ],
+};
+
+export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
+  schema: "meta",
+  name: "incident_communications",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "incident_id",
+      type: "TEXT",
+      notNull: true,
+      check: "incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "audience",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "audience IN ('status_page_public', 'affected_tenants', 'all_customers', 'internal_eng', 'internal_exec', 'regulators', 'law_enforcement')",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('investigating', 'identified', 'monitoring', 'resolved', 'postmortem_published', 'scheduled_maintenance', 'breach_notification')",
+    },
+    {
+      name: "status_page_level",
+      type: "TEXT",
+      check:
+        "status_page_level IS NULL OR status_page_level IN ('operational', 'degraded', 'partial_outage', 'major_outage', 'under_maintenance')",
+    },
+    { name: "title", type: "TEXT", notNull: true },
+    { name: "body", type: "TEXT", notNull: true },
+    { name: "published_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "published_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "languages", type: "JSONB", notNull: true, default: "'[\"en\"]'::jsonb" },
+    {
+      name: "requires_legal_review",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "legal_reviewed_by", type: "UUID", references: USER_FK },
+    { name: "legal_reviewed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "requires_executive_approval",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "executive_approved_by", type: "UUID", references: USER_FK },
+    { name: "executive_approved_at", type: "TIMESTAMPTZ" },
+    { name: "delivery_channels", type: "JSONB", notNull: true },
+    {
+      name: "recipient_count",
+      type: "INTEGER",
+      notNull: true,
+      check: "recipient_count >= 0",
+    },
+    {
+      name: "bounces_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "bounces_count >= 0",
+    },
+    { name: "supersedes_id", type: "UUID" },
+    { name: "retracted_at", type: "TIMESTAMPTZ" },
+    { name: "retracted_reason", type: "TEXT" },
+    { name: "breach_notification_deadline_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_incident_communications_incident_published",
+      columns: ["incident_id", "published_at"],
+    },
+    { name: "idx_incident_communications_audience", columns: ["audience"] },
+    { name: "idx_incident_communications_kind", columns: ["kind"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -3573,4 +3841,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_GDPR_DELETION_REQUESTS,
   META_TENANT_DATA_EXPORTS,
   META_TENANT_TOMBSTONES,
+  META_INCIDENTS,
+  META_INCIDENT_RUNBOOK_EXECUTIONS,
+  META_INCIDENT_POSTMORTEMS,
+  META_INCIDENT_COMMUNICATIONS,
 ];
