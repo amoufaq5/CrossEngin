@@ -12,7 +12,10 @@ import {
   META_BILLING_EVENTS,
   META_BUDGET_BREACHES,
   META_CDC_CHECKPOINTS,
+  META_CHARGEBACK_STATEMENTS,
   META_COMPLIANCE_ATTESTATIONS,
+  META_COST_ATTRIBUTION,
+  META_COST_BUDGETS,
   META_DEAD_LETTER_JOBS,
   META_DEPLOYMENTS,
   META_DR_DRILLS,
@@ -46,6 +49,7 @@ import {
   META_TENANT_AI_SETTINGS,
   META_TENANT_CREDITS,
   META_TENANT_STORAGE_USAGE,
+  META_TENANT_UNIT_ECONOMICS,
   META_TENANTS,
   META_USER_TENANT_MEMBERSHIP,
   META_USERS,
@@ -54,8 +58,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 50 tables", () => {
-    expect(META_TABLES).toHaveLength(50);
+  it("contains 54 tables", () => {
+    expect(META_TABLES).toHaveLength(54);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -80,7 +84,10 @@ describe("META_TABLES", () => {
       "billing_events",
       "budget_breaches",
       "cdc_checkpoints",
+      "chargeback_statements",
       "compliance_attestations",
+      "cost_attribution",
+      "cost_budgets",
       "dead_letter_jobs",
       "deployments",
       "dr_drills",
@@ -114,6 +121,7 @@ describe("META_TABLES", () => {
       "tenant_ai_settings",
       "tenant_credits",
       "tenant_storage_usage",
+      "tenant_unit_economics",
       "tenants",
       "user_tenant_membership",
       "users",
@@ -710,6 +718,56 @@ describe("table column shapes", () => {
     expect(status?.check).toContain("'canary'");
     expect(status?.check).toContain("'production'");
     expect(status?.check).toContain("'retired'");
+  });
+
+  it("META_COST_ATTRIBUTION check-constrains category to the 17 cost categories", () => {
+    const cat = META_COST_ATTRIBUTION.columns.find((c) => c.name === "category");
+    expect(cat?.check).toContain("'compute_serverless'");
+    expect(cat?.check).toContain("'ai_inference'");
+    expect(cat?.check).toContain("'license_fees'");
+  });
+
+  it("META_COST_ATTRIBUTION check-constrains allocation_method to five methods", () => {
+    const am = META_COST_ATTRIBUTION.columns.find((c) => c.name === "allocation_method");
+    expect(am?.check).toContain("'direct'");
+    expect(am?.check).toContain("'proportional_usage'");
+    expect(am?.check).toContain("'estimated'");
+  });
+
+  it("META_COST_BUDGETS enforces (tenant_id, budget_id) uniqueness", () => {
+    expect(META_COST_BUDGETS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "budget_id",
+    ]);
+  });
+
+  it("META_COST_BUDGETS check-constrains period to five values", () => {
+    const period = META_COST_BUDGETS.columns.find((c) => c.name === "period");
+    expect(period?.check).toContain("'daily'");
+    expect(period?.check).toContain("'monthly'");
+    expect(period?.check).toContain("'annual'");
+  });
+
+  it("META_TENANT_UNIT_ECONOMICS check-constrains health to five states", () => {
+    const health = META_TENANT_UNIT_ECONOMICS.columns.find((c) => c.name === "health");
+    expect(health?.check).toContain("'healthy'");
+    expect(health?.check).toContain("'negative'");
+    expect(health?.check).toContain("'loss_leader_approved'");
+  });
+
+  it("META_TENANT_UNIT_ECONOMICS enforces (tenant_id, period_start, period_end) uniqueness", () => {
+    expect(META_TENANT_UNIT_ECONOMICS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "period_start",
+      "period_end",
+    ]);
+  });
+
+  it("META_CHARGEBACK_STATEMENTS check-constrains status to five states", () => {
+    const status = META_CHARGEBACK_STATEMENTS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'draft'");
+    expect(status?.check).toContain("'posted'");
+    expect(status?.check).toContain("'voided'");
   });
 });
 

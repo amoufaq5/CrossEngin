@@ -2885,6 +2885,321 @@ export const META_ML_MODELS: TableDefinition = {
   ],
 };
 
+export const META_COST_ATTRIBUTION: TableDefinition = {
+  schema: "meta",
+  name: "cost_attribution",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "period_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end", type: "TIMESTAMPTZ", notNull: true },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "app_id", type: "TEXT" },
+    {
+      name: "region",
+      type: "TEXT",
+      check:
+        "region IS NULL OR region IN ('eu-central', 'eu-west', 'us-east', 'us-west', 'me-uae', 'gcc-ksa', 'apac-sg', 'ap-south')",
+    },
+    {
+      name: "environment",
+      type: "TEXT",
+      check:
+        "environment IS NULL OR environment IN ('local', 'preview', 'staging', 'production', 'sandbox')",
+    },
+    {
+      name: "category",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "category IN ('compute_serverless', 'compute_long_running', 'compute_gpu', 'storage_hot', 'storage_archive', 'storage_cold', 'egress_bandwidth', 'ingress_bandwidth', 'database_compute', 'database_storage', 'ai_inference', 'ai_training', 'third_party_api', 'search_index', 'observability', 'support_hours', 'license_fees')",
+    },
+    {
+      name: "allocation_method",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "allocation_method IN ('direct', 'proportional_usage', 'even_split', 'flat_rate', 'estimated')",
+    },
+    {
+      name: "currency",
+      type: "CHAR(3)",
+      notNull: true,
+      check: "currency ~ '^[A-Z]{3}$'",
+    },
+    {
+      name: "cost_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "cost_cents >= 0",
+    },
+    {
+      name: "usage_quantity",
+      type: "NUMERIC(20, 6)",
+      notNull: true,
+      check: "usage_quantity >= 0",
+    },
+    { name: "usage_unit", type: "TEXT", notNull: true },
+    {
+      name: "provider_cost_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "provider_cost_cents >= 0",
+    },
+    { name: "provider_name", type: "TEXT", notNull: true },
+    { name: "source_ledger_ref", type: "TEXT", notNull: true },
+    { name: "is_estimated", type: "BOOLEAN", notNull: true, default: "false" },
+    {
+      name: "estimated_confidence",
+      type: "NUMERIC(4, 3)",
+      check: "estimated_confidence IS NULL OR estimated_confidence BETWEEN 0 AND 1",
+    },
+    {
+      name: "source_data_class",
+      type: "TEXT",
+      check:
+        "source_data_class IS NULL OR source_data_class IN ('public', 'internal', 'commercial_sensitive', 'pii', 'phi', 'regulated')",
+    },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_cost_attribution_tenant_period",
+      columns: ["tenant_id", "period_start"],
+    },
+    { name: "idx_cost_attribution_category", columns: ["category"] },
+    { name: "idx_cost_attribution_period", columns: ["period_start", "period_end"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "cost_attribution_tenant_isolation",
+        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_COST_BUDGETS: TableDefinition = {
+  schema: "meta",
+  name: "cost_budgets",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "budget_id",
+      type: "TEXT",
+      notNull: true,
+      check: "budget_id ~ '^[a-z][a-z0-9-]*$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      name: "period",
+      type: "TEXT",
+      notNull: true,
+      check: "period IN ('daily', 'weekly', 'monthly', 'quarterly', 'annual')",
+    },
+    {
+      name: "amount_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "amount_cents > 0",
+    },
+    {
+      name: "currency",
+      type: "CHAR(3)",
+      notNull: true,
+      check: "currency ~ '^[A-Z]{3}$'",
+    },
+    { name: "applies_to_categories", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "thresholds", type: "JSONB", notNull: true },
+    {
+      name: "auto_reset_at_period_end",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "true",
+    },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "cost_budgets_tenant_budget_id_key",
+      columns: ["tenant_id", "budget_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_cost_budgets_tenant_enabled", columns: ["tenant_id", "enabled"] },
+    { name: "idx_cost_budgets_period", columns: ["period"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "cost_budgets_tenant_isolation",
+        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_TENANT_UNIT_ECONOMICS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_unit_economics",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "period_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "currency",
+      type: "CHAR(3)",
+      notNull: true,
+      check: "currency ~ '^[A-Z]{3}$'",
+    },
+    {
+      name: "gross_revenue_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "gross_revenue_cents >= 0",
+    },
+    {
+      name: "refunds_cents",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "refunds_cents >= 0",
+    },
+    {
+      name: "credits_applied_cents",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "credits_applied_cents >= 0",
+    },
+    {
+      name: "net_revenue_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "net_revenue_cents >= 0",
+    },
+    {
+      name: "fixed_costs_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "fixed_costs_cents >= 0",
+    },
+    {
+      name: "variable_costs_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "variable_costs_cents >= 0",
+    },
+    {
+      name: "total_costs_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "total_costs_cents >= 0",
+    },
+    { name: "gross_margin_cents", type: "BIGINT", notNull: true },
+    {
+      name: "gross_margin_percent",
+      type: "NUMERIC(6, 2)",
+      notNull: true,
+      check: "gross_margin_percent BETWEEN -1000 AND 100",
+    },
+    { name: "contribution_margin_cents", type: "BIGINT", notNull: true },
+    {
+      name: "health",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "health IN ('healthy', 'watch', 'thin', 'negative', 'loss_leader_approved')",
+    },
+    { name: "loss_leader_approved_by", type: "UUID", references: USER_FK },
+    { name: "loss_leader_approved_reason", type: "TEXT" },
+    {
+      name: "ltv_estimate_cents",
+      type: "BIGINT",
+      check: "ltv_estimate_cents IS NULL OR ltv_estimate_cents >= 0",
+    },
+    {
+      name: "cac_estimate_cents",
+      type: "BIGINT",
+      check: "cac_estimate_cents IS NULL OR cac_estimate_cents >= 0",
+    },
+    { name: "computed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "tenant_unit_economics_period_key",
+      columns: ["tenant_id", "period_start", "period_end"],
+    },
+  ],
+  indexes: [
+    { name: "idx_tenant_unit_economics_health", columns: ["health"] },
+    {
+      name: "idx_tenant_unit_economics_tenant_period",
+      columns: ["tenant_id", "period_start"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_unit_economics_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_CHARGEBACK_STATEMENTS: TableDefinition = {
+  schema: "meta",
+  name: "chargeback_statements",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "period_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "currency",
+      type: "CHAR(3)",
+      notNull: true,
+      check: "currency ~ '^[A-Z]{3}$'",
+    },
+    {
+      name: "total_amount_cents",
+      type: "BIGINT",
+      notNull: true,
+      check: "total_amount_cents >= 0",
+    },
+    { name: "lines", type: "JSONB", notNull: true },
+    { name: "generated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "generated_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "approved_at", type: "TIMESTAMPTZ" },
+    { name: "approved_by", type: "UUID", references: USER_FK },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'pending_approval', 'approved', 'posted', 'voided')",
+    },
+    { name: "voided_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_chargeback_period", columns: ["period_start", "period_end"] },
+    { name: "idx_chargeback_status", columns: ["status"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -2936,4 +3251,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ML_TRAINING_RUNS,
   META_ML_EVALUATIONS,
   META_ML_MODELS,
+  META_COST_ATTRIBUTION,
+  META_COST_BUDGETS,
+  META_TENANT_UNIT_ECONOMICS,
+  META_CHARGEBACK_STATEMENTS,
 ];
