@@ -1,7 +1,10 @@
 # CrossEngin
 
-> **Status:** Phase 1 in progress. Monorepo code surface opening
-> per ADR-0024. ADRs 0001–0025 drafted. No production code yet.
+> **Status:** Phase 1 contract-types layer landed. **30 packages,
+> 66 meta-schema tables, ~3,000 tests**, all green, zero type
+> errors. ADRs 0001–0037 drafted (skipping 0032 and 0034, which
+> are reserved). Impure runtime (real provider clients, DB
+> execution, cryptography) is deferred to Phase 2+.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,
@@ -16,22 +19,42 @@ healthcare digitalization (**Heal**), education (**Educate**), NGOs
 (**Serve**), bespoke self-service apps (**Build**), and a
 white-label channel for system integrators (**Partner**).
 
-## Repository layout
+## Current state
 
-The unified monorepo (per ADR-0024) is shaped as follows. `docs/`
-exists today; the remaining directories arrive as package skeletons
-land in subsequent Phase 1 commits.
+Thirty packages cover the Phase 1 surface as zod schemas +
+deterministic helpers. Everything is pure contracts — no network,
+no DB execution, no real cryptography yet. Detailed orientation
+is in **[CLAUDE.md](CLAUDE.md)**.
+
+Quick map by concern:
+
+- **Substrate.** `kernel` (meta-schema + DDL emit + manifest
+  validate/diff), `types`, `config`, `testing`.
+- **Identity, security, data.** `auth`, `security`, `compliance`,
+  `residency`, `files`.
+- **AI surface.** `ai-providers`, `ai-architect`.
+- **Runtime + ops.** `jobs`, `observability`, `integrations`.
+- **Reporting / search / UI.** `reporting`, `search`, `views`,
+  `i18n`.
+- **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
+- **Delivery infrastructure.** `deploy`, `dr`, `edge`, `pwa`.
+- **Developer / partner.** `sdk`, `marketplace`, `migration`,
+  `ml-training`.
+- **Audit + compliance ops.** `incident-response`, `forensics`.
+
+## Repository layout
 
 ```
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/
+│   └── adr/          ADRs 0001-0037 (0032, 0034 reserved)
+├── packages/         30 workspace packages
 ├── apps/             user-facing applications          [pending]
-├── packages/         kernel + auth + workflow + AI + UI [pending]
-├── manifests/        declarative app packs              [pending]
-├── infra/            terraform + helm + docker          [pending]
-├── tools/            CLI tooling, codemods, eval suite  [pending]
+├── manifests/        declarative app packs             [pending]
+├── infra/            terraform + helm + docker         [pending]
+├── tools/            CLI tooling, codemods, eval suite [pending]
+├── CLAUDE.md         project state snapshot for AI assistants
 └── (root config)     pnpm-workspace.yaml, turbo.json, package.json
 ```
 
@@ -40,15 +63,20 @@ The full target layout is in
 
 ## How to read this repository
 
-Start with **[`docs/vision.md`](docs/vision.md)** — the north-star
-concept document.
-
-Then **[`docs/adr/index.md`](docs/adr/index.md)** — the running
-index of all 25 architecture decisions.
+If you're a human contributor, start with
+**[`docs/vision.md`](docs/vision.md)** — the north-star concept
+document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
+running index of 35 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at
 **[`docs/adr/0000-template.md`](docs/adr/0000-template.md)**.
+
+If you're an AI assistant resuming work on the codebase, start
+with **[CLAUDE.md](CLAUDE.md)** — concise state snapshot covering
+the package map, cross-cutting invariants, meta-schema discipline,
+build/test commands, and the workflow pattern used to extend the
+codebase.
 
 ## Sub-brand map
 
@@ -107,11 +135,27 @@ The monorepo uses:
 - **Vitest** for unit tests, **Playwright** for E2E, **MSW** for HTTP mocks
 - **Node** ≥ 20, **pnpm** ≥ 9
 
+Common commands:
+
+```bash
+pnpm install                                # install workspace
+pnpm -r build                               # build all packages
+pnpm -r test                                # test all packages (~30s)
+pnpm -r typecheck                           # type-check all packages
+pnpm --filter @crossengin/<name> test       # one package
+```
+
 ## Contributing
 
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** for ADR contribution
-guidance. Code contribution guidelines will land alongside the
-first package skeletons in subsequent Phase 1 commits.
+guidance. Code contribution guidelines for new packages: scaffold
+follows the existing layout (`package.json`, `tsconfig.json`,
+`vitest.config.ts`, `src/index.ts` re-exporting modules, matching
+`src/*.test.ts` files); add any `META_*` tables to
+`packages/kernel/src/bootstrap/meta-schema.ts`; aim for 15–30
+tests per module covering schema accept/reject + helpers + state
+transitions. [CLAUDE.md](CLAUDE.md) §Workflow has the full
+11-step shape.
 
 ## License
 

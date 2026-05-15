@@ -19,8 +19,8 @@ full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
-The README still says "No production code yet" — that wording is
-outdated; ignore it. Update only if asked.
+README has been refreshed to reflect this state. ADRs 0001-0037
+are drafted in `docs/adr/` (0032 and 0034 reserved).
 
 ## Architecture in 90 seconds
 
@@ -273,11 +273,12 @@ following are intentionally out of scope until contracts settle:
 - Apps under `apps/`. The directory is empty; UI lives in `views`
   as type definitions only.
 
-## Recent ADR backlog
+## ADRs
 
-ADRs 0001-0025 exist as markdown in `docs/adr/`. ADRs 0026-0037
-were referenced in commits but have not been written as markdown
-documents yet; they correspond to the marketplace, sdk, migration,
-ml-training, edge, dr, finops, forensics, tenant-lifecycle,
-incident-response, and (not yet built) multi-region active-active
-work. If asked to formalize them, follow `0000-template.md`.
+ADRs 0001-0037 exist as markdown in `docs/adr/`. Each shipped
+package has a corresponding ADR. **0032** (multi-region
+active-active) and **0034** (SDK client libraries) are reserved
+in the index — packages not yet built. When you ship a new
+package, write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.
