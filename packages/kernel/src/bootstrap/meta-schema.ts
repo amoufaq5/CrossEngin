@@ -2422,6 +2422,469 @@ export const META_ONBOARDING_RUNS: TableDefinition = {
   },
 };
 
+export const META_ML_CONSENT: TableDefinition = {
+  schema: "meta",
+  name: "ml_consent",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "purpose",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "purpose IN ('global_model_improvement', 'tenant_specific_finetune', 'shared_catalog_patterns', 'redteam_evaluation', 'benchmarking_only')",
+    },
+    { name: "allowed_data_classes", type: "JSONB", notNull: true },
+    { name: "redact_pii", type: "BOOLEAN", notNull: true, default: "true" },
+    {
+      name: "minimum_k_anonymity",
+      type: "INTEGER",
+      notNull: true,
+      default: "5",
+      check: "minimum_k_anonymity BETWEEN 1 AND 1000",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('active', 'withdrawn', 'expired', 'superseded')",
+    },
+    { name: "granted_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "granted_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "granted_by_role", type: "TEXT", notNull: true },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "withdrawn_at", type: "TIMESTAMPTZ" },
+    { name: "withdrawn_by", type: "UUID", references: USER_FK },
+    { name: "withdrawn_reason", type: "TEXT" },
+    { name: "superseding_consent_id", type: "UUID" },
+    { name: "terms_version", type: "TEXT", notNull: true },
+    {
+      name: "legal_basis",
+      type: "TEXT",
+      notNull: true,
+      check: "legal_basis IN ('consent', 'contract', 'legitimate_interest')",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_ml_consent_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_ml_consent_purpose", columns: ["purpose"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "ml_consent_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_ML_DATASETS: TableDefinition = {
+  schema: "meta",
+  name: "ml_datasets",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "dataset_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "ml_datasets_dataset_id_key" },
+      check: "dataset_id ~ '^ds_[a-z0-9-]{4,40}$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "purpose",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "purpose IN ('global_model_improvement', 'tenant_specific_finetune', 'shared_catalog_patterns', 'redteam_evaluation', 'benchmarking_only')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('drafting', 'frozen', 'deprecated', 'purged')",
+    },
+    { name: "source_consent_ids", type: "JSONB", notNull: true },
+    { name: "data_classes", type: "JSONB", notNull: true },
+    {
+      name: "redaction_strategy",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "redaction_strategy IN ('drop_row', 'mask_token', 'fake_replacement', 'differential_privacy')",
+    },
+    {
+      name: "minimum_k_anonymity",
+      type: "INTEGER",
+      notNull: true,
+      default: "5",
+      check: "minimum_k_anonymity BETWEEN 1 AND 1000",
+    },
+    { name: "splits", type: "JSONB", notNull: true },
+    {
+      name: "total_sample_count",
+      type: "BIGINT",
+      notNull: true,
+      check: "total_sample_count >= 1",
+    },
+    {
+      name: "total_size_bytes",
+      type: "BIGINT",
+      notNull: true,
+      check: "total_size_bytes >= 1",
+    },
+    { name: "storage_uri", type: "TEXT", notNull: true },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "frozen_at", type: "TIMESTAMPTZ" },
+    { name: "frozen_by", type: "UUID", references: USER_FK },
+    { name: "frozen_sha256", type: "CHAR(64)" },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "deprecated_reason", type: "TEXT" },
+    { name: "purged_at", type: "TIMESTAMPTZ" },
+    { name: "purged_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_ml_datasets_status", columns: ["status"] },
+    { name: "idx_ml_datasets_purpose", columns: ["purpose"] },
+  ],
+};
+
+export const META_ML_EVALSETS: TableDefinition = {
+  schema: "meta",
+  name: "ml_evalsets",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "evalset_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "ml_evalsets_evalset_id_key" },
+      check: "evalset_id ~ '^eval_[a-z0-9-]{4,40}$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "task_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "task_kind IN ('manifest_proposal', 'sql_generation', 'permission_decision', 'redaction_decision', 'summarization', 'intent_classification', 'safety_refusal', 'regression_replay')",
+    },
+    { name: "examples", type: "JSONB", notNull: true },
+    { name: "frozen_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "frozen_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "frozen_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "frozen_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "required_pass_rate",
+      type: "NUMERIC(4, 3)",
+      notNull: true,
+      check: "required_pass_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "blocks_production_promotion",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "version", type: "TEXT", notNull: true },
+    { name: "superseded_by", type: "TEXT" },
+    { name: "retired_at", type: "TIMESTAMPTZ" },
+    { name: "retired_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_ml_evalsets_task_kind", columns: ["task_kind"] },
+    { name: "idx_ml_evalsets_blocking", columns: ["blocks_production_promotion"] },
+  ],
+};
+
+export const META_ML_TRAINING_RUNS: TableDefinition = {
+  schema: "meta",
+  name: "ml_training_runs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "run_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "ml_training_runs_run_id_key" },
+      check: "run_id ~ '^train_[a-z0-9]{8,32}$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('supervised_finetune', 'preference_finetune', 'embedding_train', 'lora_adapter', 'qlora_adapter', 'full_pretrain_continue')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'cancelled')",
+    },
+    { name: "base_model_id", type: "TEXT", notNull: true },
+    {
+      name: "dataset_id",
+      type: "TEXT",
+      notNull: true,
+      check: "dataset_id ~ '^ds_[a-z0-9-]{4,40}$'",
+    },
+    {
+      name: "dataset_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "dataset_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "hyperparameters", type: "JSONB", notNull: true },
+    {
+      name: "estimated_cost_usd",
+      type: "NUMERIC(12, 6)",
+      notNull: true,
+      check: "estimated_cost_usd >= 0",
+    },
+    {
+      name: "actual_cost_usd",
+      type: "NUMERIC(12, 6)",
+      check: "actual_cost_usd IS NULL OR actual_cost_usd >= 0",
+    },
+    {
+      name: "estimated_duration_minutes",
+      type: "INTEGER",
+      notNull: true,
+      check: "estimated_duration_minutes > 0",
+    },
+    {
+      name: "actual_duration_minutes",
+      type: "INTEGER",
+      check: "actual_duration_minutes IS NULL OR actual_duration_minutes >= 0",
+    },
+    { name: "queued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "approved_by", type: "UUID", references: USER_FK },
+    { name: "cancelled_by", type: "UUID", references: USER_FK },
+    { name: "cancelled_reason", type: "TEXT" },
+    { name: "failure_reason", type: "TEXT" },
+    { name: "output_model_artifact_sha256", type: "CHAR(64)" },
+    { name: "output_model_storage_uri", type: "TEXT" },
+    { name: "train_loss_final", type: "NUMERIC(12, 6)" },
+    { name: "validation_loss_final", type: "NUMERIC(12, 6)" },
+    {
+      name: "tokens_consumed",
+      type: "BIGINT",
+      check: "tokens_consumed IS NULL OR tokens_consumed >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_ml_training_runs_status", columns: ["status"] },
+    { name: "idx_ml_training_runs_kind", columns: ["kind"] },
+    { name: "idx_ml_training_runs_queued", columns: ["queued_at"] },
+  ],
+};
+
+export const META_ML_EVALUATIONS: TableDefinition = {
+  schema: "meta",
+  name: "ml_evaluations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "eval_run_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "ml_evaluations_eval_run_id_key" },
+      check: "eval_run_id ~ '^evalrun_[a-z0-9]{8,32}$'",
+    },
+    {
+      name: "evalset_id",
+      type: "TEXT",
+      notNull: true,
+      check: "evalset_id ~ '^eval_[a-z0-9-]{4,40}$'",
+    },
+    {
+      name: "evalset_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "evalset_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "model_id", type: "TEXT", notNull: true },
+    { name: "model_version", type: "TEXT", notNull: true },
+    { name: "baseline_run_id", type: "TEXT" },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    {
+      name: "examples_evaluated",
+      type: "INTEGER",
+      notNull: true,
+      check: "examples_evaluated >= 0",
+    },
+    {
+      name: "examples_passed",
+      type: "INTEGER",
+      notNull: true,
+      check: "examples_passed >= 0",
+    },
+    {
+      name: "examples_failed",
+      type: "INTEGER",
+      notNull: true,
+      check: "examples_failed >= 0",
+    },
+    {
+      name: "examples_errored",
+      type: "INTEGER",
+      notNull: true,
+      check: "examples_errored >= 0",
+    },
+    {
+      name: "examples_skipped",
+      type: "INTEGER",
+      notNull: true,
+      check: "examples_skipped >= 0",
+    },
+    {
+      name: "pass_rate",
+      type: "NUMERIC(4, 3)",
+      notNull: true,
+      check: "pass_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "required_pass_rate",
+      type: "NUMERIC(4, 3)",
+      notNull: true,
+      check: "required_pass_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "verdict",
+      type: "TEXT",
+      notNull: true,
+      check: "verdict IN ('passed', 'failed', 'regressed', 'improved')",
+    },
+    {
+      name: "total_cost_usd",
+      type: "NUMERIC(12, 6)",
+      notNull: true,
+      check: "total_cost_usd >= 0",
+    },
+    {
+      name: "p50_latency_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "p50_latency_ms >= 0",
+    },
+    {
+      name: "p99_latency_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "p99_latency_ms >= 0",
+    },
+    { name: "results", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "blocks_promotion", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "triggered_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "trigger",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger IN ('manual', 'ci_pipeline', 'training_completed', 'scheduled_regression')",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_ml_evaluations_model", columns: ["model_id", "model_version"] },
+    { name: "idx_ml_evaluations_evalset", columns: ["evalset_id"] },
+    { name: "idx_ml_evaluations_verdict", columns: ["verdict"] },
+  ],
+};
+
+export const META_ML_MODELS: TableDefinition = {
+  schema: "meta",
+  name: "ml_models",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "model_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "ml_models_model_id_key" },
+      check: "model_id ~ '^mdl_[a-z0-9-]{4,40}$'",
+    },
+    {
+      name: "family",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "family IN ('manifest_proposer', 'sql_codegen', 'permission_classifier', 'redaction_classifier', 'summarizer', 'embeddings', 'safety_filter', 'intent_classifier')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "version", type: "TEXT", notNull: true },
+    { name: "base_model_id", type: "TEXT", notNull: true },
+    { name: "training_run_id", type: "TEXT" },
+    {
+      name: "artifact_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "artifact_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "artifact_storage_uri", type: "TEXT", notNull: true },
+    {
+      name: "size_bytes",
+      type: "BIGINT",
+      notNull: true,
+      check: "size_bytes >= 1",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'evaluating', 'approved', 'shadow', 'canary', 'production', 'deprecated', 'retired')",
+    },
+    { name: "card", type: "JSONB", notNull: true },
+    { name: "blocking_eval_run_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "canary_traffic_percent",
+      type: "INTEGER",
+      check: "canary_traffic_percent IS NULL OR canary_traffic_percent BETWEEN 0 AND 100",
+    },
+    { name: "promoted_to_production_at", type: "TIMESTAMPTZ" },
+    { name: "promoted_to_production_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "deprecated_reason", type: "TEXT" },
+    { name: "superseded_by", type: "TEXT" },
+    { name: "retired_at", type: "TIMESTAMPTZ" },
+    { name: "retired_reason", type: "TEXT" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "ml_models_family_version_key", columns: ["family", "version"] },
+  ],
+  indexes: [
+    { name: "idx_ml_models_family_status", columns: ["family", "status"] },
+    { name: "idx_ml_models_status", columns: ["status"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -2467,4 +2930,10 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_BACKFILL_JOBS,
   META_BACKFILL_LEDGER,
   META_ONBOARDING_RUNS,
+  META_ML_CONSENT,
+  META_ML_DATASETS,
+  META_ML_EVALSETS,
+  META_ML_TRAINING_RUNS,
+  META_ML_EVALUATIONS,
+  META_ML_MODELS,
 ];

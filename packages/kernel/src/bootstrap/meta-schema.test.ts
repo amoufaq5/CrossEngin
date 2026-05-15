@@ -27,6 +27,12 @@ import {
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_MANIFESTS,
+  META_ML_CONSENT,
+  META_ML_DATASETS,
+  META_ML_EVALSETS,
+  META_ML_EVALUATIONS,
+  META_ML_MODELS,
+  META_ML_TRAINING_RUNS,
   META_ONBOARDING_RUNS,
   META_PACK_INSTALLATIONS,
   META_PACK_REVIEWS,
@@ -48,8 +54,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 44 tables", () => {
-    expect(META_TABLES).toHaveLength(44);
+  it("contains 50 tables", () => {
+    expect(META_TABLES).toHaveLength(50);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -90,6 +96,12 @@ describe("META_TABLES", () => {
       "job_costs",
       "job_runs",
       "manifests",
+      "ml_consent",
+      "ml_datasets",
+      "ml_evalsets",
+      "ml_evaluations",
+      "ml_models",
+      "ml_training_runs",
       "onboarding_runs",
       "pack_installations",
       "pack_reviews",
@@ -634,6 +646,70 @@ describe("table column shapes", () => {
     expect(path?.check).toContain("'bring_my_data'");
     expect(path?.check).toContain("'vertical_template'");
     expect(path?.check).toContain("'blank_workspace'");
+  });
+
+  it("META_ML_CONSENT check-constrains purpose to the five training purposes", () => {
+    const purpose = META_ML_CONSENT.columns.find((c) => c.name === "purpose");
+    expect(purpose?.check).toContain("'global_model_improvement'");
+    expect(purpose?.check).toContain("'tenant_specific_finetune'");
+    expect(purpose?.check).toContain("'redteam_evaluation'");
+  });
+
+  it("META_ML_CONSENT check-constrains legal_basis to three options", () => {
+    const lb = META_ML_CONSENT.columns.find((c) => c.name === "legal_basis");
+    expect(lb?.check).toContain("'consent'");
+    expect(lb?.check).toContain("'contract'");
+    expect(lb?.check).toContain("'legitimate_interest'");
+  });
+
+  it("META_ML_DATASETS check-constrains status to the four lifecycle states", () => {
+    const status = META_ML_DATASETS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'drafting'");
+    expect(status?.check).toContain("'frozen'");
+    expect(status?.check).toContain("'purged'");
+  });
+
+  it("META_ML_EVALSETS check-constrains task_kind to the eight task kinds", () => {
+    const tk = META_ML_EVALSETS.columns.find((c) => c.name === "task_kind");
+    expect(tk?.check).toContain("'manifest_proposal'");
+    expect(tk?.check).toContain("'safety_refusal'");
+    expect(tk?.check).toContain("'regression_replay'");
+  });
+
+  it("META_ML_TRAINING_RUNS check-constrains status to the six lifecycle states", () => {
+    const status = META_ML_TRAINING_RUNS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'queued'");
+    expect(status?.check).toContain("'preparing'");
+    expect(status?.check).toContain("'succeeded'");
+  });
+
+  it("META_ML_TRAINING_RUNS check-constrains kind to the six training kinds", () => {
+    const kind = META_ML_TRAINING_RUNS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'supervised_finetune'");
+    expect(kind?.check).toContain("'lora_adapter'");
+    expect(kind?.check).toContain("'full_pretrain_continue'");
+  });
+
+  it("META_ML_EVALUATIONS check-constrains verdict to four values", () => {
+    const v = META_ML_EVALUATIONS.columns.find((c) => c.name === "verdict");
+    expect(v?.check).toContain("'passed'");
+    expect(v?.check).toContain("'regressed'");
+    expect(v?.check).toContain("'improved'");
+  });
+
+  it("META_ML_MODELS enforces (family, version) uniqueness", () => {
+    expect(META_ML_MODELS.uniqueConstraints?.[0]?.columns).toEqual([
+      "family",
+      "version",
+    ]);
+  });
+
+  it("META_ML_MODELS check-constrains status to the eight lifecycle states", () => {
+    const status = META_ML_MODELS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'draft'");
+    expect(status?.check).toContain("'canary'");
+    expect(status?.check).toContain("'production'");
+    expect(status?.check).toContain("'retired'");
   });
 });
 
