@@ -1,10 +1,10 @@
 # CrossEngin
 
-> **Status:** Phase 1 contract-types layer landed. **30 packages,
-> 66 meta-schema tables, ~3,000 tests**, all green, zero type
-> errors. ADRs 0001–0037 drafted (skipping 0032 and 0034, which
-> are reserved). Impure runtime (real provider clients, DB
-> execution, cryptography) is deferred to Phase 2+.
+> **Status:** Phase 1 contract-types layer landed. **31 packages,
+> 69 meta-schema tables, ~3,200 tests**, all green, zero type
+> errors. ADRs 0001–0037 drafted (0034 still reserved). Impure
+> runtime (real provider clients, DB execution, cryptography)
+> is deferred to Phase 2+.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,

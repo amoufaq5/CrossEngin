@@ -34,6 +34,7 @@
 | [0029](0029-ml-training-and-feedback.md) | ML training and feedback | 3 | Proposed | 2026-05-15 |
 | [0030](0030-edge-and-latency-slo.md) | Edge and latency SLO | 2 | Proposed | 2026-05-15 |
 | [0031](0031-disaster-recovery.md) | Disaster recovery | 2 | Proposed | 2026-05-15 |
+| [0032](0032-multi-region-active-active.md) | Multi-region active-active | 3 | Proposed | 2026-05-15 |
 | [0033](0033-cost-attribution-and-finops.md) | Cost attribution and FinOps | 3 | Proposed | 2026-05-15 |
 | [0035](0035-audit-and-forensics.md) | Audit and forensics | 3 | Proposed | 2026-05-15 |
 | [0036](0036-tenant-lifecycle.md) | Tenant lifecycle | 2 | Proposed | 2026-05-15 |
@@ -43,7 +44,6 @@
 
 | # | Title (provisional) | Note |
 |---|---|---|
-| 0032 | Multi-region active-active | Reserved for future ADR; package not yet built. |
 | 0034 | SDK client libraries (TS / Python / Go) | Reserved for future ADR; package not yet built. |
 
 ## Tiers
@@ -52,7 +52,7 @@ ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024.
 - **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0036, 0037.
-- **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, and forensics work. ADRs 0019, 0021, 0022, 0026, 0029, 0033, 0035.
+- **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
 
@@ -76,3 +76,4 @@ The 25 + 10 ADRs are written in 9 review-sized batches across multiple sessions:
 | 7 | 0016 + 0017 + 0020 + 0023 + 0025 | 12,200 | Drafted |
 | 8 | 0019 + 0021 + 0022 | 7,400 | Drafted |
 | 9 | 0026 + 0027 + 0028 + 0029 + 0030 + 0031 + 0033 + 0035 + 0036 + 0037 | 18,000 | Drafted (backfilled from shipped packages) |
+| 10 | 0032 | 2,000 | Drafted alongside `@crossengin/active-active` package |

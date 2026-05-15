@@ -13,14 +13,14 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 1 contract-types layer: **30 packages, 66 meta-schema
-tables, 3000+ tests**, all green, no type errors. Nearly the
+Phase 1 contract-types layer: **31 packages, 69 meta-schema
+tables, 3187 tests**, all green, no type errors. Nearly the
 full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
 README has been refreshed to reflect this state. ADRs 0001-0037
-are drafted in `docs/adr/` (0032 and 0034 reserved).
+are drafted in `docs/adr/` (only 0034 still reserved).
 
 ## Architecture in 90 seconds
 
@@ -113,6 +113,10 @@ re-exporting everything.
 - **`edge`** — region routing, latency budgets per route,
   autoscaling policies, edge cache, throttling, region
   affinity.
+- **`active-active`** — multi-region active-active topology, 7
+  consistency levels, vector clocks, 6 CRDT kinds (G/PN counters,
+  OR-set, LWW register/map, MV register), conflict detection +
+  resolution, split-brain lifecycle.
 - **`pwa`** — PWA manifest, service worker, IndexedDB outbox,
   sync, push notifications (PHI-safe stubs), Capacitor wrapper.
 

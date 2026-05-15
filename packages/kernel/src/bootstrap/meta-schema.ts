@@ -4080,6 +4080,174 @@ export const META_EDISCOVERY_REQUESTS: TableDefinition = {
   ],
 };
 
+export const META_AA_TOPOLOGY: TableDefinition = {
+  schema: "meta",
+  name: "aa_topology",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "topology_id", type: "TEXT", notNull: true, unique: { constraintName: "aa_topology_topology_id_key" } },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('single_primary', 'active_passive', 'active_active', 'multi_master_partitioned')",
+    },
+    {
+      name: "partition_strategy",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "partition_strategy IN ('tenant_hash', 'tenant_residency', 'entity_class', 'row_hash', 'geographic')",
+    },
+    { name: "participations", type: "JSONB", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    { name: "activated_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "activated_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "superseded_at", type: "TIMESTAMPTZ" },
+    { name: "superseded_by", type: "UUID", references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_aa_topology_kind", columns: ["kind"] },
+    { name: "idx_aa_topology_activated_at", columns: ["activated_at"] },
+  ],
+};
+
+export const META_AA_CONFLICTS: TableDefinition = {
+  schema: "meta",
+  name: "aa_conflicts",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "conflict_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "aa_conflicts_conflict_id_key" },
+      check: "conflict_id ~ '^CFL-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "entity_class", type: "TEXT", notNull: true },
+    { name: "entity_id", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('concurrent_write', 'delete_update_race', 'constraint_violation_after_merge', 'ordering_ambiguity', 'schema_drift', 'tenant_residency_violation')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('detected', 'auto_resolving', 'awaiting_review', 'resolved', 'escalated')",
+    },
+    { name: "detected_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "conflicting_writes", type: "JSONB", notNull: true },
+    {
+      name: "chosen_strategy",
+      type: "TEXT",
+      check:
+        "chosen_strategy IS NULL OR chosen_strategy IN ('last_writer_wins', 'first_writer_wins', 'vector_clock_merge', 'crdt_merge', 'application_merge', 'manual_review', 'rollback')",
+    },
+    { name: "chosen_strategy_at", type: "TIMESTAMPTZ" },
+    { name: "chosen_strategy_by", type: "UUID", references: USER_FK },
+    { name: "resolved_at", type: "TIMESTAMPTZ" },
+    { name: "resolved_by", type: "UUID", references: USER_FK },
+    {
+      name: "resolution_payload_sha256",
+      type: "CHAR(64)",
+      check: "resolution_payload_sha256 IS NULL OR resolution_payload_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "resolution_notes", type: "TEXT" },
+    { name: "requires_audit", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "audit_recorded_at", type: "TIMESTAMPTZ" },
+    { name: "escalated_to", type: "TEXT" },
+    { name: "escalation_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_aa_conflicts_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_aa_conflicts_entity", columns: ["entity_class", "entity_id"] },
+    { name: "idx_aa_conflicts_detected_at", columns: ["detected_at"] },
+    { name: "idx_aa_conflicts_kind", columns: ["kind"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "aa_conflicts_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_AA_SPLIT_BRAIN_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "aa_split_brain_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "event_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "aa_split_brain_events_event_id_key" },
+      check: "event_id ~ '^SB-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('network_partition', 'asymmetric_partition', 'membership_disagreement', 'clock_skew', 'replication_lag_critical')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('detected', 'isolating', 'healing', 'healed', 'permanent_partition')",
+    },
+    { name: "detected_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "detected_by", type: "TEXT", notNull: true },
+    { name: "detector_evidence", type: "TEXT", notNull: true },
+    { name: "partition_groups", type: "JSONB", notNull: true },
+    { name: "isolated_at", type: "TIMESTAMPTZ" },
+    { name: "healing_started_at", type: "TIMESTAMPTZ" },
+    { name: "healed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "healing_strategy",
+      type: "TEXT",
+      check:
+        "healing_strategy IS NULL OR healing_strategy IN ('auto_merge_concurrent', 'manual_evidence_review', 'rollback_minority', 'freeze_and_audit', 'prefer_quorum_side')",
+    },
+    { name: "conflict_record_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "permanent_partition_at", type: "TIMESTAMPTZ" },
+    { name: "permanent_partition_reason", type: "TEXT" },
+    {
+      name: "requires_incident_response",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "true",
+    },
+    { name: "incident_record_id", type: "TEXT" },
+    {
+      name: "duration_seconds",
+      type: "INTEGER",
+      check: "duration_seconds IS NULL OR duration_seconds >= 0",
+    },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_aa_split_brain_status", columns: ["status"] },
+    { name: "idx_aa_split_brain_detected_at", columns: ["detected_at"] },
+    { name: "idx_aa_split_brain_kind", columns: ["kind"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -4147,4 +4315,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_CHAIN_OF_CUSTODY,
   META_LEGAL_HOLDS,
   META_EDISCOVERY_REQUESTS,
+  META_AA_TOPOLOGY,
+  META_AA_CONFLICTS,
+  META_AA_SPLIT_BRAIN_EVENTS,
 ];

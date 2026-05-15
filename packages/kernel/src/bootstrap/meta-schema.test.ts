@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { emitMetaBootstrapSql } from "./index.js";
 import {
+  META_AA_CONFLICTS,
+  META_AA_SPLIT_BRAIN_EVENTS,
+  META_AA_TOPOLOGY,
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
   META_API_KEYS,
@@ -70,8 +73,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 66 tables", () => {
-    expect(META_TABLES).toHaveLength(66);
+  it("contains 69 tables", () => {
+    expect(META_TABLES).toHaveLength(69);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -85,6 +88,9 @@ describe("META_TABLES", () => {
 
   it("includes all expected tables", () => {
     expect(META_TABLES.map((t) => t.name).sort()).toEqual([
+      "aa_conflicts",
+      "aa_split_brain_events",
+      "aa_topology",
       "ai_conversations",
       "ai_provider_calls",
       "api_keys",
@@ -942,6 +948,48 @@ describe("table column shapes", () => {
     expect(fmt?.check).toContain("'native'");
     expect(fmt?.check).toContain("'pdf_with_load_file'");
     expect(fmt?.check).toContain("'tiff_with_load_file'");
+  });
+
+  it("META_AA_TOPOLOGY check-constrains kind to four topology kinds", () => {
+    const kind = META_AA_TOPOLOGY.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'single_primary'");
+    expect(kind?.check).toContain("'active_active'");
+    expect(kind?.check).toContain("'multi_master_partitioned'");
+  });
+
+  it("META_AA_TOPOLOGY check-constrains partition_strategy to five strategies", () => {
+    const ps = META_AA_TOPOLOGY.columns.find((c) => c.name === "partition_strategy");
+    expect(ps?.check).toContain("'tenant_hash'");
+    expect(ps?.check).toContain("'tenant_residency'");
+    expect(ps?.check).toContain("'geographic'");
+  });
+
+  it("META_AA_CONFLICTS check-constrains kind to six conflict kinds", () => {
+    const kind = META_AA_CONFLICTS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'concurrent_write'");
+    expect(kind?.check).toContain("'delete_update_race'");
+    expect(kind?.check).toContain("'tenant_residency_violation'");
+  });
+
+  it("META_AA_CONFLICTS check-constrains chosen_strategy to seven strategies", () => {
+    const cs = META_AA_CONFLICTS.columns.find((c) => c.name === "chosen_strategy");
+    expect(cs?.check).toContain("'last_writer_wins'");
+    expect(cs?.check).toContain("'vector_clock_merge'");
+    expect(cs?.check).toContain("'manual_review'");
+  });
+
+  it("META_AA_SPLIT_BRAIN_EVENTS check-constrains kind to five partition kinds", () => {
+    const kind = META_AA_SPLIT_BRAIN_EVENTS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'network_partition'");
+    expect(kind?.check).toContain("'asymmetric_partition'");
+    expect(kind?.check).toContain("'clock_skew'");
+  });
+
+  it("META_AA_SPLIT_BRAIN_EVENTS check-constrains status to five lifecycle states", () => {
+    const status = META_AA_SPLIT_BRAIN_EVENTS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'detected'");
+    expect(status?.check).toContain("'healing'");
+    expect(status?.check).toContain("'permanent_partition'");
   });
 });
 
