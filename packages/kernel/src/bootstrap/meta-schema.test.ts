@@ -12,6 +12,7 @@ import {
   META_BILLING_EVENTS,
   META_BUDGET_BREACHES,
   META_CDC_CHECKPOINTS,
+  META_CHAIN_OF_CUSTODY,
   META_CHARGEBACK_STATEMENTS,
   META_COMPLIANCE_ATTESTATIONS,
   META_COST_ATTRIBUTION,
@@ -19,9 +20,11 @@ import {
   META_DEAD_LETTER_JOBS,
   META_DEPLOYMENTS,
   META_DR_DRILLS,
+  META_EDISCOVERY_REQUESTS,
   META_EVENTS,
   META_EXTENSION_PACKS,
   META_FAILOVER_RECORDS,
+  META_FORENSIC_EVIDENCE,
   META_FEATURE_FLAGS,
   META_FILES,
   META_GDPR_DELETION_REQUESTS,
@@ -34,6 +37,7 @@ import {
   META_INVOICES,
   META_JOB_COSTS,
   META_JOB_RUNS,
+  META_LEGAL_HOLDS,
   META_MANIFESTS,
   META_ML_CONSENT,
   META_ML_DATASETS,
@@ -66,8 +70,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 62 tables", () => {
-    expect(META_TABLES).toHaveLength(62);
+  it("contains 66 tables", () => {
+    expect(META_TABLES).toHaveLength(66);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -92,6 +96,7 @@ describe("META_TABLES", () => {
       "billing_events",
       "budget_breaches",
       "cdc_checkpoints",
+      "chain_of_custody",
       "chargeback_statements",
       "compliance_attestations",
       "cost_attribution",
@@ -99,11 +104,13 @@ describe("META_TABLES", () => {
       "dead_letter_jobs",
       "deployments",
       "dr_drills",
+      "ediscovery_requests",
       "events",
       "extension_packs",
       "failover_records",
       "feature_flags",
       "files",
+      "forensic_evidence",
       "gdpr_deletion_requests",
       "idempotency_records",
       "import_sources",
@@ -115,6 +122,7 @@ describe("META_TABLES", () => {
       "invoices",
       "job_costs",
       "job_runs",
+      "legal_holds",
       "manifests",
       "ml_consent",
       "ml_datasets",
@@ -886,6 +894,54 @@ describe("table column shapes", () => {
     const kind = META_INCIDENT_COMMUNICATIONS.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'breach_notification'");
     expect(kind?.check).toContain("'postmortem_published'");
+  });
+
+  it("META_FORENSIC_EVIDENCE check-constrains kind to ten evidence kinds", () => {
+    const kind = META_FORENSIC_EVIDENCE.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'log_export'");
+    expect(kind?.check).toContain("'memory_dump'");
+    expect(kind?.check).toContain("'expert_report'");
+  });
+
+  it("META_FORENSIC_EVIDENCE check-constrains sensitivity to six levels incl attorney_client_privileged", () => {
+    const sens = META_FORENSIC_EVIDENCE.columns.find((c) => c.name === "sensitivity");
+    expect(sens?.check).toContain("'attorney_client_privileged'");
+    expect(sens?.check).toContain("'national_security'");
+  });
+
+  it("META_CHAIN_OF_CUSTODY check-constrains action to nine custody actions", () => {
+    const action = META_CHAIN_OF_CUSTODY.columns.find((c) => c.name === "action");
+    expect(action?.check).toContain("'collected'");
+    expect(action?.check).toContain("'transferred'");
+    expect(action?.check).toContain("'destroyed'");
+  });
+
+  it("META_LEGAL_HOLDS check-constrains status to five states", () => {
+    const status = META_LEGAL_HOLDS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'draft'");
+    expect(status?.check).toContain("'active'");
+    expect(status?.check).toContain("'released'");
+  });
+
+  it("META_LEGAL_HOLDS check-constrains kind to seven hold kinds", () => {
+    const kind = META_LEGAL_HOLDS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'litigation'");
+    expect(kind?.check).toContain("'subpoena'");
+    expect(kind?.check).toContain("'preservation_letter'");
+  });
+
+  it("META_EDISCOVERY_REQUESTS check-constrains status to eight lifecycle states", () => {
+    const status = META_EDISCOVERY_REQUESTS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'scoped'");
+    expect(status?.check).toContain("'producing'");
+    expect(status?.check).toContain("'objected'");
+  });
+
+  it("META_EDISCOVERY_REQUESTS check-constrains production_format to five formats", () => {
+    const fmt = META_EDISCOVERY_REQUESTS.columns.find((c) => c.name === "production_format");
+    expect(fmt?.check).toContain("'native'");
+    expect(fmt?.check).toContain("'pdf_with_load_file'");
+    expect(fmt?.check).toContain("'tiff_with_load_file'");
   });
 });
 

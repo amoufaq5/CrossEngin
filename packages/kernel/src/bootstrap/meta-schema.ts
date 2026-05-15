@@ -3782,6 +3782,304 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
   ],
 };
 
+export const META_FORENSIC_EVIDENCE: TableDefinition = {
+  schema: "meta",
+  name: "forensic_evidence",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "evidence_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "forensic_evidence_evidence_id_key" },
+      check: "evidence_id ~ '^EV-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    { name: "case_id", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('log_export', 'database_snapshot', 'file_artifact', 'network_capture', 'memory_dump', 'configuration_snapshot', 'screenshot', 'video_recording', 'witness_statement', 'expert_report')",
+    },
+    {
+      name: "sensitivity",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "sensitivity IN ('public', 'internal', 'confidential', 'phi_protected', 'attorney_client_privileged', 'national_security')",
+    },
+    {
+      name: "provenance",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "provenance IN ('automated_collection', 'human_collection', 'forensic_imaging', 'subpoena_response', 'third_party_provided')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    { name: "source_system", type: "TEXT", notNull: true },
+    { name: "collected_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "collected_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "size_bytes",
+      type: "BIGINT",
+      notNull: true,
+      check: "size_bytes >= 0",
+    },
+    {
+      name: "sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "storage_uri", type: "TEXT", notNull: true },
+    {
+      name: "encryption_key_fingerprint",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "encryption_key_fingerprint ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "sealed_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "sealed_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "content_redacted_sha256", type: "CHAR(64)" },
+    { name: "related_incident_id", type: "TEXT" },
+    { name: "related_tenant_id", type: "UUID" },
+    { name: "retention_until", type: "TIMESTAMPTZ", notNull: true },
+    { name: "legal_hold_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "destroyed_at", type: "TIMESTAMPTZ" },
+    { name: "destroyed_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_forensic_evidence_case", columns: ["case_id"] },
+    { name: "idx_forensic_evidence_kind", columns: ["kind"] },
+    { name: "idx_forensic_evidence_retention", columns: ["retention_until"] },
+    { name: "idx_forensic_evidence_related_incident", columns: ["related_incident_id"] },
+  ],
+};
+
+export const META_CHAIN_OF_CUSTODY: TableDefinition = {
+  schema: "meta",
+  name: "chain_of_custody",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "custody_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "chain_of_custody_custody_id_key" },
+      check: "custody_id ~ '^COC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "evidence_id",
+      type: "TEXT",
+      notNull: true,
+      check: "evidence_id ~ '^EV-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "action",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "action IN ('collected', 'transferred', 'accessed', 'analyzed', 'duplicated', 'redacted', 'exported_for_review', 'returned', 'destroyed')",
+    },
+    {
+      name: "purpose",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "purpose IN ('incident_investigation', 'regulatory_inquiry', 'litigation_preservation', 'internal_audit', 'security_research', 'law_enforcement_request')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "from_custodian_id", type: "UUID", references: USER_FK },
+    { name: "to_custodian_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "witness_id", type: "UUID", references: USER_FK },
+    {
+      name: "expected_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "expected_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "verified_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "verified_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "seal_number", type: "TEXT" },
+    { name: "location", type: "TEXT", notNull: true },
+    { name: "notes", type: "TEXT" },
+    { name: "signature", type: "TEXT", notNull: true },
+    {
+      name: "signing_key_fingerprint",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "signing_key_fingerprint ~ '^[0-9a-f]{64}$'",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_chain_of_custody_evidence_occurred",
+      columns: ["evidence_id", "occurred_at"],
+    },
+    { name: "idx_chain_of_custody_action", columns: ["action"] },
+  ],
+};
+
+export const META_LEGAL_HOLDS: TableDefinition = {
+  schema: "meta",
+  name: "legal_holds",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "hold_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "legal_holds_hold_id_key" },
+      check: "hold_id ~ '^LH-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('litigation', 'regulatory_inquiry', 'internal_investigation', 'tax_audit', 'merger_acquisition_diligence', 'subpoena', 'preservation_letter')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'active', 'suspended', 'released', 'expired')",
+    },
+    { name: "title", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    { name: "matter_reference", type: "TEXT", notNull: true },
+    { name: "legal_counsel_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "scope", type: "JSONB", notNull: true },
+    { name: "issued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "issued_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "activated_at", type: "TIMESTAMPTZ" },
+    { name: "suspended_at", type: "TIMESTAMPTZ" },
+    { name: "suspended_reason", type: "TEXT" },
+    { name: "released_at", type: "TIMESTAMPTZ" },
+    { name: "released_by", type: "UUID", references: USER_FK },
+    { name: "released_reason", type: "TEXT" },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    {
+      name: "blocks_automatic_deletion",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "true",
+    },
+    {
+      name: "affected_custodian_count",
+      type: "INTEGER",
+      notNull: true,
+      check: "affected_custodian_count >= 0",
+    },
+    {
+      name: "custodian_notifications_sent",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "custodian_acknowledgement_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "custodian_acknowledgement_count >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_legal_holds_status", columns: ["status"] },
+    { name: "idx_legal_holds_kind", columns: ["kind"] },
+    { name: "idx_legal_holds_expires_at", columns: ["expires_at"] },
+  ],
+};
+
+export const META_EDISCOVERY_REQUESTS: TableDefinition = {
+  schema: "meta",
+  name: "ediscovery_requests",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "ediscovery_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "ediscovery_requests_ediscovery_id_key" },
+      check: "ediscovery_id ~ '^ED-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    { name: "matter_reference", type: "TEXT", notNull: true },
+    { name: "requesting_party", type: "TEXT", notNull: true },
+    { name: "legal_counsel_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('requested', 'scoped', 'running', 'producing', 'delivered', 'objected', 'complete', 'withdrawn')",
+    },
+    { name: "related_legal_hold_ids", type: "JSONB", notNull: true },
+    { name: "scope", type: "JSONB", notNull: true },
+    {
+      name: "production_format",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "production_format IN ('native', 'pdf_with_load_file', 'tiff_with_load_file', 'csv', 'json')",
+    },
+    { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "scoped_at", type: "TIMESTAMPTZ" },
+    { name: "scoped_by", type: "UUID", references: USER_FK },
+    { name: "run_started_at", type: "TIMESTAMPTZ" },
+    { name: "delivered_at", type: "TIMESTAMPTZ" },
+    { name: "complete_at", type: "TIMESTAMPTZ" },
+    { name: "objection_reason", type: "TEXT" },
+    { name: "withdrawn_reason", type: "TEXT" },
+    {
+      name: "estimated_document_count",
+      type: "BIGINT",
+      check: "estimated_document_count IS NULL OR estimated_document_count >= 0",
+    },
+    {
+      name: "produced_document_count",
+      type: "BIGINT",
+      check: "produced_document_count IS NULL OR produced_document_count >= 0",
+    },
+    {
+      name: "produced_size_bytes",
+      type: "BIGINT",
+      check: "produced_size_bytes IS NULL OR produced_size_bytes >= 0",
+    },
+    {
+      name: "production_sha256",
+      type: "CHAR(64)",
+      check: "production_sha256 IS NULL OR production_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "production_storage_uri", type: "TEXT" },
+    {
+      name: "privileged_exclusion_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "privileged_exclusion_count >= 0",
+    },
+    { name: "deadline_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_ediscovery_status", columns: ["status"] },
+    { name: "idx_ediscovery_deadline", columns: ["deadline_at"] },
+    { name: "idx_ediscovery_matter", columns: ["matter_reference"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -3845,4 +4143,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_INCIDENT_RUNBOOK_EXECUTIONS,
   META_INCIDENT_POSTMORTEMS,
   META_INCIDENT_COMMUNICATIONS,
+  META_FORENSIC_EVIDENCE,
+  META_CHAIN_OF_CUSTODY,
+  META_LEGAL_HOLDS,
+  META_EDISCOVERY_REQUESTS,
 ];
