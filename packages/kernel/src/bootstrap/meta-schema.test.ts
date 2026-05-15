@@ -24,6 +24,7 @@ import {
   META_FAILOVER_RECORDS,
   META_FEATURE_FLAGS,
   META_FILES,
+  META_GDPR_DELETION_REQUESTS,
   META_IDEMPOTENCY_RECORDS,
   META_IMPORT_SOURCES,
   META_INVOICES,
@@ -48,7 +49,10 @@ import {
   META_TABLES,
   META_TENANT_AI_SETTINGS,
   META_TENANT_CREDITS,
+  META_TENANT_DATA_EXPORTS,
+  META_TENANT_LIFECYCLE_EVENTS,
   META_TENANT_STORAGE_USAGE,
+  META_TENANT_TOMBSTONES,
   META_TENANT_UNIT_ECONOMICS,
   META_TENANTS,
   META_USER_TENANT_MEMBERSHIP,
@@ -58,8 +62,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 54 tables", () => {
-    expect(META_TABLES).toHaveLength(54);
+  it("contains 58 tables", () => {
+    expect(META_TABLES).toHaveLength(58);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -96,6 +100,7 @@ describe("META_TABLES", () => {
       "failover_records",
       "feature_flags",
       "files",
+      "gdpr_deletion_requests",
       "idempotency_records",
       "import_sources",
       "integration_calls",
@@ -120,7 +125,10 @@ describe("META_TABLES", () => {
       "subscriptions",
       "tenant_ai_settings",
       "tenant_credits",
+      "tenant_data_exports",
+      "tenant_lifecycle_events",
       "tenant_storage_usage",
+      "tenant_tombstones",
       "tenant_unit_economics",
       "tenants",
       "user_tenant_membership",
@@ -768,6 +776,61 @@ describe("table column shapes", () => {
     expect(status?.check).toContain("'draft'");
     expect(status?.check).toContain("'posted'");
     expect(status?.check).toContain("'voided'");
+  });
+
+  it("META_TENANT_LIFECYCLE_EVENTS check-constrains action to seven lifecycle actions", () => {
+    const action = META_TENANT_LIFECYCLE_EVENTS.columns.find((c) => c.name === "action");
+    expect(action?.check).toContain("'activate'");
+    expect(action?.check).toContain("'execute_deletion'");
+    expect(action?.check).toContain("'cancel_deletion'");
+  });
+
+  it("META_TENANT_LIFECYCLE_EVENTS check-constrains from/to_state to seven lifecycle states", () => {
+    const fromState = META_TENANT_LIFECYCLE_EVENTS.columns.find((c) => c.name === "from_state");
+    expect(fromState?.check).toContain("'trial'");
+    expect(fromState?.check).toContain("'pending_deletion'");
+    expect(fromState?.check).toContain("'deleted'");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS check-constrains legal_basis to six bases", () => {
+    const lb = META_GDPR_DELETION_REQUESTS.columns.find((c) => c.name === "legal_basis");
+    expect(lb?.check).toContain("'article_17_right_to_erasure'");
+    expect(lb?.check).toContain("'consent_withdrawn'");
+    expect(lb?.check).toContain("'no_lawful_basis_remaining'");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS check-constrains status to six states", () => {
+    const status = META_GDPR_DELETION_REQUESTS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'submitted'");
+    expect(status?.check).toContain("'verified'");
+    expect(status?.check).toContain("'deferred'");
+  });
+
+  it("META_TENANT_DATA_EXPORTS check-constrains trigger to five sources", () => {
+    const trigger = META_TENANT_DATA_EXPORTS.columns.find((c) => c.name === "trigger");
+    expect(trigger?.check).toContain("'customer_request'");
+    expect(trigger?.check).toContain("'pre_deletion_archive'");
+    expect(trigger?.check).toContain("'regulatory_subpoena'");
+  });
+
+  it("META_TENANT_DATA_EXPORTS check-constrains format to five formats", () => {
+    const fmt = META_TENANT_DATA_EXPORTS.columns.find((c) => c.name === "format");
+    expect(fmt?.check).toContain("'json'");
+    expect(fmt?.check).toContain("'parquet'");
+    expect(fmt?.check).toContain("'sql_dump'");
+  });
+
+  it("META_TENANT_TOMBSTONES enforces unique tombstone_id with 'tomb_' prefix", () => {
+    const tid = META_TENANT_TOMBSTONES.columns.find((c) => c.name === "tombstone_id");
+    expect(tid?.unique?.constraintName).toBe("tenant_tombstones_tombstone_id_key");
+    expect(tid?.check).toContain("tomb_");
+  });
+
+  it("META_TENANT_TOMBSTONES check-constrains kind to five tombstone kinds", () => {
+    const kind = META_TENANT_TOMBSTONES.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'tenant_deletion'");
+    expect(kind?.check).toContain("'data_subject_erasure'");
+    expect(kind?.check).toContain("'abandoned_export_purge'");
   });
 });
 

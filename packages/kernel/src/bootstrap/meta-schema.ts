@@ -3200,6 +3200,320 @@ export const META_CHARGEBACK_STATEMENTS: TableDefinition = {
   ],
 };
 
+export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_lifecycle_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "action",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "action IN ('activate', 'suspend', 'restore', 'archive', 'schedule_deletion', 'cancel_deletion', 'execute_deletion')",
+    },
+    {
+      name: "from_state",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "from_state IN ('trial', 'active', 'past_due', 'suspended', 'archived', 'pending_deletion', 'deleted')",
+    },
+    {
+      name: "to_state",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "to_state IN ('trial', 'active', 'past_due', 'suspended', 'archived', 'pending_deletion', 'deleted')",
+    },
+    {
+      name: "trigger",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger IN ('customer_request', 'billing_failure', 'compliance_directive', 'abuse_report', 'security_incident', 'scheduled_policy', 'platform_admin', 'support_escalation')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "actor_user_id", type: "UUID", references: USER_FK },
+    { name: "actor_system_id", type: "TEXT" },
+    { name: "reason", type: "TEXT", notNull: true },
+    { name: "customer_notified_at", type: "TIMESTAMPTZ" },
+    {
+      name: "notification_channel",
+      type: "TEXT",
+      notNull: true,
+      default: "'email'",
+      check: "notification_channel IN ('email', 'in_app', 'phone', 'none')",
+    },
+    {
+      name: "requires_four_eyes_approval",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "approved_by_user_id", type: "UUID", references: USER_FK },
+    { name: "approved_at", type: "TIMESTAMPTZ" },
+    { name: "related_incident_id", type: "TEXT" },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_tenant_lifecycle_events_tenant_occurred",
+      columns: ["tenant_id", "occurred_at"],
+    },
+    { name: "idx_tenant_lifecycle_events_action", columns: ["action"] },
+    { name: "idx_tenant_lifecycle_events_trigger", columns: ["trigger"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_lifecycle_events_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
+  schema: "meta",
+  name: "gdpr_deletion_requests",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "subject_identifier", type: "TEXT", notNull: true },
+    {
+      name: "legal_basis",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "legal_basis IN ('article_17_right_to_erasure', 'article_21_objection_to_processing', 'data_subject_request', 'consent_withdrawn', 'contract_terminated', 'no_lawful_basis_remaining')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('submitted', 'verified', 'in_progress', 'completed', 'rejected', 'deferred')",
+    },
+    { name: "submitted_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "submitted_by", type: "TEXT", notNull: true },
+    { name: "deadline_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "verification_method",
+      type: "TEXT",
+      check:
+        "verification_method IS NULL OR verification_method IN ('email_link', 'phone_otp', 'in_app_re_authentication', 'government_id_check', 'in_person')",
+    },
+    { name: "verified_at", type: "TIMESTAMPTZ" },
+    { name: "verified_by", type: "UUID", references: USER_FK },
+    { name: "in_progress_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "completion_sha256",
+      type: "CHAR(64)",
+      check: "completion_sha256 IS NULL OR completion_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "rejected_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_reason", type: "TEXT" },
+    { name: "deferred_until", type: "TIMESTAMPTZ" },
+    { name: "deferral_reason", type: "TEXT" },
+    {
+      name: "retention_obligations",
+      type: "JSONB",
+      notNull: true,
+      default: "'[\"none\"]'::jsonb",
+    },
+    {
+      name: "retained_data_categories",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_gdpr_deletion_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    { name: "idx_gdpr_deletion_deadline", columns: ["deadline_at"] },
+    { name: "idx_gdpr_deletion_legal_basis", columns: ["legal_basis"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "gdpr_deletion_requests_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_TENANT_DATA_EXPORTS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_data_exports",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "trigger",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger IN ('customer_request', 'pre_deletion_archive', 'scheduled_backup_certified', 'regulatory_subpoena', 'tenant_migration')",
+    },
+    { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "format",
+      type: "TEXT",
+      notNull: true,
+      check: "format IN ('json', 'ndjson', 'csv', 'parquet', 'sql_dump')",
+    },
+    {
+      name: "includes_pii_categories",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "includes_phi_categories",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "encryption_key_fingerprint",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "encryption_key_fingerprint ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'running', 'ready_for_download', 'delivered', 'failed', 'expired')",
+    },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "ready_at", type: "TIMESTAMPTZ" },
+    { name: "delivered_at", type: "TIMESTAMPTZ" },
+    { name: "failed_at", type: "TIMESTAMPTZ" },
+    { name: "failure_reason", type: "TEXT" },
+    {
+      name: "size_bytes",
+      type: "BIGINT",
+      check: "size_bytes IS NULL OR size_bytes >= 0",
+    },
+    {
+      name: "row_count",
+      type: "BIGINT",
+      check: "row_count IS NULL OR row_count >= 0",
+    },
+    {
+      name: "sha256",
+      type: "CHAR(64)",
+      check: "sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "storage_uri", type: "TEXT" },
+    { name: "download_url_expires_at", type: "TIMESTAMPTZ" },
+    {
+      name: "download_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "download_count >= 0",
+    },
+    {
+      name: "max_downloads",
+      type: "INTEGER",
+      notNull: true,
+      default: "3",
+      check: "max_downloads BETWEEN 1 AND 10",
+    },
+    { name: "purged_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_tenant_data_exports_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_tenant_data_exports_expires", columns: ["download_url_expires_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_data_exports_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_TENANT_TOMBSTONES: TableDefinition = {
+  schema: "meta",
+  name: "tenant_tombstones",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "tombstone_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "tenant_tombstones_tombstone_id_key" },
+      check: "tombstone_id ~ '^tomb_[A-Za-z0-9_-]{12,40}$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('tenant_deletion', 'user_deletion', 'data_subject_erasure', 'scheduled_purge', 'abandoned_export_purge')",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true },
+    { name: "subject_identifier", type: "TEXT" },
+    { name: "related_deletion_request_id", type: "UUID" },
+    { name: "deleted_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "executed_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "approved_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "scope", type: "JSONB", notNull: true },
+    {
+      name: "content_manifest_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "content_manifest_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "proof_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "proof_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "anchors", type: "JSONB", notNull: true },
+    { name: "retained_reason", type: "TEXT" },
+    { name: "retained_data_reference", type: "TEXT" },
+    { name: "invalidation_of_prior_tombstone_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_tenant_tombstones_tenant", columns: ["tenant_id"] },
+    { name: "idx_tenant_tombstones_kind", columns: ["kind"] },
+    { name: "idx_tenant_tombstones_deleted_at", columns: ["deleted_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_tombstones_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -3255,4 +3569,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_COST_BUDGETS,
   META_TENANT_UNIT_ECONOMICS,
   META_CHARGEBACK_STATEMENTS,
+  META_TENANT_LIFECYCLE_EVENTS,
+  META_GDPR_DELETION_REQUESTS,
+  META_TENANT_DATA_EXPORTS,
+  META_TENANT_TOMBSTONES,
 ];
