@@ -13,13 +13,13 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 1 contract-types layer: **32 packages, 71 meta-schema
-tables, 3316 tests**, all green, no type errors. Nearly the
+Phase 1 contract-types layer: **33 packages, 76 meta-schema
+tables, 3,563 tests**, all green, no type errors. Nearly the
 full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
-README has been refreshed to reflect this state. ADRs 0001-0037
+README has been refreshed to reflect this state. ADRs 0001-0038
 are fully drafted in `docs/adr/` — no reserved gaps.
 
 ## Architecture in 90 seconds
@@ -57,6 +57,9 @@ re-exporting everything.
 ### Identity, security, data
 - **`auth`** — RBAC + ABAC + field-level permissions + write
   masks. RoleDefinition, RbacGrant, principals.
+- **`sso`** — federated identity: SAML 2.0 + OIDC providers,
+  SCIM 2.0 provisioning, claim mappings + JIT policies, session
+  lifecycle, login audit.
 - **`security`** — data classification, encryption keys, CSP,
   backup policy, incident classification, threat model,
   certifications.
@@ -182,7 +185,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 71 platform-level Postgres tables. Each new package
+catalog of 76 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).

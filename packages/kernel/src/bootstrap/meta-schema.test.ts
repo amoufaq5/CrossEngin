@@ -56,8 +56,13 @@ import {
   META_REGIONS,
   META_REPORT_RUNS,
   META_SCHEDULED_EXPORTS,
+  META_SCIM_CLIENTS,
+  META_SCIM_PROVISIONING,
   META_SDK_CLIENT_INSTALLATIONS,
   META_SDK_CLIENT_RELEASES,
+  META_SSO_LOGINS,
+  META_SSO_PROVIDERS,
+  META_SSO_SESSIONS,
   META_SUBSCRIPTIONS,
   META_TABLES,
   META_TENANT_AI_SETTINGS,
@@ -75,8 +80,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 71 tables", () => {
-    expect(META_TABLES).toHaveLength(71);
+  it("contains 76 tables", () => {
+    expect(META_TABLES).toHaveLength(76);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -146,8 +151,13 @@ describe("META_TABLES", () => {
       "regions",
       "report_runs",
       "scheduled_exports",
+      "scim_clients",
+      "scim_provisioning",
       "sdk_client_installations",
       "sdk_client_releases",
+      "sso_logins",
+      "sso_providers",
+      "sso_sessions",
       "subscriptions",
       "tenant_ai_settings",
       "tenant_credits",
@@ -1039,6 +1049,52 @@ describe("table column shapes", () => {
     expect(nag?.check).toContain("'none'");
     expect(nag?.check).toContain("'soft_warning'");
     expect(nag?.check).toContain("'forced_upgrade_required'");
+  });
+
+  it("META_SSO_PROVIDERS protocol enum has saml and oidc", () => {
+    const protocol = META_SSO_PROVIDERS.columns.find((c) => c.name === "protocol");
+    expect(protocol?.check).toContain("'saml'");
+    expect(protocol?.check).toContain("'oidc'");
+  });
+
+  it("META_SSO_PROVIDERS allows NULL tenant_id (platform-wide providers)", () => {
+    const tenantId = META_SSO_PROVIDERS.columns.find((c) => c.name === "tenant_id");
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(META_SSO_PROVIDERS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+  });
+
+  it("META_SSO_LOGINS check-constrains outcome to the 8 SSO outcomes", () => {
+    const outcome = META_SSO_LOGINS.columns.find((c) => c.name === "outcome");
+    expect(outcome?.check).toContain("'success'");
+    expect(outcome?.check).toContain("'mfa_required'");
+    expect(outcome?.check).toContain("'denied_by_policy'");
+  });
+
+  it("META_SSO_SESSIONS check-constrains status to four values", () => {
+    const status = META_SSO_SESSIONS.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'active'");
+    expect(status?.check).toContain("'expired'");
+    expect(status?.check).toContain("'revoked'");
+    expect(status?.check).toContain("'logged_out'");
+  });
+
+  it("META_SCIM_CLIENTS bearer_token_sha256 is CHAR(64) with hex check", () => {
+    const tok = META_SCIM_CLIENTS.columns.find(
+      (c) => c.name === "bearer_token_sha256",
+    );
+    expect(tok?.type).toBe("CHAR(64)");
+    expect(tok?.check).toContain("[0-9a-f]{64}");
+  });
+
+  it("META_SCIM_PROVISIONING resource_type enum has the 5 SCIM resource types", () => {
+    const rt = META_SCIM_PROVISIONING.columns.find(
+      (c) => c.name === "resource_type",
+    );
+    expect(rt?.check).toContain("'User'");
+    expect(rt?.check).toContain("'Group'");
+    expect(rt?.check).toContain("'EnterpriseUser'");
+    expect(rt?.check).toContain("'Role'");
+    expect(rt?.check).toContain("'Entitlement'");
   });
 });
 

@@ -40,13 +40,14 @@
 | [0035](0035-audit-and-forensics.md) | Audit and forensics | 3 | Proposed | 2026-05-15 |
 | [0036](0036-tenant-lifecycle.md) | Tenant lifecycle | 2 | Proposed | 2026-05-15 |
 | [0037](0037-incident-response.md) | Incident response | 2 | Proposed | 2026-05-15 |
+| [0038](0038-sso-and-federated-identity.md) | SSO and federated identity | 2 | Proposed | 2026-05-16 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -73,3 +74,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 9 | 0026 + 0027 + 0028 + 0029 + 0030 + 0031 + 0033 + 0035 + 0036 + 0037 | 18,000 | Drafted (backfilled from shipped packages) |
 | 10 | 0032 | 2,000 | Drafted alongside `@crossengin/active-active` package |
 | 11 | 0034 | 2,000 | Drafted alongside `@crossengin/sdk-clients` package |
+| 12 | 0038 | 2,000 | Drafted alongside `@crossengin/sso` package |

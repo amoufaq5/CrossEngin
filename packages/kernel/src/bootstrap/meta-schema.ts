@@ -4472,6 +4472,365 @@ export const META_SDK_CLIENT_INSTALLATIONS: TableDefinition = {
   },
 };
 
+export const META_SSO_PROVIDERS: TableDefinition = {
+  schema: "meta",
+  name: "sso_providers",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "provider_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "sso_providers_provider_id_key" },
+      check: "provider_id ~ '^sso_[a-z0-9]{8,32}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "vendor",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "vendor IN ('okta', 'auth0', 'azure_ad', 'google_workspace', 'jumpcloud', 'onelogin', 'ping_federate', 'adfs', 'keycloak', 'custom')",
+    },
+    {
+      name: "protocol",
+      type: "TEXT",
+      notNull: true,
+      check: "protocol IN ('saml', 'oidc')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('draft', 'testing', 'active', 'suspended', 'archived')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT" },
+    { name: "config", type: "JSONB", notNull: true },
+    { name: "claim_mappings", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "group_sync_rules", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "jit_policy", type: "JSONB", notNull: true },
+    {
+      name: "signing_certificate_sha256",
+      type: "CHAR(64)",
+      check:
+        "signing_certificate_sha256 IS NULL OR signing_certificate_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "client_secret_sha256",
+      type: "CHAR(64)",
+      check:
+        "client_secret_sha256 IS NULL OR client_secret_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "allow_weak_signatures",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_tested_at", type: "TIMESTAMPTZ" },
+    {
+      name: "last_test_outcome",
+      type: "TEXT",
+      notNull: true,
+      default: "'untested'",
+      check:
+        "last_test_outcome IN ('untested', 'metadata_ok', 'metadata_failed', 'round_trip_ok', 'round_trip_failed')",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_sso_providers_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_sso_providers_protocol", columns: ["protocol"] },
+    { name: "idx_sso_providers_vendor", columns: ["vendor"] },
+    { name: "idx_sso_providers_created_by", columns: ["created_by"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "sso_providers_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_SSO_LOGINS: TableDefinition = {
+  schema: "meta",
+  name: "sso_logins",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    { name: "request_id", type: "TEXT", notNull: true },
+    { name: "initiated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "latency_ms",
+      type: "INTEGER",
+      check: "latency_ms IS NULL OR latency_ms BETWEEN 0 AND 600000",
+    },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('success', 'mfa_required', 'mfa_failed', 'password_expired', 'account_locked', 'idp_unreachable', 'attribute_invalid', 'denied_by_policy')",
+    },
+    {
+      name: "initiation",
+      type: "TEXT",
+      notNull: true,
+      check: "initiation IN ('sp_initiated', 'idp_initiated', 'scim_invoked')",
+    },
+    { name: "federated_subject_id", type: "TEXT" },
+    { name: "requested_name_id_format", type: "TEXT" },
+    { name: "principal_id", type: "UUID", references: USER_FK },
+    {
+      name: "mfa_factor",
+      type: "TEXT",
+      check:
+        "mfa_factor IS NULL OR mfa_factor IN ('totp', 'webauthn', 'push_notification', 'sms', 'security_question')",
+    },
+    { name: "mfa_completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "failure_category",
+      type: "TEXT",
+      check:
+        "failure_category IS NULL OR failure_category IN ('network', 'credential', 'mfa', 'policy', 'attribute', 'account')",
+    },
+    { name: "failure_reason", type: "TEXT" },
+    { name: "ip_address", type: "INET", notNull: true },
+    { name: "user_agent", type: "TEXT", notNull: true },
+    {
+      name: "as_number",
+      type: "BIGINT",
+      check: "as_number IS NULL OR as_number BETWEEN 0 AND 4294967295",
+    },
+    {
+      name: "geo_country",
+      type: "CHAR(2)",
+      check: "geo_country IS NULL OR geo_country ~ '^[A-Z]{2}$'",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_sso_logins_tenant_initiated", columns: ["tenant_id", "initiated_at"] },
+    { name: "idx_sso_logins_outcome", columns: ["tenant_id", "outcome"] },
+    { name: "idx_sso_logins_provider", columns: ["provider_id"] },
+    { name: "idx_sso_logins_subject", columns: ["federated_subject_id"] },
+    { name: "idx_sso_logins_principal", columns: ["principal_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "sso_logins_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_SSO_SESSIONS: TableDefinition = {
+  schema: "meta",
+  name: "sso_sessions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "session_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "sso_sessions_session_id_key" },
+      check: "session_id ~ '^sess_[A-Za-z0-9_-]{12,64}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    { name: "federated_subject_id", type: "TEXT", notNull: true },
+    {
+      name: "binding",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "binding IN ('cookie', 'jwt_bearer', 'opaque_token', 'ldap_kerberos')",
+    },
+    { name: "idp_session_index", type: "TEXT" },
+    {
+      name: "idp_refresh_token_sha256",
+      type: "CHAR(64)",
+      check:
+        "idp_refresh_token_sha256 IS NULL OR idp_refresh_token_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_activity_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "absolute_expires_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('active', 'expired', 'revoked', 'logged_out')",
+    },
+    { name: "terminated_at", type: "TIMESTAMPTZ" },
+    {
+      name: "termination_kind",
+      type: "TEXT",
+      check:
+        "termination_kind IS NULL OR termination_kind IN ('sp_initiated', 'idp_initiated', 'idle_timeout', 'absolute_timeout', 'admin_revoke', 'policy_violation', 'mfa_step_up_failed')",
+    },
+    { name: "termination_reason", type: "TEXT" },
+    { name: "mfa_satisfied_at", type: "TIMESTAMPTZ" },
+    { name: "ip_address", type: "INET", notNull: true },
+    { name: "user_agent", type: "TEXT", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_sso_sessions_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_sso_sessions_user", columns: ["user_id"] },
+    { name: "idx_sso_sessions_provider", columns: ["provider_id"] },
+    { name: "idx_sso_sessions_expires", columns: ["expires_at"] },
+    { name: "idx_sso_sessions_subject", columns: ["federated_subject_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "sso_sessions_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_SCIM_CLIENTS: TableDefinition = {
+  schema: "meta",
+  name: "scim_clients",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "client_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "scim_clients_client_id_key" },
+      check: "client_id ~ '^scim_[A-Za-z0-9_-]{8,40}$'",
+    },
+    {
+      name: "bearer_token_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "bearer_token_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      default: "'active'",
+      check: "status IN ('active', 'disabled', 'revoked')",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "last_used_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_by", type: "UUID", references: USER_FK },
+    { name: "revoked_reason", type: "TEXT" },
+    { name: "allowed_ip_ranges", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_scim_clients_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_scim_clients_provider", columns: ["provider_id"] },
+    { name: "idx_scim_clients_created_by", columns: ["created_by"] },
+    { name: "idx_scim_clients_revoked_by", columns: ["revoked_by"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "scim_clients_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_SCIM_PROVISIONING: TableDefinition = {
+  schema: "meta",
+  name: "scim_provisioning",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "scim_client_id", type: "UUID", notNull: true, references: { schema: "meta", table: "scim_clients", column: "id", onDelete: "RESTRICT" } },
+    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    { name: "request_id", type: "TEXT", notNull: true },
+    {
+      name: "resource_type",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "resource_type IN ('User', 'Group', 'EnterpriseUser', 'Role', 'Entitlement')",
+    },
+    {
+      name: "operation",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "operation IN ('create', 'replace', 'patch', 'delete', 'get', 'list', 'search')",
+    },
+    { name: "target_resource_id", type: "TEXT" },
+    { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "completed_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "latency_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "latency_ms BETWEEN 0 AND 600000",
+    },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('success', 'created', 'conflict', 'invalid_filter', 'invalid_path', 'invalid_value', 'not_found', 'forbidden', 'rate_limited', 'schema_violation')",
+    },
+    {
+      name: "bytes_request",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "bytes_request >= 0",
+    },
+    {
+      name: "bytes_response",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "bytes_response >= 0",
+    },
+    { name: "error_message", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_scim_provisioning_tenant_requested",
+      columns: ["tenant_id", "requested_at"],
+    },
+    { name: "idx_scim_provisioning_outcome", columns: ["outcome"] },
+    { name: "idx_scim_provisioning_resource_type", columns: ["resource_type"] },
+    { name: "idx_scim_provisioning_client", columns: ["scim_client_id"] },
+    { name: "idx_scim_provisioning_provider", columns: ["provider_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "scim_provisioning_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -4544,4 +4903,9 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_AA_SPLIT_BRAIN_EVENTS,
   META_SDK_CLIENT_RELEASES,
   META_SDK_CLIENT_INSTALLATIONS,
+  META_SSO_PROVIDERS,
+  META_SSO_LOGINS,
+  META_SSO_SESSIONS,
+  META_SCIM_CLIENTS,
+  META_SCIM_PROVISIONING,
 ];
