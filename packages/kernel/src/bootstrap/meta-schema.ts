@@ -8737,6 +8737,158 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
   },
 };
 
+export const META_CRYPTO_KEYS: TableDefinition = {
+  schema: "meta",
+  name: "crypto_keys",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "key_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "crypto_keys_key_id_key" },
+      check:
+        "key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "algorithm",
+      type: "TEXT",
+      notNull: true,
+      check: "algorithm IN ('hmac-sha256', 'ed25519')",
+    },
+    {
+      name: "purpose",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "purpose IN ('pack_signing', 'webhook_signing', 'evidence_sealing', 'tombstone_anchoring')",
+    },
+    { name: "public_key_base64", type: "TEXT" },
+    {
+      name: "fingerprint_sha256",
+      type: "CHAR(64)",
+      check: "fingerprint_sha256 IS NULL OR fingerprint_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "key_version",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "key_version >= 1",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      default: "'active'",
+      check: "status IN ('active', 'rotating', 'revoked')",
+    },
+    {
+      name: "rotated_from_key_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "crypto_keys",
+        column: "id",
+        onDelete: "SET NULL",
+      },
+    },
+    { name: "created_by_user_id", type: "UUID", references: USER_FK },
+    {
+      name: "created_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+    },
+    { name: "rotated_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_crypto_keys_tenant", columns: ["tenant_id"] },
+    { name: "idx_crypto_keys_purpose", columns: ["purpose"] },
+    { name: "idx_crypto_keys_status", columns: ["status"] },
+    { name: "idx_crypto_keys_rotated_from", columns: ["rotated_from_key_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "crypto_keys_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_CRYPTO_AUDIT: TableDefinition = {
+  schema: "meta",
+  name: "crypto_audit",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "key_id",
+      type: "TEXT",
+      check:
+        "key_id IS NULL OR key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
+    },
+    {
+      name: "algorithm",
+      type: "TEXT",
+      check: "algorithm IS NULL OR algorithm IN ('hmac-sha256', 'ed25519')",
+    },
+    {
+      name: "purpose",
+      type: "TEXT",
+      check:
+        "purpose IS NULL OR purpose IN ('pack_signing', 'webhook_signing', 'evidence_sealing', 'tombstone_anchoring')",
+    },
+    {
+      name: "operation",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "operation IN ('sign', 'verify', 'hmac', 'verify_hmac', 'hash', 'create_key', 'rotate_key', 'destroy_key', 'get_public')",
+    },
+    { name: "principal_user_id", type: "UUID", references: USER_FK },
+    { name: "succeeded", type: "BOOLEAN", notNull: true },
+    { name: "error_message", type: "TEXT" },
+    {
+      name: "duration_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "duration_ms >= 0",
+    },
+    {
+      name: "performed_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_crypto_audit_tenant", columns: ["tenant_id"] },
+    { name: "idx_crypto_audit_key", columns: ["key_id"] },
+    { name: "idx_crypto_audit_operation", columns: ["operation"] },
+    { name: "idx_crypto_audit_performed_at", columns: ["performed_at"] },
+    { name: "idx_crypto_audit_principal", columns: ["principal_user_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "crypto_audit_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -8851,4 +9003,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_FEATURE_FLAG_KILL_SWITCHES,
   META_FEATURE_FLAG_EVALUATIONS,
   META_FEATURE_FLAG_CHANGES,
+  META_CRYPTO_KEYS,
+  META_CRYPTO_AUDIT,
 ];

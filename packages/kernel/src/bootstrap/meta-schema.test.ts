@@ -117,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 113 tables", () => {
-    expect(META_TABLES).toHaveLength(113);
+  it("contains 115 tables", () => {
+    expect(META_TABLES).toHaveLength(115);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -157,6 +157,8 @@ describe("META_TABLES", () => {
       "compliance_attestations",
       "cost_attribution",
       "cost_budgets",
+      "crypto_audit",
+      "crypto_keys",
       "data_subjects",
       "dead_letter_jobs",
       "deployments",

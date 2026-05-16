@@ -13,19 +13,19 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 in progress: **41 packages, 113 meta-schema tables,
-4,781 tests**, all green, no type errors. Phase 1 contract-types
-layer is complete; M1 added `@crossengin/kernel-pg`, the first
-impure runtime package — a Postgres-backed migration applier
-that turns `emitMetaBootstrapSql()` output into a live schema,
-with hash-based idempotency, advisory-lock concurrency safety,
-and pg_catalog-driven drift detection.
+Phase 2 M1 + M2 landed: **42 packages, 115 meta-schema tables,
+4,929 tests**, all green, no type errors. M1 added `@crossengin/
+kernel-pg` (Postgres-backed migration applier). M2 added
+`@crossengin/crypto` — real SHA-256 / BLAKE2b-512 / HMAC-SHA256 /
+Ed25519 implementations over `node:crypto`, an opaque `KeyHandle`
+contract, an `InMemoryKeyStore` with per-tenant isolation, and
+two new meta-schema tables (`crypto_keys`, `crypto_audit`).
 
-ADRs 0001-0047 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0048 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
-→ M8 SLO enforcement); ADR-0047 covers M1.
+→ M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2.
 
 ## Architecture in 90 seconds
 
@@ -65,6 +65,17 @@ re-exporting everything.
   (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
+- **`crypto`** — real cryptography over `node:crypto`. 7 modules:
+  algorithms (`HashAlgorithm`/`MacAlgorithm`/`SignatureAlgorithm`
+  + `KeyPurpose` allow-list), hashing (SHA-256, BLAKE2b-512, hash
+  chain step, content addressing, constant-time compare), hmac
+  (HMAC-SHA256 + webhook signing in `t=...,v1=...` format with
+  replay-window verify), signing (Ed25519 sign/verify/keypair via
+  Node JWK, public key fingerprint), key-handles (opaque
+  `KeyHandle` with tenant-scoped `KeyId` and `assertHandleTenant`
+  guard), key-store (`KeyStore` interface + `InMemoryKeyStore`
+  with rotate + revoke + per-tenant isolation), audit (auto-audit
+  for management ops, schema-validated `CryptoAuditRecord`).
 - **`types`** — primitive zod types shared across the workspace
   (UUIDs, ISO 8601, slugs, etc.).
 - **`config`** — shared TypeScript + lint config base.
@@ -245,7 +256,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 113 platform-level Postgres tables. Each new package
+catalog of 115 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
@@ -348,12 +359,21 @@ following are intentionally out of scope until contracts settle:
 Postgres, with `_meta_migrations` bookkeeping for idempotent
 re-runs and pg_catalog introspection for drift detection.
 
+**No longer deferred (as of M2):** real cryptography. The
+`crypto` package produces verifiable SHA-256 / BLAKE2b-512
+hashes, real HMAC-SHA256 / Ed25519 signatures over `node:crypto`,
+with an opaque `KeyHandle` contract that hides raw key material
+behind a `KeyStore` interface. Downstream wiring (marketplace
+pack signing, sdk webhook HMAC, forensics evidence sealing,
+tombstone anchoring) is an incremental M2.5 follow-up — the
+substrate is in place.
+
 ## ADRs
 
-ADRs 0001-0047 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0048 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
-milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`). When you
-ship a new package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
-0026-0037 batch.
+milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
+covers Phase 2 M2 (`crypto`). When you ship a new package, write
+the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037 batch.
