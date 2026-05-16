@@ -13,9 +13,9 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M3.6 + M4 + M4.5 +
-M5 landed: **46 packages + 1 app, 115 meta-schema tables, 5,394
-tests**, all green, no type errors. The four runtime pillars
+Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M3.6 + M3.7 + M4 +
+M4.5 + M5 landed: **46 packages + 1 app, 115 meta-schema tables,
+5,410 tests**, all green, no type errors. The four runtime pillars
 (DDL execution + cryptography + workflow execution + HTTP
 gateway) are in place; both impure runtime pillars (workflows +
 gateway) now have production-shape Postgres adapters; M5 added
@@ -108,7 +108,7 @@ re-exporting everything.
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
 - **`workflow-runtime-pg`** — Postgres-backed adapters for the
-  workflow runtime. 8 modules: id-mapping
+  workflow runtime. 9 modules: id-mapping
   (WorkflowInstanceIdResolver + WorkflowDefinitionIdResolver,
   cached wfi_*/wfd_* → UUID lookups against workflow_instances /
   workflow_definitions), event-log (PostgresEventLog implements
@@ -129,7 +129,13 @@ re-exporting everything.
   subsequent event), persistent-engine (buildPersistentEngine
   one-call factory: pass a PgConnection + definitions map, get
   back {engine, eventLog, stores} where the engine is wired to
-  the projecting log so all engine ops persist automatically).
+  the projecting log so all engine ops persist automatically),
+  replayer (WorkflowReplayer.resyncInstance re-projects from the
+  event log + upserts all projection tables to fix drift;
+  verifyInstance returns a per-field DriftReport comparing
+  expected projection vs stored rows; bulkResync iterates with
+  pagination + maxInstances cap for periodic CI / observability
+  guards).
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces. 4 modules: idempotency-store
   (INSERT … ON CONFLICT DO UPDATE on tenant+operation+key,
@@ -518,18 +524,23 @@ variable_updated / compensation_* / instance_completed/failed/
 cancelled/suspended/resumed), and replays state by left-folding
 the event stream.
 
-**No longer deferred (as of M3.5 + M3.6):** workflow persistence
-+ wiring. The `workflow-runtime-pg` package implements the
-`EventLog` interface against META_WORKFLOW_EVENTS via
-`@crossengin/kernel-pg`. Events survive process restarts;
-multiple worker processes can share an event log.
-PostgresInstanceStore / ActivityStore / SignalStore / TimerStore
-turn projected in-memory state into UPSERTs against the
-corresponding META_WORKFLOW_* tables. `ProjectingEventLog` wraps
-any `EventLog` and auto-runs the projection writers after each
-append — drop it into a `WorkflowEngine` and every transition,
-signal, timer, activity scheduling becomes a Postgres write
-without the consumer needing to know.
+**No longer deferred (as of M3.5 + M3.6 + M3.7):** workflow
+persistence + wiring + recovery. The `workflow-runtime-pg`
+package implements the `EventLog` interface against
+META_WORKFLOW_EVENTS via `@crossengin/kernel-pg`. Events survive
+process restarts; multiple worker processes can share an event
+log. PostgresInstanceStore / ActivityStore / SignalStore /
+TimerStore turn projected in-memory state into UPSERTs against
+the corresponding META_WORKFLOW_* tables. `ProjectingEventLog`
+wraps any `EventLog` and auto-runs the projection writers after
+each append — drop it into a `WorkflowEngine` and every
+transition, signal, timer, activity scheduling becomes a
+Postgres write without the consumer needing to know.
+`WorkflowReplayer.resyncInstance` re-projects from the canonical
+event log + re-upserts to fix drift after crashes or schema
+changes; `verifyInstance` returns a typed DriftReport for CI
+guards; `bulkResync` iterates with pagination so periodic sweeps
+stay bounded.
 `buildPersistentEngine(conn, definitions)` is the one-call
 factory that wires the whole thing together.
 
