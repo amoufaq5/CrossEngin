@@ -1,13 +1,16 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 landed. **42 packages, 115 meta-
-> schema tables, ~4,930 tests**, all green, zero type errors.
-> ADRs 0001–0048 fully drafted. M1 added `kernel-pg` (Postgres-
-> backed migration applier with hash-based idempotency + advisory-
-> lock concurrency + pg_catalog drift detection). M2 added
-> `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
-> opaque key handles + per-tenant key store). Real provider
-> clients remain deferred.
+> **Status:** Phase 2 M1 + M2 + M2.5 landed. **42 packages, 115
+> meta-schema tables, ~4,990 tests**, all green, zero type
+> errors. ADRs 0001–0048 fully drafted. M1 added `kernel-pg`
+> (Postgres-backed migration applier). M2 added `crypto` (real
+> SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 + per-tenant
+> key store). M2.5 wired the crypto package into `marketplace`
+> (pack signing), `sdk` (webhook HMAC), `forensics` (evidence
+> sealing + hash-chain integrity), and `tenant-lifecycle`
+> (tombstone proofs) — the previously-string-only signature
+> fields are now backed by real, verifiable values. Real
+> provider clients remain deferred.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,

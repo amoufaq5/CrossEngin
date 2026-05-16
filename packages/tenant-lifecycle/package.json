@@ -21,6 +21,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/crypto": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

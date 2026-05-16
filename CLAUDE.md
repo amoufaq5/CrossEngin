@@ -13,13 +13,19 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 landed: **42 packages, 115 meta-schema tables,
-4,929 tests**, all green, no type errors. M1 added `@crossengin/
-kernel-pg` (Postgres-backed migration applier). M2 added
-`@crossengin/crypto` — real SHA-256 / BLAKE2b-512 / HMAC-SHA256 /
-Ed25519 implementations over `node:crypto`, an opaque `KeyHandle`
-contract, an `InMemoryKeyStore` with per-tenant isolation, and
-two new meta-schema tables (`crypto_keys`, `crypto_audit`).
+Phase 2 M1 + M2 + M2.5 landed: **42 packages, 115 meta-schema
+tables, 4,989 tests**, all green, no type errors. M1 added
+`@crossengin/kernel-pg` (Postgres-backed migration applier). M2
+added `@crossengin/crypto` (real SHA-256 / BLAKE2b-512 /
+HMAC-SHA256 / Ed25519 over `node:crypto`, opaque `KeyHandle`,
+per-tenant `InMemoryKeyStore`, two new META_ tables). M2.5 wired
+the crypto package into four downstream packages: `marketplace`
+(`signPackManifest` + `verifyPackSignature`), `sdk`
+(`signWebhookDelivery` + `verifyWebhookDelivery` over the
+existing `t=...,v1=...` format), `forensics` (`buildChainEntry` +
+`sealEvidence` + verify counterparts), `tenant-lifecycle`
+(`computeContentManifestSha256` + `computeProofSha256` +
+`populateTombstoneHashes` + `verifyTombstoneHashes`).
 
 ADRs 0001-0048 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
@@ -363,10 +369,20 @@ re-runs and pg_catalog introspection for drift detection.
 `crypto` package produces verifiable SHA-256 / BLAKE2b-512
 hashes, real HMAC-SHA256 / Ed25519 signatures over `node:crypto`,
 with an opaque `KeyHandle` contract that hides raw key material
-behind a `KeyStore` interface. Downstream wiring (marketplace
-pack signing, sdk webhook HMAC, forensics evidence sealing,
-tombstone anchoring) is an incremental M2.5 follow-up — the
-substrate is in place.
+behind a `KeyStore` interface.
+
+**No longer deferred (as of M2.5):** downstream wiring. The
+crypto package is now called from four existing packages, so the
+previously-string-only signature fields are populated by real
+verifiable values: marketplace pack manifests carry real
+Ed25519 signatures with sha256 public key fingerprints; sdk
+webhook deliveries carry real HMAC-SHA256 signatures bound to
+timestamps for replay protection; forensics chain entries carry
+real hash chains rooted at GENESIS_HASH plus Ed25519 entry
+signatures, and evidence is sealed with real sha256 + Ed25519;
+tenant-lifecycle tombstones carry canonical-JSON-derived
+contentManifestSha256 + proofSha256 that round-trip via
+`verifyTombstoneHashes`.
 
 ## ADRs
 
