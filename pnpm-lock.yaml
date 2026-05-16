@@ -39,9 +39,6 @@ importers:
 
   packages/ai-architect:
     dependencies:
-      '@crossengin/auth':
-        specifier: workspace:*
-        version: link:../auth
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../kernel
@@ -612,9 +609,6 @@ importers:
 
   packages/sdk-clients:
     dependencies:
-      '@crossengin/sdk':
-        specifier: workspace:*
-        version: link:../sdk
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -729,9 +723,6 @@ importers:
 
   packages/views:
     dependencies:
-      '@crossengin/auth':
-        specifier: workspace:*
-        version: link:../auth
       '@crossengin/i18n':
         specifier: workspace:*
         version: link:../i18n
