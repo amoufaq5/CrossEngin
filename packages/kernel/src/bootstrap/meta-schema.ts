@@ -5398,6 +5398,748 @@ export const META_NOTIFICATION_DIGESTS: TableDefinition = {
   },
 };
 
+export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
+  schema: "meta",
+  name: "access_review_templates",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "template_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "access_review_templates_template_id_key" },
+      check: "template_id ~ '^art_[a-z0-9]{8,32}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "template_key",
+      type: "TEXT",
+      notNull: true,
+      check: "template_key ~ '^[a-z][a-z0-9_.-]*$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "version",
+      type: "TEXT",
+      notNull: true,
+      check: "version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'published', 'deprecated', 'retired')",
+    },
+    {
+      name: "framework",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "framework IN ('soc2_type2', 'iso27001', 'hipaa_security_rule', 'pci_dss_v4', 'gdpr_article_32', 'cfr_21_part_11', 'custom')",
+    },
+    {
+      name: "default_frequency",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "default_frequency IN ('one_time', 'monthly', 'quarterly', 'semi_annual', 'annual', 'sox_quarterly', 'post_incident', 'ad_hoc')",
+    },
+    { name: "default_scope", type: "JSONB", notNull: true },
+    { name: "default_reviewer_assignment", type: "JSONB", notNull: true },
+    {
+      name: "default_auto_revoke_policy",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "default_auto_revoke_policy IN ('auto_revoke_on_deadline', 'escalate_to_manager', 'default_keep', 'default_revoke')",
+    },
+    {
+      name: "default_deadline_days_from_start",
+      type: "INTEGER",
+      notNull: true,
+      check: "default_deadline_days_from_start BETWEEN 1 AND 180",
+    },
+    {
+      name: "default_grace_period_hours",
+      type: "INTEGER",
+      notNull: true,
+      check: "default_grace_period_hours BETWEEN 0 AND 720",
+    },
+    {
+      name: "default_remediation_days_from_completion",
+      type: "INTEGER",
+      check:
+        "default_remediation_days_from_completion IS NULL OR default_remediation_days_from_completion BETWEEN 0 AND 180",
+    },
+    { name: "documentation_url", type: "TEXT" },
+    { name: "published_at", type: "TIMESTAMPTZ" },
+    { name: "published_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "superseded_by_template_key", type: "TEXT" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "access_review_templates_tenant_key_version_key",
+      columns: ["tenant_id", "template_key", "version"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_access_review_templates_framework_status",
+      columns: ["framework", "status"],
+    },
+    {
+      name: "idx_access_review_templates_created_by",
+      columns: ["created_by"],
+    },
+    {
+      name: "idx_access_review_templates_published_by",
+      columns: ["published_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "access_review_templates_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_ACCESS_REVIEW_CAMPAIGNS: TableDefinition = {
+  schema: "meta",
+  name: "access_review_campaigns",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "campaign_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "access_review_campaigns_campaign_id_key" },
+      check: "campaign_id ~ '^arc_[a-z0-9]{8,32}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "frequency",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "frequency IN ('one_time', 'monthly', 'quarterly', 'semi_annual', 'annual', 'sox_quarterly', 'post_incident', 'ad_hoc')",
+    },
+    {
+      name: "framework",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "framework IN ('soc2_type2', 'iso27001', 'hipaa_security_rule', 'pci_dss_v4', 'gdpr_article_32', 'cfr_21_part_11', 'custom')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'scheduled', 'in_progress', 'in_remediation', 'completed', 'archived', 'cancelled')",
+    },
+    { name: "scope", type: "JSONB", notNull: true },
+    { name: "reviewer_assignment", type: "JSONB", notNull: true },
+    {
+      name: "auto_revoke_policy",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "auto_revoke_policy IN ('auto_revoke_on_deadline', 'escalate_to_manager', 'default_keep', 'default_revoke')",
+    },
+    { name: "related_incident_id", type: "TEXT" },
+    { name: "scheduled_start_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "deadline_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "grace_period_hours",
+      type: "INTEGER",
+      notNull: true,
+      default: "24",
+      check: "grace_period_hours BETWEEN 0 AND 720",
+    },
+    { name: "remediation_deadline_at", type: "TIMESTAMPTZ" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "archived_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_reason", type: "TEXT" },
+    {
+      name: "template_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "access_review_templates",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "total_items",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "total_items >= 0",
+    },
+    {
+      name: "decided_items",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "decided_items >= 0",
+    },
+    {
+      name: "auto_revoked_items",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "auto_revoked_items >= 0",
+    },
+    {
+      name: "exception_items",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "exception_items >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_access_review_campaigns_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_access_review_campaigns_framework",
+      columns: ["framework"],
+    },
+    {
+      name: "idx_access_review_campaigns_deadline",
+      columns: ["deadline_at"],
+    },
+    {
+      name: "idx_access_review_campaigns_created_by",
+      columns: ["created_by"],
+    },
+    {
+      name: "idx_access_review_campaigns_template",
+      columns: ["template_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "access_review_campaigns_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_ACCESS_REVIEW_ITEMS: TableDefinition = {
+  schema: "meta",
+  name: "access_review_items",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "item_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "access_review_items_item_id_key" },
+      check: "item_id ~ '^ari_[a-z0-9]{8,32}$'",
+    },
+    {
+      name: "campaign_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "access_review_campaigns",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "principal_id", type: "UUID", notNull: true },
+    {
+      name: "principal_type",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "principal_type IN ('user', 'service_account', 'ai_architect', 'system', 'external_partner')",
+    },
+    { name: "principal_label", type: "TEXT", notNull: true },
+    {
+      name: "grant_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "grant_kind IN ('role', 'permission', 'resource_access', 'tenant_membership', 'field_permission', 'api_key_scope', 'marketplace_pack_grant')",
+    },
+    { name: "grant_id", type: "TEXT", notNull: true },
+    { name: "grant_label", type: "TEXT", notNull: true },
+    { name: "grant_attributes", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "granted_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "granted_by", type: "UUID", references: USER_FK },
+    { name: "last_used_at", type: "TIMESTAMPTZ" },
+    {
+      name: "risk_level",
+      type: "TEXT",
+      notNull: true,
+      check: "risk_level IN ('low', 'medium', 'high', 'critical')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('pending', 'in_review', 'decided', 'escalated', 'auto_revoked', 'exception_pending', 'deferred_to_next_campaign', 'withdrawn')",
+    },
+    { name: "current_reviewer_user_id", type: "UUID", references: USER_FK },
+    {
+      name: "current_reviewer_kind",
+      type: "TEXT",
+      check:
+        "current_reviewer_kind IS NULL OR current_reviewer_kind IN ('human_user', 'ai_suggested_pending_human', 'system_automated')",
+    },
+    { name: "reviewer_assigned_at", type: "TIMESTAMPTZ" },
+    {
+      name: "reminder_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "reminder_count BETWEEN 0 AND 20",
+    },
+    { name: "last_reminder_at", type: "TIMESTAMPTZ" },
+    {
+      name: "escalation_level",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "escalation_level BETWEEN 0 AND 10",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "opened_for_review_at", type: "TIMESTAMPTZ" },
+    { name: "decided_at", type: "TIMESTAMPTZ" },
+    { name: "decision_id", type: "TEXT" },
+    { name: "auto_revoked_at", type: "TIMESTAMPTZ" },
+    { name: "auto_revoke_reason", type: "TEXT" },
+    { name: "due_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_access_review_items_campaign_status",
+      columns: ["campaign_id", "status"],
+    },
+    {
+      name: "idx_access_review_items_principal",
+      columns: ["principal_id"],
+    },
+    {
+      name: "idx_access_review_items_reviewer",
+      columns: ["current_reviewer_user_id"],
+    },
+    {
+      name: "idx_access_review_items_due",
+      columns: ["due_at"],
+    },
+    {
+      name: "idx_access_review_items_risk",
+      columns: ["tenant_id", "risk_level"],
+    },
+    {
+      name: "idx_access_review_items_granted_by",
+      columns: ["granted_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "access_review_items_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_ACCESS_REVIEW_DECISIONS: TableDefinition = {
+  schema: "meta",
+  name: "access_review_decisions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "decision_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "access_review_decisions_decision_id_key" },
+      check: "decision_id ~ '^ard_[a-z0-9]{8,32}$'",
+    },
+    {
+      name: "item_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "access_review_items",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "campaign_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "access_review_campaigns",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "decided_by_user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "decided_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('keep', 'revoke', 'time_bound_extend', 'modify_grant', 'defer_to_next_campaign')",
+    },
+    {
+      name: "reason",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "reason IN ('role_appropriate', 'last_login_recent', 'business_justification_attested', 'compliance_attestation', 'manager_attestation', 'regulatory_requirement', 'no_response_auto_default', 'security_concern_revoked', 'role_changed_modified', 'promotion_modified', 'departure_revoked', 'duplicate_access_revoked', 'unused_access_revoked', 'principal_no_longer_in_scope')",
+    },
+    { name: "comment", type: "TEXT" },
+    { name: "time_bound_extend_until", type: "TIMESTAMPTZ" },
+    { name: "modified_grant_attributes", type: "JSONB" },
+    {
+      name: "attestation_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "attestation_kind IN ('click_through_acknowledgement', 'typed_attestation_phrase', 'e_signature_digital', 'qualified_e_signature', 'two_person_attestation')",
+    },
+    {
+      name: "attestation_signature_sha256",
+      type: "CHAR(64)",
+      check:
+        "attestation_signature_sha256 IS NULL OR attestation_signature_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "attestation_signing_key_fingerprint",
+      type: "CHAR(64)",
+      check:
+        "attestation_signing_key_fingerprint IS NULL OR attestation_signing_key_fingerprint ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "co_attesting_user_id", type: "UUID", references: USER_FK },
+    { name: "co_attested_at", type: "TIMESTAMPTZ" },
+    { name: "ip_address", type: "INET", notNull: true },
+    { name: "user_agent", type: "TEXT", notNull: true },
+    { name: "supersedes_decision_id", type: "TEXT" },
+    { name: "related_exception_id", type: "TEXT" },
+    { name: "applied_at", type: "TIMESTAMPTZ" },
+    { name: "application_failed_at", type: "TIMESTAMPTZ" },
+    { name: "application_failure_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_access_review_decisions_item",
+      columns: ["item_id", "decided_at"],
+    },
+    {
+      name: "idx_access_review_decisions_campaign",
+      columns: ["campaign_id"],
+    },
+    {
+      name: "idx_access_review_decisions_decided_by",
+      columns: ["decided_by_user_id"],
+    },
+    {
+      name: "idx_access_review_decisions_co_attestor",
+      columns: ["co_attesting_user_id"],
+    },
+    {
+      name: "idx_access_review_decisions_kind_reason",
+      columns: ["kind", "reason"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "access_review_decisions_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_ACCESS_REVIEW_EXCEPTIONS: TableDefinition = {
+  schema: "meta",
+  name: "access_review_exceptions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "exception_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "access_review_exceptions_exception_id_key" },
+      check: "exception_id ~ '^are_[a-z0-9]{8,32}$'",
+    },
+    {
+      name: "item_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "access_review_items",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "campaign_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "access_review_campaigns",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('requested', 'approved', 'rejected', 'expired', 'revoked_early', 'superseded')",
+    },
+    {
+      name: "reason",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "reason IN ('emergency_break_glass', 'regulatory_exemption', 'system_account_required', 'contractor_renewal_pending', 'dual_role_business_need', 'audit_trail_required', 'migration_in_progress', 'vendor_support_requirement')",
+    },
+    { name: "justification", type: "TEXT", notNull: true },
+    { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "requested_by_user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "requested_expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "approved_at", type: "TIMESTAMPTZ" },
+    { name: "approved_by_user_id", type: "UUID", references: USER_FK },
+    { name: "approved_justification", type: "TEXT" },
+    { name: "granted_expires_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_by_user_id", type: "UUID", references: USER_FK },
+    { name: "rejected_reason", type: "TEXT" },
+    { name: "expired_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_early_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_early_by_user_id", type: "UUID", references: USER_FK },
+    { name: "revoked_early_reason", type: "TEXT" },
+    { name: "superseded_by_exception_id", type: "TEXT" },
+    {
+      name: "notification_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "notification_count BETWEEN 0 AND 50",
+    },
+    { name: "last_notification_at", type: "TIMESTAMPTZ" },
+    {
+      name: "requires_quarterly_reattestation",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "last_reattested_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_access_review_exceptions_item",
+      columns: ["item_id"],
+    },
+    {
+      name: "idx_access_review_exceptions_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_access_review_exceptions_granted_expires",
+      columns: ["granted_expires_at"],
+    },
+    {
+      name: "idx_access_review_exceptions_requested_by",
+      columns: ["requested_by_user_id"],
+    },
+    {
+      name: "idx_access_review_exceptions_approved_by",
+      columns: ["approved_by_user_id"],
+    },
+    {
+      name: "idx_access_review_exceptions_rejected_by",
+      columns: ["rejected_by_user_id"],
+    },
+    {
+      name: "idx_access_review_exceptions_revoked_early_by",
+      columns: ["revoked_early_by_user_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "access_review_exceptions_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_ACCESS_REVIEW_EVIDENCE: TableDefinition = {
+  schema: "meta",
+  name: "access_review_evidence",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "evidence_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "access_review_evidence_evidence_id_key" },
+      check: "evidence_id ~ '^arv_[a-z0-9]{8,32}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "framework",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "framework IN ('soc2_type2', 'iso27001', 'hipaa_security_rule', 'pci_dss_v4', 'gdpr_article_32', 'cfr_21_part_11', 'custom')",
+    },
+    { name: "period_start_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "campaign_ids", type: "JSONB", notNull: true },
+    { name: "control_mappings", type: "JSONB", notNull: true },
+    {
+      name: "total_items_across_campaigns",
+      type: "INTEGER",
+      notNull: true,
+      check: "total_items_across_campaigns >= 0",
+    },
+    {
+      name: "completion_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "completion_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "keep_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "keep_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "revoke_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "revoke_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "auto_revoke_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "auto_revoke_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "exception_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "exception_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "strong_attestation_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "strong_attestation_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "overdue_rate",
+      type: "NUMERIC(5, 4)",
+      notNull: true,
+      check: "overdue_rate BETWEEN 0 AND 1",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'compiled', 'sealed', 'submitted_to_auditor', 'accepted_by_auditor', 'rejected_by_auditor')",
+    },
+    { name: "compiled_at", type: "TIMESTAMPTZ" },
+    { name: "sealed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "sealed_sha256",
+      type: "CHAR(64)",
+      check: "sealed_sha256 IS NULL OR sealed_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "submitted_at", type: "TIMESTAMPTZ" },
+    { name: "submitted_to_auditor_id", type: "TEXT" },
+    { name: "accepted_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_reason", type: "TEXT" },
+    { name: "storage_uri", type: "TEXT" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_access_review_evidence_tenant_period",
+      columns: ["tenant_id", "period_end_at"],
+    },
+    {
+      name: "idx_access_review_evidence_framework_status",
+      columns: ["framework", "status"],
+    },
+    {
+      name: "idx_access_review_evidence_created_by",
+      columns: ["created_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "access_review_evidence_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -5481,4 +6223,10 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_NOTIFICATION_DISPATCHES,
   META_NOTIFICATION_DELIVERIES,
   META_NOTIFICATION_DIGESTS,
+  META_ACCESS_REVIEW_TEMPLATES,
+  META_ACCESS_REVIEW_CAMPAIGNS,
+  META_ACCESS_REVIEW_ITEMS,
+  META_ACCESS_REVIEW_DECISIONS,
+  META_ACCESS_REVIEW_EXCEPTIONS,
+  META_ACCESS_REVIEW_EVIDENCE,
 ];

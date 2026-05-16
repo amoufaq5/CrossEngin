@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { emitMetaBootstrapSql } from "./index.js";
 import {
   META_AA_CONFLICTS,
+  META_ACCESS_REVIEW_CAMPAIGNS,
+  META_ACCESS_REVIEW_DECISIONS,
+  META_ACCESS_REVIEW_EVIDENCE,
+  META_ACCESS_REVIEW_EXCEPTIONS,
+  META_ACCESS_REVIEW_ITEMS,
+  META_ACCESS_REVIEW_TEMPLATES,
   META_AA_SPLIT_BRAIN_EVENTS,
   META_AA_TOPOLOGY,
   META_AI_CONVERSATIONS,
@@ -86,8 +92,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 82 tables", () => {
-    expect(META_TABLES).toHaveLength(82);
+  it("contains 88 tables", () => {
+    expect(META_TABLES).toHaveLength(88);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -104,6 +110,12 @@ describe("META_TABLES", () => {
       "aa_conflicts",
       "aa_split_brain_events",
       "aa_topology",
+      "access_review_campaigns",
+      "access_review_decisions",
+      "access_review_evidence",
+      "access_review_exceptions",
+      "access_review_items",
+      "access_review_templates",
       "ai_conversations",
       "ai_provider_calls",
       "api_keys",
@@ -1182,6 +1194,100 @@ describe("table column shapes", () => {
     expect(freq?.check).not.toContain("'never'");
     expect(freq?.check).toContain("'hourly'");
     expect(freq?.check).toContain("'daily'");
+  });
+
+  it("META_ACCESS_REVIEW_TEMPLATES allows NULL tenant_id (platform templates)", () => {
+    const tenantId = META_ACCESS_REVIEW_TEMPLATES.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_ACCESS_REVIEW_TEMPLATES framework enum covers SOC 2, ISO 27001, HIPAA, PCI, GDPR, CFR 21", () => {
+    const framework = META_ACCESS_REVIEW_TEMPLATES.columns.find(
+      (c) => c.name === "framework",
+    );
+    expect(framework?.check).toContain("'soc2_type2'");
+    expect(framework?.check).toContain("'iso27001'");
+    expect(framework?.check).toContain("'hipaa_security_rule'");
+    expect(framework?.check).toContain("'pci_dss_v4'");
+    expect(framework?.check).toContain("'cfr_21_part_11'");
+  });
+
+  it("META_ACCESS_REVIEW_CAMPAIGNS status enum has the 7 lifecycle states", () => {
+    const status = META_ACCESS_REVIEW_CAMPAIGNS.columns.find(
+      (c) => c.name === "status",
+    );
+    expect(status?.check).toContain("'draft'");
+    expect(status?.check).toContain("'scheduled'");
+    expect(status?.check).toContain("'in_progress'");
+    expect(status?.check).toContain("'in_remediation'");
+    expect(status?.check).toContain("'completed'");
+    expect(status?.check).toContain("'archived'");
+    expect(status?.check).toContain("'cancelled'");
+  });
+
+  it("META_ACCESS_REVIEW_ITEMS cascades on campaign deletion", () => {
+    const fk = META_ACCESS_REVIEW_ITEMS.columns.find(
+      (c) => c.name === "campaign_id",
+    );
+    expect(fk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_ACCESS_REVIEW_ITEMS risk_level enum has 4 levels", () => {
+    const risk = META_ACCESS_REVIEW_ITEMS.columns.find(
+      (c) => c.name === "risk_level",
+    );
+    expect(risk?.check).toContain("'low'");
+    expect(risk?.check).toContain("'critical'");
+  });
+
+  it("META_ACCESS_REVIEW_DECISIONS attestation enum has the 5 attestation kinds", () => {
+    const att = META_ACCESS_REVIEW_DECISIONS.columns.find(
+      (c) => c.name === "attestation_kind",
+    );
+    expect(att?.check).toContain("'click_through_acknowledgement'");
+    expect(att?.check).toContain("'qualified_e_signature'");
+    expect(att?.check).toContain("'two_person_attestation'");
+  });
+
+  it("META_ACCESS_REVIEW_DECISIONS cascades on item deletion + restricts on campaign", () => {
+    const itemFk = META_ACCESS_REVIEW_DECISIONS.columns.find(
+      (c) => c.name === "item_id",
+    );
+    const campaignFk = META_ACCESS_REVIEW_DECISIONS.columns.find(
+      (c) => c.name === "campaign_id",
+    );
+    expect(itemFk?.references?.onDelete).toBe("CASCADE");
+    expect(campaignFk?.references?.onDelete).toBe("RESTRICT");
+  });
+
+  it("META_ACCESS_REVIEW_EXCEPTIONS reason enum covers emergency + regulatory categories", () => {
+    const reason = META_ACCESS_REVIEW_EXCEPTIONS.columns.find(
+      (c) => c.name === "reason",
+    );
+    expect(reason?.check).toContain("'emergency_break_glass'");
+    expect(reason?.check).toContain("'regulatory_exemption'");
+    expect(reason?.check).toContain("'dual_role_business_need'");
+  });
+
+  it("META_ACCESS_REVIEW_EVIDENCE rates are NUMERIC(5, 4) bounded 0-1", () => {
+    const completion = META_ACCESS_REVIEW_EVIDENCE.columns.find(
+      (c) => c.name === "completion_rate",
+    );
+    expect(completion?.type).toBe("NUMERIC(5, 4)");
+    expect(completion?.check).toContain("BETWEEN 0 AND 1");
+  });
+
+  it("META_ACCESS_REVIEW_EVIDENCE sealed_sha256 is CHAR(64) hex", () => {
+    const sha = META_ACCESS_REVIEW_EVIDENCE.columns.find(
+      (c) => c.name === "sealed_sha256",
+    );
+    expect(sha?.type).toBe("CHAR(64)");
+    expect(sha?.check).toContain("[0-9a-f]{64}");
   });
 });
 
