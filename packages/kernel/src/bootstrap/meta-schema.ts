@@ -1823,7 +1823,12 @@ export const META_WEBHOOK_DELIVERIES: TableDefinition = {
       check: "max_attempts >= 1",
     },
     { name: "response_status", type: "INTEGER" },
-    { name: "response_body_sha256", type: "CHAR(64)" },
+    {
+      name: "response_body_sha256",
+      type: "CHAR(64)",
+      check:
+        "response_body_sha256 IS NULL OR response_body_sha256 ~ '^[0-9a-f]{64}$'",
+    },
     { name: "delivered_at", type: "TIMESTAMPTZ" },
     { name: "failed_at", type: "TIMESTAMPTZ" },
     { name: "failure_reason", type: "TEXT" },
@@ -1874,7 +1879,12 @@ export const META_IDEMPOTENCY_RECORDS: TableDefinition = {
       check: "request_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "response_status", type: "INTEGER" },
-    { name: "response_body_sha256", type: "CHAR(64)" },
+    {
+      name: "response_body_sha256",
+      type: "CHAR(64)",
+      check:
+        "response_body_sha256 IS NULL OR response_body_sha256 ~ '^[0-9a-f]{64}$'",
+    },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -2564,7 +2574,12 @@ export const META_ML_DATASETS: TableDefinition = {
     { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
     { name: "frozen_at", type: "TIMESTAMPTZ" },
     { name: "frozen_by", type: "UUID", references: USER_FK },
-    { name: "frozen_sha256", type: "CHAR(64)" },
+    {
+      name: "frozen_sha256",
+      type: "CHAR(64)",
+      check:
+        "frozen_sha256 IS NULL OR frozen_sha256 ~ '^[0-9a-f]{64}$'",
+    },
     { name: "deprecated_at", type: "TIMESTAMPTZ" },
     { name: "deprecated_reason", type: "TEXT" },
     { name: "purged_at", type: "TIMESTAMPTZ" },
@@ -2705,7 +2720,12 @@ export const META_ML_TRAINING_RUNS: TableDefinition = {
     { name: "cancelled_by", type: "UUID", references: USER_FK },
     { name: "cancelled_reason", type: "TEXT" },
     { name: "failure_reason", type: "TEXT" },
-    { name: "output_model_artifact_sha256", type: "CHAR(64)" },
+    {
+      name: "output_model_artifact_sha256",
+      type: "CHAR(64)",
+      check:
+        "output_model_artifact_sha256 IS NULL OR output_model_artifact_sha256 ~ '^[0-9a-f]{64}$'",
+    },
     { name: "output_model_storage_uri", type: "TEXT" },
     { name: "train_loss_final", type: "NUMERIC(12, 6)" },
     { name: "validation_loss_final", type: "NUMERIC(12, 6)" },
@@ -3742,7 +3762,12 @@ export const META_INCIDENT_POSTMORTEMS: TableDefinition = {
         "confidentiality_class IN ('public', 'customer_facing', 'internal_only', 'security_restricted')",
     },
     { name: "storage_uri", type: "TEXT" },
-    { name: "storage_sha256", type: "CHAR(64)" },
+    {
+      name: "storage_sha256",
+      type: "CHAR(64)",
+      check:
+        "storage_sha256 IS NULL OR storage_sha256 ~ '^[0-9a-f]{64}$'",
+    },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -3898,7 +3923,12 @@ export const META_FORENSIC_EVIDENCE: TableDefinition = {
     },
     { name: "sealed_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "sealed_by", type: "UUID", notNull: true, references: USER_FK },
-    { name: "content_redacted_sha256", type: "CHAR(64)" },
+    {
+      name: "content_redacted_sha256",
+      type: "CHAR(64)",
+      check:
+        "content_redacted_sha256 IS NULL OR content_redacted_sha256 ~ '^[0-9a-f]{64}$'",
+    },
     { name: "related_incident_id", type: "TEXT" },
     { name: "related_tenant_id", type: "UUID" },
     { name: "retention_until", type: "TIMESTAMPTZ", notNull: true },
@@ -4972,6 +5002,10 @@ export const META_NOTIFICATION_PREFERENCES: TableDefinition = {
       columns: ["tenant_id", "user_id"],
     },
     {
+      name: "idx_notification_preferences_user_only",
+      columns: ["user_id"],
+    },
+    {
       name: "idx_notification_preferences_updated_by",
       columns: ["updated_by"],
     },
@@ -5381,6 +5415,10 @@ export const META_NOTIFICATION_DIGESTS: TableDefinition = {
     {
       name: "idx_notification_digests_user_channel_status",
       columns: ["tenant_id", "user_id", "channel", "status"],
+    },
+    {
+      name: "idx_notification_digests_user_only",
+      columns: ["user_id"],
     },
     {
       name: "idx_notification_digests_scheduled",
@@ -5865,6 +5903,10 @@ export const META_ACCESS_REVIEW_DECISIONS: TableDefinition = {
   primaryKey: ["id"],
   indexes: [
     {
+      name: "idx_access_review_decisions_tenant",
+      columns: ["tenant_id"],
+    },
+    {
       name: "idx_access_review_decisions_item",
       columns: ["item_id", "decided_at"],
     },
@@ -5982,6 +6024,10 @@ export const META_ACCESS_REVIEW_EXCEPTIONS: TableDefinition = {
     {
       name: "idx_access_review_exceptions_item",
       columns: ["item_id"],
+    },
+    {
+      name: "idx_access_review_exceptions_campaign",
+      columns: ["campaign_id"],
     },
     {
       name: "idx_access_review_exceptions_tenant_status",
@@ -6992,6 +7038,10 @@ export const META_LINEAGE_EDGES: TableDefinition = {
   primaryKey: ["id"],
   indexes: [
     {
+      name: "idx_lineage_edges_tenant",
+      columns: ["tenant_id"],
+    },
+    {
       name: "idx_lineage_edges_source",
       columns: ["source_node_id"],
     },
@@ -7688,6 +7738,10 @@ export const META_QUOTA_USAGE: TableDefinition = {
       columns: ["tenant_id", "target", "period_start_at"],
     },
     {
+      name: "idx_quota_usage_quota_definition",
+      columns: ["quota_definition_id"],
+    },
+    {
       name: "idx_quota_usage_hard_breach",
       columns: ["hard_limit_breached_at"],
     },
@@ -7788,6 +7842,10 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
     {
       name: "idx_rate_limit_decisions_policy",
       columns: ["policy_id"],
+    },
+    {
+      name: "idx_rate_limit_decisions_quota_definition",
+      columns: ["quota_definition_id"],
     },
     {
       name: "idx_rate_limit_decisions_outcome",
@@ -8356,6 +8414,10 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
       columns: ["flag_id", "priority"],
     },
     {
+      name: "idx_feature_flag_targeting_rules_tenant",
+      columns: ["tenant_id"],
+    },
+    {
       name: "idx_feature_flag_targeting_rules_created_by",
       columns: ["created_by"],
     },
@@ -8433,6 +8495,10 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
     {
       name: "idx_feature_flag_kill_switches_flag_status",
       columns: ["flag_id", "status"],
+    },
+    {
+      name: "idx_feature_flag_kill_switches_tenant",
+      columns: ["tenant_id"],
     },
     {
       name: "idx_feature_flag_kill_switches_armed_by",
@@ -8641,6 +8707,10 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
     {
       name: "idx_feature_flag_changes_flag_occurred",
       columns: ["flag_id", "occurred_at"],
+    },
+    {
+      name: "idx_feature_flag_changes_tenant",
+      columns: ["tenant_id"],
     },
     {
       name: "idx_feature_flag_changes_kind",

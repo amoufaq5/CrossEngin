@@ -47,7 +47,7 @@ Grouped by concern. Each is `packages/<name>` with `src/index.ts`
 re-exporting everything.
 
 ### Substrate (the kernel itself)
-- **`kernel`** — meta-schema (71 tables), DDL emit, manifest
+- **`kernel`** — meta-schema (113 tables), DDL emit, manifest
   validate/diff/patch/topology/hash, bootstrap SQL generator.
 - **`types`** — primitive zod types shared across the workspace
   (UUIDs, ISO 8601, slugs, etc.).
@@ -331,7 +331,7 @@ following are intentionally out of scope until contracts settle:
 
 ## ADRs
 
-ADRs 0001-0037 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0045 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
