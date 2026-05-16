@@ -13,17 +13,19 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 1 contract-types layer: **40 packages, 113 meta-schema
-tables, 4,694 tests**, all green, no type errors. Nearly the
-full Phase 1 surface is sketched in zod schemas + deterministic
-helpers. Impure runtime (network calls, file I/O, DB execution,
-provider clients) is deferred to Phase 2+.
+Phase 2 M1 in progress: **41 packages, 113 meta-schema tables,
+4,781 tests**, all green, no type errors. Phase 1 contract-types
+layer is complete; M1 added `@crossengin/kernel-pg`, the first
+impure runtime package — a Postgres-backed migration applier
+that turns `emitMetaBootstrapSql()` output into a live schema,
+with hash-based idempotency, advisory-lock concurrency safety,
+and pg_catalog-driven drift detection.
 
-README has been refreshed to reflect this state. ADRs 0001-0046
-are fully drafted in `docs/adr/` — no reserved gaps. ADR-0046 is
-the Phase 2 implementation plan (M1 DDL → M2 crypto → M3 workflow
-runtime → M4 gateway runtime → M5 architect-cli → M6 notifications
-+ workflow bridge → M7 first vertical pack → M8 SLO enforcement).
+ADRs 0001-0047 are fully drafted in `docs/adr/` — no reserved
+gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
+crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
+cli → M6 notifications + workflow bridge → M7 first vertical pack
+→ M8 SLO enforcement); ADR-0047 covers M1.
 
 ## Architecture in 90 seconds
 
@@ -52,6 +54,17 @@ re-exporting everything.
 ### Substrate (the kernel itself)
 - **`kernel`** — meta-schema (113 tables), DDL emit, manifest
   validate/diff/patch/topology/hash, bootstrap SQL generator.
+- **`kernel-pg`** — Postgres-backed migration applier (first
+  impure package). 7 modules: connection (PgConnection interface
+  + `parsePgEnvConfig` + node-postgres binding), statement-hash
+  (sha256 of normalized SQL), migration-log (`_meta_migrations`
+  bookkeeping), preconditions (`pg_uuidv7` extension + PG ≥ 14 +
+  CREATE privilege checks), applier (advisory-lock-gated, per-
+  statement transactions, halt-on-first-failure, hash-based
+  skip), introspection (pg_catalog queries + pure parsers), diff
+  (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
+  CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
+  `version` commands.
 - **`types`** — primitive zod types shared across the workspace
   (UUIDs, ISO 8601, slugs, etc.).
 - **`config`** — shared TypeScript + lint config base.
@@ -325,19 +338,22 @@ following are intentionally out of scope until contracts settle:
 - Real provider clients (Stripe, Salesforce, ServiceNow,
   Anthropic). Today the packages have credential refs + record
   types only.
-- Real database execution. `kernel/bootstrap` emits SQL strings;
-  it doesn't connect to Postgres.
 - Real cryptography. Signature fields are typed as strings; the
   actual HMAC/ed25519 computation is not in this codebase.
 - Apps under `apps/`. The directory is empty; UI lives in `views`
   as type definitions only.
 
+**No longer deferred (as of M1):** kernel DDL execution. The
+`kernel-pg` package executes meta-schema DDL against a real
+Postgres, with `_meta_migrations` bookkeeping for idempotent
+re-runs and pg_catalog introspection for drift detection.
+
 ## ADRs
 
-ADRs 0001-0046 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0047 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
-milestones). When you ship a new package, write the matching ADR
-in the same session, following `0000-template.md` and the style
-of the existing
+milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`). When you
+ship a new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
 0026-0037 batch.

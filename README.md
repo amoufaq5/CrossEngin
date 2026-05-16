@@ -1,10 +1,13 @@
 # CrossEngin
 
-> **Status:** Phase 1 contract-types layer landed. **40 packages,
-> 113 meta-schema tables, ~4,700 tests**, all green, zero type
-> errors. ADRs 0001–0046 fully drafted. Impure runtime (real
-> provider clients, DB execution, cryptography) is deferred to
-> Phase 2+.
+> **Status:** Phase 2 M1 in progress. **41 packages, 113 meta-
+> schema tables, ~4,780 tests**, all green, zero type errors.
+> ADRs 0001–0047 fully drafted. M1 added `kernel-pg`, the first
+> impure runtime: a Postgres-backed migration applier that
+> executes the kernel's meta-schema DDL, with hash-based
+> idempotency, advisory-lock concurrency safety, and pg_catalog
+> drift detection. Real provider clients + real cryptography
+> remain deferred.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,
@@ -21,15 +24,16 @@ white-label channel for system integrators (**Partner**).
 
 ## Current state
 
-Forty packages cover the Phase 1 surface as zod schemas +
-deterministic helpers. Everything is pure contracts — no network,
-no DB execution, no real cryptography yet. Detailed orientation
-is in **[CLAUDE.md](CLAUDE.md)**.
+Forty-one packages cover the Phase 1 surface (zod schemas +
+deterministic helpers) plus the first Phase 2 milestone (`kernel-
+pg`: real Postgres execution). Detailed orientation is in
+**[CLAUDE.md](CLAUDE.md)**.
 
 Quick map by concern:
 
 - **Substrate.** `kernel` (meta-schema + DDL emit + manifest
-  validate/diff), `types`, `config`, `testing`.
+  validate/diff), `kernel-pg` (Postgres-backed migration applier
+  + drift detector), `types`, `config`, `testing`.
 - **Identity, security, data.** `auth`, `sso`, `security`,
   `compliance`, `residency`, `files`.
 - **AI surface.** `ai-providers`, `ai-architect`.
@@ -62,8 +66,8 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0046
-├── packages/         40 workspace packages
+│   └── adr/          ADRs 0001-0047
+├── packages/         41 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -82,7 +86,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 46 architecture decisions.
+running index of 47 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at
