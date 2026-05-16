@@ -180,6 +180,7 @@ export const META_MANIFESTS: TableDefinition = {
   indexes: [
     { name: "idx_manifests_tenant_status", columns: ["tenant_id", "status"] },
     { name: "idx_manifests_tenant_applied_at", columns: ["tenant_id", "applied_at"] },
+    { name: "idx_manifests_applied_by", columns: ["applied_by"] },
   ],
   rls: {
     enabled: true,
@@ -343,6 +344,7 @@ export const META_COMPLIANCE_ATTESTATIONS: TableDefinition = {
   ],
   indexes: [
     { name: "idx_compliance_attestations_tenant", columns: ["tenant_id"] },
+    { name: "idx_compliance_attestations_attester", columns: ["attester_user_id"] },
   ],
   rls: {
     enabled: true,
@@ -701,6 +703,7 @@ export const META_FILES: TableDefinition = {
     { name: "idx_files_tenant_uploaded_at", columns: ["tenant_id", "uploaded_at"] },
     { name: "idx_files_status", columns: ["tenant_id", "status"] },
     { name: "idx_files_file_type", columns: ["tenant_id", "file_type_id"] },
+    { name: "idx_files_uploaded_by", columns: ["uploaded_by"] },
   ],
   rls: {
     enabled: true,
@@ -812,7 +815,7 @@ export const META_REPORT_RUNS: TableDefinition = {
       check:
         "trigger IN ('user_invoked', 'scheduled', 'dashboard_refresh', 'ai_architect', 'api')",
     },
-    { name: "invoked_by", type: "UUID" },
+    { name: "invoked_by", type: "UUID", references: USER_FK },
     {
       name: "engine",
       type: "TEXT",
@@ -832,6 +835,7 @@ export const META_REPORT_RUNS: TableDefinition = {
     { name: "idx_report_runs_tenant_started", columns: ["tenant_id", "started_at"] },
     { name: "idx_report_runs_report_id", columns: ["tenant_id", "report_id"] },
     { name: "idx_report_runs_status", columns: ["tenant_id", "status"] },
+    { name: "idx_report_runs_invoked_by", columns: ["invoked_by"] },
   ],
   rls: {
     enabled: true,
@@ -1118,6 +1122,7 @@ export const META_TENANT_CREDITS: TableDefinition = {
   indexes: [
     { name: "idx_tenant_credits_tenant_remaining", columns: ["tenant_id", "remaining_cents"] },
     { name: "idx_tenant_credits_kind", columns: ["kind"] },
+    { name: "idx_tenant_credits_issued_by", columns: ["issued_by"] },
   ],
   rls: {
     enabled: true,
@@ -1195,6 +1200,9 @@ export const META_TENANT_AI_SETTINGS: TableDefinition = {
     { name: "updated_by", type: "UUID", notNull: true, references: USER_FK },
   ],
   primaryKey: ["tenant_id"],
+  indexes: [
+    { name: "idx_tenant_ai_settings_updated_by", columns: ["updated_by"] },
+  ],
   rls: {
     enabled: true,
     policies: [
@@ -1372,6 +1380,7 @@ export const META_DEPLOYMENTS: TableDefinition = {
     },
     { name: "idx_deployments_status", columns: ["status"] },
     { name: "idx_deployments_commit_sha", columns: ["commit_sha"] },
+    { name: "idx_deployments_triggered_by", columns: ["triggered_by"] },
   ],
 };
 
@@ -1698,6 +1707,8 @@ export const META_API_KEYS: TableDefinition = {
   indexes: [
     { name: "idx_api_keys_tenant_status", columns: ["tenant_id", "status"] },
     { name: "idx_api_keys_last_used", columns: ["tenant_id", "last_used_at"] },
+    { name: "idx_api_keys_created_by", columns: ["created_by"] },
+    { name: "idx_api_keys_revoked_by", columns: ["revoked_by"] },
   ],
   rls: {
     enabled: true,
@@ -1759,6 +1770,7 @@ export const META_WEBHOOK_ENDPOINTS: TableDefinition = {
   indexes: [
     { name: "idx_webhook_endpoints_tenant_enabled", columns: ["tenant_id", "enabled"] },
     { name: "idx_webhook_endpoints_consecutive_failures", columns: ["consecutive_failures"] },
+    { name: "idx_webhook_endpoints_created_by", columns: ["created_by"] },
   ],
   rls: {
     enabled: true,
@@ -2021,6 +2033,8 @@ export const META_PACK_VERSIONS: TableDefinition = {
     { name: "idx_pack_versions_pack_status", columns: ["pack_id", "status"] },
     { name: "idx_pack_versions_channel", columns: ["channel"] },
     { name: "idx_pack_versions_security_review", columns: ["security_review_status"] },
+    { name: "idx_pack_versions_published_by", columns: ["published_by"] },
+    { name: "idx_pack_versions_security_reviewer", columns: ["security_reviewer"] },
   ],
 };
 
@@ -2073,6 +2087,9 @@ export const META_PACK_INSTALLATIONS: TableDefinition = {
       name: "idx_pack_installations_tenant_pack_active",
       columns: ["tenant_id", "pack_id", "status"],
     },
+    { name: "idx_pack_installations_requested_by", columns: ["requested_by"] },
+    { name: "idx_pack_installations_installed_by", columns: ["installed_by"] },
+    { name: "idx_pack_installations_uninstalled_by", columns: ["uninstalled_by"] },
   ],
   rls: {
     enabled: true,
@@ -2126,6 +2143,7 @@ export const META_PACK_REVIEWS: TableDefinition = {
     { name: "idx_pack_reviews_pack_submitted", columns: ["pack_id", "submitted_at"] },
     { name: "idx_pack_reviews_moderation", columns: ["moderation_status"] },
     { name: "idx_pack_reviews_tenant", columns: ["tenant_id"] },
+    { name: "idx_pack_reviews_author", columns: ["author_id"] },
   ],
   rls: {
     enabled: true,
@@ -2194,6 +2212,7 @@ export const META_IMPORT_SOURCES: TableDefinition = {
   indexes: [
     { name: "idx_import_sources_tenant_enabled", columns: ["tenant_id", "enabled"] },
     { name: "idx_import_sources_kind", columns: ["kind"] },
+    { name: "idx_import_sources_created_by", columns: ["created_by"] },
   ],
   rls: {
     enabled: true,
@@ -2311,6 +2330,8 @@ export const META_BACKFILL_JOBS: TableDefinition = {
     { name: "idx_backfill_jobs_tenant_queued", columns: ["tenant_id", "queued_at"] },
     { name: "idx_backfill_jobs_status", columns: ["status"] },
     { name: "idx_backfill_jobs_source", columns: ["source_id"] },
+    { name: "idx_backfill_jobs_requested_by", columns: ["requested_by"] },
+    { name: "idx_backfill_jobs_cancelled_by", columns: ["cancelled_by"] },
   ],
   rls: {
     enabled: true,
@@ -2413,6 +2434,7 @@ export const META_ONBOARDING_RUNS: TableDefinition = {
   indexes: [
     { name: "idx_onboarding_runs_current_stage", columns: ["current_stage"] },
     { name: "idx_onboarding_runs_started", columns: ["started_at"] },
+    { name: "idx_onboarding_runs_started_by", columns: ["started_by"] },
   ],
   rls: {
     enabled: true,
@@ -2470,6 +2492,8 @@ export const META_ML_CONSENT: TableDefinition = {
   indexes: [
     { name: "idx_ml_consent_tenant_status", columns: ["tenant_id", "status"] },
     { name: "idx_ml_consent_purpose", columns: ["purpose"] },
+    { name: "idx_ml_consent_granted_by", columns: ["granted_by"] },
+    { name: "idx_ml_consent_withdrawn_by", columns: ["withdrawn_by"] },
   ],
   rls: {
     enabled: true,
@@ -2550,6 +2574,8 @@ export const META_ML_DATASETS: TableDefinition = {
   indexes: [
     { name: "idx_ml_datasets_status", columns: ["status"] },
     { name: "idx_ml_datasets_purpose", columns: ["purpose"] },
+    { name: "idx_ml_datasets_created_by", columns: ["created_by"] },
+    { name: "idx_ml_datasets_frozen_by", columns: ["frozen_by"] },
   ],
 };
 
@@ -2604,6 +2630,7 @@ export const META_ML_EVALSETS: TableDefinition = {
   indexes: [
     { name: "idx_ml_evalsets_task_kind", columns: ["task_kind"] },
     { name: "idx_ml_evalsets_blocking", columns: ["blocks_production_promotion"] },
+    { name: "idx_ml_evalsets_frozen_by", columns: ["frozen_by"] },
   ],
 };
 
@@ -2693,6 +2720,9 @@ export const META_ML_TRAINING_RUNS: TableDefinition = {
     { name: "idx_ml_training_runs_status", columns: ["status"] },
     { name: "idx_ml_training_runs_kind", columns: ["kind"] },
     { name: "idx_ml_training_runs_queued", columns: ["queued_at"] },
+    { name: "idx_ml_training_runs_requested_by", columns: ["requested_by"] },
+    { name: "idx_ml_training_runs_approved_by", columns: ["approved_by"] },
+    { name: "idx_ml_training_runs_cancelled_by", columns: ["cancelled_by"] },
   ],
 };
 
@@ -2812,6 +2842,7 @@ export const META_ML_EVALUATIONS: TableDefinition = {
     { name: "idx_ml_evaluations_model", columns: ["model_id", "model_version"] },
     { name: "idx_ml_evaluations_evalset", columns: ["evalset_id"] },
     { name: "idx_ml_evaluations_verdict", columns: ["verdict"] },
+    { name: "idx_ml_evaluations_triggered_by", columns: ["triggered_by"] },
   ],
 };
 
@@ -2882,6 +2913,8 @@ export const META_ML_MODELS: TableDefinition = {
   indexes: [
     { name: "idx_ml_models_family_status", columns: ["family", "status"] },
     { name: "idx_ml_models_status", columns: ["status"] },
+    { name: "idx_ml_models_promoted_by", columns: ["promoted_to_production_by"] },
+    { name: "idx_ml_models_created_by", columns: ["created_by"] },
   ],
 };
 
@@ -3036,6 +3069,7 @@ export const META_COST_BUDGETS: TableDefinition = {
   indexes: [
     { name: "idx_cost_budgets_tenant_enabled", columns: ["tenant_id", "enabled"] },
     { name: "idx_cost_budgets_period", columns: ["period"] },
+    { name: "idx_cost_budgets_created_by", columns: ["created_by"] },
   ],
   rls: {
     enabled: true,
@@ -3148,6 +3182,10 @@ export const META_TENANT_UNIT_ECONOMICS: TableDefinition = {
       name: "idx_tenant_unit_economics_tenant_period",
       columns: ["tenant_id", "period_start"],
     },
+    {
+      name: "idx_tenant_unit_economics_loss_leader_approved_by",
+      columns: ["loss_leader_approved_by"],
+    },
   ],
   rls: {
     enabled: true,
@@ -3197,6 +3235,8 @@ export const META_CHARGEBACK_STATEMENTS: TableDefinition = {
   indexes: [
     { name: "idx_chargeback_period", columns: ["period_start", "period_end"] },
     { name: "idx_chargeback_status", columns: ["status"] },
+    { name: "idx_chargeback_generated_by", columns: ["generated_by"] },
+    { name: "idx_chargeback_approved_by", columns: ["approved_by"] },
   ],
 };
 
@@ -3265,6 +3305,8 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
     },
     { name: "idx_tenant_lifecycle_events_action", columns: ["action"] },
     { name: "idx_tenant_lifecycle_events_trigger", columns: ["trigger"] },
+    { name: "idx_tenant_lifecycle_events_actor", columns: ["actor_user_id"] },
+    { name: "idx_tenant_lifecycle_events_approved_by", columns: ["approved_by_user_id"] },
   ],
   rls: {
     enabled: true,
@@ -3342,6 +3384,7 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
     },
     { name: "idx_gdpr_deletion_deadline", columns: ["deadline_at"] },
     { name: "idx_gdpr_deletion_legal_basis", columns: ["legal_basis"] },
+    { name: "idx_gdpr_deletion_verified_by", columns: ["verified_by"] },
   ],
   rls: {
     enabled: true,
@@ -3442,6 +3485,7 @@ export const META_TENANT_DATA_EXPORTS: TableDefinition = {
   indexes: [
     { name: "idx_tenant_data_exports_tenant_status", columns: ["tenant_id", "status"] },
     { name: "idx_tenant_data_exports_expires", columns: ["download_url_expires_at"] },
+    { name: "idx_tenant_data_exports_requested_by", columns: ["requested_by"] },
   ],
   rls: {
     enabled: true,
@@ -3502,6 +3546,8 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "idx_tenant_tombstones_tenant", columns: ["tenant_id"] },
     { name: "idx_tenant_tombstones_kind", columns: ["kind"] },
     { name: "idx_tenant_tombstones_deleted_at", columns: ["deleted_at"] },
+    { name: "idx_tenant_tombstones_executed_by", columns: ["executed_by"] },
+    { name: "idx_tenant_tombstones_approved_by", columns: ["approved_by"] },
   ],
   rls: {
     enabled: true,
@@ -3574,6 +3620,7 @@ export const META_INCIDENTS: TableDefinition = {
     { name: "idx_incidents_status", columns: ["status"] },
     { name: "idx_incidents_declared_at", columns: ["declared_at"] },
     { name: "idx_incidents_security", columns: ["security_incident"] },
+    { name: "idx_incidents_declared_by", columns: ["declared_by"] },
   ],
 };
 
@@ -3631,6 +3678,11 @@ export const META_INCIDENT_RUNBOOK_EXECUTIONS: TableDefinition = {
     },
     { name: "idx_incident_runbook_executions_runbook", columns: ["runbook_id"] },
     { name: "idx_incident_runbook_executions_status", columns: ["status"] },
+    { name: "idx_incident_runbook_executions_invoked_by", columns: ["invoked_by"] },
+    {
+      name: "idx_incident_runbook_executions_commander_approval",
+      columns: ["incident_commander_approval_user_id"],
+    },
   ],
 };
 
@@ -3697,6 +3749,7 @@ export const META_INCIDENT_POSTMORTEMS: TableDefinition = {
     { name: "idx_incident_postmortems_status", columns: ["status"] },
     { name: "idx_incident_postmortems_incident", columns: ["incident_id"] },
     { name: "idx_incident_postmortems_severity", columns: ["severity"] },
+    { name: "idx_incident_postmortems_author", columns: ["author_user_id"] },
   ],
 };
 
@@ -3779,6 +3832,9 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
     },
     { name: "idx_incident_communications_audience", columns: ["audience"] },
     { name: "idx_incident_communications_kind", columns: ["kind"] },
+    { name: "idx_incident_communications_published_by", columns: ["published_by"] },
+    { name: "idx_incident_communications_legal_reviewed_by", columns: ["legal_reviewed_by"] },
+    { name: "idx_incident_communications_exec_approved_by", columns: ["executive_approved_by"] },
   ],
 };
 
@@ -3856,6 +3912,8 @@ export const META_FORENSIC_EVIDENCE: TableDefinition = {
     { name: "idx_forensic_evidence_kind", columns: ["kind"] },
     { name: "idx_forensic_evidence_retention", columns: ["retention_until"] },
     { name: "idx_forensic_evidence_related_incident", columns: ["related_incident_id"] },
+    { name: "idx_forensic_evidence_collected_by", columns: ["collected_by"] },
+    { name: "idx_forensic_evidence_sealed_by", columns: ["sealed_by"] },
   ],
 };
 
@@ -3925,6 +3983,9 @@ export const META_CHAIN_OF_CUSTODY: TableDefinition = {
       columns: ["evidence_id", "occurred_at"],
     },
     { name: "idx_chain_of_custody_action", columns: ["action"] },
+    { name: "idx_chain_of_custody_from_custodian", columns: ["from_custodian_id"] },
+    { name: "idx_chain_of_custody_to_custodian", columns: ["to_custodian_id"] },
+    { name: "idx_chain_of_custody_witness", columns: ["witness_id"] },
   ],
 };
 
@@ -3999,6 +4060,9 @@ export const META_LEGAL_HOLDS: TableDefinition = {
     { name: "idx_legal_holds_status", columns: ["status"] },
     { name: "idx_legal_holds_kind", columns: ["kind"] },
     { name: "idx_legal_holds_expires_at", columns: ["expires_at"] },
+    { name: "idx_legal_holds_counsel", columns: ["legal_counsel_id"] },
+    { name: "idx_legal_holds_issued_by", columns: ["issued_by"] },
+    { name: "idx_legal_holds_released_by", columns: ["released_by"] },
   ],
 };
 
@@ -4077,6 +4141,9 @@ export const META_EDISCOVERY_REQUESTS: TableDefinition = {
     { name: "idx_ediscovery_status", columns: ["status"] },
     { name: "idx_ediscovery_deadline", columns: ["deadline_at"] },
     { name: "idx_ediscovery_matter", columns: ["matter_reference"] },
+    { name: "idx_ediscovery_counsel", columns: ["legal_counsel_id"] },
+    { name: "idx_ediscovery_requested_by", columns: ["requested_by"] },
+    { name: "idx_ediscovery_scoped_by", columns: ["scoped_by"] },
   ],
 };
 
@@ -4111,6 +4178,8 @@ export const META_AA_TOPOLOGY: TableDefinition = {
   indexes: [
     { name: "idx_aa_topology_kind", columns: ["kind"] },
     { name: "idx_aa_topology_activated_at", columns: ["activated_at"] },
+    { name: "idx_aa_topology_activated_by", columns: ["activated_by"] },
+    { name: "idx_aa_topology_superseded_by", columns: ["superseded_by"] },
   ],
 };
 
@@ -4172,6 +4241,8 @@ export const META_AA_CONFLICTS: TableDefinition = {
     { name: "idx_aa_conflicts_entity", columns: ["entity_class", "entity_id"] },
     { name: "idx_aa_conflicts_detected_at", columns: ["detected_at"] },
     { name: "idx_aa_conflicts_kind", columns: ["kind"] },
+    { name: "idx_aa_conflicts_chosen_strategy_by", columns: ["chosen_strategy_by"] },
+    { name: "idx_aa_conflicts_resolved_by", columns: ["resolved_by"] },
   ],
   rls: {
     enabled: true,
@@ -4325,6 +4396,7 @@ export const META_SDK_CLIENT_RELEASES: TableDefinition = {
     { name: "idx_sdk_client_releases_status", columns: ["status"] },
     { name: "idx_sdk_client_releases_api_version", columns: ["api_version"] },
     { name: "idx_sdk_client_releases_channel", columns: ["channel"] },
+    { name: "idx_sdk_client_releases_published_by", columns: ["published_by"] },
   ],
 };
 
@@ -4383,6 +4455,10 @@ export const META_SDK_CLIENT_INSTALLATIONS: TableDefinition = {
     {
       name: "idx_sdk_client_installations_nag",
       columns: ["upgrade_nag_status"],
+    },
+    {
+      name: "idx_sdk_client_installations_acknowledged_by",
+      columns: ["acknowledged_by"],
     },
   ],
   rls: {
