@@ -89,11 +89,17 @@ import {
   META_USERS,
   META_WEBHOOK_DELIVERIES,
   META_WEBHOOK_ENDPOINTS,
+  META_WORKFLOW_ACTIVITIES,
+  META_WORKFLOW_DEFINITIONS,
+  META_WORKFLOW_EVENTS,
+  META_WORKFLOW_INSTANCES,
+  META_WORKFLOW_SIGNALS,
+  META_WORKFLOW_TIMERS,
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 88 tables", () => {
-    expect(META_TABLES).toHaveLength(88);
+  it("contains 94 tables", () => {
+    expect(META_TABLES).toHaveLength(94);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -195,15 +201,24 @@ describe("META_TABLES", () => {
       "users",
       "webhook_deliveries",
       "webhook_endpoints",
+      "workflow_activities",
+      "workflow_definitions",
+      "workflow_events",
+      "workflow_instances",
+      "workflow_signals",
+      "workflow_timers",
     ]);
   });
 
-  it("FK references resolve to a table declared earlier in META_TABLES", () => {
+  it("FK references resolve to a table declared earlier in META_TABLES (or self)", () => {
     const seen = new Set<string>();
     for (const table of META_TABLES) {
       for (const col of table.columns) {
         if (col.references && col.references.schema === "meta") {
-          expect(seen.has(col.references.table)).toBe(true);
+          const isSelfReference = col.references.table === table.name;
+          expect(
+            isSelfReference || seen.has(col.references.table),
+          ).toBe(true);
         }
       }
       seen.add(table.name);
@@ -1288,6 +1303,101 @@ describe("table column shapes", () => {
     );
     expect(sha?.type).toBe("CHAR(64)");
     expect(sha?.check).toContain("[0-9a-f]{64}");
+  });
+
+  it("META_WORKFLOW_DEFINITIONS allows NULL tenant_id (platform definitions)", () => {
+    const tenantId = META_WORKFLOW_DEFINITIONS.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_WORKFLOW_DEFINITIONS enforces (tenant, key, version) uniqueness", () => {
+    expect(
+      META_WORKFLOW_DEFINITIONS.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "definition_key", "version"]);
+  });
+
+  it("META_WORKFLOW_DEFINITIONS compensation_strategy enum has 4 strategies", () => {
+    const strat = META_WORKFLOW_DEFINITIONS.columns.find(
+      (c) => c.name === "compensation_strategy",
+    );
+    expect(strat?.check).toContain("'immediate_reverse_order'");
+    expect(strat?.check).toContain("'manual_review'");
+    expect(strat?.check).toContain("'no_compensation'");
+  });
+
+  it("META_WORKFLOW_INSTANCES status enum covers 12 lifecycle states", () => {
+    const status = META_WORKFLOW_INSTANCES.columns.find(
+      (c) => c.name === "status",
+    );
+    expect(status?.check).toContain("'running'");
+    expect(status?.check).toContain("'waiting_for_signal'");
+    expect(status?.check).toContain("'compensating'");
+    expect(status?.check).toContain("'compensated'");
+  });
+
+  it("META_WORKFLOW_INSTANCES has parent FK pointing back to instances (child workflows)", () => {
+    const parent = META_WORKFLOW_INSTANCES.columns.find(
+      (c) => c.name === "parent_instance_id",
+    );
+    expect(parent?.references?.table).toBe("workflow_instances");
+  });
+
+  it("META_WORKFLOW_ACTIVITIES cascades on instance deletion", () => {
+    const fk = META_WORKFLOW_ACTIVITIES.columns.find(
+      (c) => c.name === "instance_id",
+    );
+    expect(fk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_WORKFLOW_ACTIVITIES kind enum covers 10 activity kinds", () => {
+    const kind = META_WORKFLOW_ACTIVITIES.columns.find(
+      (c) => c.name === "kind",
+    );
+    expect(kind?.check).toContain("'http_call'");
+    expect(kind?.check).toContain("'manual_task'");
+    expect(kind?.check).toContain("'child_workflow'");
+    expect(kind?.check).toContain("'compensation'");
+  });
+
+  it("META_WORKFLOW_SIGNALS delivery_guarantee enum has 3 levels", () => {
+    const delivery = META_WORKFLOW_SIGNALS.columns.find(
+      (c) => c.name === "delivery_guarantee",
+    );
+    expect(delivery?.check).toContain("'at_most_once'");
+    expect(delivery?.check).toContain("'at_least_once'");
+    expect(delivery?.check).toContain("'exactly_once_idempotent'");
+  });
+
+  it("META_WORKFLOW_SIGNALS enforces (tenant, name, idempotency_key) uniqueness", () => {
+    expect(
+      META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "signal_name", "idempotency_key"]);
+  });
+
+  it("META_WORKFLOW_TIMERS kind enum has 4 kinds", () => {
+    const kind = META_WORKFLOW_TIMERS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'absolute_at'");
+    expect(kind?.check).toContain("'relative_after'");
+    expect(kind?.check).toContain("'cron_schedule'");
+    expect(kind?.check).toContain("'business_hours'");
+  });
+
+  it("META_WORKFLOW_EVENTS enforces append-only per-instance ordering via unique (instance, sequence)", () => {
+    expect(
+      META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["instance_id", "sequence_number"]);
+  });
+
+  it("META_WORKFLOW_EVENTS cascades on instance deletion", () => {
+    const fk = META_WORKFLOW_EVENTS.columns.find(
+      (c) => c.name === "instance_id",
+    );
+    expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 });
 

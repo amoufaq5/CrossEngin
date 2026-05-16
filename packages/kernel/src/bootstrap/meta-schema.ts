@@ -6140,6 +6140,665 @@ export const META_ACCESS_REVIEW_EVIDENCE: TableDefinition = {
   },
 };
 
+export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
+  schema: "meta",
+  name: "workflow_definitions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "definition_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "workflow_definitions_definition_id_key" },
+      check: "definition_id ~ '^wfd_[a-z0-9]{8,32}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "definition_key",
+      type: "TEXT",
+      notNull: true,
+      check: "definition_key ~ '^[a-z][a-z0-9_.-]*$'",
+    },
+    {
+      name: "version",
+      type: "TEXT",
+      notNull: true,
+      check: "version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'in_review', 'published', 'deprecated', 'retired')",
+    },
+    { name: "states", type: "JSONB", notNull: true },
+    { name: "transitions", type: "JSONB", notNull: true },
+    { name: "variables", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "timers", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "signals", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "initial_state",
+      type: "TEXT",
+      notNull: true,
+      check: "initial_state ~ '^[a-z][a-z0-9_]*$'",
+    },
+    {
+      name: "compensation_strategy",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "compensation_strategy IN ('immediate_reverse_order', 'parallel', 'manual_review', 'no_compensation')",
+    },
+    {
+      name: "timeout_seconds",
+      type: "INTEGER",
+      notNull: true,
+      check: "timeout_seconds BETWEEN 60 AND 31536000",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "published_at", type: "TIMESTAMPTZ" },
+    { name: "published_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "superseded_by_definition_id", type: "TEXT" },
+    {
+      name: "source_manifest_sha256",
+      type: "CHAR(64)",
+      check:
+        "source_manifest_sha256 IS NULL OR source_manifest_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "workflow_definitions_tenant_key_version_key",
+      columns: ["tenant_id", "definition_key", "version"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_workflow_definitions_tenant_key",
+      columns: ["tenant_id", "definition_key"],
+    },
+    { name: "idx_workflow_definitions_status", columns: ["status"] },
+    { name: "idx_workflow_definitions_created_by", columns: ["created_by"] },
+    { name: "idx_workflow_definitions_published_by", columns: ["published_by"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_definitions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_WORKFLOW_INSTANCES: TableDefinition = {
+  schema: "meta",
+  name: "workflow_instances",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "instance_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "workflow_instances_instance_id_key" },
+      check: "instance_id ~ '^wfi_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "definition_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "workflow_definitions",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "definition_key",
+      type: "TEXT",
+      notNull: true,
+      check: "definition_key ~ '^[a-z][a-z0-9_.-]*$'",
+    },
+    {
+      name: "definition_version",
+      type: "TEXT",
+      notNull: true,
+      check: "definition_version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('created', 'running', 'waiting_for_signal', 'waiting_for_timer', 'waiting_for_activity', 'waiting_for_manual', 'suspended', 'completed', 'failed', 'cancelled', 'compensating', 'compensated')",
+    },
+    {
+      name: "current_state",
+      type: "TEXT",
+      notNull: true,
+      check: "current_state ~ '^[a-z][a-z0-9_]*$'",
+    },
+    { name: "variables", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "related_entity", type: "JSONB" },
+    { name: "correlation_key", type: "TEXT" },
+    {
+      name: "parent_instance_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "workflow_instances",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "started_by_user_id", type: "UUID", references: USER_FK },
+    { name: "started_by_system", type: "TEXT" },
+    { name: "last_transition_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_by_user_id", type: "UUID", references: USER_FK },
+    { name: "cancelled_reason", type: "TEXT" },
+    { name: "failed_at", type: "TIMESTAMPTZ" },
+    { name: "failure_code", type: "TEXT" },
+    { name: "failure_message", type: "TEXT" },
+    { name: "suspended_at", type: "TIMESTAMPTZ" },
+    { name: "suspended_reason", type: "TEXT" },
+    { name: "compensation_started_at", type: "TIMESTAMPTZ" },
+    { name: "compensation_completed_at", type: "TIMESTAMPTZ" },
+    { name: "timeout_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "sequence_cursor",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "sequence_cursor >= 0",
+    },
+    { name: "awaiting_activity_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "awaiting_signal_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "awaiting_timer_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_workflow_instances_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_workflow_instances_definition",
+      columns: ["definition_id"],
+    },
+    {
+      name: "idx_workflow_instances_correlation",
+      columns: ["tenant_id", "correlation_key"],
+    },
+    {
+      name: "idx_workflow_instances_timeout",
+      columns: ["timeout_at"],
+    },
+    {
+      name: "idx_workflow_instances_parent",
+      columns: ["parent_instance_id"],
+    },
+    {
+      name: "idx_workflow_instances_started_by",
+      columns: ["started_by_user_id"],
+    },
+    {
+      name: "idx_workflow_instances_cancelled_by",
+      columns: ["cancelled_by_user_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_instances_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
+  schema: "meta",
+  name: "workflow_activities",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "activity_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "workflow_activities_activity_id_key" },
+      check: "activity_id ~ '^wfa_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "instance_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "workflow_instances",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "definition_activity_key",
+      type: "TEXT",
+      notNull: true,
+      check: "definition_activity_key ~ '^[a-z][a-z0-9_]*$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('http_call', 'db_read', 'db_write', 'ai_call', 'manual_task', 'child_workflow', 'compensation', 'send_notification', 'audit_emit', 'transformation')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('pending', 'scheduled', 'running', 'succeeded', 'failed', 'cancelled', 'compensated', 'timed_out')",
+    },
+    {
+      name: "attempt_number",
+      type: "INTEGER",
+      notNull: true,
+      check: "attempt_number BETWEEN 1 AND 50",
+    },
+    {
+      name: "max_attempts",
+      type: "INTEGER",
+      notNull: true,
+      check: "max_attempts BETWEEN 1 AND 50",
+    },
+    { name: "retry_policy", type: "JSONB", notNull: true },
+    { name: "scheduled_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "timeout_seconds",
+      type: "INTEGER",
+      notNull: true,
+      check: "timeout_seconds BETWEEN 1 AND 86400",
+    },
+    { name: "timeout_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "input_sha256",
+      type: "CHAR(64)",
+      check: "input_sha256 IS NULL OR input_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "output_sha256",
+      type: "CHAR(64)",
+      check: "output_sha256 IS NULL OR output_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "next_retry_at", type: "TIMESTAMPTZ" },
+    {
+      name: "compensation_activity_key",
+      type: "TEXT",
+      check:
+        "compensation_activity_key IS NULL OR compensation_activity_key ~ '^[a-z][a-z0-9_]*$'",
+    },
+    { name: "compensates_activity_id", type: "TEXT" },
+    { name: "child_workflow_instance_id", type: "TEXT" },
+    { name: "assigned_to_user_id", type: "UUID", references: USER_FK },
+    { name: "completed_by_user_id", type: "UUID", references: USER_FK },
+    {
+      name: "sequence_cursor",
+      type: "INTEGER",
+      notNull: true,
+      check: "sequence_cursor >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_workflow_activities_instance_seq",
+      columns: ["instance_id", "sequence_cursor"],
+    },
+    {
+      name: "idx_workflow_activities_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_workflow_activities_next_retry",
+      columns: ["next_retry_at"],
+    },
+    {
+      name: "idx_workflow_activities_timeout",
+      columns: ["timeout_at"],
+    },
+    {
+      name: "idx_workflow_activities_assigned_to",
+      columns: ["assigned_to_user_id"],
+    },
+    {
+      name: "idx_workflow_activities_completed_by",
+      columns: ["completed_by_user_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_activities_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_WORKFLOW_SIGNALS: TableDefinition = {
+  schema: "meta",
+  name: "workflow_signals",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "signal_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "workflow_signals_signal_id_key" },
+      check: "signal_id ~ '^wfs_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "instance_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "workflow_instances",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "signal_name",
+      type: "TEXT",
+      notNull: true,
+      check: "signal_name ~ '^[a-z][a-z0-9_.-]*$'",
+    },
+    { name: "correlation_key", type: "TEXT", notNull: true },
+    {
+      name: "delivery_guarantee",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "delivery_guarantee IN ('at_most_once', 'at_least_once', 'exactly_once_idempotent')",
+    },
+    { name: "idempotency_key", type: "TEXT" },
+    {
+      name: "payload_sha256",
+      type: "CHAR(64)",
+      check:
+        "payload_sha256 IS NULL OR payload_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "payload_storage_uri", type: "TEXT" },
+    {
+      name: "payload_size_bytes",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "payload_size_bytes BETWEEN 0 AND 10000000",
+    },
+    { name: "source_system", type: "TEXT", notNull: true },
+    { name: "source_principal_id", type: "UUID", references: USER_FK },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('received', 'matched_to_instance', 'consumed', 'expired', 'rejected')",
+    },
+    { name: "received_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "matched_at", type: "TIMESTAMPTZ" },
+    { name: "consumed_at", type: "TIMESTAMPTZ" },
+    { name: "consumed_by_activity_id", type: "TEXT" },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "expired_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_at", type: "TIMESTAMPTZ" },
+    {
+      name: "rejected_reason",
+      type: "TEXT",
+      check:
+        "rejected_reason IS NULL OR rejected_reason IN ('no_matching_instance', 'instance_terminal', 'signal_not_declared', 'duplicate_idempotency_key', 'payload_schema_mismatch', 'expired_before_match', 'tenant_mismatch')",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "workflow_signals_tenant_name_idempotency_key",
+      columns: ["tenant_id", "signal_name", "idempotency_key"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_workflow_signals_correlation",
+      columns: ["tenant_id", "correlation_key"],
+    },
+    {
+      name: "idx_workflow_signals_instance",
+      columns: ["instance_id"],
+    },
+    {
+      name: "idx_workflow_signals_status",
+      columns: ["status"],
+    },
+    {
+      name: "idx_workflow_signals_source_principal",
+      columns: ["source_principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_signals_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_WORKFLOW_TIMERS: TableDefinition = {
+  schema: "meta",
+  name: "workflow_timers",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "timer_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "workflow_timers_timer_id_key" },
+      check: "timer_id ~ '^wft_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "instance_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "workflow_instances",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "timer_name",
+      type: "TEXT",
+      notNull: true,
+      check: "timer_name ~ '^[a-z][a-z0-9_]*$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('absolute_at', 'relative_after', 'cron_schedule', 'business_hours')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('scheduled', 'fired', 'cancelled', 'expired_before_fire')",
+    },
+    { name: "scheduled_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "fire_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "timezone", type: "TEXT", notNull: true, default: "'UTC'" },
+    { name: "cron_expression", type: "TEXT" },
+    {
+      name: "relative_seconds",
+      type: "INTEGER",
+      check:
+        "relative_seconds IS NULL OR relative_seconds BETWEEN 1 AND 31536000",
+    },
+    { name: "fired_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_at", type: "TIMESTAMPTZ" },
+    { name: "cancelled_reason", type: "TEXT" },
+    { name: "expired_at", type: "TIMESTAMPTZ" },
+    { name: "transition_to_trigger", type: "TEXT" },
+    {
+      name: "fire_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "fire_count BETWEEN 0 AND 1000000",
+    },
+    { name: "next_fire_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_workflow_timers_instance",
+      columns: ["instance_id"],
+    },
+    {
+      name: "idx_workflow_timers_fire_at",
+      columns: ["fire_at"],
+    },
+    {
+      name: "idx_workflow_timers_status",
+      columns: ["tenant_id", "status"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_timers_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_WORKFLOW_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "workflow_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "event_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "workflow_events_event_id_key" },
+      check: "event_id ~ '^wfe_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "instance_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "workflow_instances",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "sequence_number",
+      type: "INTEGER",
+      notNull: true,
+      check: "sequence_number BETWEEN 0 AND 1000000000",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "actor_principal_id", type: "UUID", references: USER_FK },
+    { name: "actor_system_id", type: "TEXT" },
+    { name: "previous_state", type: "TEXT" },
+    { name: "new_state", type: "TEXT" },
+    { name: "activity_id", type: "TEXT" },
+    { name: "signal_id", type: "TEXT" },
+    { name: "timer_id", type: "TEXT" },
+    { name: "child_instance_id", type: "TEXT" },
+    {
+      name: "variable_name",
+      type: "TEXT",
+      check:
+        "variable_name IS NULL OR variable_name ~ '^[a-z][a-z0-9_]*$'",
+    },
+    { name: "payload", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "correlation_id", type: "TEXT" },
+    { name: "causation_event_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "workflow_events_instance_sequence_key",
+      columns: ["instance_id", "sequence_number"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_workflow_events_instance_occurred",
+      columns: ["instance_id", "occurred_at"],
+    },
+    {
+      name: "idx_workflow_events_kind",
+      columns: ["tenant_id", "kind"],
+    },
+    {
+      name: "idx_workflow_events_actor",
+      columns: ["actor_principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_events_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -6229,4 +6888,10 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ACCESS_REVIEW_DECISIONS,
   META_ACCESS_REVIEW_EXCEPTIONS,
   META_ACCESS_REVIEW_EVIDENCE,
+  META_WORKFLOW_DEFINITIONS,
+  META_WORKFLOW_INSTANCES,
+  META_WORKFLOW_ACTIVITIES,
+  META_WORKFLOW_SIGNALS,
+  META_WORKFLOW_TIMERS,
+  META_WORKFLOW_EVENTS,
 ];
