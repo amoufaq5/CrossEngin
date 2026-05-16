@@ -13,13 +13,19 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M4 + M4.5 landed: **45
-packages, 115 meta-schema tables, 5,270 tests**, all green, no
-type errors. The four runtime pillars (DDL execution +
-cryptography + workflow execution + HTTP gateway) are in place.
-M4.5 added `@crossengin/api-gateway-pg` — Postgres-backed
-adapters for the gateway runtime's four store interfaces
-(IdempotencyStore, RouteRegistry, RateLimitChecker,
+Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 + M4.5 landed:
+**46 packages, 115 meta-schema tables, 5,311 tests**, all green,
+no type errors. The four runtime pillars (DDL execution +
+cryptography + workflow execution + HTTP gateway) are in place;
+both impure runtime pillars (workflows + gateway) now have
+production-shape Postgres adapters. M3.5 added
+`@crossengin/workflow-runtime-pg` — PostgresEventLog + four
+projection stores (instance / activity / signal / timer) backed
+by the existing META_WORKFLOW_* tables, with cached wfi_*/wfd_*
+→ UUID resolvers that bridge the runtime's string IDs to the
+schema's UUID FKs. M4.5 added `@crossengin/api-gateway-pg` —
+Postgres-backed adapters for the gateway runtime's four store
+interfaces (IdempotencyStore, RouteRegistry, RateLimitChecker,
 PipelineExecutionStore) backed by the existing META_GATEWAY_* +
 META_RATE_LIMIT_DECISIONS tables via `@crossengin/kernel-pg`.
 M4 added `@crossengin/api-gateway-runtime` — the 17-stage
@@ -90,6 +96,22 @@ re-exporting everything.
   (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
+- **`workflow-runtime-pg`** — Postgres-backed adapters for the
+  workflow runtime. 6 modules: id-mapping
+  (WorkflowInstanceIdResolver + WorkflowDefinitionIdResolver,
+  cached wfi_*/wfd_* → UUID lookups against workflow_instances /
+  workflow_definitions), event-log (PostgresEventLog implements
+  EventLog over META_WORKFLOW_EVENTS, parses JSONB or text
+  payloads, computes latestSequence via MAX(sequence_number)),
+  instance-store (PostgresInstanceStore.create INSERTs
+  workflow_instances + caches the UUID; upsertProjection
+  UPDATEs all status / variables / awaiting* fields by
+  instance_id), activity-store (UPSERT into workflow_activities
+  via ON CONFLICT (activity_id) DO UPDATE), signal-store (UPSERT
+  workflow_signals with COALESCE-preserving instance_id),
+  timer-store (UPSERT workflow_timers with status/firedAt/
+  cancelledAt). Each store auto-resolves the instance UUID via
+  the shared resolver.
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces. 4 modules: idempotency-store
   (INSERT … ON CONFLICT DO UPDATE on tenant+operation+key,
@@ -476,8 +498,17 @@ emits the documented 24 event kinds (instance_started /
 state_transitioned / activity_* / signal_* / timer_* /
 variable_updated / compensation_* / instance_completed/failed/
 cancelled/suspended/resumed), and replays state by left-folding
-the event stream. Distributed (Postgres-backed) execution is
-M3.5 — same engine over a `PostgresEventLog` adapter.
+the event stream.
+
+**No longer deferred (as of M3.5):** workflow persistence. The
+`workflow-runtime-pg` package implements the `EventLog`
+interface against META_WORKFLOW_EVENTS via `@crossengin/
+kernel-pg`. Events survive process restarts; multiple worker
+processes can share an event log. PostgresInstanceStore /
+ActivityStore / SignalStore / TimerStore turn projected
+in-memory state into UPSERTs against the corresponding META_
+WORKFLOW_* tables, so queries like "show me all instances
+waiting on signal X for tenant Y" become normal SQL.
 
 **No longer deferred (as of M4):** HTTP request handling. The
 `api-gateway-runtime` package executes the 17-stage pipeline
