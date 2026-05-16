@@ -13,25 +13,26 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 landed: **42 packages, 115 meta-schema
-tables, 4,989 tests**, all green, no type errors. M1 added
+Phase 2 M1 + M2 + M2.5 + M3 landed: **43 packages, 115 meta-
+schema tables, 5,102 tests**, all green, no type errors. M1 added
 `@crossengin/kernel-pg` (Postgres-backed migration applier). M2
 added `@crossengin/crypto` (real SHA-256 / BLAKE2b-512 /
-HMAC-SHA256 / Ed25519 over `node:crypto`, opaque `KeyHandle`,
-per-tenant `InMemoryKeyStore`, two new META_ tables). M2.5 wired
-the crypto package into four downstream packages: `marketplace`
-(`signPackManifest` + `verifyPackSignature`), `sdk`
-(`signWebhookDelivery` + `verifyWebhookDelivery` over the
-existing `t=...,v1=...` format), `forensics` (`buildChainEntry` +
-`sealEvidence` + verify counterparts), `tenant-lifecycle`
-(`computeContentManifestSha256` + `computeProofSha256` +
-`populateTombstoneHashes` + `verifyTombstoneHashes`).
+HMAC-SHA256 / Ed25519). M2.5 wired crypto into marketplace +
+sdk + forensics + tenant-lifecycle. M3 added `@crossengin/
+workflow-runtime` — in-process event-sourced executor consuming
+`@crossengin/workflow-engine` contracts; turns workflow
+definitions into actually-running instances with append-only
+event log, deterministic replay-style projection, registered
+activity handlers, signal correlation, timer firing, automatic
+transitions, on-entry actions (set_variable / schedule_activity /
+schedule_timer), and saga compensation planning.
 
-ADRs 0001-0048 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0049 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
-→ M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2.
+→ M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
+ADR-0049 covers M3.
 
 ## Architecture in 90 seconds
 
@@ -71,6 +72,29 @@ re-exporting everything.
   (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
+- **`workflow-runtime`** — in-process event-sourced workflow
+  executor (third impure package). 7 modules: clock (Clock +
+  IdGenerator interfaces, SystemClock + FixedClock,
+  RandomIdGenerator + CountingIdGenerator), event-log (append-
+  only `EventLog` interface + InMemoryEventLog with monotonic-
+  per-instance sequence enforcement), projection (pure
+  `projectInstance` / `projectActivities` / `projectSignals` /
+  `projectTimers` — definition-aware projection refines status
+  to waiting_for_signal/timer/manual based on outgoing transition
+  triggers), transitions (pure trigger matching + guard
+  evaluation, defaultGuardEvaluator covers always_true /
+  variable_equals / variable_predicate with 8 operators /
+  role_required), activity-handlers (`ActivityRegistry` with
+  specific + per-kind fallback resolution, built-in handlers for
+  audit_emit + transformation), engine (`WorkflowEngine.start
+  Instance` / `submitSignal` / `tickTimers` / `cancelInstance` /
+  `getInstanceState` / `listEvents`; step loop runs automatic
+  transitions + on-entry actions until quiescent; signals
+  matched by tenant + correlationKey with exactly_once
+  idempotency dedup), saga (pure `planCompensation` /
+  `listCompensatableActivities` / `hasOutstandingCompensation`
+  handling immediate_reverse_order / parallel / manual_review /
+  no_compensation strategies).
 - **`crypto`** — real cryptography over `node:crypto`. 7 modules:
   algorithms (`HashAlgorithm`/`MacAlgorithm`/`SignatureAlgorithm`
   + `KeyPurpose` allow-list), hashing (SHA-256, BLAKE2b-512, hash
@@ -384,12 +408,26 @@ tenant-lifecycle tombstones carry canonical-JSON-derived
 contentManifestSha256 + proofSha256 that round-trip via
 `verifyTombstoneHashes`.
 
+**No longer deferred (as of M3):** workflow execution. The
+`workflow-runtime` package consumes `WorkflowDefinition` shapes
+and actually runs them: starts instances, threads variables,
+runs automatic transitions, schedules + executes activities via
+a registered handler registry, fires timers when their fireAt is
+reached, accepts signals matched by tenant + correlationKey,
+emits the documented 24 event kinds (instance_started /
+state_transitioned / activity_* / signal_* / timer_* /
+variable_updated / compensation_* / instance_completed/failed/
+cancelled/suspended/resumed), and replays state by left-folding
+the event stream. Distributed (Postgres-backed) execution is
+M3.5 — same engine over a `PostgresEventLog` adapter.
+
 ## ADRs
 
-ADRs 0001-0048 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0049 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
-covers Phase 2 M2 (`crypto`). When you ship a new package, write
-the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037 batch.
+covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
+(`workflow-runtime`). When you ship a new package, write the
+matching ADR in the same session, following `0000-template.md`
+and the style of the existing 0026-0037 batch.

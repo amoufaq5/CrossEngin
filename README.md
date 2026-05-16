@@ -1,16 +1,17 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 landed. **42 packages, 115
-> meta-schema tables, ~4,990 tests**, all green, zero type
-> errors. ADRs 0001–0048 fully drafted. M1 added `kernel-pg`
+> **Status:** Phase 2 M1 + M2 + M2.5 + M3 landed. **43 packages,
+> 115 meta-schema tables, ~5,100 tests**, all green, zero type
+> errors. ADRs 0001–0049 fully drafted. M1 added `kernel-pg`
 > (Postgres-backed migration applier). M2 added `crypto` (real
 > SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 + per-tenant
-> key store). M2.5 wired the crypto package into `marketplace`
-> (pack signing), `sdk` (webhook HMAC), `forensics` (evidence
-> sealing + hash-chain integrity), and `tenant-lifecycle`
-> (tombstone proofs) — the previously-string-only signature
-> fields are now backed by real, verifiable values. Real
-> provider clients remain deferred.
+> key store). M2.5 wired the crypto package into marketplace,
+> sdk, forensics, and tenant-lifecycle. M3 added
+> `workflow-runtime` — an in-process event-sourced executor that
+> turns `WorkflowDefinition` shapes into actually-running
+> instances (start, transition, schedule + run activities, fire
+> timers, accept signals, compensate). Real provider clients
+> remain deferred.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,
@@ -27,9 +28,10 @@ white-label channel for system integrators (**Partner**).
 
 ## Current state
 
-Forty-two packages cover the Phase 1 surface (zod schemas +
-deterministic helpers) plus Phase 2 M1-M2 (`kernel-pg`: real
-Postgres execution; `crypto`: real signatures + hashes).
+Forty-three packages cover the Phase 1 surface (zod schemas +
+deterministic helpers) plus Phase 2 M1-M3 (`kernel-pg`: real
+Postgres execution; `crypto`: real signatures + hashes;
+`workflow-runtime`: event-sourced in-process executor).
 Detailed orientation is in **[CLAUDE.md](CLAUDE.md)**.
 
 Quick map by concern:
@@ -44,7 +46,7 @@ Quick map by concern:
 - **AI surface.** `ai-providers`, `ai-architect`.
 - **Runtime + admission control.** `jobs`, `observability`,
   `integrations`, `rate-limiting`, `api-gateway`, `feature-flags`,
-  `workflow-engine`.
+  `workflow-engine`, `workflow-runtime`.
 - **Reporting / search / UI / messaging.** `reporting`, `search`,
   `views`, `i18n`, `notifications`.
 - **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
@@ -71,8 +73,8 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0048
-├── packages/         42 workspace packages
+│   └── adr/          ADRs 0001-0049
+├── packages/         43 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -91,7 +93,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 48 architecture decisions.
+running index of 49 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at
