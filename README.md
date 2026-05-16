@@ -1,8 +1,10 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 landed. **43
-> packages, 115 meta-schema tables, ~5,140 tests**, all green,
-> zero type errors. ADRs 0001–0049 fully drafted. M1 added
+> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M4 landed.
+> The four runtime pillars (DDL + crypto + workflows + gateway)
+> are in place. **44 packages, 115 meta-schema tables, ~5,240
+> tests**, all green, zero type errors. ADRs 0001–0050 fully
+> drafted. M1 added
 > `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
@@ -47,8 +49,9 @@ Quick map by concern:
   `compliance`, `residency`, `files`.
 - **AI surface.** `ai-providers`, `ai-architect`.
 - **Runtime + admission control.** `jobs`, `observability`,
-  `integrations`, `rate-limiting`, `api-gateway`, `feature-flags`,
-  `workflow-engine`, `workflow-runtime`.
+  `integrations`, `rate-limiting`, `api-gateway`,
+  `api-gateway-runtime`, `feature-flags`, `workflow-engine`,
+  `workflow-runtime`.
 - **Reporting / search / UI / messaging.** `reporting`, `search`,
   `views`, `i18n`, `notifications`.
 - **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
@@ -75,8 +78,8 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0049
-├── packages/         43 workspace packages
+│   └── adr/          ADRs 0001-0050
+├── packages/         44 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -95,7 +98,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 49 architecture decisions.
+running index of 50 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at

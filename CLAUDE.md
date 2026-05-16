@@ -13,8 +13,15 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 landed: **43 packages, 115
-meta-schema tables, 5,143 tests**, all green, no type errors. M1
+Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M4 landed: **44 packages,
+115 meta-schema tables, 5,236 tests**, all green, no type errors.
+The four runtime pillars (DDL execution + cryptography + workflow
+execution + HTTP gateway) are in place. M4 added `@crossengin/
+api-gateway-runtime` — the 17-stage pipeline as real middleware,
+with EdDSA JWT verification (via crypto), idempotency-key replay
+detection (via the IdempotencyStore interface), rate-limit
+denial with Retry-After, RFC 9457 problem details for every
+error, and a queryable PipelineExecution per request. M1
 added `@crossengin/kernel-pg` (Postgres-backed migration applier).
 M2 added `@crossengin/crypto` (real SHA-256 / BLAKE2b-512 /
 HMAC-SHA256 / Ed25519). M2.5 wired crypto into marketplace + sdk
@@ -33,12 +40,12 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0049 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0050 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
 → M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
-ADR-0049 covers M3.
+ADR-0049 covers M3, ADR-0050 covers M4.
 
 ## Architecture in 90 seconds
 
@@ -78,6 +85,29 @@ re-exporting everything.
   (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
+- **`api-gateway-runtime`** — HTTP gateway middleware
+  (fourth impure package). 7 modules: adapters (RequestAdapter +
+  ResponseAdapter for Node HTTP + edge runtimes,
+  buildIncomingRequest helper), stores (PrincipalResolver +
+  IdempotencyStore + RateLimitChecker + RouteRegistry interfaces
+  + in-memory implementations), auth (EdDSA JWT verify with iss/
+  aud/exp/nbf checks via @crossengin/crypto, opaque token matcher
+  with constant-time compare, parseAuthHeader for Bearer/Basic/
+  x-api-key), problems (RFC 9457 envelope builders for the 14
+  declared problem types — authenticationRequired with WWW-
+  Authenticate, tooManyRequests with Retry-After, sunsetEndpoint
+  with Sunset header), dispatcher (HandlerRegistry mapping
+  operationId → handler, handlerOutputToResponse converting
+  json/empty/bytes outputs), pipeline-runner (PipelineRecorder
+  enforcing stage-order monotonicity, building schema-valid
+  PipelineExecution), runtime (GatewayRuntime.handleRequest walks
+  the 17 stages: receive → parse_request → validate_tls →
+  parse_auth → authenticate → resolve_principal → match_route →
+  negotiate_version → negotiate_content → check_idempotency →
+  check_rate_limit → validate_signature → validate_schema →
+  dispatch_handler → transform_response → apply_security_headers
+  → emit_audit; halts on terminating outcomes; merges
+  DEFAULT_SECURITY_HEADERS on pass).
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -433,13 +463,27 @@ cancelled/suspended/resumed), and replays state by left-folding
 the event stream. Distributed (Postgres-backed) execution is
 M3.5 — same engine over a `PostgresEventLog` adapter.
 
+**No longer deferred (as of M4):** HTTP request handling. The
+`api-gateway-runtime` package executes the 17-stage pipeline
+declared in `@crossengin/api-gateway` as real middleware. A
+POST request lands → walks the stages → produces an
+OutgoingResponse + a schema-valid PipelineExecution. Unauth →
+401 + WWW-Authenticate. Valid JWT + over-quota → 429 +
+Retry-After. Replay with same Idempotency-Key → cached 201 with
+X-Idempotent-Replay: true. Routes with required scopes plug
+into @crossengin/auth's principal model. The IdempotencyStore /
+RateLimitChecker / RouteRegistry interfaces are designed for
+Phase 3 swap to Postgres-backed adapters via `@crossengin/
+kernel-pg`.
+
 ## ADRs
 
-ADRs 0001-0049 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0050 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
 covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
-(`workflow-runtime`). When you ship a new package, write the
+(`workflow-runtime`), ADR-0050 covers Phase 2 M4
+(`api-gateway-runtime`). When you ship a new package, write the
 matching ADR in the same session, following `0000-template.md`
 and the style of the existing 0026-0037 batch.

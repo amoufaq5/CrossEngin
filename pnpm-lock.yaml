@@ -125,6 +125,40 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  packages/api-gateway-runtime:
+    dependencies:
+      '@crossengin/api-gateway':
+        specifier: workspace:*
+        version: link:../api-gateway
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
+      '@crossengin/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/auth:
     dependencies:
       '@crossengin/types':
