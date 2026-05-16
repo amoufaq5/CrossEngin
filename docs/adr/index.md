@@ -53,13 +53,14 @@
 | [0048](0048-real-cryptography.md) | Real cryptography (Phase 2 M2) | 2 | Proposed | 2026-05-16 |
 | [0049](0049-workflow-engine-runtime.md) | Workflow engine runtime (Phase 2 M3) | 2 | Proposed | 2026-05-16 |
 | [0050](0050-api-gateway-runtime.md) | API gateway runtime (Phase 2 M4) | 2 | Proposed | 2026-05-16 |
+| [0051](0051-architect-cli.md) | Architect CLI (Phase 2 M5) | 2 | Proposed | 2026-05-16 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024, 0046.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses

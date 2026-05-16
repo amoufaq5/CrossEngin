@@ -13,12 +13,18 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 + M4.5 landed:
-**46 packages, 115 meta-schema tables, 5,311 tests**, all green,
-no type errors. The four runtime pillars (DDL execution +
-cryptography + workflow execution + HTTP gateway) are in place;
-both impure runtime pillars (workflows + gateway) now have
-production-shape Postgres adapters. M3.5 added
+Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 + M4.5 + M5
+landed: **46 packages + 1 app, 115 meta-schema tables, 5,378
+tests**, all green, no type errors. The four runtime pillars
+(DDL execution + cryptography + workflow execution + HTTP
+gateway) are in place; both impure runtime pillars (workflows +
+gateway) now have production-shape Postgres adapters; M5 added
+the first app under `apps/` — `@crossengin/architect-cli` ships
+the `crossengin` binary with `init`, `validate`, `diff`, `patch`,
+`hash`, `apply`, `chat` (stubbed for M5.5), `version`, `help`.
+The end-to-end story works today: `crossengin init m.json &&
+crossengin validate m.json && crossengin apply --dry-run`
+produces a 3,061-line SQL dump of the full meta-schema. M3.5 added
 `@crossengin/workflow-runtime-pg` — PostgresEventLog + four
 projection stores (instance / activity / signal / timer) backed
 by the existing META_WORKFLOW_* tables, with cached wfi_*/wfd_*
@@ -51,12 +57,12 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0050 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0051 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
 → M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
-ADR-0049 covers M3, ADR-0050 covers M4.
+ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5.
 
 ## Architecture in 90 seconds
 
@@ -455,8 +461,8 @@ following are intentionally out of scope until contracts settle:
   types only.
 - Real cryptography. Signature fields are typed as strings; the
   actual HMAC/ed25519 computation is not in this codebase.
-- Apps under `apps/`. The directory is empty; UI lives in `views`
-  as type definitions only.
+- Customer-facing apps under `apps/` other than `architect-cli`.
+  UI lives in `views` as type definitions only.
 
 **No longer deferred (as of M1):** kernel DDL execution. The
 `kernel-pg` package executes meta-schema DDL against a real
@@ -532,14 +538,27 @@ META_RATE_LIMIT_DECISIONS. PipelineExecutions persist to
 META_GATEWAY_PIPELINE_EXECUTIONS so every request is queryable
 by tenant + correlationId + time.
 
+**No longer deferred (as of M5):** the developer entry point.
+`apps/architect-cli` ships a `crossengin` binary with the M5
+subcommand surface: `init` (scaffold a manifest), `validate`
+(zod-check + summary), `diff` (computeManifestDiff with human
+or JSON output), `patch` (write a manifest patch), `hash`
+(deterministic manifestHash), `apply` (--dry-run emits the
+3,061-line meta-schema SQL; live mode uses MigrationApplier
+against PGHOST/PGDATABASE), `chat` (stub for M5.5), `version`,
+`help`. Every subcommand has --format human|json. Exit codes:
+0 success / 1 runtime problem / 2 misuse. The CLI is the first
+binary that composes contracts → real artifact.
+
 ## ADRs
 
-ADRs 0001-0050 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0051 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
 covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (`workflow-runtime`), ADR-0050 covers Phase 2 M4
-(`api-gateway-runtime`). When you ship a new package, write the
+(`api-gateway-runtime`), ADR-0051 covers Phase 2 M5
+(`architect-cli`). When you ship a new package, write the
 matching ADR in the same session, following `0000-template.md`
 and the style of the existing 0026-0037 batch.

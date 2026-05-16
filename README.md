@@ -1,11 +1,13 @@
 # CrossEngin
 
 > **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 +
-> M4.5 landed. The four runtime pillars (DDL + crypto +
+> M4.5 + M5 landed. The four runtime pillars (DDL + crypto +
 > workflows + gateway) are in place; both impure runtimes have
-> Postgres-backed adapters (workflow-runtime-pg + api-gateway-pg).
-> **46 packages, 115 meta-schema tables, ~5,310 tests**, all
-> green, zero type errors. ADRs 0001–0050 fully drafted. M1 added
+> Postgres-backed adapters; M5 shipped the first binary —
+> `crossengin` CLI with init / validate / diff / patch / hash /
+> apply / chat / version / help subcommands. **46 packages + 1
+> app, 115 meta-schema tables, ~5,380 tests**, all green, zero
+> type errors. ADRs 0001–0051 fully drafted. M1 added
 > `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
@@ -80,6 +82,7 @@ CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
 │   └── adr/          ADRs 0001-0050
+├── apps/             1 workspace app  (architect-cli)
 ├── packages/         46 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]

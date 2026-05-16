@@ -1,0 +1,134 @@
+export const SUBCOMMANDS = [
+  "init",
+  "validate",
+  "diff",
+  "patch",
+  "hash",
+  "apply",
+  "chat",
+  "version",
+  "help",
+] as const;
+export type Subcommand = (typeof SUBCOMMANDS)[number];
+
+export const OUTPUT_FORMATS = ["human", "json"] as const;
+export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
+
+export interface ParsedCommand {
+  readonly subcommand: Subcommand;
+  readonly positional: readonly string[];
+  readonly flags: ReadonlyMap<string, string | true>;
+  readonly format: OutputFormat;
+}
+
+export interface ParseError {
+  readonly kind: "parse_error";
+  readonly message: string;
+}
+
+export type ParseResult =
+  | { readonly ok: true; readonly command: ParsedCommand }
+  | { readonly ok: false; readonly error: ParseError };
+
+export function parseArgs(argv: readonly string[]): ParseResult {
+  const args = argv.slice(2);
+  const positional: string[] = [];
+  const flags = new Map<string, string | true>();
+
+  let subcommandRaw: string | null = null;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      if (eq >= 0) {
+        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+      } else {
+        const next = args[i + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          flags.set(arg.slice(2), next);
+          i += 1;
+        } else {
+          flags.set(arg.slice(2), true);
+        }
+      }
+      continue;
+    }
+    if (subcommandRaw === null) {
+      subcommandRaw = arg;
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  if (subcommandRaw === null) {
+    return { ok: true, command: { subcommand: "help", positional, flags, format: "human" } };
+  }
+  if (!isSubcommand(subcommandRaw)) {
+    return {
+      ok: false,
+      error: { kind: "parse_error", message: `unknown subcommand: ${subcommandRaw}` },
+    };
+  }
+  const formatRaw = flags.get("format");
+  let format: OutputFormat = "human";
+  if (typeof formatRaw === "string") {
+    if (formatRaw !== "human" && formatRaw !== "json") {
+      return {
+        ok: false,
+        error: { kind: "parse_error", message: `unknown output format: ${formatRaw}` },
+      };
+    }
+    format = formatRaw;
+  }
+  return {
+    ok: true,
+    command: { subcommand: subcommandRaw, positional, flags, format },
+  };
+}
+
+export function isSubcommand(value: unknown): value is Subcommand {
+  return typeof value === "string" && (SUBCOMMANDS as readonly string[]).includes(value);
+}
+
+export function getStringFlag(
+  command: ParsedCommand,
+  name: string,
+): string | null {
+  const value = command.flags.get(name);
+  if (typeof value === "string") return value;
+  return null;
+}
+
+export function getBooleanFlag(command: ParsedCommand, name: string): boolean {
+  const value = command.flags.get(name);
+  return value === true || value === "true" || value === "1";
+}
+
+export function helpText(): string {
+  return [
+    "Usage: crossengin <command> [options]",
+    "",
+    "Commands:",
+    "  init <output>           Scaffold a new manifest file",
+    "  validate <path>         Validate a manifest against the kernel schema",
+    "  diff <old> <new>        Compare two manifests",
+    "  patch <base> <patch>    Apply a manifest patch (writes new manifest)",
+    "  hash <path>             Print the deterministic manifest hash",
+    "  apply [--dry-run]       Apply the meta-schema to the configured Postgres",
+    "  chat                    Interactive AI Architect session (M5.5)",
+    "  version                 Print the CLI version + workspace info",
+    "  help                    Show this help text",
+    "",
+    "Flags:",
+    "  --format human|json     Output format (default: human)",
+    "  --force                 With init / patch, overwrite an existing file",
+    "  --output <path>         With patch, write the result to a different path",
+    "  --dry-run               With apply, emit SQL without executing",
+    "  --confirm               Required when PGDATABASE looks like production",
+    "",
+    "Environment (for apply):",
+    "  PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, PGAPPNAME",
+    "",
+  ].join("\n");
+}
