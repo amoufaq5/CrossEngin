@@ -1,11 +1,11 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M4 + M4.5
-> landed. The four runtime pillars (DDL + crypto + workflows +
-> gateway) are in place; M4.5 added Postgres-backed adapters
-> for the gateway stores. **45 packages, 115 meta-schema tables,
-> ~5,270 tests**, all green, zero type errors. ADRs 0001–0050
-> fully drafted. M1 added
+> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 +
+> M4.5 landed. The four runtime pillars (DDL + crypto +
+> workflows + gateway) are in place; both impure runtimes have
+> Postgres-backed adapters (workflow-runtime-pg + api-gateway-pg).
+> **46 packages, 115 meta-schema tables, ~5,310 tests**, all
+> green, zero type errors. ADRs 0001–0050 fully drafted. M1 added
 > `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
@@ -52,7 +52,7 @@ Quick map by concern:
 - **Runtime + admission control.** `jobs`, `observability`,
   `integrations`, `rate-limiting`, `api-gateway`,
   `api-gateway-runtime`, `api-gateway-pg`, `feature-flags`,
-  `workflow-engine`, `workflow-runtime`.
+  `workflow-engine`, `workflow-runtime`, `workflow-runtime-pg`.
 - **Reporting / search / UI / messaging.** `reporting`, `search`,
   `views`, `i18n`, `notifications`.
 - **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
@@ -80,7 +80,7 @@ CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
 │   └── adr/          ADRs 0001-0050
-├── packages/         45 workspace packages
+├── packages/         46 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
