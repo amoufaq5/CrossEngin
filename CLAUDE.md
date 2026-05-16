@@ -19,8 +19,11 @@ full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
-README has been refreshed to reflect this state. ADRs 0001-0045
-are fully drafted in `docs/adr/` — no reserved gaps.
+README has been refreshed to reflect this state. ADRs 0001-0046
+are fully drafted in `docs/adr/` — no reserved gaps. ADR-0046 is
+the Phase 2 implementation plan (M1 DDL → M2 crypto → M3 workflow
+runtime → M4 gateway runtime → M5 architect-cli → M6 notifications
++ workflow bridge → M7 first vertical pack → M8 SLO enforcement).
 
 ## Architecture in 90 seconds
 
@@ -331,8 +334,10 @@ following are intentionally out of scope until contracts settle:
 
 ## ADRs
 
-ADRs 0001-0045 exist as markdown in `docs/adr/`. Every shipped
-package has a corresponding ADR; no reserved gaps. When you ship
-a new package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
+ADRs 0001-0046 exist as markdown in `docs/adr/`. Every shipped
+package has a corresponding ADR; no reserved gaps. ADR-0046 is
+the bridge from Phase 1 contracts to Phase 2 runtime (8
+milestones). When you ship a new package, write the matching ADR
+in the same session, following `0000-template.md` and the style
+of the existing
 0026-0037 batch.

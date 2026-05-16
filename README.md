@@ -1,8 +1,8 @@
 # CrossEngin
 
-> **Status:** Phase 1 contract-types layer landed. **32 packages,
-> 71 meta-schema tables, ~3,300 tests**, all green, zero type
-> errors. ADRs 0001–0037 fully drafted. Impure runtime (real
+> **Status:** Phase 1 contract-types layer landed. **40 packages,
+> 113 meta-schema tables, ~4,700 tests**, all green, zero type
+> errors. ADRs 0001–0046 fully drafted. Impure runtime (real
 > provider clients, DB execution, cryptography) is deferred to
 > Phase 2+.
 
@@ -21,7 +21,7 @@ white-label channel for system integrators (**Partner**).
 
 ## Current state
 
-Thirty packages cover the Phase 1 surface as zod schemas +
+Forty packages cover the Phase 1 surface as zod schemas +
 deterministic helpers. Everything is pure contracts — no network,
 no DB execution, no real cryptography yet. Detailed orientation
 is in **[CLAUDE.md](CLAUDE.md)**.
@@ -30,17 +30,31 @@ Quick map by concern:
 
 - **Substrate.** `kernel` (meta-schema + DDL emit + manifest
   validate/diff), `types`, `config`, `testing`.
-- **Identity, security, data.** `auth`, `security`, `compliance`,
-  `residency`, `files`.
+- **Identity, security, data.** `auth`, `sso`, `security`,
+  `compliance`, `residency`, `files`.
 - **AI surface.** `ai-providers`, `ai-architect`.
-- **Runtime + ops.** `jobs`, `observability`, `integrations`.
-- **Reporting / search / UI.** `reporting`, `search`, `views`,
-  `i18n`.
+- **Runtime + admission control.** `jobs`, `observability`,
+  `integrations`, `rate-limiting`, `api-gateway`, `feature-flags`,
+  `workflow-engine`.
+- **Reporting / search / UI / messaging.** `reporting`, `search`,
+  `views`, `i18n`, `notifications`.
 - **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
-- **Delivery infrastructure.** `deploy`, `dr`, `edge`, `pwa`.
-- **Developer / partner.** `sdk`, `marketplace`, `migration`,
-  `ml-training`.
-- **Audit + compliance ops.** `incident-response`, `forensics`.
+- **Delivery infrastructure.** `deploy`, `dr`, `edge`,
+  `active-active`, `pwa`.
+- **Developer / partner.** `sdk`, `sdk-clients`, `marketplace`,
+  `migration`, `ml-training`.
+- **Audit + compliance ops.** `incident-response`, `forensics`,
+  `access-reviews`, `data-lineage`.
+
+Three compliance triangles closed at the contract layer:
+- **Privacy.** `tenant-lifecycle` (GDPR Art. 17 deletion) +
+  `data-lineage` (Art. 15 access) + `forensics` (legal hold).
+- **Access control.** `auth` (RBAC/ABAC) + `sso` (federation) +
+  `access-reviews` (SOC 2 CC6.3 periodic attestation).
+- **Runtime safety.** `feature-flags` (kill switches +
+  gradual rollout) + `rate-limiting` (admission control) +
+  `incident-response` (declared incidents) +
+  `workflow-engine` (saga compensation).
 
 ## Repository layout
 
@@ -48,8 +62,8 @@ Quick map by concern:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0037 (0032, 0034 reserved)
-├── packages/         30 workspace packages
+│   └── adr/          ADRs 0001-0046
+├── packages/         40 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -60,13 +74,15 @@ CrossEngin/
 
 The full target layout is in
 **[ADR-0024](docs/adr/0024-repository-and-migration-strategy.md)**.
+The Phase 2 implementation plan is in
+**[ADR-0046](docs/adr/0046-phase-2-implementation-plan.md)**.
 
 ## How to read this repository
 
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 35 architecture decisions.
+running index of 46 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at
@@ -140,7 +156,7 @@ Common commands:
 ```bash
 pnpm install                                # install workspace
 pnpm -r build                               # build all packages
-pnpm -r test                                # test all packages (~30s)
+pnpm -r test                                # test all packages (~45s)
 pnpm -r typecheck                           # type-check all packages
 pnpm --filter @crossengin/<name> test       # one package
 ```
