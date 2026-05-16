@@ -4248,6 +4248,154 @@ export const META_AA_SPLIT_BRAIN_EVENTS: TableDefinition = {
   ],
 };
 
+export const META_SDK_CLIENT_RELEASES: TableDefinition = {
+  schema: "meta",
+  name: "sdk_client_releases",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "release_id", type: "TEXT", notNull: true, unique: { constraintName: "sdk_client_releases_release_id_key" } },
+    {
+      name: "language",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "language IN ('typescript', 'python', 'go', 'java', 'csharp', 'ruby', 'rust', 'php', 'swift', 'kotlin')",
+    },
+    { name: "version", type: "TEXT", notNull: true },
+    { name: "api_version", type: "TEXT", notNull: true },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check: "channel IN ('stable', 'beta', 'rc', 'nightly')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('draft', 'in_review', 'published', 'deprecated', 'yanked')",
+    },
+    {
+      name: "artifact_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "artifact_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "artifact_size_bytes",
+      type: "BIGINT",
+      notNull: true,
+      check: "artifact_size_bytes > 0",
+    },
+    { name: "registry_package_uri", type: "TEXT", notNull: true },
+    { name: "generation_run_id", type: "TEXT", notNull: true },
+    { name: "published_at", type: "TIMESTAMPTZ" },
+    { name: "published_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "deprecated_reason", type: "TEXT" },
+    { name: "deprecated_replaced_by", type: "TEXT" },
+    { name: "yanked_at", type: "TIMESTAMPTZ" },
+    { name: "yanked_reason", type: "TEXT" },
+    { name: "security_advisories", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "changelog_url", type: "TEXT", notNull: true },
+    {
+      name: "download_count",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "download_count >= 0",
+    },
+    {
+      name: "breaking_changes",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "min_language_runtime_version", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "sdk_client_releases_lang_version_key",
+      columns: ["language", "version"],
+    },
+  ],
+  indexes: [
+    { name: "idx_sdk_client_releases_language", columns: ["language"] },
+    { name: "idx_sdk_client_releases_status", columns: ["status"] },
+    { name: "idx_sdk_client_releases_api_version", columns: ["api_version"] },
+    { name: "idx_sdk_client_releases_channel", columns: ["channel"] },
+  ],
+};
+
+export const META_SDK_CLIENT_INSTALLATIONS: TableDefinition = {
+  schema: "meta",
+  name: "sdk_client_installations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "language",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "language IN ('typescript', 'python', 'go', 'java', 'csharp', 'ruby', 'rust', 'php', 'swift', 'kotlin')",
+    },
+    { name: "client_version", type: "TEXT", notNull: true },
+    { name: "first_observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "request_count_30d",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "request_count_30d >= 0",
+    },
+    { name: "user_agent_sample", type: "TEXT" },
+    {
+      name: "upgrade_nag_status",
+      type: "TEXT",
+      notNull: true,
+      default: "'none'",
+      check:
+        "upgrade_nag_status IN ('none', 'soft_warning', 'hard_warning', 'forced_upgrade_required')",
+    },
+    { name: "last_nag_sent_at", type: "TIMESTAMPTZ" },
+    { name: "acknowledged_at", type: "TIMESTAMPTZ" },
+    { name: "acknowledged_by", type: "UUID", references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "sdk_client_installations_tenant_lang_version_key",
+      columns: ["tenant_id", "language", "client_version"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_sdk_client_installations_tenant",
+      columns: ["tenant_id"],
+    },
+    {
+      name: "idx_sdk_client_installations_language_version",
+      columns: ["language", "client_version"],
+    },
+    {
+      name: "idx_sdk_client_installations_nag",
+      columns: ["upgrade_nag_status"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "sdk_client_installations_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -4318,4 +4466,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_AA_TOPOLOGY,
   META_AA_CONFLICTS,
   META_AA_SPLIT_BRAIN_EVENTS,
+  META_SDK_CLIENT_RELEASES,
+  META_SDK_CLIENT_INSTALLATIONS,
 ];

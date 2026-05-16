@@ -56,6 +56,8 @@ import {
   META_REGIONS,
   META_REPORT_RUNS,
   META_SCHEDULED_EXPORTS,
+  META_SDK_CLIENT_INSTALLATIONS,
+  META_SDK_CLIENT_RELEASES,
   META_SUBSCRIPTIONS,
   META_TABLES,
   META_TENANT_AI_SETTINGS,
@@ -73,8 +75,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 69 tables", () => {
-    expect(META_TABLES).toHaveLength(69);
+  it("contains 71 tables", () => {
+    expect(META_TABLES).toHaveLength(71);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -144,6 +146,8 @@ describe("META_TABLES", () => {
       "regions",
       "report_runs",
       "scheduled_exports",
+      "sdk_client_installations",
+      "sdk_client_releases",
       "subscriptions",
       "tenant_ai_settings",
       "tenant_credits",
@@ -990,6 +994,51 @@ describe("table column shapes", () => {
     expect(status?.check).toContain("'detected'");
     expect(status?.check).toContain("'healing'");
     expect(status?.check).toContain("'permanent_partition'");
+  });
+
+  it("META_SDK_CLIENT_RELEASES check-constrains language to ten targets", () => {
+    const lang = META_SDK_CLIENT_RELEASES.columns.find((c) => c.name === "language");
+    expect(lang?.check).toContain("'typescript'");
+    expect(lang?.check).toContain("'python'");
+    expect(lang?.check).toContain("'kotlin'");
+  });
+
+  it("META_SDK_CLIENT_RELEASES check-constrains channel to four channels", () => {
+    const channel = META_SDK_CLIENT_RELEASES.columns.find((c) => c.name === "channel");
+    expect(channel?.check).toContain("'stable'");
+    expect(channel?.check).toContain("'beta'");
+    expect(channel?.check).toContain("'nightly'");
+  });
+
+  it("META_SDK_CLIENT_RELEASES check-constrains status to five lifecycle states", () => {
+    const status = META_SDK_CLIENT_RELEASES.columns.find((c) => c.name === "status");
+    expect(status?.check).toContain("'published'");
+    expect(status?.check).toContain("'deprecated'");
+    expect(status?.check).toContain("'yanked'");
+  });
+
+  it("META_SDK_CLIENT_RELEASES enforces (language, version) uniqueness", () => {
+    expect(META_SDK_CLIENT_RELEASES.uniqueConstraints?.[0]?.columns).toEqual([
+      "language",
+      "version",
+    ]);
+  });
+
+  it("META_SDK_CLIENT_INSTALLATIONS enforces (tenant_id, language, client_version) uniqueness", () => {
+    expect(META_SDK_CLIENT_INSTALLATIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "language",
+      "client_version",
+    ]);
+  });
+
+  it("META_SDK_CLIENT_INSTALLATIONS check-constrains upgrade_nag_status to four values", () => {
+    const nag = META_SDK_CLIENT_INSTALLATIONS.columns.find(
+      (c) => c.name === "upgrade_nag_status",
+    );
+    expect(nag?.check).toContain("'none'");
+    expect(nag?.check).toContain("'soft_warning'");
+    expect(nag?.check).toContain("'forced_upgrade_required'");
   });
 });
 

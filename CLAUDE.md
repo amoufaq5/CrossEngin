@@ -13,14 +13,14 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 1 contract-types layer: **31 packages, 69 meta-schema
-tables, 3187 tests**, all green, no type errors. Nearly the
+Phase 1 contract-types layer: **32 packages, 71 meta-schema
+tables, 3316 tests**, all green, no type errors. Nearly the
 full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
 README has been refreshed to reflect this state. ADRs 0001-0037
-are drafted in `docs/adr/` (only 0034 still reserved).
+are fully drafted in `docs/adr/` — no reserved gaps.
 
 ## Architecture in 90 seconds
 
@@ -124,6 +124,11 @@ re-exporting everything.
 - **`sdk`** — public API contract (versioning, scopes, operations,
   RFC 9457 problem details, cursor pagination, idempotency,
   webhooks with HMAC-SHA256).
+- **`sdk-clients`** — language-specific client generation
+  contract (10 target languages × 10 registries × 3 tiers,
+  generator pipeline, semver release lifecycle, compatibility
+  matrix, auth + retry helpers, client telemetry with W3C
+  trace context).
 - **`marketplace`** — installable extension packs, pack registry
   with ed25519 signing + security review, per-tenant install
   lifecycle, permission grants, marketplace listings + reviews.
