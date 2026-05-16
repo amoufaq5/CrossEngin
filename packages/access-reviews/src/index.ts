@@ -5,3 +5,5 @@ export * from "./decisions.js";
 export * from "./exceptions.js";
 export * from "./templates.js";
 export * from "./evidence.js";
+export * from "./attestation-signing.js";
+export * from "./evidence-sealing.js";

@@ -17,6 +17,9 @@ importers:
 
   packages/access-reviews:
     dependencies:
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -27,6 +30,9 @@ importers:
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
@@ -239,6 +245,9 @@ importers:
 
   packages/data-lineage:
     dependencies:
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -249,6 +258,9 @@ importers:
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

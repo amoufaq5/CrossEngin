@@ -1,17 +1,19 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M3 landed. **43 packages,
-> 115 meta-schema tables, ~5,100 tests**, all green, zero type
-> errors. ADRs 0001–0049 fully drafted. M1 added `kernel-pg`
-> (Postgres-backed migration applier). M2 added `crypto` (real
-> SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 + per-tenant
-> key store). M2.5 wired the crypto package into marketplace,
-> sdk, forensics, and tenant-lifecycle. M3 added
-> `workflow-runtime` — an in-process event-sourced executor that
-> turns `WorkflowDefinition` shapes into actually-running
-> instances (start, transition, schedule + run activities, fire
-> timers, accept signals, compensate). Real provider clients
-> remain deferred.
+> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 landed. **43
+> packages, 115 meta-schema tables, ~5,140 tests**, all green,
+> zero type errors. ADRs 0001–0049 fully drafted. M1 added
+> `kernel-pg` (Postgres-backed migration applier). M2 added
+> `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
+> per-tenant key store). M2.5 + M2.6 wired crypto into six
+> downstream packages — marketplace pack signing, sdk webhook
+> HMAC, forensics evidence sealing + hash chain, tenant-lifecycle
+> tombstones, access-reviews digital signature attestations +
+> campaign evidence sealing, data-lineage Article 15 GDPR
+> evidence packs. M3 added `workflow-runtime` — an in-process
+> event-sourced executor that turns `WorkflowDefinition` shapes
+> into actually-running instances. Real provider clients remain
+> deferred.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,
