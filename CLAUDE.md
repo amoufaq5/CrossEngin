@@ -13,13 +13,13 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 1 contract-types layer: **36 packages, 94 meta-schema
-tables, 4,098 tests**, all green, no type errors. Nearly the
+Phase 1 contract-types layer: **37 packages, 100 meta-schema
+tables, 4,239 tests**, all green, no type errors. Nearly the
 full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
-README has been refreshed to reflect this state. ADRs 0001-0041
+README has been refreshed to reflect this state. ADRs 0001-0042
 are fully drafted in `docs/adr/` — no reserved gaps.
 
 ## Architecture in 90 seconds
@@ -167,6 +167,14 @@ re-exporting everything.
   items, decisions with attestation + four-eyes, exceptions with
   per-reason duration caps, templates, sealed evidence with
   per-framework control mappings.
+- **`data-lineage`** — provenance graph for GDPR Article 15 right
+  of access (+ CCPA / LGPD / PIPEDA / UAE peers). 14 node kinds ×
+  10 edge kinds with classification propagation rules
+  (pii → public via anonymized_from with k≥5, phi → internal via
+  aggregated_from with k≥11). Provenance records, data subject
+  registry (sha256-only identifiers), subject access requests,
+  graph traversal (ancestors/descendants/path/cycle/subject impact),
+  retention policies + Article 15 evidence packs.
 
 ## Cross-cutting invariants
 
@@ -199,7 +207,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 94 platform-level Postgres tables. Each new package
+catalog of 100 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).

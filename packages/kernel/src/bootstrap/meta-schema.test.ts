@@ -26,6 +26,7 @@ import {
   META_COMPLIANCE_ATTESTATIONS,
   META_COST_ATTRIBUTION,
   META_COST_BUDGETS,
+  META_DATA_SUBJECTS,
   META_DEAD_LETTER_JOBS,
   META_DEPLOYMENTS,
   META_DR_DRILLS,
@@ -47,6 +48,8 @@ import {
   META_JOB_COSTS,
   META_JOB_RUNS,
   META_LEGAL_HOLDS,
+  META_LINEAGE_EDGES,
+  META_LINEAGE_NODES,
   META_MANIFESTS,
   META_ML_CONSENT,
   META_ML_DATASETS,
@@ -65,6 +68,7 @@ import {
   META_PACK_REVIEWS,
   META_PACK_VERSIONS,
   META_PLANS,
+  META_PROVENANCE_RECORDS,
   META_REGIONS,
   META_REPORT_RUNS,
   META_SCHEDULED_EXPORTS,
@@ -75,6 +79,8 @@ import {
   META_SSO_LOGINS,
   META_SSO_PROVIDERS,
   META_SSO_SESSIONS,
+  META_SUBJECT_ACCESS_REQUESTS,
+  META_SUBJECT_NODE_OCCURRENCES,
   META_SUBSCRIPTIONS,
   META_TABLES,
   META_TENANT_AI_SETTINGS,
@@ -98,8 +104,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 94 tables", () => {
-    expect(META_TABLES).toHaveLength(94);
+  it("contains 100 tables", () => {
+    expect(META_TABLES).toHaveLength(100);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -138,6 +144,7 @@ describe("META_TABLES", () => {
       "compliance_attestations",
       "cost_attribution",
       "cost_budgets",
+      "data_subjects",
       "dead_letter_jobs",
       "deployments",
       "dr_drills",
@@ -160,6 +167,8 @@ describe("META_TABLES", () => {
       "job_costs",
       "job_runs",
       "legal_holds",
+      "lineage_edges",
+      "lineage_nodes",
       "manifests",
       "ml_consent",
       "ml_datasets",
@@ -178,6 +187,7 @@ describe("META_TABLES", () => {
       "pack_reviews",
       "pack_versions",
       "plans",
+      "provenance_records",
       "regions",
       "report_runs",
       "scheduled_exports",
@@ -188,6 +198,8 @@ describe("META_TABLES", () => {
       "sso_logins",
       "sso_providers",
       "sso_sessions",
+      "subject_access_requests",
+      "subject_node_occurrences",
       "subscriptions",
       "tenant_ai_settings",
       "tenant_credits",
@@ -1398,6 +1410,117 @@ describe("table column shapes", () => {
       (c) => c.name === "instance_id",
     );
     expect(fk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_LINEAGE_NODES allows NULL tenant_id (platform-wide nodes)", () => {
+    const tenantId = META_LINEAGE_NODES.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_LINEAGE_NODES.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_LINEAGE_NODES kind enum covers 14 node kinds", () => {
+    const kind = META_LINEAGE_NODES.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'source_table'");
+    expect(kind?.check).toContain("'ml_model'");
+    expect(kind?.check).toContain("'tenant_export'");
+    expect(kind?.check).toContain("'aggregation_result'");
+  });
+
+  it("META_LINEAGE_NODES classification enum has the 6 data classifications", () => {
+    const classification = META_LINEAGE_NODES.columns.find(
+      (c) => c.name === "classification",
+    );
+    expect(classification?.check).toContain("'pii_personal'");
+    expect(classification?.check).toContain("'phi_protected'");
+    expect(classification?.check).toContain("'regulated_financial'");
+  });
+
+  it("META_LINEAGE_EDGES restricts on source/target node deletion (preserve history)", () => {
+    const source = META_LINEAGE_EDGES.columns.find(
+      (c) => c.name === "source_node_id",
+    );
+    const target = META_LINEAGE_EDGES.columns.find(
+      (c) => c.name === "target_node_id",
+    );
+    expect(source?.references?.onDelete).toBe("RESTRICT");
+    expect(target?.references?.onDelete).toBe("RESTRICT");
+  });
+
+  it("META_LINEAGE_EDGES kind enum has 10 edge kinds", () => {
+    const kind = META_LINEAGE_EDGES.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'derived_from'");
+    expect(kind?.check).toContain("'anonymized_from'");
+    expect(kind?.check).toContain("'trained_on'");
+  });
+
+  it("META_PROVENANCE_RECORDS operation_kind enum covers 15 operations", () => {
+    const op = META_PROVENANCE_RECORDS.columns.find(
+      (c) => c.name === "operation_kind",
+    );
+    expect(op?.check).toContain("'ingest'");
+    expect(op?.check).toContain("'anonymize'");
+    expect(op?.check).toContain("'ai_inference'");
+    expect(op?.check).toContain("'tombstone'");
+  });
+
+  it("META_DATA_SUBJECTS enforces (tenant, identifier kind + sha) uniqueness", () => {
+    expect(
+      META_DATA_SUBJECTS.uniqueConstraints?.[0]?.columns,
+    ).toEqual([
+      "tenant_id",
+      "primary_identifier_kind",
+      "primary_identifier_sha256",
+    ]);
+  });
+
+  it("META_DATA_SUBJECTS primary_identifier_sha256 is CHAR(64) hex", () => {
+    const sha = META_DATA_SUBJECTS.columns.find(
+      (c) => c.name === "primary_identifier_sha256",
+    );
+    expect(sha?.type).toBe("CHAR(64)");
+    expect(sha?.check).toContain("[0-9a-f]{64}");
+  });
+
+  it("META_SUBJECT_NODE_OCCURRENCES cascades on subject + node deletion", () => {
+    const subjectFk = META_SUBJECT_NODE_OCCURRENCES.columns.find(
+      (c) => c.name === "subject_id",
+    );
+    const nodeFk = META_SUBJECT_NODE_OCCURRENCES.columns.find(
+      (c) => c.name === "node_id",
+    );
+    expect(subjectFk?.references?.onDelete).toBe("CASCADE");
+    expect(nodeFk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_SUBJECT_NODE_OCCURRENCES enforces (subject, node) uniqueness", () => {
+    expect(
+      META_SUBJECT_NODE_OCCURRENCES.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["subject_id", "node_id"]);
+  });
+
+  it("META_SUBJECT_ACCESS_REQUESTS legal_basis enum covers GDPR/CCPA/LGPD/PIPEDA/UAE", () => {
+    const basis = META_SUBJECT_ACCESS_REQUESTS.columns.find(
+      (c) => c.name === "legal_basis",
+    );
+    expect(basis?.check).toContain("'gdpr_article_15'");
+    expect(basis?.check).toContain("'ccpa_right_to_know'");
+    expect(basis?.check).toContain("'lgpd_article_18'");
+    expect(basis?.check).toContain("'pipeda_principle_9'");
+    expect(basis?.check).toContain("'uae_data_protection_law'");
+  });
+
+  it("META_SUBJECT_ACCESS_REQUESTS status enum has the 7 lifecycle states", () => {
+    const status = META_SUBJECT_ACCESS_REQUESTS.columns.find(
+      (c) => c.name === "status",
+    );
+    expect(status?.check).toContain("'submitted'");
+    expect(status?.check).toContain("'verified'");
+    expect(status?.check).toContain("'partial_complete'");
+    expect(status?.check).toContain("'deferred'");
   });
 });
 

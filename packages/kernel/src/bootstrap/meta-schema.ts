@@ -6799,6 +6799,632 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
   },
 };
 
+export const META_LINEAGE_NODES: TableDefinition = {
+  schema: "meta",
+  name: "lineage_nodes",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "node_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "lineage_nodes_node_id_key" },
+      check: "node_id ~ '^lng_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('source_table', 'derived_table', 'dataset', 'ml_model', 'ml_evaluation', 'report', 'dashboard', 'tenant_export', 'ai_call_output', 'search_index_document', 'materialized_view', 'file_artifact', 'aggregation_result', 'redacted_view')",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('active', 'frozen', 'archived', 'purged', 'tombstoned')",
+    },
+    {
+      name: "classification",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "classification IN ('public', 'internal', 'confidential', 'pii_personal', 'phi_protected', 'regulated_financial')",
+    },
+    {
+      name: "row_count",
+      type: "BIGINT",
+      check: "row_count IS NULL OR row_count >= 0",
+    },
+    {
+      name: "column_count",
+      type: "INTEGER",
+      check: "column_count IS NULL OR column_count BETWEEN 0 AND 10000",
+    },
+    {
+      name: "size_bytes",
+      type: "BIGINT",
+      check: "size_bytes IS NULL OR size_bytes >= 0",
+    },
+    {
+      name: "content_sha256",
+      type: "CHAR(64)",
+      check:
+        "content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "storage_uri", type: "TEXT" },
+    { name: "external_ref", type: "JSONB" },
+    {
+      name: "source_package",
+      type: "TEXT",
+      check:
+        "source_package IS NULL OR source_package ~ '^@crossengin/[a-z][a-z0-9-]*$'",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by_user_id", type: "UUID", references: USER_FK },
+    { name: "created_by_system", type: "TEXT" },
+    { name: "frozen_at", type: "TIMESTAMPTZ" },
+    {
+      name: "frozen_sha256",
+      type: "CHAR(64)",
+      check:
+        "frozen_sha256 IS NULL OR frozen_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "purged_at", type: "TIMESTAMPTZ" },
+    { name: "tombstoned_at", type: "TIMESTAMPTZ" },
+    { name: "retention_until", type: "TIMESTAMPTZ" },
+    {
+      name: "minimum_k_anonymity",
+      type: "INTEGER",
+      check:
+        "minimum_k_anonymity IS NULL OR minimum_k_anonymity BETWEEN 1 AND 10000",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_lineage_nodes_tenant_kind", columns: ["tenant_id", "kind"] },
+    { name: "idx_lineage_nodes_classification", columns: ["classification"] },
+    { name: "idx_lineage_nodes_status", columns: ["status"] },
+    { name: "idx_lineage_nodes_retention", columns: ["retention_until"] },
+    { name: "idx_lineage_nodes_created_by", columns: ["created_by_user_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "lineage_nodes_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_LINEAGE_EDGES: TableDefinition = {
+  schema: "meta",
+  name: "lineage_edges",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "edge_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "lineage_edges_edge_id_key" },
+      check: "edge_id ~ '^lne_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('derived_from', 'joined_with', 'aggregated_from', 'transformed_by', 'redacted_from', 'anonymized_from', 'referenced_by', 'copied_to', 'predicted_by', 'trained_on')",
+    },
+    {
+      name: "source_node_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "lineage_nodes",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "target_node_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "lineage_nodes",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "source_classification",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "source_classification IN ('public', 'internal', 'confidential', 'pii_personal', 'phi_protected', 'regulated_financial')",
+    },
+    {
+      name: "target_classification",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "target_classification IN ('public', 'internal', 'confidential', 'pii_personal', 'phi_protected', 'regulated_financial')",
+    },
+    { name: "columns_contributing", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "columns_consumed", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "transform_expression_sha256",
+      type: "CHAR(64)",
+      check:
+        "transform_expression_sha256 IS NULL OR transform_expression_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "row_count_consumed",
+      type: "BIGINT",
+      check: "row_count_consumed IS NULL OR row_count_consumed >= 0",
+    },
+    {
+      name: "row_count_produced",
+      type: "BIGINT",
+      check: "row_count_produced IS NULL OR row_count_produced >= 0",
+    },
+    {
+      name: "k_anonymity_achieved",
+      type: "INTEGER",
+      check: "k_anonymity_achieved IS NULL OR k_anonymity_achieved >= 1",
+    },
+    { name: "redaction_rules", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "provenance_record_id", type: "TEXT" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by_user_id", type: "UUID", references: USER_FK },
+    { name: "created_by_system", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_lineage_edges_source",
+      columns: ["source_node_id"],
+    },
+    {
+      name: "idx_lineage_edges_target",
+      columns: ["target_node_id"],
+    },
+    {
+      name: "idx_lineage_edges_kind",
+      columns: ["kind"],
+    },
+    {
+      name: "idx_lineage_edges_created_by",
+      columns: ["created_by_user_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "lineage_edges_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_PROVENANCE_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "provenance_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "provenance_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "provenance_records_provenance_id_key" },
+      check: "provenance_id ~ '^prv_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "operation_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "operation_kind IN ('ingest', 'transform', 'join', 'aggregate', 'redact', 'anonymize', 'train', 'evaluate', 'predict', 'export', 'query', 'index', 'ai_inference', 'copy_to_region', 'tombstone')",
+    },
+    {
+      name: "edge_kind",
+      type: "TEXT",
+      check:
+        "edge_kind IS NULL OR edge_kind IN ('derived_from', 'joined_with', 'aggregated_from', 'transformed_by', 'redacted_from', 'anonymized_from', 'referenced_by', 'copied_to', 'predicted_by', 'trained_on')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "actor_principal_id", type: "UUID", references: USER_FK },
+    { name: "actor_system_id", type: "TEXT" },
+    {
+      name: "actor_package",
+      type: "TEXT",
+      check:
+        "actor_package IS NULL OR actor_package ~ '^@crossengin/[a-z][a-z0-9-]*$'",
+    },
+    { name: "input_node_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "output_node_ids", type: "JSONB", notNull: true },
+    {
+      name: "operation_parameters_sha256",
+      type: "CHAR(64)",
+      check:
+        "operation_parameters_sha256 IS NULL OR operation_parameters_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "operation_code_sha256",
+      type: "CHAR(64)",
+      check:
+        "operation_code_sha256 IS NULL OR operation_code_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "related_workflow_instance_id", type: "TEXT" },
+    { name: "related_activity_id", type: "TEXT" },
+    { name: "related_job_run_id", type: "TEXT" },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('succeeded', 'partial_succeeded', 'failed', 'rolled_back')",
+    },
+    {
+      name: "duration_ms",
+      type: "INTEGER",
+      check: "duration_ms IS NULL OR duration_ms BETWEEN 0 AND 86400000",
+    },
+    {
+      name: "rows_read",
+      type: "BIGINT",
+      check: "rows_read IS NULL OR rows_read >= 0",
+    },
+    {
+      name: "rows_written",
+      type: "BIGINT",
+      check: "rows_written IS NULL OR rows_written >= 0",
+    },
+    { name: "error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "rolled_back_at", type: "TIMESTAMPTZ" },
+    { name: "rolled_back_reason", type: "TEXT" },
+    { name: "caused_by_provenance_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_provenance_records_tenant_occurred",
+      columns: ["tenant_id", "occurred_at"],
+    },
+    {
+      name: "idx_provenance_records_operation",
+      columns: ["operation_kind"],
+    },
+    {
+      name: "idx_provenance_records_outcome",
+      columns: ["outcome"],
+    },
+    {
+      name: "idx_provenance_records_actor",
+      columns: ["actor_principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "provenance_records_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_DATA_SUBJECTS: TableDefinition = {
+  schema: "meta",
+  name: "data_subjects",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "subject_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "data_subjects_subject_id_key" },
+      check: "subject_id ~ '^ds_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "primary_identifier_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "primary_identifier_kind IN ('email_address', 'user_id', 'external_user_id', 'patient_mrn', 'national_id', 'tax_id', 'phone_e164', 'device_fingerprint', 'ip_address', 'pseudonymous_id')",
+    },
+    {
+      name: "primary_identifier_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "primary_identifier_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "alternate_identifiers", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "is_verified", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "verified_at", type: "TIMESTAMPTZ" },
+    {
+      name: "verification_method",
+      type: "TEXT",
+      check:
+        "verification_method IS NULL OR verification_method IN ('email_link', 'phone_otp', 'in_app_re_authentication', 'government_id_check', 'in_person')",
+    },
+    { name: "first_seen_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "last_seen_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "node_occurrence_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "node_occurrence_count >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "data_subjects_tenant_primary_identifier_key",
+      columns: ["tenant_id", "primary_identifier_kind", "primary_identifier_sha256"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_data_subjects_tenant_kind",
+      columns: ["tenant_id", "primary_identifier_kind"],
+    },
+    {
+      name: "idx_data_subjects_last_seen",
+      columns: ["last_seen_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "data_subjects_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_SUBJECT_NODE_OCCURRENCES: TableDefinition = {
+  schema: "meta",
+  name: "subject_node_occurrences",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "occurrence_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "subject_node_occurrences_occurrence_id_key",
+      },
+      check: "occurrence_id ~ '^sno_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "subject_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "data_subjects",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "node_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "lineage_nodes",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "first_observed_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "last_observed_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "occurrence_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "occurrence_count >= 1",
+    },
+    { name: "columns_containing", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "derived_through_edge_ids",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "subject_node_occurrences_subject_node_key",
+      columns: ["subject_id", "node_id"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_subject_node_occurrences_subject",
+      columns: ["subject_id"],
+    },
+    {
+      name: "idx_subject_node_occurrences_node",
+      columns: ["node_id"],
+    },
+    {
+      name: "idx_subject_node_occurrences_tenant",
+      columns: ["tenant_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "subject_node_occurrences_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_SUBJECT_ACCESS_REQUESTS: TableDefinition = {
+  schema: "meta",
+  name: "subject_access_requests",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "request_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "subject_access_requests_request_id_key" },
+      check: "request_id ~ '^sar_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "subject_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "data_subjects",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "legal_basis",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "legal_basis IN ('gdpr_article_15', 'ccpa_right_to_know', 'lgpd_article_18', 'pipeda_principle_9', 'uae_data_protection_law', 'custom_contract_obligation')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('submitted', 'verified', 'in_progress', 'partial_complete', 'complete', 'rejected', 'deferred')",
+    },
+    { name: "submitted_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "submitted_by_contact", type: "TEXT", notNull: true },
+    { name: "deadline_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "verified_at", type: "TIMESTAMPTZ" },
+    { name: "in_progress_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_reason", type: "TEXT" },
+    { name: "deferred_until", type: "TIMESTAMPTZ" },
+    { name: "deferral_reason", type: "TEXT" },
+    {
+      name: "requested_format",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "requested_format IN ('json', 'ndjson', 'csv', 'pdf_report', 'machine_readable_archive')",
+    },
+    { name: "include_derived_data", type: "BOOLEAN", notNull: true, default: "true" },
+    {
+      name: "node_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "node_count >= 0",
+    },
+    {
+      name: "edge_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "edge_count >= 0",
+    },
+    {
+      name: "bytes_produced",
+      type: "BIGINT",
+      check: "bytes_produced IS NULL OR bytes_produced >= 0",
+    },
+    {
+      name: "bundle_sha256",
+      type: "CHAR(64)",
+      check:
+        "bundle_sha256 IS NULL OR bundle_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "bundle_storage_uri", type: "TEXT" },
+    {
+      name: "bundle_encryption_key_fingerprint",
+      type: "CHAR(64)",
+      check:
+        "bundle_encryption_key_fingerprint IS NULL OR bundle_encryption_key_fingerprint ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "delivered_at", type: "TIMESTAMPTZ" },
+    {
+      name: "download_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "download_count >= 0",
+    },
+    {
+      name: "max_downloads",
+      type: "INTEGER",
+      notNull: true,
+      default: "3",
+      check: "max_downloads BETWEEN 1 AND 10",
+    },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_subject_access_requests_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_subject_access_requests_deadline",
+      columns: ["deadline_at"],
+    },
+    {
+      name: "idx_subject_access_requests_subject",
+      columns: ["subject_id"],
+    },
+    {
+      name: "idx_subject_access_requests_legal_basis",
+      columns: ["legal_basis"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "subject_access_requests_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -6894,4 +7520,10 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_WORKFLOW_SIGNALS,
   META_WORKFLOW_TIMERS,
   META_WORKFLOW_EVENTS,
+  META_LINEAGE_NODES,
+  META_LINEAGE_EDGES,
+  META_PROVENANCE_RECORDS,
+  META_DATA_SUBJECTS,
+  META_SUBJECT_NODE_OCCURRENCES,
+  META_SUBJECT_ACCESS_REQUESTS,
 ];
