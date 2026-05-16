@@ -69,6 +69,11 @@ import {
   META_PACK_VERSIONS,
   META_PLANS,
   META_PROVENANCE_RECORDS,
+  META_QUOTA_DEFINITIONS,
+  META_QUOTA_USAGE,
+  META_RATE_LIMIT_DECISIONS,
+  META_RATE_LIMIT_EXCEPTIONS,
+  META_RATE_LIMIT_POLICIES,
   META_REGIONS,
   META_REPORT_RUNS,
   META_SCHEDULED_EXPORTS,
@@ -91,6 +96,7 @@ import {
   META_TENANT_TOMBSTONES,
   META_TENANT_UNIT_ECONOMICS,
   META_TENANTS,
+  META_THROTTLE_EVENTS,
   META_USER_TENANT_MEMBERSHIP,
   META_USERS,
   META_WEBHOOK_DELIVERIES,
@@ -104,8 +110,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 100 tables", () => {
-    expect(META_TABLES).toHaveLength(100);
+  it("contains 106 tables", () => {
+    expect(META_TABLES).toHaveLength(106);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -188,6 +194,11 @@ describe("META_TABLES", () => {
       "pack_versions",
       "plans",
       "provenance_records",
+      "quota_definitions",
+      "quota_usage",
+      "rate_limit_decisions",
+      "rate_limit_exceptions",
+      "rate_limit_policies",
       "regions",
       "report_runs",
       "scheduled_exports",
@@ -209,6 +220,7 @@ describe("META_TABLES", () => {
       "tenant_tombstones",
       "tenant_unit_economics",
       "tenants",
+      "throttle_events",
       "user_tenant_membership",
       "users",
       "webhook_deliveries",
@@ -1521,6 +1533,100 @@ describe("table column shapes", () => {
     expect(status?.check).toContain("'verified'");
     expect(status?.check).toContain("'partial_complete'");
     expect(status?.check).toContain("'deferred'");
+  });
+
+  it("META_RATE_LIMIT_POLICIES allows NULL tenant_id (platform policies)", () => {
+    const tenantId = META_RATE_LIMIT_POLICIES.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_RATE_LIMIT_POLICIES algorithm enum has 6 algorithms", () => {
+    const alg = META_RATE_LIMIT_POLICIES.columns.find(
+      (c) => c.name === "algorithm",
+    );
+    expect(alg?.check).toContain("'token_bucket'");
+    expect(alg?.check).toContain("'leaky_bucket'");
+    expect(alg?.check).toContain("'sliding_window_log'");
+    expect(alg?.check).toContain("'concurrent_request'");
+  });
+
+  it("META_RATE_LIMIT_POLICIES response_code restricted to 429 or 503", () => {
+    const code = META_RATE_LIMIT_POLICIES.columns.find(
+      (c) => c.name === "response_code",
+    );
+    expect(code?.check).toContain("(429, 503)");
+  });
+
+  it("META_QUOTA_DEFINITIONS target enum covers 10 quota targets", () => {
+    const target = META_QUOTA_DEFINITIONS.columns.find(
+      (c) => c.name === "target",
+    );
+    expect(target?.check).toContain("'api_requests'");
+    expect(target?.check).toContain("'ai_tokens'");
+    expect(target?.check).toContain("'ml_training_minutes'");
+    expect(target?.check).toContain("'rows_exported'");
+  });
+
+  it("META_QUOTA_DEFINITIONS period enum has 7 periods", () => {
+    const period = META_QUOTA_DEFINITIONS.columns.find(
+      (c) => c.name === "period",
+    );
+    expect(period?.check).toContain("'minute'");
+    expect(period?.check).toContain("'billing_period'");
+    expect(period?.check).toContain("'lifetime'");
+  });
+
+  it("META_QUOTA_USAGE enforces (tenant, quota_def, period_start) uniqueness", () => {
+    expect(
+      META_QUOTA_USAGE.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "quota_definition_id", "period_start_at"]);
+  });
+
+  it("META_QUOTA_USAGE restricts on quota_definitions deletion", () => {
+    const fk = META_QUOTA_USAGE.columns.find(
+      (c) => c.name === "quota_definition_id",
+    );
+    expect(fk?.references?.onDelete).toBe("RESTRICT");
+  });
+
+  it("META_RATE_LIMIT_DECISIONS outcome enum covers 10 decision outcomes", () => {
+    const outcome = META_RATE_LIMIT_DECISIONS.columns.find(
+      (c) => c.name === "outcome",
+    );
+    expect(outcome?.check).toContain("'allowed'");
+    expect(outcome?.check).toContain("'denied_quota_exceeded'");
+    expect(outcome?.check).toContain("'bypassed_critical_priority'");
+    expect(outcome?.check).toContain("'denied_circuit_open'");
+  });
+
+  it("META_RATE_LIMIT_EXCEPTIONS multiplier is NUMERIC(8, 4) bounded 0.1 - 100", () => {
+    const m = META_RATE_LIMIT_EXCEPTIONS.columns.find(
+      (c) => c.name === "multiplier",
+    );
+    expect(m?.type).toBe("NUMERIC(8, 4)");
+    expect(m?.check).toContain("BETWEEN 0.1 AND 100");
+  });
+
+  it("META_RATE_LIMIT_EXCEPTIONS kind enum has 6 exception kinds", () => {
+    const kind = META_RATE_LIMIT_EXCEPTIONS.columns.find(
+      (c) => c.name === "kind",
+    );
+    expect(kind?.check).toContain("'principal_overage'");
+    expect(kind?.check).toContain("'incident_response_bypass'");
+    expect(kind?.check).toContain("'load_test_temporary'");
+  });
+
+  it("META_THROTTLE_EVENTS kind enum covers 10 event kinds", () => {
+    const kind = META_THROTTLE_EVENTS.columns.find((c) => c.name === "kind");
+    expect(kind?.check).toContain("'hard_limit_hit'");
+    expect(kind?.check).toContain("'soft_limit_hit'");
+    expect(kind?.check).toContain("'circuit_opened'");
+    expect(kind?.check).toContain("'exception_approved'");
   });
 });
 

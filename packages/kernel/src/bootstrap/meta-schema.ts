@@ -7425,6 +7425,580 @@ export const META_SUBJECT_ACCESS_REQUESTS: TableDefinition = {
   },
 };
 
+export const META_RATE_LIMIT_POLICIES: TableDefinition = {
+  schema: "meta",
+  name: "rate_limit_policies",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "policy_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "rate_limit_policies_policy_id_key" },
+      check: "policy_id ~ '^rlp_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "description", type: "TEXT", notNull: true },
+    {
+      name: "version",
+      type: "TEXT",
+      notNull: true,
+      check: "version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'active', 'paused', 'deprecated', 'retired')",
+    },
+    {
+      name: "algorithm",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "algorithm IN ('token_bucket', 'leaky_bucket', 'fixed_window', 'sliding_window', 'sliding_window_log', 'concurrent_request')",
+    },
+    { name: "algorithm_params", type: "JSONB", notNull: true },
+    { name: "scope", type: "JSONB", notNull: true },
+    {
+      name: "overage_handling",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "overage_handling IN ('hard_block', 'soft_throttle_delay', 'queue_and_serve', 'allow_with_overage_billing', 'allow_with_warning')",
+    },
+    {
+      name: "priority_override",
+      type: "TEXT",
+      notNull: true,
+      default: "'none'",
+      check:
+        "priority_override IN ('none', 'critical_only', 'high_and_above', 'elevated_principals')",
+    },
+    {
+      name: "soft_throttle_delay_ms_per_overage",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "soft_throttle_delay_ms_per_overage BETWEEN 0 AND 60000",
+    },
+    {
+      name: "queue_max_wait_ms",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "queue_max_wait_ms BETWEEN 0 AND 300000",
+    },
+    {
+      name: "response_code",
+      type: "INTEGER",
+      notNull: true,
+      check: "response_code IN (429, 503)",
+    },
+    {
+      name: "include_retry_after_header",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "true",
+    },
+    {
+      name: "include_rate_limit_headers",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "true",
+    },
+    { name: "problem_type_uri", type: "TEXT" },
+    { name: "enabled_routes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "excluded_routes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "exempt_principal_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "exempt_api_key_prefixes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "activated_at", type: "TIMESTAMPTZ" },
+    { name: "activated_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "superseded_by_policy_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_rate_limit_policies_tenant_status", columns: ["tenant_id", "status"] },
+    { name: "idx_rate_limit_policies_algorithm", columns: ["algorithm"] },
+    { name: "idx_rate_limit_policies_created_by", columns: ["created_by"] },
+    { name: "idx_rate_limit_policies_activated_by", columns: ["activated_by"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "rate_limit_policies_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_QUOTA_DEFINITIONS: TableDefinition = {
+  schema: "meta",
+  name: "quota_definitions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "quota_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "quota_definitions_quota_id_key" },
+      check: "quota_id ~ '^rlq_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      name: "target",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "target IN ('api_requests', 'ai_tokens', 'storage_bytes', 'compute_seconds', 'notification_dispatches', 'search_queries', 'report_runs', 'ml_training_minutes', 'webhook_deliveries', 'rows_exported')",
+    },
+    {
+      name: "quota_class",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "quota_class IN ('free_tier', 'starter', 'pro', 'enterprise', 'internal', 'custom')",
+    },
+    {
+      name: "period",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "period IN ('minute', 'hour', 'day', 'week', 'month', 'billing_period', 'lifetime')",
+    },
+    { name: "hard_limit", type: "BIGINT", notNull: true, check: "hard_limit >= 0" },
+    {
+      name: "soft_limit",
+      type: "BIGINT",
+      check: "soft_limit IS NULL OR soft_limit >= 0",
+    },
+    { name: "overage_allowed", type: "BOOLEAN", notNull: true, default: "false" },
+    {
+      name: "overage_unit_price_cents",
+      type: "BIGINT",
+      check:
+        "overage_unit_price_cents IS NULL OR overage_unit_price_cents >= 0",
+    },
+    {
+      name: "applies_after_plan_switch_seconds",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "applies_after_plan_switch_seconds BETWEEN 0 AND 86400",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_quota_definitions_tenant_class", columns: ["tenant_id", "quota_class"] },
+    { name: "idx_quota_definitions_target", columns: ["target"] },
+    { name: "idx_quota_definitions_created_by", columns: ["created_by"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "quota_definitions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_QUOTA_USAGE: TableDefinition = {
+  schema: "meta",
+  name: "quota_usage",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "usage_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "quota_usage_usage_id_key" },
+      check: "usage_id ~ '^rlu_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "quota_definition_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "quota_definitions",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "target",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "target IN ('api_requests', 'ai_tokens', 'storage_bytes', 'compute_seconds', 'notification_dispatches', 'search_queries', 'report_runs', 'ml_training_minutes', 'webhook_deliveries', 'rows_exported')",
+    },
+    {
+      name: "period",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "period IN ('minute', 'hour', 'day', 'week', 'month', 'billing_period', 'lifetime')",
+    },
+    { name: "period_start_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end_at", type: "TIMESTAMPTZ" },
+    {
+      name: "consumed_units",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "consumed_units >= 0",
+    },
+    { name: "soft_limit_breached_at", type: "TIMESTAMPTZ" },
+    { name: "hard_limit_breached_at", type: "TIMESTAMPTZ" },
+    {
+      name: "overage_units_consumed",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "overage_units_consumed >= 0",
+    },
+    { name: "overage_billed_at", type: "TIMESTAMPTZ" },
+    { name: "last_updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "quota_usage_tenant_quota_period_key",
+      columns: ["tenant_id", "quota_definition_id", "period_start_at"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_quota_usage_tenant_target_period",
+      columns: ["tenant_id", "target", "period_start_at"],
+    },
+    {
+      name: "idx_quota_usage_hard_breach",
+      columns: ["hard_limit_breached_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "quota_usage_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
+  schema: "meta",
+  name: "rate_limit_decisions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "decision_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "rate_limit_decisions_decision_id_key" },
+      check: "decision_id ~ '^rld_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "policy_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "rate_limit_policies",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "quota_definition_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "quota_definitions",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    { name: "scope_key", type: "TEXT", notNull: true },
+    { name: "principal_id", type: "UUID", references: USER_FK },
+    {
+      name: "api_key_prefix",
+      type: "TEXT",
+      check:
+        "api_key_prefix IS NULL OR api_key_prefix ~ '^ce_(live|test)_[A-Za-z0-9]{8}$'",
+    },
+    { name: "route", type: "TEXT" },
+    { name: "decided_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('allowed', 'allowed_with_warning', 'throttled_soft_delayed', 'denied_rate_limit_exceeded', 'denied_quota_exceeded', 'denied_concurrent_limit', 'denied_global_limit', 'denied_circuit_open', 'bypassed_critical_priority', 'bypassed_exempt_principal')",
+    },
+    {
+      name: "cost_units",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "cost_units >= 1",
+    },
+    { name: "limit_total", type: "BIGINT", notNull: true, check: "limit_total >= 0" },
+    {
+      name: "remaining_after",
+      type: "BIGINT",
+      notNull: true,
+      check: "remaining_after >= 0",
+    },
+    { name: "reset_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "retry_after_seconds",
+      type: "INTEGER",
+      check: "retry_after_seconds IS NULL OR retry_after_seconds >= 0",
+    },
+    {
+      name: "soft_throttle_delay_ms",
+      type: "INTEGER",
+      check: "soft_throttle_delay_ms IS NULL OR soft_throttle_delay_ms >= 0",
+    },
+    { name: "applied_headers", type: "JSONB" },
+    { name: "problem_details", type: "JSONB" },
+    { name: "bypass_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_rate_limit_decisions_tenant_decided",
+      columns: ["tenant_id", "decided_at"],
+    },
+    {
+      name: "idx_rate_limit_decisions_policy",
+      columns: ["policy_id"],
+    },
+    {
+      name: "idx_rate_limit_decisions_outcome",
+      columns: ["outcome"],
+    },
+    {
+      name: "idx_rate_limit_decisions_scope_key",
+      columns: ["scope_key"],
+    },
+    {
+      name: "idx_rate_limit_decisions_principal",
+      columns: ["principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "rate_limit_decisions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_RATE_LIMIT_EXCEPTIONS: TableDefinition = {
+  schema: "meta",
+  name: "rate_limit_exceptions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "exception_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "rate_limit_exceptions_exception_id_key" },
+      check: "exception_id ~ '^rle_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "policy_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "rate_limit_policies",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    { name: "scope_key", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('principal_overage', 'tenant_burst_allowance', 'scheduled_event_uplift', 'compliance_override', 'incident_response_bypass', 'load_test_temporary')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('requested', 'approved', 'active', 'expired', 'rejected', 'revoked_early')",
+    },
+    {
+      name: "multiplier",
+      type: "NUMERIC(8, 4)",
+      notNull: true,
+      check: "multiplier BETWEEN 0.1 AND 100",
+    },
+    {
+      name: "additive_burst",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "additive_burst BETWEEN 0 AND 1000000",
+    },
+    { name: "justification", type: "TEXT", notNull: true },
+    { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "approved_at", type: "TIMESTAMPTZ" },
+    { name: "approved_by", type: "UUID", references: USER_FK },
+    { name: "rejected_at", type: "TIMESTAMPTZ" },
+    { name: "rejected_by", type: "UUID", references: USER_FK },
+    { name: "rejected_reason", type: "TEXT" },
+    { name: "activated_at", type: "TIMESTAMPTZ" },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "revoked_early_at", type: "TIMESTAMPTZ" },
+    { name: "revoked_early_by", type: "UUID", references: USER_FK },
+    { name: "revoked_early_reason", type: "TEXT" },
+    { name: "related_incident_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_rate_limit_exceptions_tenant_status",
+      columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_rate_limit_exceptions_policy_scope",
+      columns: ["policy_id", "scope_key"],
+    },
+    {
+      name: "idx_rate_limit_exceptions_expires",
+      columns: ["expires_at"],
+    },
+    {
+      name: "idx_rate_limit_exceptions_requested_by",
+      columns: ["requested_by"],
+    },
+    {
+      name: "idx_rate_limit_exceptions_approved_by",
+      columns: ["approved_by"],
+    },
+    {
+      name: "idx_rate_limit_exceptions_rejected_by",
+      columns: ["rejected_by"],
+    },
+    {
+      name: "idx_rate_limit_exceptions_revoked_early_by",
+      columns: ["revoked_early_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "rate_limit_exceptions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_THROTTLE_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "throttle_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "event_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "throttle_events_event_id_key" },
+      check: "event_id ~ '^rlt_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('hard_limit_hit', 'soft_limit_hit', 'burst_consumed', 'quota_period_reset', 'policy_activated', 'policy_deactivated', 'exception_approved', 'exception_expired', 'circuit_opened', 'circuit_closed')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "policy_id", type: "TEXT" },
+    { name: "quota_definition_id", type: "TEXT" },
+    { name: "exception_id", type: "TEXT" },
+    { name: "scope_key", type: "TEXT" },
+    {
+      name: "related_decision_outcome",
+      type: "TEXT",
+      check:
+        "related_decision_outcome IS NULL OR related_decision_outcome IN ('allowed', 'allowed_with_warning', 'throttled_soft_delayed', 'denied_rate_limit_exceeded', 'denied_quota_exceeded', 'denied_concurrent_limit', 'denied_global_limit', 'denied_circuit_open', 'bypassed_critical_priority', 'bypassed_exempt_principal')",
+    },
+    { name: "actor_principal_id", type: "UUID", references: USER_FK },
+    { name: "actor_system_id", type: "TEXT" },
+    { name: "payload", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    {
+      name: "notification_dispatched",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "incident_declared",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "related_incident_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_throttle_events_tenant_occurred",
+      columns: ["tenant_id", "occurred_at"],
+    },
+    {
+      name: "idx_throttle_events_kind",
+      columns: ["kind"],
+    },
+    {
+      name: "idx_throttle_events_actor",
+      columns: ["actor_principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "throttle_events_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -7526,4 +8100,10 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_DATA_SUBJECTS,
   META_SUBJECT_NODE_OCCURRENCES,
   META_SUBJECT_ACCESS_REQUESTS,
+  META_RATE_LIMIT_POLICIES,
+  META_QUOTA_DEFINITIONS,
+  META_QUOTA_USAGE,
+  META_RATE_LIMIT_DECISIONS,
+  META_RATE_LIMIT_EXCEPTIONS,
+  META_THROTTLE_EVENTS,
 ];

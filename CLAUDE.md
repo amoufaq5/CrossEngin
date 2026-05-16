@@ -13,13 +13,13 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 1 contract-types layer: **37 packages, 100 meta-schema
-tables, 4,239 tests**, all green, no type errors. Nearly the
+Phase 1 contract-types layer: **38 packages, 106 meta-schema
+tables, 4,387 tests**, all green, no type errors. Nearly the
 full Phase 1 surface is sketched in zod schemas + deterministic
 helpers. Impure runtime (network calls, file I/O, DB execution,
 provider clients) is deferred to Phase 2+.
 
-README has been refreshed to reflect this state. ADRs 0001-0042
+README has been refreshed to reflect this state. ADRs 0001-0043
 are fully drafted in `docs/adr/` — no reserved gaps.
 
 ## Architecture in 90 seconds
@@ -85,6 +85,13 @@ re-exporting everything.
   redaction, synthetics, OTel-style tracing.
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
+- **`rate-limiting`** — unified rate-limit + quota contracts. 6
+  algorithms (token_bucket, leaky_bucket, fixed/sliding window,
+  sliding_log, concurrent_request) × 10 scope kinds × policies
+  with 5 overage handling kinds; 10 quota targets × 7 periods × 6
+  classes; RFC 9457 problem details + IETF rate-limit headers on
+  every denial; 6 exception kinds with per-kind duration caps +
+  four-eyes; throttle event audit.
 - **`workflow-engine`** — runtime contracts for the manifest-level
   workflows declared in kernel: definitions (canonical executable
   form), instances (12 statuses), activities (10 kinds, retry
@@ -207,7 +214,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 100 platform-level Postgres tables. Each new package
+catalog of 106 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
