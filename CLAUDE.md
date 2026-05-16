@@ -13,8 +13,8 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 + M4.5 + M5
-landed: **46 packages + 1 app, 115 meta-schema tables, 5,378
+Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M3.6 + M4 + M4.5 +
+M5 landed: **46 packages + 1 app, 115 meta-schema tables, 5,394
 tests**, all green, no type errors. The four runtime pillars
 (DDL execution + cryptography + workflow execution + HTTP
 gateway) are in place; both impure runtime pillars (workflows +
@@ -24,7 +24,12 @@ the `crossengin` binary with `init`, `validate`, `diff`, `patch`,
 `hash`, `apply`, `chat` (stubbed for M5.5), `version`, `help`.
 The end-to-end story works today: `crossengin init m.json &&
 crossengin validate m.json && crossengin apply --dry-run`
-produces a 3,061-line SQL dump of the full meta-schema. M3.5 added
+produces a 3,061-line SQL dump of the full meta-schema. M3.6
+added `ProjectingEventLog` + `buildPersistentEngine` to
+`@crossengin/workflow-runtime-pg` — wrap a `WorkflowEngine` once
+and every event append automatically projects + upserts the
+instance / activity / signal / timer rows into their META_
+WORKFLOW_* tables. M3.5 added
 `@crossengin/workflow-runtime-pg` — PostgresEventLog + four
 projection stores (instance / activity / signal / timer) backed
 by the existing META_WORKFLOW_* tables, with cached wfi_*/wfd_*
@@ -103,7 +108,7 @@ re-exporting everything.
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
 - **`workflow-runtime-pg`** — Postgres-backed adapters for the
-  workflow runtime. 6 modules: id-mapping
+  workflow runtime. 8 modules: id-mapping
   (WorkflowInstanceIdResolver + WorkflowDefinitionIdResolver,
   cached wfi_*/wfd_* → UUID lookups against workflow_instances /
   workflow_definitions), event-log (PostgresEventLog implements
@@ -116,8 +121,15 @@ re-exporting everything.
   via ON CONFLICT (activity_id) DO UPDATE), signal-store (UPSERT
   workflow_signals with COALESCE-preserving instance_id),
   timer-store (UPSERT workflow_timers with status/firedAt/
-  cancelledAt). Each store auto-resolves the instance UUID via
-  the shared resolver.
+  cancelledAt), projecting-event-log (ProjectingEventLog wraps
+  any EventLog + auto-runs the four projection writers after
+  each append; creates the workflow_instances row on
+  instance_started so the FK is satisfied; re-projects + upserts
+  the instance / activities / signals / timers on every
+  subsequent event), persistent-engine (buildPersistentEngine
+  one-call factory: pass a PgConnection + definitions map, get
+  back {engine, eventLog, stores} where the engine is wired to
+  the projecting log so all engine ops persist automatically).
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces. 4 modules: idempotency-store
   (INSERT … ON CONFLICT DO UPDATE on tenant+operation+key,
@@ -506,15 +518,20 @@ variable_updated / compensation_* / instance_completed/failed/
 cancelled/suspended/resumed), and replays state by left-folding
 the event stream.
 
-**No longer deferred (as of M3.5):** workflow persistence. The
-`workflow-runtime-pg` package implements the `EventLog`
-interface against META_WORKFLOW_EVENTS via `@crossengin/
-kernel-pg`. Events survive process restarts; multiple worker
-processes can share an event log. PostgresInstanceStore /
-ActivityStore / SignalStore / TimerStore turn projected
-in-memory state into UPSERTs against the corresponding META_
-WORKFLOW_* tables, so queries like "show me all instances
-waiting on signal X for tenant Y" become normal SQL.
+**No longer deferred (as of M3.5 + M3.6):** workflow persistence
++ wiring. The `workflow-runtime-pg` package implements the
+`EventLog` interface against META_WORKFLOW_EVENTS via
+`@crossengin/kernel-pg`. Events survive process restarts;
+multiple worker processes can share an event log.
+PostgresInstanceStore / ActivityStore / SignalStore / TimerStore
+turn projected in-memory state into UPSERTs against the
+corresponding META_WORKFLOW_* tables. `ProjectingEventLog` wraps
+any `EventLog` and auto-runs the projection writers after each
+append — drop it into a `WorkflowEngine` and every transition,
+signal, timer, activity scheduling becomes a Postgres write
+without the consumer needing to know.
+`buildPersistentEngine(conn, definitions)` is the one-call
+factory that wires the whole thing together.
 
 **No longer deferred (as of M4):** HTTP request handling. The
 `api-gateway-runtime` package executes the 17-stage pipeline
