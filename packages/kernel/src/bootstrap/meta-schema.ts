@@ -4831,6 +4831,573 @@ export const META_SCIM_PROVISIONING: TableDefinition = {
   },
 };
 
+export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
+  schema: "meta",
+  name: "notification_templates",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "ntpl_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "notification_templates_ntpl_id_key" },
+      check: "ntpl_id ~ '^ntpl_[a-z0-9]{8,32}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "template_id",
+      type: "TEXT",
+      notNull: true,
+      check: "template_id ~ '^[a-z][a-z0-9_.-]*$'",
+    },
+    {
+      name: "version",
+      type: "TEXT",
+      notNull: true,
+      check: "version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    {
+      name: "locale",
+      type: "TEXT",
+      notNull: true,
+      check: "locale ~ '^[a-z]{2}(-[A-Z]{2})?$'",
+    },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+    },
+    {
+      name: "category",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "category IN ('transactional', 'security_alert', 'system_notice', 'operational_digest', 'marketing')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('draft', 'in_review', 'approved', 'deprecated', 'retired')",
+    },
+    { name: "content", type: "JSONB", notNull: true },
+    { name: "variables", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "body_size_bytes",
+      type: "INTEGER",
+      notNull: true,
+      check: "body_size_bytes >= 1",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    { name: "approved_at", type: "TIMESTAMPTZ" },
+    { name: "approved_by", type: "UUID", references: USER_FK },
+    { name: "deprecated_at", type: "TIMESTAMPTZ" },
+    { name: "superseded_by_template_id", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_templates_tenant_template_locale_version_key",
+      columns: ["tenant_id", "template_id", "channel", "locale", "version"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_notification_templates_tenant_template",
+      columns: ["tenant_id", "template_id"],
+    },
+    { name: "idx_notification_templates_status", columns: ["status"] },
+    { name: "idx_notification_templates_channel", columns: ["channel"] },
+    { name: "idx_notification_templates_created_by", columns: ["created_by"] },
+    { name: "idx_notification_templates_approved_by", columns: ["approved_by"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "notification_templates_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_NOTIFICATION_PREFERENCES: TableDefinition = {
+  schema: "meta",
+  name: "notification_preferences",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "category",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "category IN ('transactional', 'security_alert', 'system_notice', 'operational_digest', 'marketing')",
+    },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+    },
+    { name: "opted_in", type: "BOOLEAN", notNull: true },
+    {
+      name: "source",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "source IN ('default_policy', 'user_set', 'admin_set', 'regulatory_requirement', 'import')",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_by", type: "UUID", references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_preferences_user_category_channel_key",
+      columns: ["tenant_id", "user_id", "category", "channel"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_notification_preferences_user",
+      columns: ["tenant_id", "user_id"],
+    },
+    {
+      name: "idx_notification_preferences_updated_by",
+      columns: ["updated_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "notification_preferences_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_NOTIFICATION_SUPPRESSIONS: TableDefinition = {
+  schema: "meta",
+  name: "notification_suppressions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "suppression_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "notification_suppressions_suppression_id_key",
+      },
+      check: "suppression_id ~ '^supp_[A-Za-z0-9_-]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+    },
+    { name: "recipient_address", type: "TEXT", notNull: true },
+    {
+      name: "reason",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "reason IN ('hard_bounce', 'soft_bounce_exceeded', 'spam_complaint', 'manual_block', 'unsubscribe', 'do_not_contact_register', 'regulatory_block')",
+    },
+    { name: "applied_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "applied_by", type: "UUID", references: USER_FK },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "source_delivery_id", type: "UUID" },
+    { name: "notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_suppressions_tenant_channel_address_active",
+      columns: ["tenant_id", "channel", "recipient_address"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_notification_suppressions_expires",
+      columns: ["expires_at"],
+    },
+    {
+      name: "idx_notification_suppressions_reason",
+      columns: ["reason"],
+    },
+    {
+      name: "idx_notification_suppressions_applied_by",
+      columns: ["applied_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "notification_suppressions_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_NOTIFICATION_DISPATCHES: TableDefinition = {
+  schema: "meta",
+  name: "notification_dispatches",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "dispatch_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "notification_dispatches_dispatch_id_key",
+      },
+      check: "dispatch_id ~ '^disp_[A-Za-z0-9_-]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "template_id", type: "TEXT", notNull: true },
+    {
+      name: "template_version",
+      type: "TEXT",
+      notNull: true,
+      check: "template_version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    {
+      name: "locale",
+      type: "TEXT",
+      notNull: true,
+      check: "locale ~ '^[a-z]{2}(-[A-Z]{2})?$'",
+    },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+    },
+    {
+      name: "category",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "category IN ('transactional', 'security_alert', 'system_notice', 'operational_digest', 'marketing')",
+    },
+    {
+      name: "priority",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "priority IN ('critical', 'high', 'normal', 'low', 'background')",
+    },
+    { name: "audience", type: "JSONB", notNull: true },
+    {
+      name: "variables_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "variables_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "correlation_id", type: "TEXT" },
+    {
+      name: "idempotency_key",
+      type: "TEXT",
+      notNull: true,
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('queued', 'rendering', 'rendered', 'sending', 'completed', 'failed', 'cancelled')",
+    },
+    { name: "queued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "started_at", type: "TIMESTAMPTZ" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    {
+      name: "recipient_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "recipient_count >= 0",
+    },
+    {
+      name: "delivered_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "delivered_count >= 0",
+    },
+    {
+      name: "failed_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "failed_count >= 0",
+    },
+    {
+      name: "suppressed_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "suppressed_count >= 0",
+    },
+    { name: "cancelled_reason", type: "TEXT" },
+    { name: "requested_by", type: "UUID", references: USER_FK },
+    { name: "requesting_system", type: "TEXT", notNull: true },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_dispatches_tenant_idempotency_key",
+      columns: ["tenant_id", "idempotency_key"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_notification_dispatches_tenant_queued",
+      columns: ["tenant_id", "queued_at"],
+    },
+    { name: "idx_notification_dispatches_status", columns: ["status"] },
+    {
+      name: "idx_notification_dispatches_template",
+      columns: ["template_id", "template_version"],
+    },
+    {
+      name: "idx_notification_dispatches_correlation",
+      columns: ["correlation_id"],
+    },
+    {
+      name: "idx_notification_dispatches_requested_by",
+      columns: ["requested_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "notification_dispatches_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_NOTIFICATION_DELIVERIES: TableDefinition = {
+  schema: "meta",
+  name: "notification_deliveries",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "delivery_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "notification_deliveries_delivery_id_key",
+      },
+      check: "delivery_id ~ '^dlv_[A-Za-z0-9_-]{8,40}$'",
+    },
+    {
+      name: "dispatch_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "notification_dispatches",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+    },
+    { name: "provider", type: "TEXT", notNull: true },
+    {
+      name: "recipient_address_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "recipient_address_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "attempt_kind",
+      type: "TEXT",
+      notNull: true,
+      check: "attempt_kind IN ('initial', 'retry', 'escalation')",
+    },
+    {
+      name: "attempt_number",
+      type: "INTEGER",
+      notNull: true,
+      check: "attempt_number BETWEEN 1 AND 20",
+    },
+    { name: "queued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "sent_at", type: "TIMESTAMPTZ" },
+    { name: "finalized_at", type: "TIMESTAMPTZ" },
+    {
+      name: "latency_ms",
+      type: "INTEGER",
+      check: "latency_ms IS NULL OR latency_ms BETWEEN 0 AND 600000",
+    },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('queued', 'delivered', 'deferred', 'bounced_hard', 'bounced_soft', 'complained', 'dropped', 'failed', 'suppressed', 'rate_limited')",
+    },
+    { name: "provider_message_id", type: "TEXT" },
+    {
+      name: "http_status",
+      type: "INTEGER",
+      check: "http_status IS NULL OR http_status BETWEEN 100 AND 599",
+    },
+    {
+      name: "bytes_sent",
+      type: "INTEGER",
+      check: "bytes_sent IS NULL OR bytes_sent >= 0",
+    },
+    {
+      name: "sms_segments",
+      type: "INTEGER",
+      check: "sms_segments IS NULL OR sms_segments BETWEEN 0 AND 20",
+    },
+    { name: "error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "next_retry_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_notification_deliveries_dispatch_attempt",
+      columns: ["dispatch_id", "attempt_number"],
+    },
+    {
+      name: "idx_notification_deliveries_tenant_queued",
+      columns: ["tenant_id", "queued_at"],
+    },
+    {
+      name: "idx_notification_deliveries_outcome",
+      columns: ["outcome"],
+    },
+    {
+      name: "idx_notification_deliveries_next_retry",
+      columns: ["next_retry_at"],
+    },
+    {
+      name: "idx_notification_deliveries_recipient_sha",
+      columns: ["channel", "recipient_address_sha256"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "notification_deliveries_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_NOTIFICATION_DIGESTS: TableDefinition = {
+  schema: "meta",
+  name: "notification_digests",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "digest_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "notification_digests_digest_id_key" },
+      check: "digest_id ~ '^dgst_[A-Za-z0-9_-]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "channel",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+    },
+    {
+      name: "frequency",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "frequency IN ('every_15_minutes', 'hourly', 'daily', 'weekly')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('open', 'queued_for_assembly', 'assembled', 'dispatched', 'expired')",
+    },
+    { name: "opened_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "scheduled_dispatch_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "assembled_at", type: "TIMESTAMPTZ" },
+    { name: "dispatched_at", type: "TIMESTAMPTZ" },
+    {
+      name: "item_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "item_count >= 0",
+    },
+    {
+      name: "max_items",
+      type: "INTEGER",
+      notNull: true,
+      default: "100",
+      check: "max_items BETWEEN 1 AND 1000",
+    },
+    {
+      name: "dedup_sha256",
+      type: "CHAR(64)",
+      check: "dedup_sha256 IS NULL OR dedup_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_notification_digests_user_channel_status",
+      columns: ["tenant_id", "user_id", "channel", "status"],
+    },
+    {
+      name: "idx_notification_digests_scheduled",
+      columns: ["scheduled_dispatch_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "notification_digests_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -4908,4 +5475,10 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_SSO_SESSIONS,
   META_SCIM_CLIENTS,
   META_SCIM_PROVISIONING,
+  META_NOTIFICATION_TEMPLATES,
+  META_NOTIFICATION_PREFERENCES,
+  META_NOTIFICATION_SUPPRESSIONS,
+  META_NOTIFICATION_DISPATCHES,
+  META_NOTIFICATION_DELIVERIES,
+  META_NOTIFICATION_DIGESTS,
 ];

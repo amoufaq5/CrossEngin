@@ -48,6 +48,12 @@ import {
   META_ML_EVALUATIONS,
   META_ML_MODELS,
   META_ML_TRAINING_RUNS,
+  META_NOTIFICATION_DELIVERIES,
+  META_NOTIFICATION_DIGESTS,
+  META_NOTIFICATION_DISPATCHES,
+  META_NOTIFICATION_PREFERENCES,
+  META_NOTIFICATION_SUPPRESSIONS,
+  META_NOTIFICATION_TEMPLATES,
   META_ONBOARDING_RUNS,
   META_PACK_INSTALLATIONS,
   META_PACK_REVIEWS,
@@ -80,8 +86,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 76 tables", () => {
-    expect(META_TABLES).toHaveLength(76);
+  it("contains 82 tables", () => {
+    expect(META_TABLES).toHaveLength(82);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -143,6 +149,12 @@ describe("META_TABLES", () => {
       "ml_evaluations",
       "ml_models",
       "ml_training_runs",
+      "notification_deliveries",
+      "notification_digests",
+      "notification_dispatches",
+      "notification_preferences",
+      "notification_suppressions",
+      "notification_templates",
       "onboarding_runs",
       "pack_installations",
       "pack_reviews",
@@ -1095,6 +1107,81 @@ describe("table column shapes", () => {
     expect(rt?.check).toContain("'EnterpriseUser'");
     expect(rt?.check).toContain("'Role'");
     expect(rt?.check).toContain("'Entitlement'");
+  });
+
+  it("META_NOTIFICATION_TEMPLATES enforces (tenant, template, channel, locale, version) uniqueness", () => {
+    expect(
+      META_NOTIFICATION_TEMPLATES.uniqueConstraints?.[0]?.columns,
+    ).toEqual([
+      "tenant_id",
+      "template_id",
+      "channel",
+      "locale",
+      "version",
+    ]);
+  });
+
+  it("META_NOTIFICATION_TEMPLATES allows NULL tenant_id (platform templates)", () => {
+    const tenantId = META_NOTIFICATION_TEMPLATES.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_NOTIFICATION_PREFERENCES enforces (tenant, user, category, channel) uniqueness", () => {
+    expect(
+      META_NOTIFICATION_PREFERENCES.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "user_id", "category", "channel"]);
+  });
+
+  it("META_NOTIFICATION_SUPPRESSIONS enforces (tenant, channel, address) uniqueness", () => {
+    expect(
+      META_NOTIFICATION_SUPPRESSIONS.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "channel", "recipient_address"]);
+  });
+
+  it("META_NOTIFICATION_SUPPRESSIONS check-constrains reason to the 7 suppression reasons", () => {
+    const reason = META_NOTIFICATION_SUPPRESSIONS.columns.find(
+      (c) => c.name === "reason",
+    );
+    expect(reason?.check).toContain("'hard_bounce'");
+    expect(reason?.check).toContain("'spam_complaint'");
+    expect(reason?.check).toContain("'unsubscribe'");
+    expect(reason?.check).toContain("'regulatory_block'");
+  });
+
+  it("META_NOTIFICATION_DISPATCHES enforces (tenant, idempotency_key) uniqueness", () => {
+    expect(
+      META_NOTIFICATION_DISPATCHES.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "idempotency_key"]);
+  });
+
+  it("META_NOTIFICATION_DISPATCHES check-constrains priority to 5 levels", () => {
+    const priority = META_NOTIFICATION_DISPATCHES.columns.find(
+      (c) => c.name === "priority",
+    );
+    expect(priority?.check).toContain("'critical'");
+    expect(priority?.check).toContain("'background'");
+  });
+
+  it("META_NOTIFICATION_DELIVERIES cascades on dispatch deletion", () => {
+    const fk = META_NOTIFICATION_DELIVERIES.columns.find(
+      (c) => c.name === "dispatch_id",
+    );
+    expect(fk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_NOTIFICATION_DIGESTS frequency excludes immediate and never (batches only)", () => {
+    const freq = META_NOTIFICATION_DIGESTS.columns.find(
+      (c) => c.name === "frequency",
+    );
+    expect(freq?.check).not.toContain("'immediate'");
+    expect(freq?.check).not.toContain("'never'");
+    expect(freq?.check).toContain("'hourly'");
+    expect(freq?.check).toContain("'daily'");
   });
 });
 
