@@ -13,15 +13,20 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M4 landed: **44 packages,
-115 meta-schema tables, 5,236 tests**, all green, no type errors.
-The four runtime pillars (DDL execution + cryptography + workflow
-execution + HTTP gateway) are in place. M4 added `@crossengin/
-api-gateway-runtime` — the 17-stage pipeline as real middleware,
-with EdDSA JWT verification (via crypto), idempotency-key replay
-detection (via the IdempotencyStore interface), rate-limit
-denial with Retry-After, RFC 9457 problem details for every
-error, and a queryable PipelineExecution per request. M1
+Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M4 + M4.5 landed: **45
+packages, 115 meta-schema tables, 5,270 tests**, all green, no
+type errors. The four runtime pillars (DDL execution +
+cryptography + workflow execution + HTTP gateway) are in place.
+M4.5 added `@crossengin/api-gateway-pg` — Postgres-backed
+adapters for the gateway runtime's four store interfaces
+(IdempotencyStore, RouteRegistry, RateLimitChecker,
+PipelineExecutionStore) backed by the existing META_GATEWAY_* +
+META_RATE_LIMIT_DECISIONS tables via `@crossengin/kernel-pg`.
+M4 added `@crossengin/api-gateway-runtime` — the 17-stage
+pipeline as real middleware, with EdDSA JWT verification (via
+crypto), idempotency-key replay detection, rate-limit denial
+with Retry-After, RFC 9457 problem details for every error, and
+a queryable PipelineExecution per request. M1
 added `@crossengin/kernel-pg` (Postgres-backed migration applier).
 M2 added `@crossengin/crypto` (real SHA-256 / BLAKE2b-512 /
 HMAC-SHA256 / Ed25519). M2.5 wired crypto into marketplace + sdk
@@ -85,6 +90,17 @@ re-exporting everything.
   (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
+- **`api-gateway-pg`** — Postgres-backed adapters for the four
+  gateway runtime store interfaces. 4 modules: idempotency-store
+  (INSERT … ON CONFLICT DO UPDATE on tenant+operation+key,
+  TTL-based deleteExpired), route-registry (cache-backed lookup
+  + listVersionsFor with configurable TTL, upsert that
+  invalidates the cache), rate-limit-checker (per-(tenant,
+  principal, operation) sliding-window counter; writes
+  META_RATE_LIMIT_DECISIONS with allowed /
+  denied_rate_limit_exceeded outcomes), pipeline-execution-store
+  (INSERT … ON CONFLICT DO NOTHING for the M4 PipelineExecution,
+  plus countSince audit query).
 - **`api-gateway-runtime`** — HTTP gateway middleware
   (fourth impure package). 7 modules: adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
@@ -471,10 +487,19 @@ OutgoingResponse + a schema-valid PipelineExecution. Unauth →
 401 + WWW-Authenticate. Valid JWT + over-quota → 429 +
 Retry-After. Replay with same Idempotency-Key → cached 201 with
 X-Idempotent-Replay: true. Routes with required scopes plug
-into @crossengin/auth's principal model. The IdempotencyStore /
-RateLimitChecker / RouteRegistry interfaces are designed for
-Phase 3 swap to Postgres-backed adapters via `@crossengin/
-kernel-pg`.
+into @crossengin/auth's principal model.
+
+**No longer deferred (as of M4.5):** production-shape gateway
+persistence. The `api-gateway-pg` package implements the four
+store interfaces against the existing META_GATEWAY_* +
+META_RATE_LIMIT_DECISIONS tables via `@crossengin/kernel-pg`.
+Idempotency records survive process restarts and persist across
+nodes. Route definitions live in the database (cache reload on
+TTL or explicit refresh, plus upsert API for tooling).
+Rate-limit decisions are auditable rows in
+META_RATE_LIMIT_DECISIONS. PipelineExecutions persist to
+META_GATEWAY_PIPELINE_EXECUTIONS so every request is queryable
+by tenant + correlationId + time.
 
 ## ADRs
 
