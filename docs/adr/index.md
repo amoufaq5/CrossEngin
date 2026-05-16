@@ -46,13 +46,14 @@
 | [0041](0041-workflow-engine-runtime.md) | Workflow engine runtime contracts | 2 | Proposed | 2026-05-16 |
 | [0042](0042-data-lineage-and-provenance.md) | Data lineage and provenance | 2 | Proposed | 2026-05-16 |
 | [0043](0043-rate-limiting-and-quotas.md) | Rate limiting and quotas | 2 | Proposed | 2026-05-16 |
+| [0044](0044-api-gateway-request-lifecycle.md) | API gateway request lifecycle | 2 | Proposed | 2026-05-16 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -85,3 +86,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 15 | 0041 | 2,000 | Drafted alongside `@crossengin/workflow-engine` package |
 | 16 | 0042 | 2,000 | Drafted alongside `@crossengin/data-lineage` package |
 | 17 | 0043 | 2,000 | Drafted alongside `@crossengin/rate-limiting` package |
+| 18 | 0044 | 2,000 | Drafted alongside `@crossengin/api-gateway` package |

@@ -7999,6 +7999,310 @@ export const META_THROTTLE_EVENTS: TableDefinition = {
   },
 };
 
+export const META_GATEWAY_ROUTES: TableDefinition = {
+  schema: "meta",
+  name: "gateway_routes",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "route_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "gateway_routes_route_id_key" },
+      check: "route_id ~ '^rt_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "operation_id",
+      type: "TEXT",
+      notNull: true,
+      check: "operation_id ~ '^[a-z][a-zA-Z0-9._]*$'",
+    },
+    {
+      name: "method",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "method IN ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT')",
+    },
+    { name: "path_segments", type: "JSONB", notNull: true },
+    {
+      name: "api_version",
+      type: "TEXT",
+      notNull: true,
+      check: "api_version ~ '^v[0-9]+$'",
+    },
+    { name: "is_deprecated", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "deprecated_since", type: "TIMESTAMPTZ" },
+    { name: "sunset_at", type: "TIMESTAMPTZ" },
+    { name: "successor_operation_id", type: "TEXT" },
+    {
+      name: "required_scopes",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
+    {
+      name: "rate_limit_policy_id",
+      type: "TEXT",
+      check:
+        "rate_limit_policy_id IS NULL OR rate_limit_policy_id ~ '^rlp_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "idempotency_required",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "request_schema_sha256",
+      type: "CHAR(64)",
+      check:
+        "request_schema_sha256 IS NULL OR request_schema_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      name: "response_schema_sha256",
+      type: "CHAR(64)",
+      check:
+        "response_schema_sha256 IS NULL OR response_schema_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "gateway_routes_method_version_operation_key",
+      columns: ["method", "api_version", "operation_id"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_gateway_routes_version_method",
+      columns: ["api_version", "method"],
+    },
+    {
+      name: "idx_gateway_routes_sunset",
+      columns: ["sunset_at"],
+    },
+    {
+      name: "idx_gateway_routes_created_by",
+      columns: ["created_by"],
+    },
+  ],
+};
+
+export const META_GATEWAY_IDEMPOTENCY_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "gateway_idempotency_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "record_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "gateway_idempotency_records_record_id_key",
+      },
+      check: "record_id ~ '^idem_[A-Za-z0-9_-]{8,64}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "operation_id", type: "TEXT", notNull: true },
+    {
+      name: "method",
+      type: "TEXT",
+      notNull: true,
+      check: "method IN ('POST', 'PUT', 'PATCH', 'DELETE')",
+    },
+    {
+      name: "idempotency_key",
+      type: "TEXT",
+      notNull: true,
+      check: "idempotency_key ~ '^[A-Za-z0-9_.:-]{8,255}$'",
+    },
+    {
+      name: "request_hash_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "request_hash_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "principal_id", type: "UUID", references: USER_FK },
+    { name: "received_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('in_progress', 'completed_success', 'completed_error', 'expired')",
+    },
+    {
+      name: "response_status",
+      type: "INTEGER",
+      check:
+        "response_status IS NULL OR response_status BETWEEN 100 AND 599",
+    },
+    {
+      name: "response_sha256",
+      type: "CHAR(64)",
+      check:
+        "response_sha256 IS NULL OR response_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "response_storage_uri", type: "TEXT" },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "gateway_idempotency_records_tenant_op_key",
+      columns: ["tenant_id", "operation_id", "idempotency_key"],
+    },
+  ],
+  indexes: [
+    {
+      name: "idx_gateway_idempotency_expires",
+      columns: ["expires_at"],
+    },
+    {
+      name: "idx_gateway_idempotency_principal",
+      columns: ["principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "gateway_idempotency_records_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
+export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
+  schema: "meta",
+  name: "gateway_pipeline_executions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "request_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "gateway_pipeline_executions_request_id_key",
+      },
+      check: "request_id ~ '^req_[A-Za-z0-9_-]{8,64}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "completed_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "total_duration_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "total_duration_ms BETWEEN 0 AND 300000",
+    },
+    {
+      name: "final_stage",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "final_stage IN ('receive', 'parse_request', 'validate_tls', 'parse_auth_credential', 'authenticate', 'resolve_principal', 'match_route', 'negotiate_version', 'negotiate_content', 'check_idempotency', 'check_rate_limit', 'validate_request_signature', 'validate_request_schema', 'dispatch_handler', 'transform_response', 'apply_security_headers', 'emit_audit')",
+    },
+    {
+      name: "final_outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "final_outcome IN ('pass', 'deny', 'short_circuit_replay', 'redirect', 'fallthrough', 'error')",
+    },
+    {
+      name: "final_response_status",
+      type: "INTEGER",
+      notNull: true,
+      check: "final_response_status BETWEEN 100 AND 599",
+    },
+    { name: "stages", type: "JSONB", notNull: true },
+    {
+      name: "auth_outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "auth_outcome IN ('anonymous', 'authenticated', 'credential_malformed', 'credential_not_found', 'invalid_signature', 'expired_token', 'not_yet_valid_token', 'audience_mismatch', 'issuer_mismatch', 'principal_not_found', 'principal_disabled', 'principal_locked', 'scope_insufficient', 'mfa_required', 'weak_tls_rejected')",
+    },
+    {
+      name: "route_match_outcome",
+      type: "TEXT",
+      check:
+        "route_match_outcome IS NULL OR route_match_outcome IN ('matched', 'no_route', 'method_not_allowed', 'version_not_supported', 'deprecated_version', 'sunset_version')",
+    },
+    {
+      name: "idempotency_outcome",
+      type: "TEXT",
+      check:
+        "idempotency_outcome IS NULL OR idempotency_outcome IN ('no_key_required', 'no_key_provided', 'first_seen', 'replay_hit_match', 'replay_hit_mismatch', 'replay_in_progress', 'replay_expired', 'replay_not_allowed_for_method')",
+    },
+    { name: "principal_id", type: "UUID", references: USER_FK },
+    { name: "route_operation_id", type: "TEXT" },
+    {
+      name: "resolved_api_version",
+      type: "TEXT",
+      check:
+        "resolved_api_version IS NULL OR resolved_api_version ~ '^v[0-9]+$'",
+    },
+    { name: "correlation_id", type: "TEXT" },
+    { name: "rate_limit_decision_id", type: "TEXT" },
+    {
+      name: "bytes_in",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "bytes_in >= 0",
+    },
+    {
+      name: "bytes_out",
+      type: "BIGINT",
+      notNull: true,
+      default: "0",
+      check: "bytes_out >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_gateway_pipeline_tenant_started",
+      columns: ["tenant_id", "started_at"],
+    },
+    {
+      name: "idx_gateway_pipeline_final_outcome",
+      columns: ["final_outcome"],
+    },
+    {
+      name: "idx_gateway_pipeline_auth_outcome",
+      columns: ["auth_outcome"],
+    },
+    {
+      name: "idx_gateway_pipeline_principal",
+      columns: ["principal_id"],
+    },
+    {
+      name: "idx_gateway_pipeline_operation",
+      columns: ["route_operation_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "gateway_pipeline_executions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -8106,4 +8410,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_RATE_LIMIT_DECISIONS,
   META_RATE_LIMIT_EXCEPTIONS,
   META_THROTTLE_EVENTS,
+  META_GATEWAY_ROUTES,
+  META_GATEWAY_IDEMPOTENCY_RECORDS,
+  META_GATEWAY_PIPELINE_EXECUTIONS,
 ];

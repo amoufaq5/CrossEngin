@@ -36,6 +36,9 @@ import {
   META_FAILOVER_RECORDS,
   META_FORENSIC_EVIDENCE,
   META_FEATURE_FLAGS,
+  META_GATEWAY_IDEMPOTENCY_RECORDS,
+  META_GATEWAY_PIPELINE_EXECUTIONS,
+  META_GATEWAY_ROUTES,
   META_FILES,
   META_GDPR_DELETION_REQUESTS,
   META_IDEMPOTENCY_RECORDS,
@@ -110,8 +113,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 106 tables", () => {
-    expect(META_TABLES).toHaveLength(106);
+  it("contains 109 tables", () => {
+    expect(META_TABLES).toHaveLength(109);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -161,6 +164,9 @@ describe("META_TABLES", () => {
       "feature_flags",
       "files",
       "forensic_evidence",
+      "gateway_idempotency_records",
+      "gateway_pipeline_executions",
+      "gateway_routes",
       "gdpr_deletion_requests",
       "idempotency_records",
       "import_sources",
@@ -1627,6 +1633,76 @@ describe("table column shapes", () => {
     expect(kind?.check).toContain("'soft_limit_hit'");
     expect(kind?.check).toContain("'circuit_opened'");
     expect(kind?.check).toContain("'exception_approved'");
+  });
+
+  it("META_GATEWAY_ROUTES enforces (method, version, operation) uniqueness", () => {
+    expect(
+      META_GATEWAY_ROUTES.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["method", "api_version", "operation_id"]);
+  });
+
+  it("META_GATEWAY_ROUTES method enum has 9 HTTP methods", () => {
+    const method = META_GATEWAY_ROUTES.columns.find((c) => c.name === "method");
+    expect(method?.check).toContain("'GET'");
+    expect(method?.check).toContain("'PATCH'");
+    expect(method?.check).toContain("'CONNECT'");
+  });
+
+  it("META_GATEWAY_IDEMPOTENCY_RECORDS enforces (tenant, op, key) uniqueness", () => {
+    expect(
+      META_GATEWAY_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns,
+    ).toEqual(["tenant_id", "operation_id", "idempotency_key"]);
+  });
+
+  it("META_GATEWAY_IDEMPOTENCY_RECORDS method restricted to non-idempotent HTTP methods", () => {
+    const method = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find(
+      (c) => c.name === "method",
+    );
+    expect(method?.check).toContain("'POST'");
+    expect(method?.check).toContain("'PUT'");
+    expect(method?.check).toContain("'PATCH'");
+    expect(method?.check).toContain("'DELETE'");
+    expect(method?.check).not.toContain("'GET'");
+  });
+
+  it("META_GATEWAY_IDEMPOTENCY_RECORDS status enum has 4 lifecycle states", () => {
+    const status = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find(
+      (c) => c.name === "status",
+    );
+    expect(status?.check).toContain("'in_progress'");
+    expect(status?.check).toContain("'completed_success'");
+    expect(status?.check).toContain("'completed_error'");
+    expect(status?.check).toContain("'expired'");
+  });
+
+  it("META_GATEWAY_PIPELINE_EXECUTIONS allows NULL tenant_id (anonymous traffic)", () => {
+    const tenantId = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_GATEWAY_PIPELINE_EXECUTIONS final_stage enum covers 17 stages", () => {
+    const stage = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
+      (c) => c.name === "final_stage",
+    );
+    expect(stage?.check).toContain("'receive'");
+    expect(stage?.check).toContain("'authenticate'");
+    expect(stage?.check).toContain("'check_rate_limit'");
+    expect(stage?.check).toContain("'emit_audit'");
+  });
+
+  it("META_GATEWAY_PIPELINE_EXECUTIONS final_outcome enum has 6 outcomes", () => {
+    const outcome = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
+      (c) => c.name === "final_outcome",
+    );
+    expect(outcome?.check).toContain("'pass'");
+    expect(outcome?.check).toContain("'deny'");
+    expect(outcome?.check).toContain("'short_circuit_replay'");
+    expect(outcome?.check).toContain("'redirect'");
   });
 });
 
