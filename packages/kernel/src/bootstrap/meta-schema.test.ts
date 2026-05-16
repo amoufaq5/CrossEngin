@@ -36,6 +36,10 @@ import {
   META_FAILOVER_RECORDS,
   META_FORENSIC_EVIDENCE,
   META_FEATURE_FLAGS,
+  META_FEATURE_FLAG_CHANGES,
+  META_FEATURE_FLAG_EVALUATIONS,
+  META_FEATURE_FLAG_KILL_SWITCHES,
+  META_FEATURE_FLAG_TARGETING_RULES,
   META_GATEWAY_IDEMPOTENCY_RECORDS,
   META_GATEWAY_PIPELINE_EXECUTIONS,
   META_GATEWAY_ROUTES,
@@ -113,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 109 tables", () => {
-    expect(META_TABLES).toHaveLength(109);
+  it("contains 113 tables", () => {
+    expect(META_TABLES).toHaveLength(113);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -161,6 +165,10 @@ describe("META_TABLES", () => {
       "events",
       "extension_packs",
       "failover_records",
+      "feature_flag_changes",
+      "feature_flag_evaluations",
+      "feature_flag_kill_switches",
+      "feature_flag_targeting_rules",
       "feature_flags",
       "files",
       "forensic_evidence",
@@ -1703,6 +1711,97 @@ describe("table column shapes", () => {
     expect(outcome?.check).toContain("'deny'");
     expect(outcome?.check).toContain("'short_circuit_replay'");
     expect(outcome?.check).toContain("'redirect'");
+  });
+
+  it("META_FEATURE_FLAG_TARGETING_RULES cascades on flag deletion", () => {
+    const fk = META_FEATURE_FLAG_TARGETING_RULES.columns.find(
+      (c) => c.name === "flag_id",
+    );
+    expect(fk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_FEATURE_FLAG_TARGETING_RULES allows NULL tenant_id (platform rules)", () => {
+    const tenantId = META_FEATURE_FLAG_TARGETING_RULES.columns.find(
+      (c) => c.name === "tenant_id",
+    );
+    expect(tenantId?.notNull).not.toBe(true);
+    expect(
+      META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using,
+    ).toContain("IS NULL OR");
+  });
+
+  it("META_FEATURE_FLAG_KILL_SWITCHES restricts on flag deletion (preserve audit)", () => {
+    const fk = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
+      (c) => c.name === "flag_id",
+    );
+    expect(fk?.references?.onDelete).toBe("RESTRICT");
+  });
+
+  it("META_FEATURE_FLAG_KILL_SWITCHES status enum has 4 lifecycle states", () => {
+    const status = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
+      (c) => c.name === "status",
+    );
+    expect(status?.check).toContain("'armed'");
+    expect(status?.check).toContain("'triggered_active'");
+    expect(status?.check).toContain("'released'");
+    expect(status?.check).toContain("'expired'");
+  });
+
+  it("META_FEATURE_FLAG_KILL_SWITCHES trigger_kind covers 8 trigger kinds", () => {
+    const trigger = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
+      (c) => c.name === "trigger_kind",
+    );
+    expect(trigger?.check).toContain("'manual_admin'");
+    expect(trigger?.check).toContain("'incident_response'");
+    expect(trigger?.check).toContain("'compliance_directive'");
+    expect(trigger?.check).toContain("'automated_metric_breach'");
+  });
+
+  it("META_FEATURE_FLAG_EVALUATIONS reason enum covers 17 reasons", () => {
+    const reason = META_FEATURE_FLAG_EVALUATIONS.columns.find(
+      (c) => c.name === "reason",
+    );
+    expect(reason?.check).toContain("'default_returned'");
+    expect(reason?.check).toContain("'kill_switch_active'");
+    expect(reason?.check).toContain("'percentage_bucket_match'");
+    expect(reason?.check).toContain("'segment_match'");
+    expect(reason?.check).toContain("'exclusion_rule_hit'");
+  });
+
+  it("META_FEATURE_FLAG_EVALUATIONS environment enum restricted to 4 envs", () => {
+    const env = META_FEATURE_FLAG_EVALUATIONS.columns.find(
+      (c) => c.name === "environment",
+    );
+    expect(env?.check).toContain("'preview'");
+    expect(env?.check).toContain("'staging'");
+    expect(env?.check).toContain("'production'");
+    expect(env?.check).toContain("'sandbox'");
+  });
+
+  it("META_FEATURE_FLAG_CHANGES cascades on flag deletion", () => {
+    const fk = META_FEATURE_FLAG_CHANGES.columns.find(
+      (c) => c.name === "flag_id",
+    );
+    expect(fk?.references?.onDelete).toBe("CASCADE");
+  });
+
+  it("META_FEATURE_FLAG_CHANGES kind enum covers 23 change kinds", () => {
+    const kind = META_FEATURE_FLAG_CHANGES.columns.find(
+      (c) => c.name === "kind",
+    );
+    expect(kind?.check).toContain("'flag_created'");
+    expect(kind?.check).toContain("'default_value_changed'");
+    expect(kind?.check).toContain("'rollout_stage_advanced'");
+    expect(kind?.check).toContain("'kill_switch_triggered'");
+  });
+
+  it("META_FEATURE_FLAG_CHANGES outcome enum has 4 outcomes", () => {
+    const outcome = META_FEATURE_FLAG_CHANGES.columns.find(
+      (c) => c.name === "outcome",
+    );
+    expect(outcome?.check).toContain("'succeeded'");
+    expect(outcome?.check).toContain("'blocked_by_four_eyes'");
+    expect(outcome?.check).toContain("'blocked_by_policy'");
   });
 });
 

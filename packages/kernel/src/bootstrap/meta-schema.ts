@@ -8303,6 +8303,370 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
   },
 };
 
+export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
+  schema: "meta",
+  name: "feature_flag_targeting_rules",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "rule_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "feature_flag_targeting_rules_rule_id_key",
+      },
+      check: "rule_id ~ '^ftr_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "flag_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "feature_flags",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "priority",
+      type: "INTEGER",
+      notNull: true,
+      check: "priority BETWEEN 0 AND 1000",
+    },
+    { name: "label", type: "TEXT", notNull: true },
+    { name: "condition", type: "JSONB", notNull: true },
+    {
+      name: "served_variant_key",
+      type: "TEXT",
+      check:
+        "served_variant_key IS NULL OR served_variant_key ~ '^[a-z][a-z0-9_]*$'",
+    },
+    { name: "served_value_json", type: "TEXT" },
+    { name: "is_exclusion", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "description", type: "TEXT" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_feature_flag_targeting_rules_flag_priority",
+      columns: ["flag_id", "priority"],
+    },
+    {
+      name: "idx_feature_flag_targeting_rules_created_by",
+      columns: ["created_by"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "feature_flag_targeting_rules_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
+  schema: "meta",
+  name: "feature_flag_kill_switches",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "kill_switch_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "feature_flag_kill_switches_kill_switch_id_key",
+      },
+      check: "kill_switch_id ~ '^fks_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "flag_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "feature_flags",
+        column: "id",
+        onDelete: "RESTRICT",
+      },
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "status IN ('armed', 'triggered_active', 'released', 'expired')",
+    },
+    {
+      name: "trigger_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "trigger_kind IN ('manual_admin', 'incident_response', 'security_event', 'data_quality_alert', 'performance_degradation', 'vendor_outage', 'compliance_directive', 'automated_metric_breach')",
+    },
+    { name: "justification", type: "TEXT", notNull: true },
+    { name: "armed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "armed_by_user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "triggered_at", type: "TIMESTAMPTZ" },
+    { name: "triggered_by_user_id", type: "UUID", references: USER_FK },
+    { name: "co_triggered_by_user_id", type: "UUID", references: USER_FK },
+    { name: "co_triggered_at", type: "TIMESTAMPTZ" },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "released_at", type: "TIMESTAMPTZ" },
+    { name: "released_by_user_id", type: "UUID", references: USER_FK },
+    { name: "released_reason", type: "TEXT" },
+    { name: "expired_at", type: "TIMESTAMPTZ" },
+    { name: "related_incident_id", type: "TEXT" },
+    { name: "overridden_value_json", type: "TEXT", notNull: true },
+    { name: "impact_scope_notes", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_feature_flag_kill_switches_flag_status",
+      columns: ["flag_id", "status"],
+    },
+    {
+      name: "idx_feature_flag_kill_switches_armed_by",
+      columns: ["armed_by_user_id"],
+    },
+    {
+      name: "idx_feature_flag_kill_switches_triggered_by",
+      columns: ["triggered_by_user_id"],
+    },
+    {
+      name: "idx_feature_flag_kill_switches_co_triggered_by",
+      columns: ["co_triggered_by_user_id"],
+    },
+    {
+      name: "idx_feature_flag_kill_switches_released_by",
+      columns: ["released_by_user_id"],
+    },
+    {
+      name: "idx_feature_flag_kill_switches_expires",
+      columns: ["expires_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "feature_flag_kill_switches_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
+  schema: "meta",
+  name: "feature_flag_evaluations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "evaluation_id",
+      type: "TEXT",
+      notNull: true,
+      unique: {
+        constraintName: "feature_flag_evaluations_evaluation_id_key",
+      },
+      check: "evaluation_id ~ '^fev_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "flag_key",
+      type: "TEXT",
+      notNull: true,
+      check: "flag_key ~ '^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$'",
+    },
+    { name: "flag_id", type: "TEXT" },
+    {
+      name: "flag_version",
+      type: "TEXT",
+      check:
+        "flag_version IS NULL OR flag_version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+    },
+    {
+      name: "environment",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "environment IN ('preview', 'staging', 'production', 'sandbox')",
+    },
+    { name: "principal_id", type: "UUID", references: USER_FK },
+    { name: "session_id", type: "TEXT" },
+    { name: "evaluated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "evaluation_latency_us",
+      type: "INTEGER",
+      notNull: true,
+      check: "evaluation_latency_us BETWEEN 0 AND 10000000",
+    },
+    {
+      name: "reason",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "reason IN ('default_returned', 'kill_switch_active', 'flag_not_found', 'flag_archived', 'flag_paused', 'flag_disabled_for_environment', 'specific_principal_match', 'specific_tenant_match', 'tenant_attribute_match', 'principal_attribute_match', 'percentage_bucket_match', 'segment_match', 'custom_predicate_match', 'exclusion_rule_hit', 'fallthrough_to_default', 'error_returned_default', 'expired_returned_default')",
+    },
+    { name: "matched_rule_id", type: "TEXT" },
+    { name: "matched_segment_id", type: "TEXT" },
+    { name: "served_variant_key", type: "TEXT" },
+    { name: "served_value_json", type: "TEXT", notNull: true },
+    { name: "kill_switch_id", type: "TEXT" },
+    {
+      name: "bucketing_value_sha256",
+      type: "CHAR(64)",
+      check:
+        "bucketing_value_sha256 IS NULL OR bucketing_value_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "request_id", type: "TEXT" },
+    { name: "correlation_id", type: "TEXT" },
+    { name: "is_sampled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_feature_flag_evaluations_tenant_evaluated",
+      columns: ["tenant_id", "evaluated_at"],
+    },
+    {
+      name: "idx_feature_flag_evaluations_flag_key",
+      columns: ["flag_key"],
+    },
+    {
+      name: "idx_feature_flag_evaluations_reason",
+      columns: ["reason"],
+    },
+    {
+      name: "idx_feature_flag_evaluations_principal",
+      columns: ["principal_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "feature_flag_evaluations_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
+  schema: "meta",
+  name: "feature_flag_changes",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "change_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "feature_flag_changes_change_id_key" },
+      check: "change_id ~ '^fch_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "flag_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "feature_flags",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "flag_key",
+      type: "TEXT",
+      notNull: true,
+      check: "flag_key ~ '^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$'",
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('flag_created', 'flag_updated_metadata', 'flag_activated', 'flag_paused', 'flag_archived', 'default_value_changed', 'killed_value_changed', 'variant_added', 'variant_removed', 'variant_weight_changed', 'targeting_rule_added', 'targeting_rule_removed', 'targeting_rule_updated', 'rollout_stage_advanced', 'rollout_stage_paused', 'rollout_rolled_back', 'kill_switch_armed', 'kill_switch_triggered', 'kill_switch_released', 'segment_added', 'segment_updated', 'owner_transferred', 'expires_at_extended')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "actor_user_id", type: "UUID", references: USER_FK },
+    { name: "actor_system_id", type: "TEXT" },
+    { name: "co_actor_user_id", type: "UUID", references: USER_FK },
+    { name: "co_actor_attested_at", type: "TIMESTAMPTZ" },
+    { name: "before_value_json", type: "TEXT" },
+    { name: "after_value_json", type: "TEXT" },
+    { name: "change_reason", type: "TEXT", notNull: true },
+    { name: "related_deployment_id", type: "TEXT" },
+    { name: "related_incident_id", type: "TEXT" },
+    { name: "related_targeting_rule_id", type: "TEXT" },
+    { name: "related_kill_switch_id", type: "TEXT" },
+    {
+      name: "outcome",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "outcome IN ('succeeded', 'rolled_back', 'blocked_by_policy', 'blocked_by_four_eyes')",
+    },
+    {
+      name: "required_four_eyes",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "four_eyes_attested",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "blocked_reason", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_feature_flag_changes_flag_occurred",
+      columns: ["flag_id", "occurred_at"],
+    },
+    {
+      name: "idx_feature_flag_changes_kind",
+      columns: ["kind"],
+    },
+    {
+      name: "idx_feature_flag_changes_actor",
+      columns: ["actor_user_id"],
+    },
+    {
+      name: "idx_feature_flag_changes_co_actor",
+      columns: ["co_actor_user_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "feature_flag_changes_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -8413,4 +8777,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_GATEWAY_ROUTES,
   META_GATEWAY_IDEMPOTENCY_RECORDS,
   META_GATEWAY_PIPELINE_EXECUTIONS,
+  META_FEATURE_FLAG_TARGETING_RULES,
+  META_FEATURE_FLAG_KILL_SWITCHES,
+  META_FEATURE_FLAG_EVALUATIONS,
+  META_FEATURE_FLAG_CHANGES,
 ];
