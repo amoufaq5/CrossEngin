@@ -340,3 +340,138 @@ describe("summarizeChatResponse helper", () => {
     expect(summary.usage.cost).toBeGreaterThan(0);
   });
 });
+
+const RESPONSES_STREAM_SAMPLE = [
+  `event: response.created\ndata: {"response":{"id":"resp_1"}}`,
+  `event: response.output_text.delta\ndata: {"delta":"Hello"}`,
+  `event: response.output_text.delta\ndata: {"delta":" world"}`,
+  `event: response.completed\ndata: {"response":{"id":"resp_1","usage":{"input_tokens":9,"output_tokens":3,"total_tokens":12}}}`,
+  ``,
+].join("\n\n");
+
+describe("OpenAIProvider — Responses API path", () => {
+  it("complete() routes to /v1/responses when defaultApiPath = 'responses'", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      defaultApiPath: "responses",
+      fetch: buildFetch({ asStream: true, capture: captured, responseBody: RESPONSES_STREAM_SAMPLE }),
+    });
+    for await (const _ of provider.complete(fixtureRequest())) void _;
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.url).toBe("https://api.openai.com/v1/responses");
+  });
+
+  it("completeViaResponses() yields text + usage_final from a streamed response", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ asStream: true, responseBody: RESPONSES_STREAM_SAMPLE }),
+    });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of provider.completeViaResponses(fixtureRequest())) {
+      chunks.push(c);
+    }
+    const texts = chunks.filter((c) => c.kind === "text");
+    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual([
+      "Hello",
+      " world",
+    ]);
+    const final = chunks.find((c) => c.kind === "usage_final");
+    if (final?.kind === "usage_final") {
+      expect(final.usage.inputTokens).toBe(9);
+      expect(final.usage.outputTokens).toBe(3);
+    }
+  });
+
+  it("threads reasoningEffort into the request body", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      reasoningEffort: "high",
+      fetch: buildFetch({ asStream: true, capture: captured, responseBody: RESPONSES_STREAM_SAMPLE }),
+    });
+    for await (const _ of provider.completeViaResponses(fixtureRequest())) void _;
+    const body = JSON.parse(captured[0]!.body) as { reasoning?: { effort: string } };
+    expect(body.reasoning?.effort).toBe("high");
+  });
+
+  it("complete() defaults to chat path when defaultApiPath unset", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ asStream: true, capture: captured }),
+    });
+    for await (const _ of provider.complete(fixtureRequest())) void _;
+    expect(captured[0]?.url).toBe("https://api.openai.com/v1/chat/completions");
+  });
+
+  it("respondNonStreaming() parses a Responses API response", async () => {
+    const NON_STREAM_RESPONSE = JSON.stringify({
+      id: "resp_1",
+      object: "response",
+      model: "gpt-4o",
+      status: "completed",
+      output: [
+        {
+          role: "assistant",
+          content: [{ type: "output_text", text: "Hi!" }],
+        },
+      ],
+      usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+    });
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ responseBody: NON_STREAM_RESPONSE }),
+    });
+    const response = await provider.respondNonStreaming(fixtureRequest());
+    expect(response.status).toBe("completed");
+    expect(response.output[0]).toMatchObject({ role: "assistant" });
+  });
+
+  it("respondNonStreaming() throws OpenAIError on bad JSON", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ responseBody: "not-json" }),
+    });
+    await expect(provider.respondNonStreaming(fixtureRequest())).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors as OpenAIError with network_error kind", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ throwOnce: new Error("ECONNRESET") }),
+    });
+    await expect(async () => {
+      for await (const _ of provider.completeViaResponses(fixtureRequest())) void _;
+    }).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
+describe("summarizeResponsesResponse helper", () => {
+  it("packs text + tool calls + reasoning + status + usage", async () => {
+    const { summarizeResponsesResponse } = await import("./provider.js");
+    const summary = summarizeResponsesResponse(
+      {
+        id: "resp_2",
+        object: "response",
+        model: "gpt-4o",
+        status: "completed",
+        output: [
+          {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "thinking" }],
+          },
+          { role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      },
+      "gpt-4o-mini",
+    );
+    expect(summary.text).toBe("ok");
+    expect(summary.reasoningSummary).toBe("thinking");
+    expect(summary.status).toBe("completed");
+    expect(summary.usage.inputTokens).toBe(10);
+  });
+});

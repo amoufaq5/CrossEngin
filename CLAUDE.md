@@ -13,11 +13,28 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
-M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M6.5.5 + M7 landed: **52 packages + 1 app, 119 meta-schema
-tables, 5,856 tests**, all green, no type errors. M6.5.5 wired
-the ai-router into `architect-cli`'s `chat` subcommand. New
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
++ M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
++ M6 + M6.5 + M6.5.5 + M7 landed: **52 packages + 1 app, 119
+meta-schema tables, 5,896 tests**, all green, no type errors.
+M2.8.5 extended `@crossengin/ai-providers-openai` with the
+Responses API (`/v1/responses`) as an opt-in alternative to
+Chat Completions. 2 new modules: responses-api (`buildOpenAI
+ResponsesRequest` translates `CompletionRequest` to the
+flat input-array shape with `instructions` instead of system
+messages; `function_call` + `function_call_output` items
+replace assistant `tool_calls` and tool-role messages),
+responses-streaming (named-event SSE parser dispatching on
+`response.output_text.delta` / `response.function_call_
+arguments.delta` / `response.completed`). `OpenAIProvider`
+gains `defaultApiPath: "chat" | "responses"` constructor
+option (defaults to `"chat"` — backward compat) and
+`reasoningEffort: "low" | "medium" | "high"` for thinking
+models (o1, o3). Two new methods: `completeViaResponses` +
+`respondNonStreaming`. The CompletionChunk discriminated
+union is unchanged; reasoning summary surfaces only on the
+non-streaming envelope via `summarizeResponsesResponse`.
+M6.5.5 wired the ai-router into `architect-cli`'s `chat` subcommand. New
 `router-setup.ts` exports `DEFAULT_TASK_POLICIES` (7 tasks
 mapped to Anthropic-primary + OpenAI-fallback chains; cheap
 tasks like summarizer/classifier go to gpt-4o-mini primary) and
@@ -197,7 +214,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0061 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0062 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -212,7 +229,8 @@ persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`ai-router` — provider router with retry / cost / latency),
 ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 + embeddings + tool calls), ADR-0061 covers M6.5.5
-(architect-cli router integration).
+(architect-cli router integration), ADR-0062 covers M2.8.5
+(OpenAI Responses API support).
 
 ## Architecture in 90 seconds
 
@@ -837,6 +855,19 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M2.8.5):** OpenAI Responses API.
+The provider opts into `/v1/responses` via the `defaultApiPath`
+constructor option (or per-call via `completeViaResponses`).
+The Responses path collapses system messages into `instructions`,
+flattens tool calls + tool results into top-level
+`function_call` + `function_call_output` items, and surfaces
+reasoning summaries via the non-streaming
+`summarizeResponsesResponse` helper (streaming only emits
+text + tool chunks; reasoning lives off-channel). Pattern set
+for future named-event streaming providers (Anthropic's
+upcoming responses-style endpoint, AWS Bedrock converse stream)
+without touching the `CompletionChunk` discriminated union.
+
 **No longer deferred (as of M6.5.5):** the router is live in
 the CLI. `crossengin chat` now uses `buildChatCompleter` to
 adapt to whichever API keys are configured. One key →
@@ -952,7 +983,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0061 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0062 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -969,7 +1000,8 @@ M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
 Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`ai-router`), ADR-0060 covers Phase 2 M2.8
 (`ai-providers-openai`), ADR-0061 covers Phase 2 M6.5.5
-(architect-cli router integration). When you ship a new package,
+(architect-cli router integration), ADR-0062 covers Phase 2
+M2.8.5 (OpenAI Responses API support). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

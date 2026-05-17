@@ -32,6 +32,16 @@ import {
   type OpenAIChatModel,
   type OpenAIEmbeddingModel,
 } from "./pricing.js";
+import {
+  buildOpenAIResponsesRequest,
+  extractReasoningSummary,
+  extractTextFromResponsesResponse,
+  extractToolCallsFromResponsesResponse,
+  normalizeResponsesUsage,
+  type OpenAIResponsesResponse,
+  type ReasoningEffort,
+} from "./responses-api.js";
+import { readResponsesSseStream } from "./responses-streaming.js";
 import { readSseStream } from "./streaming.js";
 
 export const OPENAI_API_BASE_URL = "https://api.openai.com";
@@ -51,6 +61,8 @@ export type FetchLike = (
   body: ReadableStream<Uint8Array> | null;
 }>;
 
+export type OpenAIApiPath = "chat" | "responses";
+
 export interface OpenAIProviderOptions {
   readonly apiKey: string;
   readonly defaultChatModel?: OpenAIChatModel;
@@ -61,6 +73,8 @@ export interface OpenAIProviderOptions {
   readonly project?: string;
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
+  readonly defaultApiPath?: OpenAIApiPath;
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 const PROVIDER_ID = "openai";
@@ -88,6 +102,8 @@ export class OpenAIProvider implements LlmProvider {
   private readonly organization: string | undefined;
   private readonly project: string | undefined;
   private readonly fetchImpl: FetchLike;
+  private readonly defaultApiPath: OpenAIApiPath;
+  private readonly reasoningEffort: ReasoningEffort | undefined;
 
   constructor(opts: OpenAIProviderOptions) {
     if (opts.apiKey.length === 0) {
@@ -109,6 +125,8 @@ export class OpenAIProvider implements LlmProvider {
     this.organization = opts.organization;
     this.project = opts.project;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as FetchLike);
+    this.defaultApiPath = opts.defaultApiPath ?? "chat";
+    this.reasoningEffort = opts.reasoningEffort;
     this.models = [
       ...Object.keys(OPENAI_CHAT_PRICING),
       "text-embedding-3-small",
@@ -124,6 +142,14 @@ export class OpenAIProvider implements LlmProvider {
   }
 
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    if (this.defaultApiPath === "responses") {
+      yield* this.completeViaResponses(req);
+      return;
+    }
+    yield* this.completeViaChat(req);
+  }
+
+  async *completeViaChat(req: CompletionRequest): AsyncIterable<CompletionChunk> {
     const model = this.resolveChatModel(req.model);
     const built = buildOpenAIChatRequest(req, {
       defaultModel: this.defaultChatModel,
@@ -151,6 +177,69 @@ export class OpenAIProvider implements LlmProvider {
       });
     }
     yield* readSseStream(response.body, model);
+  }
+
+  async *completeViaResponses(req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    const model = this.resolveChatModel(req.model);
+    const built = buildOpenAIResponsesRequest(req, {
+      defaultModel: this.defaultChatModel,
+      defaultMaxTokens: this.defaultMaxTokens,
+      stream: true,
+      reasoningEffort: this.reasoningEffort,
+    });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/responses"), {
+        method: "POST",
+        headers: this.headers({ stream: true }),
+        body: JSON.stringify(built),
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    if (response.body === null) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: "OpenAI streaming response had no body",
+        status: response.status,
+      });
+    }
+    yield* readResponsesSseStream(response.body, model);
+  }
+
+  async respondNonStreaming(req: CompletionRequest): Promise<OpenAIResponsesResponse> {
+    const built = buildOpenAIResponsesRequest(req, {
+      defaultModel: this.defaultChatModel,
+      defaultMaxTokens: this.defaultMaxTokens,
+      stream: false,
+      reasoningEffort: this.reasoningEffort,
+    });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/responses"), {
+        method: "POST",
+        headers: this.headers({ stream: false }),
+        body: JSON.stringify(built),
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as OpenAIResponsesResponse;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI responses response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
   }
 
   async completeNonStreaming(req: CompletionRequest): Promise<OpenAIChatResponse> {
@@ -274,5 +363,18 @@ export function summarizeChatResponse(response: OpenAIChatResponse, model: OpenA
     toolCalls: extractToolCallsFromResponse(response),
     finishReason: response.choices[0]?.finish_reason ?? null,
     usage: normalizeChatUsage(model, response.usage),
+  };
+}
+
+export function summarizeResponsesResponse(
+  response: OpenAIResponsesResponse,
+  model: OpenAIChatModel,
+) {
+  return {
+    text: extractTextFromResponsesResponse(response),
+    toolCalls: extractToolCallsFromResponsesResponse(response),
+    reasoningSummary: extractReasoningSummary(response),
+    status: response.status,
+    usage: normalizeResponsesUsage(model, response.usage),
   };
 }
