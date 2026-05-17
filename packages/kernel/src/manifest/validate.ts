@@ -1,0 +1,496 @@
+import {
+  RoleInheritanceCycleError,
+  UnknownRoleError,
+  validateRoleGraph,
+  type EntityPermissions,
+  type FieldPermission,
+  type RbacGrant,
+  type RoleDefinition,
+} from "@crossengin/auth";
+import type { Entity, Trait } from "@crossengin/types/meta-schema";
+import type { FileTypeDeclaration } from "@crossengin/files";
+import type { IntegrationDeclaration } from "@crossengin/integrations";
+import type { JobDeclaration } from "@crossengin/jobs";
+import type {
+  DashboardDeclaration,
+  ReportDeclaration,
+} from "@crossengin/reporting";
+import { widgetReferencedReports } from "@crossengin/reporting";
+import type { ViewDeclaration } from "@crossengin/views";
+import {
+  viewReferencedDashboards,
+  viewReferencedReports,
+  viewReferencedViews,
+  viewReferencedWorkflows,
+} from "@crossengin/views";
+import type { SearchManifest } from "@crossengin/search";
+import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
+import { expandTraits } from "../ddl/resolution.js";
+import { WorkflowValidationError } from "../workflow/errors.js";
+import { validateWorkflow } from "../workflow/validate.js";
+import { ManifestValidationError } from "./errors.js";
+import type { Manifest } from "./types.js";
+
+export function validateManifest(manifest: Manifest): void {
+  const entityNames = validateEntitiesTraitsRelations(manifest);
+  const rolesMap = validateRoles(manifest);
+  const entityTransitions = validateWorkflows(manifest, entityNames);
+  validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
+  validateIntegrations(manifest);
+  validateJobs(manifest);
+  validateFiles(manifest);
+  const reportIds = validateReports(manifest, entityNames);
+  const dashboardIds = validateDashboards(manifest, reportIds);
+  validateViews(manifest, entityNames, reportIds, dashboardIds, entityTransitions);
+  validateSearch(manifest, entityNames);
+}
+
+function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
+  const entityNames = new Set<string>();
+  const traitNames = new Set<string>();
+
+  const entities = manifest.entities ?? [];
+  const traits = manifest.traits ?? [];
+  const relations = manifest.relations ?? [];
+
+  for (const [i, entity] of entities.entries()) {
+    if (entityNames.has(entity.name)) {
+      throw new ManifestValidationError(
+        `entities[${i}].name`,
+        `duplicate entity name '${entity.name}'`,
+      );
+    }
+    entityNames.add(entity.name);
+  }
+
+  for (const [i, trait] of traits.entries()) {
+    if (BUILT_IN_TRAIT_FIELDS.has(trait.name)) {
+      throw new ManifestValidationError(
+        `traits[${i}].name`,
+        `trait '${trait.name}' shadows a kernel built-in trait`,
+      );
+    }
+    if (traitNames.has(trait.name)) {
+      throw new ManifestValidationError(
+        `traits[${i}].name`,
+        `duplicate trait name '${trait.name}'`,
+      );
+    }
+    traitNames.add(trait.name);
+  }
+
+  for (const [i, entity] of entities.entries()) {
+    if (!entity.traits) continue;
+    for (const [j, traitName] of entity.traits.entries()) {
+      if (BUILT_IN_TRAIT_FIELDS.has(traitName)) continue;
+      if (!traitNames.has(traitName)) {
+        throw new ManifestValidationError(
+          `entities[${i}].traits[${j}]`,
+          `unknown trait '${traitName}' (not built-in, not declared in manifest.traits)`,
+        );
+      }
+    }
+  }
+
+  for (const [i, entity] of entities.entries()) {
+    for (const [j, field] of entity.fields.entries()) {
+      if (field.type.kind === "reference" && !entityNames.has(field.type.target)) {
+        throw new ManifestValidationError(
+          `entities[${i}].fields[${j}].type.target`,
+          `reference targets unknown entity '${field.type.target}'`,
+        );
+      }
+    }
+  }
+
+  for (const [i, trait] of traits.entries()) {
+    for (const [j, field] of trait.fields.entries()) {
+      if (field.type.kind === "reference" && !entityNames.has(field.type.target)) {
+        throw new ManifestValidationError(
+          `traits[${i}].fields[${j}].type.target`,
+          `trait field reference targets unknown entity '${field.type.target}'`,
+        );
+      }
+    }
+  }
+
+  for (const [i, rel] of relations.entries()) {
+    if (rel.kind === "many_to_many") {
+      if (!entityNames.has(rel.left)) {
+        throw new ManifestValidationError(
+          `relations[${i}].left`,
+          `relation references unknown entity '${rel.left}'`,
+        );
+      }
+      if (!entityNames.has(rel.right)) {
+        throw new ManifestValidationError(
+          `relations[${i}].right`,
+          `relation references unknown entity '${rel.right}'`,
+        );
+      }
+    } else {
+      if (!entityNames.has(rel.from)) {
+        throw new ManifestValidationError(
+          `relations[${i}].from`,
+          `relation references unknown entity '${rel.from}'`,
+        );
+      }
+      if (!entityNames.has(rel.to)) {
+        throw new ManifestValidationError(
+          `relations[${i}].to`,
+          `relation references unknown entity '${rel.to}'`,
+        );
+      }
+    }
+  }
+
+  return entityNames;
+}
+
+function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {
+  const roles = manifest.roles ?? {};
+  const rolesMap = new Map<string, RoleDefinition>();
+  for (const [key, role] of Object.entries(roles)) {
+    if (role.name !== key) {
+      throw new ManifestValidationError(
+        `roles.${key}.name`,
+        `role name '${role.name}' does not match record key '${key}'`,
+      );
+    }
+    rolesMap.set(key, role);
+  }
+
+  try {
+    validateRoleGraph(rolesMap);
+  } catch (err) {
+    if (err instanceof RoleInheritanceCycleError) {
+      throw new ManifestValidationError(
+        `roles.${err.cycle[0] ?? "*"}.inherits`,
+        `inheritance cycle: ${err.cycle.join(" -> ")}`,
+      );
+    }
+    if (err instanceof UnknownRoleError) {
+      throw new ManifestValidationError(
+        `roles.*.inherits`,
+        `inherits unknown role '${err.roleName}'`,
+      );
+    }
+    throw err;
+  }
+
+  return rolesMap;
+}
+
+function validateWorkflows(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+): Map<string, Set<string>> {
+  const workflows = manifest.workflows ?? {};
+  const entityTransitions = new Map<string, Set<string>>();
+
+  for (const [name, workflow] of Object.entries(workflows)) {
+    try {
+      validateWorkflow(name, workflow);
+    } catch (err) {
+      if (err instanceof WorkflowValidationError) {
+        throw new ManifestValidationError(err.path, err.message);
+      }
+      throw err;
+    }
+
+    if (workflow.kind === "entityLifecycle") {
+      if (!entityNames.has(workflow.entity)) {
+        throw new ManifestValidationError(
+          `workflows.${name}.entity`,
+          `workflow references unknown entity '${workflow.entity}'`,
+        );
+      }
+
+      const existing = entityTransitions.get(workflow.entity) ?? new Set<string>();
+      for (const t of workflow.transitions) {
+        existing.add(t.name);
+      }
+      entityTransitions.set(workflow.entity, existing);
+    }
+  }
+
+  return entityTransitions;
+}
+
+function validatePermissions(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+  rolesMap: ReadonlyMap<string, RoleDefinition>,
+  entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
+): void {
+  const permissions: Record<string, EntityPermissions> = manifest.permissions ?? {};
+  const customTraits: Trait[] = manifest.traits ?? [];
+  const entities: Entity[] = manifest.entities ?? [];
+
+  const checkGrant = (path: string, grant: RbacGrant): void => {
+    for (const roleName of grant.roles) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          path,
+          `grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
+  };
+
+  for (const [entityName, entityPerms] of Object.entries(permissions)) {
+    if (!entityNames.has(entityName)) {
+      throw new ManifestValidationError(
+        `permissions.${entityName}`,
+        `permission entry for unknown entity '${entityName}'`,
+      );
+    }
+
+    for (const op of ["list", "read", "create", "update", "delete"] as const) {
+      const grant = entityPerms[op];
+      if (grant) checkGrant(`permissions.${entityName}.${op}.roles`, grant);
+    }
+
+    if (entityPerms.transitions) {
+      const declaredTransitions = entityTransitions.get(entityName) ?? new Set<string>();
+      for (const [tName, grant] of Object.entries(entityPerms.transitions)) {
+        if (!declaredTransitions.has(tName)) {
+          throw new ManifestValidationError(
+            `permissions.${entityName}.transitions.${tName}`,
+            `transition '${tName}' is not declared in any workflow for entity '${entityName}'`,
+          );
+        }
+        checkGrant(`permissions.${entityName}.transitions.${tName}.roles`, grant);
+      }
+    }
+
+    if (entityPerms.fields) {
+      const entity = entities.find((e) => e.name === entityName);
+      if (entity !== undefined) {
+        const traitFields = expandTraits(entity, customTraits);
+        const allFieldNames = new Set<string>([
+          ...entity.fields.map((f) => f.name),
+          ...traitFields.map((f) => f.name),
+        ]);
+
+        const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
+        for (const [fieldName, fieldPerm] of Object.entries(fieldPerms)) {
+          if (!allFieldNames.has(fieldName)) {
+            throw new ManifestValidationError(
+              `permissions.${entityName}.fields.${fieldName}`,
+              `field-level permission for unknown field '${fieldName}' on entity '${entityName}'`,
+            );
+          }
+          if (fieldPerm.read) {
+            checkGrant(
+              `permissions.${entityName}.fields.${fieldName}.read.roles`,
+              fieldPerm.read,
+            );
+          }
+          if (fieldPerm.update) {
+            checkGrant(
+              `permissions.${entityName}.fields.${fieldName}.update.roles`,
+              fieldPerm.update,
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+function validateIntegrations(manifest: Manifest): void {
+  const integrations: Record<string, IntegrationDeclaration> = manifest.integrations ?? {};
+  for (const [id, integration] of Object.entries(integrations)) {
+    if (integration.kind === "outbound.http" || integration.kind === "outbound.graphql") {
+      const opNames = new Set<string>();
+      for (const [i, op] of integration.operations.entries()) {
+        if (opNames.has(op.name)) {
+          throw new ManifestValidationError(
+            `integrations.${id}.operations[${i}].name`,
+            `duplicate operation name '${op.name}'`,
+          );
+        }
+        opNames.add(op.name);
+      }
+    }
+  }
+}
+
+function validateJobs(manifest: Manifest): void {
+  const jobs: Record<string, JobDeclaration> = manifest.jobs ?? {};
+  const seenJobIds = new Set<string>();
+  const workflowNames = new Set<string>(Object.keys(manifest.workflows ?? {}));
+
+  for (const [key, job] of Object.entries(jobs)) {
+    if (job.id !== key) {
+      throw new ManifestValidationError(
+        `jobs.${key}.id`,
+        `job id '${job.id}' does not match its record key '${key}'`,
+      );
+    }
+    if (seenJobIds.has(job.id)) {
+      throw new ManifestValidationError(`jobs.${key}.id`, `duplicate job id '${job.id}'`);
+    }
+    seenJobIds.add(job.id);
+
+    if (job.trigger.kind === "workflow" && !workflowNames.has(job.trigger.workflow)) {
+      throw new ManifestValidationError(
+        `jobs.${key}.trigger.workflow`,
+        `workflow trigger references unknown workflow '${job.trigger.workflow}'`,
+      );
+    }
+  }
+}
+
+function validateFiles(manifest: Manifest): void {
+  const files: Record<string, FileTypeDeclaration> = manifest.files ?? {};
+  const seen = new Set<string>();
+  for (const key of Object.keys(files)) {
+    if (seen.has(key)) {
+      throw new ManifestValidationError(`files.${key}`, `duplicate file type id '${key}'`);
+    }
+    seen.add(key);
+  }
+}
+
+function validateReports(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+): Set<string> {
+  const reports: Record<string, ReportDeclaration> = manifest.reports ?? {};
+  const reportIds = new Set<string>();
+  for (const [key, report] of Object.entries(reports)) {
+    if (reportIds.has(key)) {
+      throw new ManifestValidationError(`reports.${key}`, `duplicate report id '${key}'`);
+    }
+    reportIds.add(key);
+    if (!entityNames.has(report.entity)) {
+      throw new ManifestValidationError(
+        `reports.${key}.entity`,
+        `report entity '${report.entity}' is not declared in manifest.entities`,
+      );
+    }
+  }
+  return reportIds;
+}
+
+function validateDashboards(
+  manifest: Manifest,
+  reportIds: ReadonlySet<string>,
+): Set<string> {
+  const dashboards: Record<string, DashboardDeclaration> = manifest.dashboards ?? {};
+  const ids = new Set<string>();
+  for (const [key, dashboard] of Object.entries(dashboards)) {
+    if (ids.has(key)) {
+      throw new ManifestValidationError(
+        `dashboards.${key}`,
+        `duplicate dashboard id '${key}'`,
+      );
+    }
+    ids.add(key);
+    for (const referenced of widgetReferencedReports(dashboard)) {
+      if (!reportIds.has(referenced)) {
+        throw new ManifestValidationError(
+          `dashboards.${key}`,
+          `dashboard widget references unknown report '${referenced}'`,
+        );
+      }
+    }
+  }
+  return ids;
+}
+
+function validateViews(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+  reportIds: ReadonlySet<string>,
+  dashboardIds: ReadonlySet<string>,
+  entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
+): void {
+  const views: Record<string, ViewDeclaration> = manifest.views ?? {};
+  const viewIds = new Set<string>(Object.keys(views));
+
+  for (const [key, view] of Object.entries(views)) {
+    if (!entityNames.has(view.entity)) {
+      throw new ManifestValidationError(
+        `views.${key}.entity`,
+        `view entity '${view.entity}' is not declared in manifest.entities`,
+      );
+    }
+
+    for (const reportRef of viewReferencedReports(view)) {
+      if (!reportIds.has(reportRef)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references unknown report '${reportRef}'`,
+        );
+      }
+    }
+    for (const dashRef of viewReferencedDashboards(view)) {
+      if (!dashboardIds.has(dashRef)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references unknown dashboard '${dashRef}'`,
+        );
+      }
+    }
+    for (const viewRef of viewReferencedViews(view)) {
+      if (!viewIds.has(viewRef)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references unknown view '${viewRef}'`,
+        );
+      }
+    }
+    const declared = entityTransitions.get(view.entity) ?? new Set<string>();
+    for (const transition of viewReferencedWorkflows(view)) {
+      if (!declared.has(transition)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references transition '${transition}' not declared on entity '${view.entity}'`,
+        );
+      }
+    }
+  }
+}
+
+function validateSearch(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+): void {
+  const search: SearchManifest | undefined = manifest.search;
+  if (search === undefined) return;
+  const entities = manifest.entities ?? [];
+  const fieldsByEntity = new Map<string, Set<string>>();
+  for (const entity of entities) {
+    fieldsByEntity.set(entity.name, new Set(entity.fields.map((f) => f.name)));
+  }
+  for (const [entityName, idx] of Object.entries(search.entities)) {
+    if (!entityNames.has(entityName)) {
+      throw new ManifestValidationError(
+        `search.entities.${entityName}`,
+        `search entry references unknown entity '${entityName}'`,
+      );
+    }
+    const declaredFields = fieldsByEntity.get(entityName) ?? new Set<string>();
+    for (const indexed of idx.indexedFields) {
+      const leaf = indexed.field.split(".")[0];
+      if (leaf !== undefined && !declaredFields.has(leaf)) {
+        throw new ManifestValidationError(
+          `search.entities.${entityName}.indexedFields`,
+          `indexed field '${indexed.field}' has no matching root field on entity '${entityName}'`,
+        );
+      }
+    }
+    for (const facet of idx.facets) {
+      const leaf = facet.split(".")[0];
+      if (leaf !== undefined && !declaredFields.has(leaf)) {
+        throw new ManifestValidationError(
+          `search.entities.${entityName}.facets`,
+          `facet '${facet}' has no matching root field on entity '${entityName}'`,
+        );
+      }
+    }
+  }
+}

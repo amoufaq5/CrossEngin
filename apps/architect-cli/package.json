@@ -1,0 +1,42 @@
+{
+  "name": "@crossengin/architect-cli",
+  "version": "0.0.0",
+  "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "crossengin": "./dist/bin/crossengin.js"
+  },
+  "files": ["dist", "src", "bin"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@crossengin/ai-architect": "workspace:*",
+    "@crossengin/ai-architect-pg": "workspace:*",
+    "@crossengin/ai-providers": "workspace:*",
+    "@crossengin/ai-providers-anthropic": "workspace:*",
+    "@crossengin/kernel": "workspace:*",
+    "@crossengin/kernel-pg": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@crossengin/config": "workspace:*",
+    "@crossengin/testing": "workspace:*",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
