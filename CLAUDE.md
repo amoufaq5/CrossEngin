@@ -14,8 +14,13 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M3.6 + M3.7 + M4 +
-M4.5 + M4.6 + M5 landed: **46 packages + 1 app, 115 meta-schema
-tables, 5,436 tests**, all green, no type errors. The four runtime pillars
+M4.5 + M4.6 + M5 + M6 landed: **47 packages + 1 app, 115 meta-
+schema tables, 5,490 tests**, all green, no type errors. M6
+added `@crossengin/workflow-signal-bridge` — verify a webhook
+via `sdk/webhook-signing`, extract a correlation key, route
+to `workflow-runtime.submitSignal`. Pairs with the gateway as
+a registered Handler so every external webhook → workflow
+advance flows through one place. The four runtime pillars
 (DDL execution + cryptography + workflow execution + HTTP
 gateway) are in place; both impure runtime pillars (workflows +
 gateway) now have production-shape Postgres adapters; M5 added
@@ -62,12 +67,13 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0051 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0052 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
 → M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
-ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5.
+ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
+ADR-0052 covers M6.
 
 ## Architecture in 90 seconds
 
