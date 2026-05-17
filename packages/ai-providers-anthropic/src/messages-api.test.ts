@@ -96,6 +96,75 @@ describe("buildAnthropicRequest", () => {
     expect(content[0]?.tool_use_id).toBe("tu_1");
   });
 
+  it("encodes assistant toolUses as tool_use content blocks alongside text", () => {
+    const built = buildAnthropicRequest(
+      fixtureCompletionRequest({
+        messages: [
+          { role: "user", content: "please search" },
+          {
+            role: "assistant",
+            content: "I'll search now.",
+            toolUses: [
+              { id: "tu_1", name: "search", input: { q: "anthropic" } },
+            ],
+          },
+          { role: "tool", content: "{\"hits\":1}", toolCallId: "tu_1" },
+        ],
+      }),
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const assistantMsg = built.messages[1]!;
+    expect(assistantMsg.role).toBe("assistant");
+    const blocks = assistantMsg.content as ReadonlyArray<{
+      type: string;
+      id?: string;
+      name?: string;
+      input?: unknown;
+      text?: string;
+    }>;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.type).toBe("text");
+    expect(blocks[0]?.text).toBe("I'll search now.");
+    expect(blocks[1]?.type).toBe("tool_use");
+    expect(blocks[1]?.id).toBe("tu_1");
+    expect(blocks[1]?.name).toBe("search");
+    expect(blocks[1]?.input).toEqual({ q: "anthropic" });
+  });
+
+  it("omits the text block when assistant content is empty but toolUses are present", () => {
+    const built = buildAnthropicRequest(
+      fixtureCompletionRequest({
+        messages: [
+          { role: "user", content: "do it" },
+          {
+            role: "assistant",
+            content: "",
+            toolUses: [{ id: "tu_a", name: "do_thing", input: {} }],
+          },
+          { role: "tool", content: "{}", toolCallId: "tu_a" },
+        ],
+      }),
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const assistantMsg = built.messages[1]!;
+    const blocks = assistantMsg.content as ReadonlyArray<{ type: string }>;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.type).toBe("tool_use");
+  });
+
+  it("falls back to plain string content when toolUses is empty/absent", () => {
+    const built = buildAnthropicRequest(
+      fixtureCompletionRequest({
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "Hello!" },
+        ],
+      }),
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    expect(built.messages[1]?.content).toBe("Hello!");
+  });
+
   it("threads tools through", () => {
     const built = buildAnthropicRequest(
       fixtureCompletionRequest({

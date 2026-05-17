@@ -108,7 +108,19 @@ function splitSystem(
       continue;
     }
     if (m.role === "assistant") {
-      conversation.push({ role: "assistant", content: m.content });
+      const toolUses = m.toolUses ?? [];
+      if (toolUses.length === 0) {
+        conversation.push({ role: "assistant", content: m.content });
+        continue;
+      }
+      const blocks: AnthropicContentBlock[] = [];
+      if (m.content.length > 0) {
+        blocks.push({ type: "text", text: m.content });
+      }
+      for (const u of toolUses) {
+        blocks.push({ type: "tool_use", id: u.id, name: u.name, input: u.input });
+      }
+      conversation.push({ role: "assistant", content: blocks });
       continue;
     }
     if (m.role === "tool" && m.toolCallId !== undefined) {

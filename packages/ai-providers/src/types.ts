@@ -62,6 +62,15 @@ export const LlmMessageSchema = z.object({
   content: z.string(),
   name: z.string().optional(),
   toolCallId: z.string().optional(),
+  toolUses: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string().min(1),
+        input: z.unknown(),
+      }),
+    )
+    .optional(),
 });
 export type LlmMessage = z.infer<typeof LlmMessageSchema>;
 

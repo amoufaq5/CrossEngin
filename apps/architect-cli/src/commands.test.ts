@@ -388,6 +388,36 @@ describe("runChat", () => {
     expect(out()).toContain("yes");
   });
 
+  it("returns exit 2 when --max-tool-iterations is invalid", async () => {
+    const { ctx, err } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: new StubProvider([]),
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--max-tool-iterations=zero"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --max-tool-iterations");
+  });
+
+  it("accepts --no-tools without trying to build the catalog", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "no-tools mode" },
+      {
+        kind: "usage_final",
+        usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+      },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(parsed("chat", "--prompt=hi", "--no-tools"), ctx);
+    expect(code).toBe(0);
+    expect(out()).toContain("no-tools mode");
+  });
+
   it("returns exit 1 when --system-file does not exist", async () => {
     const { ctx, err } = buffers({
       env: { ANTHROPIC_API_KEY: "sk-test" },

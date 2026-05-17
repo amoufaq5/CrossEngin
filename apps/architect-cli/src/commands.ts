@@ -18,11 +18,13 @@ import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
   DEFAULT_CHAT_MAX_TOKENS,
   DEFAULT_CHAT_MODEL,
+  DEFAULT_MAX_TOOL_ITERATIONS,
   DEFAULT_TENANT_ID,
   formatUsageLine,
   linesFromReadable,
   runChatRepl,
 } from "./chat.js";
+import { buildToolCatalog, type ChatToolDefinition } from "./tools.js";
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import {
@@ -262,6 +264,21 @@ export async function runChat(
     getStringFlag(command, "session-id") ?? `cli-${Date.now().toString(36)}`;
   const prompt = getStringFlag(command, "prompt") ?? undefined;
   const oneShot = prompt !== undefined || getBooleanFlag(command, "one-shot");
+  const toolsDisabled = getBooleanFlag(command, "no-tools");
+  const allowFileRead = getBooleanFlag(command, "allow-file-read");
+  const maxIterationsFlag = getStringFlag(command, "max-tool-iterations");
+  const maxToolIterations =
+    maxIterationsFlag !== null
+      ? Number.parseInt(maxIterationsFlag, 10)
+      : DEFAULT_MAX_TOOL_ITERATIONS;
+  if (!Number.isFinite(maxToolIterations) || maxToolIterations <= 0) {
+    printError(ctx.io, `chat: invalid --max-tool-iterations: ${maxIterationsFlag ?? ""}`);
+    return 2;
+  }
+  let toolCatalog: readonly ChatToolDefinition[] | undefined;
+  if (!toolsDisabled) {
+    toolCatalog = buildToolCatalog({ allowFileRead });
+  }
 
   let provider: LlmProvider;
   if (ctx.providerOverride !== undefined) {
@@ -292,6 +309,8 @@ export async function runChat(
       format: command.format,
       prompt,
       oneShot,
+      toolCatalog,
+      maxToolIterations,
     });
     if (command.format === "json") {
       printJson(ctx.io, {

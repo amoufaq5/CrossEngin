@@ -14,8 +14,24 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M6 landed: **48 packages + 1 app,
-115 meta-schema tables, 5,580 tests**, all green, no type errors.
+M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M6 landed: **48 packages
++ 1 app, 115 meta-schema tables, 5,606 tests**, all green, no
+type errors. M5.6 made `crossengin chat` a real authoring loop
+by adding tool dispatch. The CLI exposes
+`validate_manifest` / `hash_manifest` / `diff_manifests` /
+`summarize_manifest` (plus opt-in `read_file` under
+`--allow-file-read`) as tools Claude can invoke mid-turn. The
+chat engine assembles tool inputs from streamed
+`tool_call_arg_delta` chunks, executes locally via
+`executeToolCall`, appends tool-role results to history, runs
+continuation turns until the assistant produces terminal text
+or hits `DEFAULT_MAX_TOOL_ITERATIONS` (5). To round-trip cleanly
+through Anthropic's API, `LlmMessage` in `@crossengin/
+ai-providers` gained an optional `toolUses: {id, name, input}[]`
+field; `buildAnthropicRequest` in `ai-providers-anthropic`
+encodes those as `tool_use` content blocks alongside text on
+assistant messages. Pattern extends to OpenAI / Bedrock / Vertex
+when M2.8+ ships.
 M5.5 wired the Anthropic provider into `architect-cli`'s `chat`
 subcommand. `crossengin chat` now actually talks to Claude:
 streams tokens as they arrive, reports per-turn + aggregate cost
@@ -88,14 +104,15 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0054 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0055 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
 → M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
-ADR-0054 covers M5.5 (architect-cli chat mode).
+ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
+M5.6 (tool-driven chat).
 
 ## Architecture in 90 seconds
 
@@ -655,6 +672,22 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M5.6):** tool-driven authoring loop.
+`crossengin chat` now exposes the manifest-side CLI helpers as
+tools Claude can call mid-conversation. The default catalog
+(`validate_manifest` / `hash_manifest` / `diff_manifests` /
+`summarize_manifest`) gives Claude what it needs to author +
+verify a manifest in one session; `--allow-file-read` adds an
+extension-gated, size-capped `read_file` tool when the developer
+explicitly opts in. `runChatExchange` orchestrates per-message
+tool dispatch with a `DEFAULT_MAX_TOOL_ITERATIONS` (5) circuit
+breaker. Tool errors don't terminate the exchange — they go
+back to Claude as `tool_result` envelopes so the model can
+react. `@crossengin/ai-providers.LlmMessage` gained an optional
+`toolUses` field so assistant tool_use blocks round-trip
+correctly through Anthropic's API (required for `tool_use_id`
+matching on subsequent `tool_result` blocks).
+
 **No longer deferred (as of M5.5):** chat against a real model.
 `crossengin chat` now constructs an `AnthropicProvider` (using
 `ANTHROPIC_API_KEY` from env + a configurable `--model`,
@@ -671,7 +704,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0054 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0055 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -681,7 +714,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (`architect-cli`), ADR-0052 covers Phase 2 M6
 (`workflow-signal-bridge`), ADR-0053 covers Phase 2 M2.7
 (`ai-providers-anthropic`), ADR-0054 covers Phase 2 M5.5
-(architect-cli chat mode). When you ship a new package, write
-the matching ADR in the same session, following
+(architect-cli chat mode), ADR-0055 covers Phase 2 M5.6
+(architect-cli tool-driven chat). When you ship a new package,
+write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

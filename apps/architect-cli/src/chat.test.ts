@@ -17,10 +17,13 @@ import {
   jsonChunkRenderer,
   linesFromReadable,
   plainTextRenderer,
+  runChatExchange,
   runChatRepl,
   runChatTurn,
 } from "./chat.js";
 import type { IoStreams } from "./format.js";
+import { buildToolCatalog } from "./tools.js";
+import { emptyManifest } from "./manifest-io.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const SESSION = "sess-1";
@@ -225,7 +228,9 @@ describe("runChatTurn", () => {
       },
       plainTextRenderer(io),
     );
-    expect(result.record.toolCalls).toEqual([{ id: "tc-1", name: "lookup" }]);
+    expect(result.record.toolCalls).toEqual([
+      { id: "tc-1", name: "lookup", input: { a: 1 } },
+    ]);
   });
 });
 
@@ -412,6 +417,226 @@ describe("linesFromReadable", () => {
     const lines: string[] = [];
     for await (const line of linesFromReadable(stream)) lines.push(line);
     expect(lines).toEqual(["alpha", "beta"]);
+  });
+});
+
+describe("runChatExchange — tool dispatch", () => {
+  it("runs a single user message through the tool loop, executes a tool, then completes", async () => {
+    const captured: CompletionRequest[] = [];
+    const validJson = JSON.stringify(emptyManifest({ name: "T", slug: "t" }));
+    const provider = new FakeProvider({
+      responses: [
+        // Turn 1: assistant asks to validate
+        [
+          { kind: "text", text: "I'll validate this for you." },
+          { kind: "tool_call_start", id: "tu_1", name: "validate_manifest" },
+          {
+            kind: "tool_call_arg_delta",
+            id: "tu_1",
+            delta: JSON.stringify({ manifest_json: validJson }),
+          },
+          { kind: "tool_call_end", id: "tu_1" },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 10, outputTokens: 5, cost: 0.00002 },
+          },
+        ],
+        // Turn 2: after tool result, assistant produces final text
+        [
+          { kind: "text", text: "It's valid." },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 50, outputTokens: 4, cost: 0.00016 },
+          },
+        ],
+      ],
+      captured,
+    });
+    const { io, out } = buffers();
+    const tools = buildToolCatalog();
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "Please validate this manifest.",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: tools,
+    });
+    expect(result.iterations).toBe(2);
+    expect(result.toolInvocations).toHaveLength(1);
+    expect(result.toolInvocations[0]?.name).toBe("validate_manifest");
+    expect(result.toolInvocations[0]?.isError).toBe(false);
+    expect(result.assistantText).toBe("It's valid.");
+    expect(result.truncated).toBe(false);
+    expect(out()).toContain("I'll validate this for you.");
+    expect(out()).toContain("[tool validate_manifest OK]");
+    expect(out()).toContain("It's valid.");
+    // Continuation request should include the tool-role message + assistant.toolUses
+    const lastReq = captured[1]!;
+    const lastAssistant = lastReq.messages.find(
+      (m, i, arr) => m.role === "assistant" && i === arr.length - 2,
+    );
+    expect(lastAssistant?.toolUses?.[0]?.id).toBe("tu_1");
+    const toolMsg = lastReq.messages[lastReq.messages.length - 1]!;
+    expect(toolMsg.role).toBe("tool");
+    expect(toolMsg.toolCallId).toBe("tu_1");
+  });
+
+  it("aggregates usage across iterations", async () => {
+    const validJson = JSON.stringify(emptyManifest({ name: "T", slug: "t" }));
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "tool_call_start", id: "tu_1", name: "hash_manifest" },
+          {
+            kind: "tool_call_arg_delta",
+            id: "tu_1",
+            delta: JSON.stringify({ manifest_json: validJson }),
+          },
+          { kind: "tool_call_end", id: "tu_1" },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 10, outputTokens: 5, cost: 0.001 },
+          },
+        ],
+        [
+          { kind: "text", text: "done" },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 20, outputTokens: 2, cost: 0.002 },
+          },
+        ],
+      ],
+    });
+    const { io } = buffers();
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hash it",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: buildToolCatalog(),
+    });
+    expect(result.usage?.inputTokens).toBe(30);
+    expect(result.usage?.outputTokens).toBe(7);
+    expect(result.usage?.cost).toBeCloseTo(0.003, 6);
+  });
+
+  it("truncates when maxToolIterations is hit", async () => {
+    const looping = [
+      { kind: "tool_call_start", id: "tu_n", name: "hash_manifest" } as const,
+      {
+        kind: "tool_call_arg_delta",
+        id: "tu_n",
+        delta: JSON.stringify({
+          manifest_json: JSON.stringify(emptyManifest({ name: "X", slug: "x" })),
+        }),
+      } as const,
+      { kind: "tool_call_end", id: "tu_n" } as const,
+      {
+        kind: "usage_final",
+        usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+      } as const,
+    ];
+    const provider = new FakeProvider({
+      responses: [looping, looping, looping, looping],
+    });
+    const { io } = buffers();
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "loop",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: buildToolCatalog(),
+      maxToolIterations: 2,
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.iterations).toBe(2);
+  });
+
+  it("does NOT dispatch when toolCatalog is undefined (text-only mode)", async () => {
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "text", text: "Hi!" },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 5, outputTokens: 2, cost: 0.00001 },
+          },
+        ],
+      ],
+    });
+    const { io } = buffers();
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hi",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+    });
+    expect(result.iterations).toBe(1);
+    expect(result.toolInvocations).toEqual([]);
+    expect(result.assistantText).toBe("Hi!");
+  });
+
+  it("emits tool_result NDJSON in --format=json", async () => {
+    const validJson = JSON.stringify(emptyManifest({ name: "T", slug: "t" }));
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "tool_call_start", id: "tu_1", name: "summarize_manifest" },
+          {
+            kind: "tool_call_arg_delta",
+            id: "tu_1",
+            delta: JSON.stringify({ manifest_json: validJson }),
+          },
+          { kind: "tool_call_end", id: "tu_1" },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+          },
+        ],
+        [
+          { kind: "text", text: "done" },
+          {
+            kind: "usage_final",
+            usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+          },
+        ],
+      ],
+    });
+    const { io, out } = buffers();
+    await runChatExchange({
+      provider,
+      renderer: jsonChunkRenderer(io),
+      io,
+      format: "json",
+      history: [],
+      userInput: "summarize",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: buildToolCatalog(),
+    });
+    const lines = out().trim().split("\n").map((l) => JSON.parse(l) as { kind: string });
+    expect(lines.some((l) => l.kind === "tool_result")).toBe(true);
   });
 });
 

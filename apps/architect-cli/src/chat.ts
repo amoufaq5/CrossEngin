@@ -3,10 +3,16 @@ import type {
   CompletionRequest,
   LlmMessage,
   LlmProvider,
+  LlmTool,
   Usage,
 } from "@crossengin/ai-providers";
 
 import type { IoStreams } from "./format.js";
+import {
+  executeToolCall,
+  toolsToLlmTools,
+  type ChatToolDefinition,
+} from "./tools.js";
 
 export const DEFAULT_ARCHITECT_SYSTEM_PROMPT = [
   "You are the CrossEngin Architect, an AI assistant that helps engineers author",
@@ -20,6 +26,7 @@ export const DEFAULT_ARCHITECT_SYSTEM_PROMPT = [
 export const DEFAULT_CHAT_MODEL = "claude-sonnet-4-6";
 export const DEFAULT_CHAT_MAX_TOKENS = 4096;
 export const DEFAULT_TENANT_ID = "00000000-0000-4000-8000-000000000000";
+export const DEFAULT_MAX_TOOL_ITERATIONS = 5;
 
 export interface ChatTurnInput {
   readonly userInput: string;
@@ -29,11 +36,18 @@ export interface ChatTurnInput {
   readonly sessionId: string;
   readonly model?: string;
   readonly maxTokens?: number;
+  readonly tools?: readonly LlmTool[];
+}
+
+export interface CapturedToolCall {
+  readonly id: string;
+  readonly name: string;
+  readonly input: unknown;
 }
 
 export interface ChatTurnRecord {
   readonly assistantText: string;
-  readonly toolCalls: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+  readonly toolCalls: readonly CapturedToolCall[];
   readonly usage: Usage | null;
 }
 
@@ -55,6 +69,31 @@ export function buildCompletionRequest(input: ChatTurnInput): CompletionRequest 
     sessionId: input.sessionId,
     model: input.model,
     maxTokens: input.maxTokens,
+    tools: input.tools !== undefined ? [...input.tools] : undefined,
+  };
+}
+
+export function buildContinuationRequest(input: {
+  readonly history: readonly LlmMessage[];
+  readonly systemPrompt: string;
+  readonly tenantId: string;
+  readonly sessionId: string;
+  readonly model?: string;
+  readonly maxTokens?: number;
+  readonly tools?: readonly LlmTool[];
+}): CompletionRequest {
+  const messages: LlmMessage[] = [
+    { role: "system", content: input.systemPrompt },
+    ...input.history,
+  ];
+  return {
+    task: "executor",
+    messages,
+    tenantId: input.tenantId,
+    sessionId: input.sessionId,
+    model: input.model,
+    maxTokens: input.maxTokens,
+    tools: input.tools !== undefined ? [...input.tools] : undefined,
   };
 }
 
@@ -112,28 +151,73 @@ export async function runChatTurn(
   renderer: StreamRenderer,
 ): Promise<ChatTurnResult> {
   const request = buildCompletionRequest(input);
+  const stream = await streamCompletion(provider, request, renderer);
+  const history: LlmMessage[] = [
+    ...input.history,
+    { role: "user", content: input.userInput },
+    {
+      role: "assistant",
+      content: stream.assistantText,
+      ...(stream.toolCalls.length > 0 ? { toolUses: [...stream.toolCalls] } : {}),
+    },
+  ];
+  return {
+    record: {
+      assistantText: stream.assistantText,
+      toolCalls: stream.toolCalls,
+      usage: stream.usage,
+    },
+    history,
+  };
+}
+
+async function streamCompletion(
+  provider: LlmProvider,
+  request: CompletionRequest,
+  renderer: StreamRenderer,
+): Promise<{
+  assistantText: string;
+  toolCalls: readonly CapturedToolCall[];
+  usage: Usage | null;
+}> {
   let assistantText = "";
-  const toolCalls: Array<{ id: string; name: string }> = [];
+  const toolMetadata = new Map<string, { name: string; argBuffer: string }>();
+  const toolOrder: string[] = [];
   let usage: Usage | null = null;
   for await (const chunk of provider.complete(request)) {
     forwardChunk(chunk, renderer);
     if (chunk.kind === "text") {
       assistantText += chunk.text;
-    } else if (chunk.kind === "tool_call_start") {
-      toolCalls.push({ id: chunk.id, name: chunk.name });
-    } else if (chunk.kind === "usage_final") {
+      continue;
+    }
+    if (chunk.kind === "tool_call_start") {
+      toolMetadata.set(chunk.id, { name: chunk.name, argBuffer: "" });
+      toolOrder.push(chunk.id);
+      continue;
+    }
+    if (chunk.kind === "tool_call_arg_delta") {
+      const entry = toolMetadata.get(chunk.id);
+      if (entry !== undefined) entry.argBuffer += chunk.delta;
+      continue;
+    }
+    if (chunk.kind === "usage_final") {
       usage = chunk.usage;
     }
   }
-  const history: LlmMessage[] = [
-    ...input.history,
-    { role: "user", content: input.userInput },
-    { role: "assistant", content: assistantText },
-  ];
-  return {
-    record: { assistantText, toolCalls, usage },
-    history,
-  };
+  const toolCalls: CapturedToolCall[] = toolOrder.map((id) => {
+    const entry = toolMetadata.get(id)!;
+    return { id, name: entry.name, input: parseToolInputJson(entry.argBuffer) };
+  });
+  return { assistantText, toolCalls, usage };
+}
+
+function parseToolInputJson(buffer: string): unknown {
+  if (buffer.trim().length === 0) return {};
+  try {
+    return JSON.parse(buffer);
+  } catch {
+    return { __raw: buffer };
+  }
 }
 
 function forwardChunk(chunk: CompletionChunk, renderer: StreamRenderer): void {
@@ -182,6 +266,219 @@ export interface ChatReplOptions {
   readonly format: "human" | "json";
   readonly prompt?: string;
   readonly oneShot: boolean;
+  readonly toolCatalog?: readonly ChatToolDefinition[];
+  readonly maxToolIterations?: number;
+}
+
+export interface ChatExchangeResult {
+  readonly history: readonly LlmMessage[];
+  readonly assistantText: string;
+  readonly toolInvocations: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly input: unknown;
+    readonly output: string;
+    readonly isError: boolean;
+  }>;
+  readonly usage: Usage | null;
+  readonly iterations: number;
+  readonly truncated: boolean;
+}
+
+export interface ChatExchangeOptions {
+  readonly provider: LlmProvider;
+  readonly renderer: StreamRenderer;
+  readonly io: IoStreams;
+  readonly format: "human" | "json";
+  readonly history: readonly LlmMessage[];
+  readonly userInput: string;
+  readonly systemPrompt: string;
+  readonly tenantId: string;
+  readonly sessionId: string;
+  readonly model?: string;
+  readonly maxTokens?: number;
+  readonly toolCatalog?: readonly ChatToolDefinition[];
+  readonly maxToolIterations?: number;
+}
+
+export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatExchangeResult> {
+  const tools = opts.toolCatalog !== undefined ? toolsToLlmTools(opts.toolCatalog) : undefined;
+  const maxIterations = opts.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
+  const accumulated: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    cost: number;
+    set: boolean;
+  } = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cost: 0, set: false };
+  const invocations: Array<{
+    id: string;
+    name: string;
+    input: unknown;
+    output: string;
+    isError: boolean;
+  }> = [];
+
+  const initial = await runChatTurn(
+    opts.provider,
+    {
+      userInput: opts.userInput,
+      history: opts.history,
+      systemPrompt: opts.systemPrompt,
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      model: opts.model,
+      maxTokens: opts.maxTokens,
+      tools,
+    },
+    opts.renderer,
+  );
+  let history = initial.history;
+  let lastText = initial.record.assistantText;
+  let lastCalls = initial.record.toolCalls;
+  if (initial.record.usage !== null) accumulateUsage(accumulated, initial.record.usage);
+  if (opts.format === "human" && initial.record.usage !== null) {
+    opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage)}]`);
+  }
+  let iterations = 1;
+  let truncated = false;
+
+  while (lastCalls.length > 0 && opts.toolCatalog !== undefined) {
+    if (iterations >= maxIterations) {
+      truncated = true;
+      break;
+    }
+    const toolMessages: LlmMessage[] = [];
+    for (const call of lastCalls) {
+      const result = await executeToolCall(opts.toolCatalog, call);
+      invocations.push({
+        id: call.id,
+        name: call.name,
+        input: call.input,
+        output: result.output,
+        isError: result.isError,
+      });
+      announceToolResult(opts, call, result);
+      toolMessages.push({
+        role: "tool",
+        content: result.output,
+        toolCallId: call.id,
+        name: call.name,
+      });
+    }
+    history = [...history, ...toolMessages];
+    const continuation = await streamContinuation({
+      provider: opts.provider,
+      renderer: opts.renderer,
+      history,
+      systemPrompt: opts.systemPrompt,
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      model: opts.model,
+      maxTokens: opts.maxTokens,
+      tools,
+    });
+    history = [
+      ...history,
+      {
+        role: "assistant",
+        content: continuation.assistantText,
+        ...(continuation.toolCalls.length > 0 ? { toolUses: [...continuation.toolCalls] } : {}),
+      },
+    ];
+    lastText = continuation.assistantText;
+    lastCalls = continuation.toolCalls;
+    if (continuation.usage !== null) accumulateUsage(accumulated, continuation.usage);
+    if (opts.format === "human" && continuation.usage !== null) {
+      opts.io.stdout.write(`\n[${formatUsageLine(continuation.usage)}]`);
+    }
+    iterations += 1;
+  }
+
+  return {
+    history,
+    assistantText: lastText,
+    toolInvocations: invocations,
+    usage: accumulated.set ? snapshotAccumulated(accumulated) : null,
+    iterations,
+    truncated,
+  };
+}
+
+async function streamContinuation(input: {
+  provider: LlmProvider;
+  renderer: StreamRenderer;
+  history: readonly LlmMessage[];
+  systemPrompt: string;
+  tenantId: string;
+  sessionId: string;
+  model?: string;
+  maxTokens?: number;
+  tools?: readonly LlmTool[];
+}): Promise<{
+  assistantText: string;
+  toolCalls: readonly CapturedToolCall[];
+  usage: Usage | null;
+}> {
+  const request = buildContinuationRequest(input);
+  return streamCompletion(input.provider, request, input.renderer);
+}
+
+function announceToolResult(
+  opts: ChatExchangeOptions,
+  call: CapturedToolCall,
+  result: { output: string; isError: boolean },
+): void {
+  if (opts.format === "json") {
+    opts.io.stdout.write(
+      JSON.stringify({
+        kind: "tool_result",
+        id: call.id,
+        name: call.name,
+        is_error: result.isError,
+        output: result.output,
+      }) + "\n",
+    );
+    return;
+  }
+  const status = result.isError ? "ERROR" : "OK";
+  opts.io.stdout.write(`\n[tool ${call.name} ${status}] ${truncateForDisplay(result.output)}\n`);
+}
+
+function truncateForDisplay(text: string, limit = 240): string {
+  if (text.length <= limit) return text;
+  return text.slice(0, limit) + `… (${text.length.toString()} bytes)`;
+}
+
+function accumulateUsage(
+  agg: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    cost: number;
+    set: boolean;
+  },
+  usage: Usage,
+): void {
+  agg.inputTokens += usage.inputTokens;
+  agg.outputTokens += usage.outputTokens;
+  if (usage.cachedInputTokens !== undefined) agg.cachedInputTokens += usage.cachedInputTokens;
+  agg.cost += usage.cost;
+  agg.set = true;
+}
+
+function snapshotAccumulated(agg: {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cost: number;
+}): Usage {
+  return {
+    inputTokens: agg.inputTokens,
+    outputTokens: agg.outputTokens,
+    ...(agg.cachedInputTokens > 0 ? { cachedInputTokens: agg.cachedInputTokens } : {}),
+    cost: Number(agg.cost.toFixed(6)),
+  };
 }
 
 export interface ChatReplResult {
@@ -191,40 +488,43 @@ export interface ChatReplResult {
 
 export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult> {
   const renderer = opts.format === "json" ? jsonChunkRenderer(opts.io) : plainTextRenderer(opts.io);
-  const aggregate: { inputTokens: number; outputTokens: number; cachedInputTokens: number; cost: number } = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    cost: 0,
-  };
+  const aggregate: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    cost: number;
+    set: boolean;
+  } = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cost: 0, set: false };
   let history: readonly LlmMessage[] = [];
   let turns = 0;
 
   if (opts.prompt !== undefined && opts.prompt.length > 0) {
-    const result = await dispatchTurn({
+    const result = await runChatExchange({
       provider: opts.provider,
-      io: opts.io,
       renderer,
+      io: opts.io,
       format: opts.format,
-      input: opts.prompt,
       history,
+      userInput: opts.prompt,
       systemPrompt: opts.systemPrompt,
       tenantId: opts.tenantId,
       sessionId: opts.sessionId,
       model: opts.model,
       maxTokens: opts.maxTokens,
+      toolCatalog: opts.toolCatalog,
+      maxToolIterations: opts.maxToolIterations,
     });
     history = result.history;
-    if (result.record.usage !== null) accumulate(aggregate, result.record.usage);
+    if (result.usage !== null) accumulateUsage(aggregate, result.usage);
     turns += 1;
     if (opts.oneShot) {
-      return { turns, aggregateUsage: snapshotUsage(aggregate) };
+      return { turns, aggregateUsage: snapshotAccumulated(aggregate) };
     }
   }
 
   if (opts.format === "human") {
     opts.io.stdout.write(
-      "CrossEngin Architect chat (M5.5). Type your message; Ctrl-D to exit; /exit to quit.\n",
+      "CrossEngin Architect chat. Type your message; Ctrl-D to exit; /exit to quit.\n",
     );
   }
 
@@ -233,84 +533,28 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
     if (trimmed.length === 0) continue;
     if (trimmed === "/exit" || trimmed === "/quit") break;
     if (opts.format === "human") opts.io.stdout.write("\nArchitect: ");
-    const result = await dispatchTurn({
+    const result = await runChatExchange({
       provider: opts.provider,
-      io: opts.io,
       renderer,
+      io: opts.io,
       format: opts.format,
-      input: trimmed,
       history,
+      userInput: trimmed,
       systemPrompt: opts.systemPrompt,
       tenantId: opts.tenantId,
       sessionId: opts.sessionId,
       model: opts.model,
       maxTokens: opts.maxTokens,
+      toolCatalog: opts.toolCatalog,
+      maxToolIterations: opts.maxToolIterations,
     });
     history = result.history;
-    if (result.record.usage !== null) accumulate(aggregate, result.record.usage);
+    if (result.usage !== null) accumulateUsage(aggregate, result.usage);
     turns += 1;
     if (opts.format === "human") opts.io.stdout.write("\n");
   }
 
-  return { turns, aggregateUsage: snapshotUsage(aggregate) };
-}
-
-interface DispatchTurnOptions {
-  readonly provider: LlmProvider;
-  readonly io: IoStreams;
-  readonly renderer: StreamRenderer;
-  readonly format: "human" | "json";
-  readonly input: string;
-  readonly history: readonly LlmMessage[];
-  readonly systemPrompt: string;
-  readonly tenantId: string;
-  readonly sessionId: string;
-  readonly model?: string;
-  readonly maxTokens?: number;
-}
-
-async function dispatchTurn(o: DispatchTurnOptions): Promise<ChatTurnResult> {
-  const result = await runChatTurn(
-    o.provider,
-    {
-      userInput: o.input,
-      history: o.history,
-      systemPrompt: o.systemPrompt,
-      tenantId: o.tenantId,
-      sessionId: o.sessionId,
-      model: o.model,
-      maxTokens: o.maxTokens,
-    },
-    o.renderer,
-  );
-  if (o.format === "human" && result.record.usage !== null) {
-    o.io.stdout.write(`\n[${formatUsageLine(result.record.usage)}]`);
-  }
-  return result;
-}
-
-function accumulate(
-  agg: { inputTokens: number; outputTokens: number; cachedInputTokens: number; cost: number },
-  usage: Usage,
-): void {
-  agg.inputTokens += usage.inputTokens;
-  agg.outputTokens += usage.outputTokens;
-  if (usage.cachedInputTokens !== undefined) agg.cachedInputTokens += usage.cachedInputTokens;
-  agg.cost += usage.cost;
-}
-
-function snapshotUsage(agg: {
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  cost: number;
-}): Usage {
-  return {
-    inputTokens: agg.inputTokens,
-    outputTokens: agg.outputTokens,
-    cachedInputTokens: agg.cachedInputTokens,
-    cost: Number(agg.cost.toFixed(6)),
-  };
+  return { turns, aggregateUsage: snapshotAccumulated(aggregate) };
 }
 
 export async function* linesFromReadable(
