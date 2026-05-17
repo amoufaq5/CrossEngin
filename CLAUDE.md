@@ -14,8 +14,8 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M3.6 + M3.7 + M4 +
-M4.5 + M5 landed: **46 packages + 1 app, 115 meta-schema tables,
-5,410 tests**, all green, no type errors. The four runtime pillars
+M4.5 + M4.6 + M5 landed: **46 packages + 1 app, 115 meta-schema
+tables, 5,436 tests**, all green, no type errors. The four runtime pillars
 (DDL execution + cryptography + workflow execution + HTTP
 gateway) are in place; both impure runtime pillars (workflows +
 gateway) now have production-shape Postgres adapters; M5 added
@@ -137,16 +137,24 @@ re-exporting everything.
   pagination + maxInstances cap for periodic CI / observability
   guards).
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
-  gateway runtime store interfaces. 4 modules: idempotency-store
-  (INSERT … ON CONFLICT DO UPDATE on tenant+operation+key,
-  TTL-based deleteExpired), route-registry (cache-backed lookup
-  + listVersionsFor with configurable TTL, upsert that
-  invalidates the cache), rate-limit-checker (per-(tenant,
-  principal, operation) sliding-window counter; writes
-  META_RATE_LIMIT_DECISIONS with allowed /
+  gateway runtime store interfaces + a replayer. 5 modules:
+  idempotency-store (INSERT … ON CONFLICT DO UPDATE on tenant+
+  operation+key, TTL-based deleteExpired), route-registry
+  (cache-backed lookup + listVersionsFor with configurable TTL,
+  upsert that invalidates the cache), rate-limit-checker
+  (per-(tenant, principal, operation) sliding-window counter;
+  writes META_RATE_LIMIT_DECISIONS with allowed /
   denied_rate_limit_exceeded outcomes), pipeline-execution-store
   (INSERT … ON CONFLICT DO NOTHING for the M4 PipelineExecution,
-  plus countSince audit query).
+  plus countSince audit query), replayer
+  (verifyPipelineExecutionShape pure validator flagging
+  stages-out-of-order, stage-repeated, final-stage/outcome
+  mismatch, pass-with-4xx-or-5xx, duration-inconsistent,
+  terminating-not-last; GatewayReplayer.verifyExecution adds the
+  rate_limit_decision_not_found check by joining against
+  META_RATE_LIMIT_DECISIONS; listRecentExecutions /
+  bulkVerify paginate over META_GATEWAY_PIPELINE_EXECUTIONS;
+  summarize computes pass/deny/error counts + p50/p95 latency).
 - **`api-gateway-runtime`** — HTTP gateway middleware
   (fourth impure package). 7 modules: adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
@@ -554,17 +562,22 @@ Retry-After. Replay with same Idempotency-Key → cached 201 with
 X-Idempotent-Replay: true. Routes with required scopes plug
 into @crossengin/auth's principal model.
 
-**No longer deferred (as of M4.5):** production-shape gateway
-persistence. The `api-gateway-pg` package implements the four
-store interfaces against the existing META_GATEWAY_* +
-META_RATE_LIMIT_DECISIONS tables via `@crossengin/kernel-pg`.
-Idempotency records survive process restarts and persist across
-nodes. Route definitions live in the database (cache reload on
-TTL or explicit refresh, plus upsert API for tooling).
-Rate-limit decisions are auditable rows in
+**No longer deferred (as of M4.5 + M4.6):** production-shape
+gateway persistence + audit. The `api-gateway-pg` package
+implements the four store interfaces against the existing
+META_GATEWAY_* + META_RATE_LIMIT_DECISIONS tables via
+`@crossengin/kernel-pg`. Idempotency records survive process
+restarts and persist across nodes. Route definitions live in the
+database (cache reload on TTL or explicit refresh, plus upsert
+API for tooling). Rate-limit decisions are auditable rows in
 META_RATE_LIMIT_DECISIONS. PipelineExecutions persist to
 META_GATEWAY_PIPELINE_EXECUTIONS so every request is queryable
-by tenant + correlationId + time.
+by tenant + correlationId + time. `GatewayReplayer.verifyExecution`
+returns a typed DriftIssue list per request — stages out of
+order, final stage/outcome mismatches, pass with 4xx/5xx, deny
+without 4xx/5xx, terminating outcome not last, duration
+inconsistent, rate-limit decision orphaned. summarize / bulkVerify
+power periodic SLO + audit sweeps over the execution stream.
 
 **No longer deferred (as of M5):** the developer entry point.
 `apps/architect-cli` ships a `crossengin` binary with the M5
