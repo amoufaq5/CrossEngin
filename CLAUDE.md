@@ -13,10 +13,21 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M3.6 + M3.7 + M4 +
-M4.5 + M4.6 + M5 + M6 landed: **47 packages + 1 app, 115 meta-
-schema tables, 5,490 tests**, all green, no type errors. M6
-added `@crossengin/workflow-signal-bridge` — verify a webhook
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
+M4 + M4.5 + M4.6 + M5 + M6 landed: **48 packages + 1 app, 115
+meta-schema tables, 5,552 tests**, all green, no type errors.
+M2.7 added `@crossengin/ai-providers-anthropic` — a real
+Anthropic Messages API client implementing the `LlmProvider`
+interface from `@crossengin/ai-providers`. Zero runtime deps —
+pure `fetch` + `ReadableStream`. 5 modules (pricing for the
+five Claude 4.x models with per-token + per-cache-tier rates,
+messages-api request builder + response normalizer, SSE
+streaming parser with shared state across read boundaries,
+typed error classification + retry policy, and the
+`AnthropicProvider` class itself with `complete()` streaming +
+`completeNonStreaming()` + `anthropic-beta` header support).
+The Architect agent now has a real backend to call.
+M6 added `@crossengin/workflow-signal-bridge` — verify a webhook
 via `sdk/webhook-signing`, extract a correlation key, route
 to `workflow-runtime.submitSignal`. Pairs with the gateway as
 a registered Handler so every external webhook → workflow
@@ -67,13 +78,13 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0052 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0053 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
 → M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
-ADR-0052 covers M6.
+ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider).
 
 ## Architecture in 90 seconds
 
@@ -243,6 +254,23 @@ re-exporting everything.
 ### AI surface
 - **`ai-providers`** — provider router, pricing tables, fallback
   policy, latency budgets.
+- **`ai-providers-anthropic`** — real Anthropic Messages API
+  client implementing `LlmProvider`. Zero runtime deps (pure
+  `fetch` + `ReadableStream`). 5 modules: pricing (5 Claude 4.x
+  models with per-token + cached + cache-write rates, USD cost
+  rounded to 6 decimals), messages-api (request builder
+  flattens system messages + re-attaches tool-role messages as
+  `tool_result` blocks under user role; response normalizer
+  computes Usage with cost), streaming (SSE parser + async
+  generator over ReadableStream; shared StreamState across read
+  boundaries so token counters survive multi-chunk fills),
+  errors (11 typed kinds + RETRYABLE_KINDS set,
+  `classifyHttpStatus` + `fromHttpResponse` + `fromNetworkError`
+  with isRetryable() helper), provider
+  (`AnthropicProvider.complete()` streaming + `completeNon
+  Streaming()` + `embed()` throws invalid_request_error;
+  `anthropic-beta` header for prompt caching / tool streaming
+  / computer use; `FetchLike` injection for tests).
 - **`ai-architect`** — AI Architect session contract, safety
   policy (refusals, gates, refusal copy, tenant settings, cost
   ceilings, eval gate, incidents, redteam).
@@ -488,9 +516,9 @@ shape:
 The current packages model the *shape* of the platform. The
 following are intentionally out of scope until contracts settle:
 
-- Real provider clients (Stripe, Salesforce, ServiceNow,
-  Anthropic). Today the packages have credential refs + record
-  types only.
+- Real provider clients (Stripe, Salesforce, ServiceNow).
+  Today the packages have credential refs + record types only.
+  (Anthropic ships its real client in M2.7 — see below.)
 - Real cryptography. Signature fields are typed as strings; the
   actual HMAC/ed25519 computation is not in this codebase.
 - Customer-facing apps under `apps/` other than `architect-cli`.
@@ -525,6 +553,25 @@ campaign evidence pack carries a real sealedSha256 over the
 canonical evidence + bundle bytes; data-lineage Article 15
 evidence packs carry a real sealedSha256 over the canonical
 pack + bundle bytes for GDPR right-of-access deliverables.
+
+**No longer deferred (as of M2.7):** real LLM provider client.
+The `ai-providers-anthropic` package ships a working binding to
+Anthropic's Messages API. `AnthropicProvider.complete(req)`
+POSTs to `/v1/messages` with `x-api-key` + `anthropic-version:
+2023-06-01` + `accept: text/event-stream`, yields the
+discriminated-union `CompletionChunk` kinds (`text` /
+`tool_call_start` / `tool_call_arg_delta` / `tool_call_end` /
+`usage_final`) from `@crossengin/ai-providers` as SSE events
+stream in. Token state is shared across `reader.read()`
+boundaries via an internal `processSseEvents(raw, state)`
+helper, so `usage_final` carries cumulative input/output/cached
+tokens with USD cost computed at per-model rates (opus-4-7
+$15/$75 per million, sonnet-4-6 $3/$15, haiku-4-5 $1/$5;
+cached input 90% off; cache-write 25% premium). Errors normalize
+to `AnthropicError` with `kind` + `status` + `isRetryable()`.
+The provider is the first concrete `LlmProvider` implementation
+— the Architect agent (M5.5 chat command) can now run against
+a real backend with real cost accounting.
 
 **No longer deferred (as of M3):** workflow execution. The
 `workflow-runtime` package consumes `WorkflowDefinition` shapes
@@ -599,13 +646,16 @@ binary that composes contracts → real artifact.
 
 ## ADRs
 
-ADRs 0001-0051 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0053 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
 covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (`workflow-runtime`), ADR-0050 covers Phase 2 M4
 (`api-gateway-runtime`), ADR-0051 covers Phase 2 M5
-(`architect-cli`). When you ship a new package, write the
-matching ADR in the same session, following `0000-template.md`
-and the style of the existing 0026-0037 batch.
+(`architect-cli`), ADR-0052 covers Phase 2 M6
+(`workflow-signal-bridge`), ADR-0053 covers Phase 2 M2.7
+(`ai-providers-anthropic`). When you ship a new package,
+write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.

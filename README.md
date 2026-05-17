@@ -1,24 +1,30 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M3 + M3.5 + M4 +
-> M4.5 + M5 landed. The four runtime pillars (DDL + crypto +
-> workflows + gateway) are in place; both impure runtimes have
-> Postgres-backed adapters; M5 shipped the first binary —
-> `crossengin` CLI with init / validate / diff / patch / hash /
-> apply / chat / version / help subcommands. **46 packages + 1
-> app, 115 meta-schema tables, ~5,380 tests**, all green, zero
-> type errors. ADRs 0001–0051 fully drafted. M1 added
-> `kernel-pg` (Postgres-backed migration applier). M2 added
+> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 +
+> M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M6 landed. The four
+> runtime pillars (DDL + crypto + workflows + gateway) are in
+> place; both impure runtimes have Postgres-backed adapters; the
+> first binary `crossengin` ships with init / validate / diff /
+> patch / hash / apply / chat / version / help; M6 closed the
+> HTTP-webhook → workflow-signal chain via the signal bridge;
+> M2.7 added a real Anthropic Messages API client so the
+> Architect agent has a working backend with token-accurate cost.
+> **48 packages + 1 app, 115 meta-schema tables, 5,552 tests**,
+> all green, zero type errors. ADRs 0001–0053 fully drafted. M1
+> added `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
 > downstream packages — marketplace pack signing, sdk webhook
 > HMAC, forensics evidence sealing + hash chain, tenant-lifecycle
 > tombstones, access-reviews digital signature attestations +
 > campaign evidence sealing, data-lineage Article 15 GDPR
-> evidence packs. M3 added `workflow-runtime` — an in-process
+> evidence packs. M2.7 added `ai-providers-anthropic` — the
+> first concrete `LlmProvider` implementation, zero runtime deps,
+> pure `fetch` + SSE parsing, with per-token + cache-aware cost
+> in USD. M3 added `workflow-runtime` — an in-process
 > event-sourced executor that turns `WorkflowDefinition` shapes
-> into actually-running instances. Real provider clients remain
-> deferred.
+> into actually-running instances. Real provider clients for
+> Stripe / Salesforce / ServiceNow remain deferred.
 
 This repository is the home of **CrossEngin** — an AI-native
 application platform. Three layers: a multi-tenant **kernel**,
@@ -35,11 +41,17 @@ white-label channel for system integrators (**Partner**).
 
 ## Current state
 
-Forty-three packages cover the Phase 1 surface (zod schemas +
-deterministic helpers) plus Phase 2 M1-M3 (`kernel-pg`: real
-Postgres execution; `crypto`: real signatures + hashes;
-`workflow-runtime`: event-sourced in-process executor).
-Detailed orientation is in **[CLAUDE.md](CLAUDE.md)**.
+Forty-eight packages cover the Phase 1 surface (zod schemas +
+deterministic helpers) plus Phase 2 M1-M6 + M2.7 (`kernel-pg`:
+real Postgres execution; `crypto`: real signatures + hashes;
+`workflow-runtime` + `workflow-runtime-pg`: event-sourced
+in-process executor with Postgres projection;
+`api-gateway-runtime` + `api-gateway-pg`: 17-stage HTTP pipeline
+with Postgres-backed stores; `workflow-signal-bridge`: webhook
+→ workflow signal routing; `ai-providers-anthropic`: real
+Anthropic Messages API client). The first binary,
+`architect-cli`, ships under `apps/`. Detailed orientation is
+in **[CLAUDE.md](CLAUDE.md)**.
 
 Quick map by concern:
 
@@ -50,7 +62,8 @@ Quick map by concern:
   `testing`.
 - **Identity, security, data.** `auth`, `sso`, `security`,
   `compliance`, `residency`, `files`.
-- **AI surface.** `ai-providers`, `ai-architect`.
+- **AI surface.** `ai-providers`, `ai-providers-anthropic`,
+  `ai-architect`.
 - **Runtime + admission control.** `jobs`, `observability`,
   `integrations`, `rate-limiting`, `api-gateway`,
   `api-gateway-runtime`, `api-gateway-pg`, `feature-flags`,
@@ -81,9 +94,9 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0050
+│   └── adr/          ADRs 0001-0053
 ├── apps/             1 workspace app  (architect-cli)
-├── packages/         46 workspace packages
+├── packages/         48 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -102,7 +115,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 50 architecture decisions.
+running index of 53 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at
