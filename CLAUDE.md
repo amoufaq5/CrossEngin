@@ -14,10 +14,26 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M7
-landed: **50 packages + 1 app, 119 meta-schema tables, 5,717
-tests**, all green, no type errors. M7 shipped the first
-vertical pack — `@crossengin/pack-erp-core`: a real Manifest
+M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
+M7 landed: **51 packages + 1 app, 119 meta-schema tables, 5,768
+tests**, all green, no type errors. M6.5 added
+`@crossengin/ai-router` — the orchestration layer between
+consumers and `LlmProvider` implementations. 5 modules: retry
+(exponential backoff + isRetryable check + withRetry wrapper),
+cost-tracker (CostCeiling interface + InMemoryCostTracker with
+rolling per-tenant windows + CostCeilingExceededError),
+latency-tracker (rolling p50/p95 buffer per provider), resolve
+(pure provider-chain resolution: parseProviderRef + residency
+filter + parent/override merge), router (DefaultLlmRouter
+implements LlmRouter from @crossengin/ai-providers — picks a
+provider per task, retries transient errors, falls back to the
+next provider on failure, enforces cost ceilings pre-flight,
+buffers chunks for clean retry replays, throws
+AllProvidersExhaustedError when every fallback exhausts). The
+chat substrate can swap its direct AnthropicProvider for a
+router whenever M2.8 (OpenAI) lands — the consumer-facing
+LlmProvider surface is identical.
+M7 shipped the first vertical pack — `@crossengin/pack-erp-core`: a real Manifest
 with 4 entities (Account, Contact, Invoice, InvoiceLine all
 on the `auditable` trait), 3 relations (Account→Contacts
 cascade, Invoice→Account restrict, Invoice→Lines cascade),
@@ -146,7 +162,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0058 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0059 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -157,7 +173,8 @@ ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
 M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
 human-in-the-loop approval), ADR-0057 covers M5.7 (chat
 persistence to META_ARCHITECT_*), ADR-0058 covers M7
-(`pack-erp-core` — first vertical pack).
+(`pack-erp-core` — first vertical pack), ADR-0059 covers M6.5
+(`ai-router` — provider router with retry / cost / latency).
 
 ## Architecture in 90 seconds
 
@@ -325,8 +342,20 @@ re-exporting everything.
   archived), storage tier transitions, OCR, quota, audit.
 
 ### AI surface
-- **`ai-providers`** — provider router, pricing tables, fallback
-  policy, latency budgets.
+- **`ai-providers`** — provider router contract, pricing tables,
+  fallback policy, latency budgets.
+- **`ai-router`** — `DefaultLlmRouter implements LlmRouter` —
+  picks a provider per task using `TaskPolicyMap.primary` +
+  `fallback[]`, retries transient (`isRetryable()`) failures
+  with exponential backoff + jitter, falls back to the next
+  provider on exhaustion, enforces per-tenant cost ceilings
+  pre-flight via `CostTracker` (InMemoryCostTracker default
+  ships rolling per-tenant USD windows; PostgresCostTracker is a
+  future M6.6). Buffers chunks per-attempt so retry replays are
+  clean. Tracks per-provider p50/p95 latency for observability +
+  future latency-based routing. Throws `CostCeilingExceededError`
+  / `ProviderResolutionError` / `AllProvidersExhaustedError` —
+  all non-retryable, so the router doesn't loop on them.
 - **`ai-providers-anthropic`** — real Anthropic Messages API
   client implementing `LlmProvider`. Zero runtime deps (pure
   `fetch` + `ReadableStream`). 5 modules: pricing (5 Claude 4.x
@@ -744,6 +773,19 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M6.5):** policy routing across
+providers. `@crossengin/ai-router` lets a consumer hand off a
+`CompletionRequest` and get back a stream with: provider chosen
+via `TaskPolicyMap` (primary then fallback), residency-filtered
+to the tenant's policy, retried with exponential backoff on
+retryable errors, falling back to the next provider when
+exhausted, and refused if the tenant's `costCeiling` would be
+breached. Pre-flight cost estimate uses input length + maxTokens
+× per-million pricing; the post-call `usage_final.cost` replaces
+the estimate in the cost tracker. Pattern set for OpenAI /
+Bedrock / Vertex once their `LlmProvider` adapters land — no
+router changes needed.
+
 **No longer deferred (as of M7):** the first vertical pack.
 `@crossengin/pack-erp-core` ships a real Manifest that exercises
 every kernel cross-validator. The substrate is now proven —
@@ -822,7 +864,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0058 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0059 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -836,7 +878,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (architect-cli tool-driven chat), ADR-0056 covers Phase 2
 M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
 M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
-Phase 2 M7 (`pack-erp-core`). When you ship a new package,
+Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
+(`ai-router`). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

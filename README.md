@@ -2,7 +2,7 @@
 
 > **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 +
 > M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 +
-> M5.8 + M6 + M7 landed. The four runtime pillars (DDL + crypto
+> M5.8 + M6 + M6.5 + M7 landed. The four runtime pillars (DDL + crypto
 > + workflows + gateway) are in place; both impure runtimes
 > have Postgres-backed adapters; the first binary `crossengin`
 > ships with init / validate / diff / patch / hash / apply /
@@ -17,8 +17,8 @@
 > bridge; M7 shipped the first vertical pack
 > (`@crossengin/pack-erp-core`) proving the substrate holds up
 > under a real schema.
-> **50 packages + 1 app, 119 meta-schema tables, 5,717 tests**,
-> all green, zero type errors. ADRs 0001–0058 fully drafted. M1
+> **51 packages + 1 app, 119 meta-schema tables, 5,768 tests**,
+> all green, zero type errors. ADRs 0001–0059 fully drafted. M1
 > added `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
@@ -71,7 +71,7 @@ Quick map by concern:
 - **Identity, security, data.** `auth`, `sso`, `security`,
   `compliance`, `residency`, `files`.
 - **AI surface.** `ai-providers`, `ai-providers-anthropic`,
-  `ai-architect`, `ai-architect-pg`.
+  `ai-router`, `ai-architect`, `ai-architect-pg`.
 - **Runtime + admission control.** `jobs`, `observability`,
   `integrations`, `rate-limiting`, `api-gateway`,
   `api-gateway-runtime`, `api-gateway-pg`, `feature-flags`,
@@ -103,9 +103,9 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0058
+│   └── adr/          ADRs 0001-0059
 ├── apps/             1 workspace app  (architect-cli)
-├── packages/         50 workspace packages
+├── packages/         51 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -124,7 +124,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 58 architecture decisions.
+running index of 59 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at
