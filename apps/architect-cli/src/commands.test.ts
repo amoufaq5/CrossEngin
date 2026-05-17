@@ -41,6 +41,7 @@ function buffers(
     stdin: overrides.stdin,
     lineReader: overrides.lineReader,
     providerOverride: overrides.providerOverride,
+    transcriptOverride: overrides.transcriptOverride,
   };
   return { ctx, out: () => out.join(""), err: () => err.join("") };
 }
@@ -433,6 +434,116 @@ describe("runChat", () => {
     );
     expect(code).toBe(0);
     expect(out()).toContain("ack");
+  });
+
+  it("threads transcriptOverride through to the chat loop", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "done" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const calls: string[] = [];
+    const transcript: import("@crossengin/ai-architect-pg").Transcript = {
+      async onSessionStart() {
+        calls.push("session_start");
+        return {
+          id: "00000000-0000-0000-0000-000000000000",
+          tenantId: "t",
+          sessionId: "s",
+          model: "claude-sonnet-4-6",
+          systemPromptSha256: null,
+          startedAt: "2026-05-17T12:00:00.000Z",
+          endedAt: null,
+          turnCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          costUsd: 0,
+        };
+      },
+      async onMessage() {
+        calls.push("message");
+        return {
+          id: "00000000-0000-0000-0000-000000000001",
+          tenantId: "t",
+          sessionId: "00000000-0000-0000-0000-000000000000",
+          turnIndex: 0,
+          messageIndex: 0,
+          role: "user",
+          content: "",
+          toolCallId: null,
+          toolUses: null,
+          inputTokens: null,
+          outputTokens: null,
+          cachedInputTokens: null,
+          costUsd: null,
+          createdAt: "2026-05-17T12:00:00.000Z",
+        };
+      },
+      async onToolInvocation() {
+        calls.push("tool_invocation");
+        return {
+          id: "00000000-0000-0000-0000-000000000002",
+          tenantId: "t",
+          sessionId: "00000000-0000-0000-0000-000000000000",
+          messageId: null,
+          toolCallId: "",
+          toolName: "",
+          input: null,
+          output: "",
+          isError: false,
+          durationMs: null,
+          startedAt: "2026-05-17T12:00:00.000Z",
+        };
+      },
+      async onProposal() {
+        calls.push("proposal");
+        return {
+          id: "00000000-0000-0000-0000-000000000003",
+          tenantId: "t",
+          sessionId: "00000000-0000-0000-0000-000000000000",
+          toolInvocationId: null,
+          targetPath: "",
+          isNew: true,
+          oldHash: null,
+          newHash: "0".repeat(64),
+          entitiesAdded: 0,
+          entitiesRemoved: 0,
+          entitiesModified: 0,
+          decision: "auto_approved",
+          applied: false,
+          denialReason: null,
+          proposedAt: "2026-05-17T12:00:00.000Z",
+          decidedAt: null,
+        };
+      },
+      async onSessionEnd() {
+        calls.push("session_end");
+        return null;
+      },
+    };
+    const { ctx } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+      transcriptOverride: transcript,
+    });
+    const code = await runChat(parsed("chat", "--prompt=hi"), ctx);
+    expect(code).toBe(0);
+    expect(calls[0]).toBe("session_start");
+    expect(calls[calls.length - 1]).toBe("session_end");
+    expect(calls).toContain("message");
+  });
+
+  it("returns exit 1 when --persist is set but PG env vars are missing", async () => {
+    const { ctx, err } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: new StubProvider([
+        { kind: "text", text: "ok" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]),
+    });
+    const code = await runChat(parsed("chat", "--prompt=hi", "--persist"), ctx);
+    expect(code).toBe(1);
+    expect(err()).toContain("--persist");
   });
 
   it("accepts --no-tools without trying to build the catalog", async () => {

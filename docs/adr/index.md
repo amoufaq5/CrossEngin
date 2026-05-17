@@ -59,13 +59,14 @@
 | [0054](0054-architect-cli-chat-mode.md) | Architect CLI chat mode (Phase 2 M5.5) | 2 | Proposed | 2026-05-17 |
 | [0055](0055-architect-cli-tool-use.md) | Architect CLI tool-driven chat (Phase 2 M5.6) | 2 | Proposed | 2026-05-17 |
 | [0056](0056-architect-cli-write-tools.md) | Architect CLI write tools (Phase 2 M5.8) | 2 | Proposed | 2026-05-17 |
+| [0057](0057-chat-persistence.md) | Chat persistence to META_ARCHITECT_* (Phase 2 M5.7) | 2 | Proposed | 2026-05-17 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024, 0046.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -111,3 +112,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 28 | 0054 | 3,500 | Drafted alongside `architect-cli` chat mode (Phase 2 M5.5) |
 | 29 | 0055 | 4,000 | Drafted alongside `architect-cli` tool-driven chat (Phase 2 M5.6) |
 | 30 | 0056 | 4,000 | Drafted alongside `architect-cli` write tools (Phase 2 M5.8) |
+| 31 | 0057 | 4,500 | Drafted alongside `@crossengin/ai-architect-pg` (Phase 2 M5.7) |

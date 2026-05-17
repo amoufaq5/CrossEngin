@@ -117,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 115 tables", () => {
-    expect(META_TABLES).toHaveLength(115);
+  it("contains 119 tables", () => {
+    expect(META_TABLES).toHaveLength(119);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -144,6 +144,10 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "api_keys",
+      "architect_messages",
+      "architect_proposals",
+      "architect_sessions",
+      "architect_tool_invocations",
       "audit_log",
       "autoscaling_events",
       "backfill_jobs",

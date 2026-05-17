@@ -8889,6 +8889,249 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
   },
 };
 
+export const META_ARCHITECT_SESSIONS: TableDefinition = {
+  schema: "meta",
+  name: "architect_sessions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "session_id", type: "TEXT", notNull: true },
+    { name: "model", type: "TEXT", notNull: true },
+    { name: "system_prompt_sha256", type: "CHAR(64)" },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "ended_at", type: "TIMESTAMPTZ" },
+    {
+      name: "turn_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "turn_count >= 0",
+    },
+    {
+      name: "input_tokens",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "input_tokens >= 0",
+    },
+    {
+      name: "output_tokens",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "output_tokens >= 0",
+    },
+    {
+      name: "cached_input_tokens",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "cached_input_tokens >= 0",
+    },
+    {
+      name: "cost_usd",
+      type: "NUMERIC(12, 6)",
+      notNull: true,
+      default: "0",
+      check: "cost_usd >= 0",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "architect_sessions_tenant_session_key",
+      columns: ["tenant_id", "session_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_architect_sessions_tenant_started", columns: ["tenant_id", "started_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "architect_sessions_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_ARCHITECT_MESSAGES: TableDefinition = {
+  schema: "meta",
+  name: "architect_messages",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "session_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "architect_sessions", column: "id" },
+    },
+    {
+      name: "turn_index",
+      type: "INTEGER",
+      notNull: true,
+      check: "turn_index >= 0",
+    },
+    {
+      name: "message_index",
+      type: "INTEGER",
+      notNull: true,
+      check: "message_index >= 0",
+    },
+    {
+      name: "role",
+      type: "TEXT",
+      notNull: true,
+      check: "role IN ('system', 'user', 'assistant', 'tool')",
+    },
+    { name: "content", type: "TEXT", notNull: true },
+    { name: "tool_call_id", type: "TEXT" },
+    { name: "tool_uses", type: "JSONB" },
+    {
+      name: "input_tokens",
+      type: "INTEGER",
+      check: "input_tokens IS NULL OR input_tokens >= 0",
+    },
+    {
+      name: "output_tokens",
+      type: "INTEGER",
+      check: "output_tokens IS NULL OR output_tokens >= 0",
+    },
+    {
+      name: "cached_input_tokens",
+      type: "INTEGER",
+      check: "cached_input_tokens IS NULL OR cached_input_tokens >= 0",
+    },
+    {
+      name: "cost_usd",
+      type: "NUMERIC(12, 6)",
+      check: "cost_usd IS NULL OR cost_usd >= 0",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_architect_messages_session", columns: ["session_id", "turn_index", "message_index"] },
+    { name: "idx_architect_messages_tenant_created", columns: ["tenant_id", "created_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "architect_messages_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_ARCHITECT_TOOL_INVOCATIONS: TableDefinition = {
+  schema: "meta",
+  name: "architect_tool_invocations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "session_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "architect_sessions", column: "id" },
+    },
+    {
+      name: "message_id",
+      type: "UUID",
+      references: { schema: "meta", table: "architect_messages", column: "id" },
+    },
+    { name: "tool_call_id", type: "TEXT", notNull: true },
+    { name: "tool_name", type: "TEXT", notNull: true },
+    { name: "input", type: "JSONB", notNull: true },
+    { name: "output", type: "TEXT", notNull: true },
+    { name: "is_error", type: "BOOLEAN", notNull: true, default: "false" },
+    {
+      name: "duration_ms",
+      type: "INTEGER",
+      check: "duration_ms IS NULL OR duration_ms >= 0",
+    },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_architect_tool_invocations_session", columns: ["session_id", "started_at"] },
+    { name: "idx_architect_tool_invocations_tool_name", columns: ["tool_name"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "architect_tool_invocations_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+export const META_ARCHITECT_PROPOSALS: TableDefinition = {
+  schema: "meta",
+  name: "architect_proposals",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "session_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "architect_sessions", column: "id" },
+    },
+    {
+      name: "tool_invocation_id",
+      type: "UUID",
+      references: { schema: "meta", table: "architect_tool_invocations", column: "id" },
+    },
+    { name: "target_path", type: "TEXT", notNull: true },
+    { name: "is_new", type: "BOOLEAN", notNull: true },
+    { name: "old_hash", type: "CHAR(64)" },
+    { name: "new_hash", type: "CHAR(64)", notNull: true },
+    {
+      name: "entities_added",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "entities_added >= 0",
+    },
+    {
+      name: "entities_removed",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "entities_removed >= 0",
+    },
+    {
+      name: "entities_modified",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "entities_modified >= 0",
+    },
+    {
+      name: "decision",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "decision IN ('auto_approved', 'interactive_approved', 'interactive_denied', 'no_changes', 'invalid_manifest')",
+    },
+    { name: "applied", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "denial_reason", type: "TEXT" },
+    { name: "proposed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "decided_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_architect_proposals_session", columns: ["session_id", "proposed_at"] },
+    { name: "idx_architect_proposals_target_path", columns: ["target_path"] },
+    { name: "idx_architect_proposals_decision", columns: ["decision"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "architect_proposals_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9005,4 +9248,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_FEATURE_FLAG_CHANGES,
   META_CRYPTO_KEYS,
   META_CRYPTO_AUDIT,
+  META_ARCHITECT_SESSIONS,
+  META_ARCHITECT_MESSAGES,
+  META_ARCHITECT_TOOL_INVOCATIONS,
+  META_ARCHITECT_PROPOSALS,
 ];

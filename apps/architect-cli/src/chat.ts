@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+
+import type { Transcript } from "@crossengin/ai-architect-pg";
 import type {
   CompletionChunk,
   CompletionRequest,
@@ -15,6 +18,107 @@ import {
   type WriteApprovalRequest,
   type WriteApprover,
 } from "./tools.js";
+
+export type { Transcript } from "@crossengin/ai-architect-pg";
+
+export const NullTranscript: Transcript = {
+  async onSessionStart() {
+    return makeNullSession();
+  },
+  async onMessage() {
+    return makeNullMessage();
+  },
+  async onToolInvocation() {
+    return makeNullToolInvocation();
+  },
+  async onProposal() {
+    return makeNullProposal();
+  },
+  async onSessionEnd() {
+    return null;
+  },
+};
+
+const NULL_UUID = "00000000-0000-0000-0000-000000000000";
+const NULL_TS = "1970-01-01T00:00:00.000Z";
+const NULL_HASH = "0".repeat(64);
+
+function makeNullSession() {
+  return {
+    id: NULL_UUID,
+    tenantId: NULL_UUID,
+    sessionId: "null",
+    model: "null",
+    systemPromptSha256: null,
+    startedAt: NULL_TS,
+    endedAt: null,
+    turnCount: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    costUsd: 0,
+  };
+}
+
+function makeNullMessage() {
+  return {
+    id: NULL_UUID,
+    tenantId: NULL_UUID,
+    sessionId: NULL_UUID,
+    turnIndex: 0,
+    messageIndex: 0,
+    role: "user" as const,
+    content: "",
+    toolCallId: null,
+    toolUses: null,
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    costUsd: null,
+    createdAt: NULL_TS,
+  };
+}
+
+function makeNullToolInvocation() {
+  return {
+    id: NULL_UUID,
+    tenantId: NULL_UUID,
+    sessionId: NULL_UUID,
+    messageId: null,
+    toolCallId: "",
+    toolName: "",
+    input: null,
+    output: "",
+    isError: false,
+    durationMs: null,
+    startedAt: NULL_TS,
+  };
+}
+
+function makeNullProposal() {
+  return {
+    id: NULL_UUID,
+    tenantId: NULL_UUID,
+    sessionId: NULL_UUID,
+    toolInvocationId: null,
+    targetPath: "",
+    isNew: true,
+    oldHash: null,
+    newHash: NULL_HASH,
+    entitiesAdded: 0,
+    entitiesRemoved: 0,
+    entitiesModified: 0,
+    decision: "auto_approved" as const,
+    applied: false,
+    denialReason: null,
+    proposedAt: NULL_TS,
+    decidedAt: null,
+  };
+}
+
+export function systemPromptSha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
 
 export const DEFAULT_ARCHITECT_SYSTEM_PROMPT = [
   "You are the CrossEngin Architect, an AI assistant that helps engineers author",
@@ -284,6 +388,8 @@ export interface ChatReplOptions {
   readonly oneShot: boolean;
   readonly toolCatalog?: readonly ChatToolDefinition[];
   readonly maxToolIterations?: number;
+  readonly transcript?: Transcript;
+  readonly autoApprove?: boolean;
 }
 
 export function interactiveApprover(opts: {
@@ -338,11 +444,17 @@ export interface ChatExchangeOptions {
   readonly maxTokens?: number;
   readonly toolCatalog?: readonly ChatToolDefinition[];
   readonly maxToolIterations?: number;
+  readonly transcript?: Transcript;
+  readonly turnIndex?: number;
+  readonly autoApprove?: boolean;
 }
 
 export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatExchangeResult> {
   const tools = opts.toolCatalog !== undefined ? toolsToLlmTools(opts.toolCatalog) : undefined;
   const maxIterations = opts.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
+  const transcript = opts.transcript;
+  const turnIndex = opts.turnIndex ?? 0;
+  let messageIndex = 0;
   const accumulated: {
     inputTokens: number;
     outputTokens: number;
@@ -357,6 +469,16 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     output: string;
     isError: boolean;
   }> = [];
+
+  if (transcript !== undefined) {
+    await transcript.onMessage({
+      turnIndex,
+      messageIndex,
+      role: "user",
+      content: opts.userInput,
+    });
+    messageIndex += 1;
+  }
 
   const initial = await runChatTurn(
     opts.provider,
@@ -379,6 +501,22 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
   if (opts.format === "human" && initial.record.usage !== null) {
     opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage)}]`);
   }
+  let lastAssistantMessageId: string | null = null;
+  if (transcript !== undefined) {
+    const rec = await transcript.onMessage({
+      turnIndex,
+      messageIndex,
+      role: "assistant",
+      content: initial.record.assistantText,
+      toolUses: initial.record.toolCalls.length > 0 ? initial.record.toolCalls : null,
+      inputTokens: initial.record.usage?.inputTokens ?? null,
+      outputTokens: initial.record.usage?.outputTokens ?? null,
+      cachedInputTokens: initial.record.usage?.cachedInputTokens ?? null,
+      costUsd: initial.record.usage?.cost ?? null,
+    });
+    lastAssistantMessageId = rec.id;
+    messageIndex += 1;
+  }
   let iterations = 1;
   let truncated = false;
 
@@ -389,7 +527,9 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     }
     const toolMessages: LlmMessage[] = [];
     for (const call of lastCalls) {
+      const startTime = Date.now();
       const result = await executeToolCall(opts.toolCatalog, call);
+      const durationMs = Date.now() - startTime;
       invocations.push({
         id: call.id,
         name: call.name,
@@ -398,6 +538,30 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
         isError: result.isError,
       });
       announceToolResult(opts, call, result);
+      let toolInvocationId: string | null = null;
+      if (transcript !== undefined) {
+        const tiRec = await transcript.onToolInvocation({
+          messageId: lastAssistantMessageId,
+          toolCallId: call.id,
+          toolName: call.name,
+          input: call.input,
+          output: result.output,
+          isError: result.isError,
+          durationMs,
+        });
+        toolInvocationId = tiRec.id;
+        await transcript.onMessage({
+          turnIndex,
+          messageIndex,
+          role: "tool",
+          content: result.output,
+          toolCallId: call.id,
+        });
+        messageIndex += 1;
+        if (call.name === "propose_manifest_edit" && !result.isError) {
+          await emitProposal(transcript, toolInvocationId, call, result.output, opts.autoApprove === true);
+        }
+      }
       toolMessages.push({
         role: "tool",
         content: result.output,
@@ -431,6 +595,21 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     if (opts.format === "human" && continuation.usage !== null) {
       opts.io.stdout.write(`\n[${formatUsageLine(continuation.usage)}]`);
     }
+    if (transcript !== undefined) {
+      const rec = await transcript.onMessage({
+        turnIndex,
+        messageIndex,
+        role: "assistant",
+        content: continuation.assistantText,
+        toolUses: continuation.toolCalls.length > 0 ? continuation.toolCalls : null,
+        inputTokens: continuation.usage?.inputTokens ?? null,
+        outputTokens: continuation.usage?.outputTokens ?? null,
+        cachedInputTokens: continuation.usage?.cachedInputTokens ?? null,
+        costUsd: continuation.usage?.cost ?? null,
+      });
+      lastAssistantMessageId = rec.id;
+      messageIndex += 1;
+    }
     iterations += 1;
   }
 
@@ -442,6 +621,71 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     iterations,
     truncated,
   };
+}
+
+interface ProposalToolPayload {
+  readonly applied?: boolean;
+  readonly reason?: string;
+  readonly path?: string;
+  readonly hash?: string;
+  readonly is_new?: boolean;
+  readonly diff_summary?: {
+    readonly entitiesAdded?: number;
+    readonly entitiesRemoved?: number;
+    readonly entitiesModified?: number;
+  };
+}
+
+async function emitProposal(
+  transcript: Transcript,
+  toolInvocationId: string | null,
+  call: CapturedToolCall,
+  output: string,
+  autoApprove: boolean,
+): Promise<void> {
+  let parsed: ProposalToolPayload;
+  try {
+    parsed = JSON.parse(output) as ProposalToolPayload;
+  } catch {
+    return;
+  }
+  const path = parsed.path ?? extractInputPath(call.input);
+  if (path === null) return;
+  const newHash = parsed.hash ?? "0".repeat(64);
+  const isNew = parsed.is_new ?? true;
+  const diff = parsed.diff_summary ?? {};
+  const decision = decideProposal(parsed, autoApprove);
+  await transcript.onProposal({
+    toolInvocationId,
+    targetPath: path,
+    isNew,
+    oldHash: null,
+    newHash,
+    entitiesAdded: diff.entitiesAdded ?? 0,
+    entitiesRemoved: diff.entitiesRemoved ?? 0,
+    entitiesModified: diff.entitiesModified ?? 0,
+    decision,
+    applied: parsed.applied === true,
+    denialReason: parsed.applied === false ? parsed.reason ?? null : null,
+  });
+}
+
+function extractInputPath(input: unknown): string | null {
+  if (input === null || typeof input !== "object") return null;
+  const p = (input as Record<string, unknown>)["path"];
+  return typeof p === "string" ? p : null;
+}
+
+function decideProposal(
+  parsed: ProposalToolPayload,
+  autoApprove: boolean,
+): "auto_approved" | "interactive_approved" | "interactive_denied" | "no_changes" | "invalid_manifest" {
+  if (parsed.reason === "invalid_manifest") return "invalid_manifest";
+  if (parsed.reason === "no_changes") return "no_changes";
+  if (parsed.applied === true) {
+    return autoApprove ? "auto_approved" : "interactive_approved";
+  }
+  return "interactive_denied";
 }
 
 async function streamContinuation(input: {
@@ -537,6 +781,15 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
   let history: readonly LlmMessage[] = [];
   let turns = 0;
 
+  if (opts.transcript !== undefined) {
+    await opts.transcript.onSessionStart({
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      model: opts.model ?? DEFAULT_CHAT_MODEL,
+      systemPromptSha256: systemPromptSha256(opts.systemPrompt),
+    });
+  }
+
   if (opts.prompt !== undefined && opts.prompt.length > 0) {
     const result = await runChatExchange({
       provider: opts.provider,
@@ -552,11 +805,15 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       maxTokens: opts.maxTokens,
       toolCatalog: opts.toolCatalog,
       maxToolIterations: opts.maxToolIterations,
+      transcript: opts.transcript,
+      turnIndex: turns,
+      autoApprove: opts.autoApprove,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
     turns += 1;
     if (opts.oneShot) {
+      await emitSessionEnd(opts.transcript, turns, aggregate);
       return { turns, aggregateUsage: snapshotAccumulated(aggregate) };
     }
   }
@@ -588,6 +845,9 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       maxTokens: opts.maxTokens,
       toolCatalog: opts.toolCatalog,
       maxToolIterations: opts.maxToolIterations,
+      transcript: opts.transcript,
+      turnIndex: turns,
+      autoApprove: opts.autoApprove,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
@@ -595,7 +855,30 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
     if (opts.format === "human") opts.io.stdout.write("\n");
   }
 
+  await emitSessionEnd(opts.transcript, turns, aggregate);
   return { turns, aggregateUsage: snapshotAccumulated(aggregate) };
+}
+
+async function emitSessionEnd(
+  transcript: Transcript | undefined,
+  turns: number,
+  aggregate: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    cost: number;
+    set: boolean;
+  },
+): Promise<void> {
+  if (transcript === undefined) return;
+  const snap = snapshotAccumulated(aggregate);
+  await transcript.onSessionEnd({
+    turnCount: turns,
+    inputTokens: snap.inputTokens,
+    outputTokens: snap.outputTokens,
+    cachedInputTokens: snap.cachedInputTokens ?? 0,
+    costUsd: snap.cost,
+  });
 }
 
 export async function* linesFromReadable(

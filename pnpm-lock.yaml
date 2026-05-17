@@ -17,6 +17,12 @@ importers:
 
   apps/architect-cli:
     dependencies:
+      '@crossengin/ai-architect':
+        specifier: workspace:*
+        version: link:../../packages/ai-architect
+      '@crossengin/ai-architect-pg':
+        specifier: workspace:*
+        version: link:../../packages/ai-architect-pg
       '@crossengin/ai-providers':
         specifier: workspace:*
         version: link:../../packages/ai-providers
@@ -114,6 +120,34 @@ importers:
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/ai-architect-pg:
+    dependencies:
+      '@crossengin/ai-architect':
+        specifier: workspace:*
+        version: link:../ai-architect
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../kernel-pg
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

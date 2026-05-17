@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+  NullTranscript,
   buildCompletionRequest,
   formatUsageLine,
   interactiveApprover,
@@ -22,6 +23,8 @@ import {
   runChatExchange,
   runChatRepl,
   runChatTurn,
+  systemPromptSha256,
+  type Transcript,
 } from "./chat.js";
 import type { IoStreams } from "./format.js";
 import { buildToolCatalog } from "./tools.js";
@@ -763,3 +766,345 @@ function makeReadable(text: string): NodeJS.ReadableStream {
     },
   } as unknown as NodeJS.ReadableStream;
 }
+
+interface TranscriptCall {
+  readonly kind: "session_start" | "message" | "tool_invocation" | "proposal" | "session_end";
+  readonly payload: unknown;
+}
+
+function recordingTranscript(): { transcript: Transcript; calls: TranscriptCall[] } {
+  const calls: TranscriptCall[] = [];
+  const sessionId = "00000000-0000-4000-8000-000000000001";
+  const transcript: Transcript = {
+    async onSessionStart(input) {
+      calls.push({ kind: "session_start", payload: input });
+      return {
+        id: sessionId,
+        tenantId: input.tenantId,
+        sessionId: input.sessionId,
+        model: input.model,
+        systemPromptSha256: input.systemPromptSha256,
+        startedAt: "2026-05-17T12:00:00.000Z",
+        endedAt: null,
+        turnCount: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        costUsd: 0,
+      };
+    },
+    async onMessage(input) {
+      calls.push({ kind: "message", payload: input });
+      return {
+        id: `msg-${calls.length.toString()}`,
+        tenantId: TENANT,
+        sessionId,
+        turnIndex: input.turnIndex,
+        messageIndex: input.messageIndex,
+        role: input.role,
+        content: input.content,
+        toolCallId: input.toolCallId ?? null,
+        toolUses: input.toolUses === undefined ? null : input.toolUses === null ? null : [...input.toolUses],
+        inputTokens: input.inputTokens ?? null,
+        outputTokens: input.outputTokens ?? null,
+        cachedInputTokens: input.cachedInputTokens ?? null,
+        costUsd: input.costUsd ?? null,
+        createdAt: "2026-05-17T12:00:00.000Z",
+      };
+    },
+    async onToolInvocation(input) {
+      calls.push({ kind: "tool_invocation", payload: input });
+      return {
+        id: `ti-${calls.length.toString()}`,
+        tenantId: TENANT,
+        sessionId,
+        messageId: input.messageId,
+        toolCallId: input.toolCallId,
+        toolName: input.toolName,
+        input: input.input,
+        output: input.output,
+        isError: input.isError,
+        durationMs: input.durationMs,
+        startedAt: "2026-05-17T12:00:00.000Z",
+      };
+    },
+    async onProposal(input) {
+      calls.push({ kind: "proposal", payload: input });
+      return {
+        id: `prop-${calls.length.toString()}`,
+        tenantId: TENANT,
+        sessionId,
+        toolInvocationId: input.toolInvocationId,
+        targetPath: input.targetPath,
+        isNew: input.isNew,
+        oldHash: input.oldHash,
+        newHash: input.newHash,
+        entitiesAdded: input.entitiesAdded,
+        entitiesRemoved: input.entitiesRemoved,
+        entitiesModified: input.entitiesModified,
+        decision: input.decision,
+        applied: input.applied,
+        denialReason: input.denialReason,
+        proposedAt: "2026-05-17T12:00:00.000Z",
+        decidedAt: "2026-05-17T12:00:00.000Z",
+      };
+    },
+    async onSessionEnd(input) {
+      calls.push({ kind: "session_end", payload: input });
+      return {
+        id: sessionId,
+        tenantId: TENANT,
+        sessionId: "cli-1",
+        model: "claude-sonnet-4-6",
+        systemPromptSha256: null,
+        startedAt: "2026-05-17T12:00:00.000Z",
+        endedAt: "2026-05-17T12:00:05.000Z",
+        turnCount: input.turnCount,
+        inputTokens: input.inputTokens,
+        outputTokens: input.outputTokens,
+        cachedInputTokens: input.cachedInputTokens,
+        costUsd: input.costUsd,
+      };
+    },
+  };
+  return { transcript, calls };
+}
+
+describe("systemPromptSha256", () => {
+  it("returns a 64-char hex hash", () => {
+    expect(systemPromptSha256("hello")).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("is deterministic", () => {
+    expect(systemPromptSha256("x")).toBe(systemPromptSha256("x"));
+  });
+});
+
+describe("NullTranscript", () => {
+  it("returns dummy records without throwing", async () => {
+    const s = await NullTranscript.onSessionStart({
+      tenantId: TENANT,
+      sessionId: "cli-1",
+      model: "claude-sonnet-4-6",
+      systemPromptSha256: null,
+    });
+    expect(s.id).toMatch(/^0[0-9a-f-]+0$/);
+    const end = await NullTranscript.onSessionEnd({
+      turnCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      costUsd: 0,
+    });
+    expect(end).toBeNull();
+  });
+});
+
+describe("runChatExchange — transcript wiring", () => {
+  it("emits onMessage(user) → onMessage(assistant) for a simple text turn", async () => {
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS] });
+    const { io } = buffers();
+    const { transcript, calls } = recordingTranscript();
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hi",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      transcript,
+      turnIndex: 0,
+    });
+    const kinds = calls.map((c) => c.kind);
+    expect(kinds).toEqual(["message", "message"]);
+    expect((calls[0]?.payload as { role: string }).role).toBe("user");
+    expect((calls[1]?.payload as { role: string }).role).toBe("assistant");
+  });
+
+  it("emits tool_invocation + tool message for a tool-using turn", async () => {
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "tool_call_start", id: "tu_1", name: "hash_manifest" },
+          {
+            kind: "tool_call_arg_delta",
+            id: "tu_1",
+            delta: JSON.stringify({
+              manifest_json: JSON.stringify(emptyManifest({ name: "T", slug: "t" })),
+            }),
+          },
+          { kind: "tool_call_end", id: "tu_1" },
+          { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+        ],
+        [
+          { kind: "text", text: "done" },
+          { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+        ],
+      ],
+    });
+    const { io } = buffers();
+    const { transcript, calls } = recordingTranscript();
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hash it",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: buildToolCatalog(),
+      transcript,
+    });
+    const kinds = calls.map((c) => c.kind);
+    expect(kinds).toContain("tool_invocation");
+    const ti = calls.find((c) => c.kind === "tool_invocation");
+    expect((ti?.payload as { toolName: string }).toolName).toBe("hash_manifest");
+    const toolMsg = calls.find(
+      (c) => c.kind === "message" && (c.payload as { role: string }).role === "tool",
+    );
+    expect(toolMsg).toBeDefined();
+  });
+
+  it("emits onProposal for propose_manifest_edit (auto-approve, applied)", async () => {
+    const validJson = JSON.stringify(emptyManifest({ name: "X", slug: "x" }));
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "tool_call_start", id: "tu_1", name: "propose_manifest_edit" },
+          {
+            kind: "tool_call_arg_delta",
+            id: "tu_1",
+            delta: JSON.stringify({
+              path: "/tmp/test-output-not-written.json",
+              new_manifest_json: validJson,
+            }),
+          },
+          { kind: "tool_call_end", id: "tu_1" },
+          { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+        ],
+        [
+          { kind: "text", text: "written" },
+          { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+        ],
+      ],
+    });
+    const { io } = buffers();
+    const { transcript, calls } = recordingTranscript();
+    // Use an approver that records but DENIES so we don't actually write to disk
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver: { async approve() { return false; } },
+    });
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "write it",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: tools,
+      transcript,
+      autoApprove: false,
+    });
+    const proposal = calls.find((c) => c.kind === "proposal");
+    expect(proposal).toBeDefined();
+    const payload = proposal?.payload as {
+      decision: string;
+      applied: boolean;
+      targetPath: string;
+    };
+    expect(payload.decision).toBe("interactive_denied");
+    expect(payload.applied).toBe(false);
+    expect(payload.targetPath).toBe("/tmp/test-output-not-written.json");
+  });
+});
+
+describe("runChatRepl — transcript wiring", () => {
+  it("emits onSessionStart at the beginning and onSessionEnd at the end (one-shot)", async () => {
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS] });
+    const { io } = buffers();
+    const { transcript, calls } = recordingTranscript();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter([])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      prompt: "hi",
+      oneShot: true,
+      transcript,
+    });
+    expect(calls[0]?.kind).toBe("session_start");
+    expect(calls[calls.length - 1]?.kind).toBe("session_end");
+    const sessionEnd = calls[calls.length - 1]?.payload as { turnCount: number };
+    expect(sessionEnd.turnCount).toBe(1);
+  });
+
+  it("threads system prompt hash through onSessionStart", async () => {
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS] });
+    const { io } = buffers();
+    const { transcript, calls } = recordingTranscript();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter([])),
+      systemPrompt: "test prompt",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      prompt: "hi",
+      oneShot: true,
+      transcript,
+    });
+    const start = calls[0]?.payload as { systemPromptSha256: string };
+    expect(start.systemPromptSha256).toBe(systemPromptSha256("test prompt"));
+  });
+
+  it("aggregates per-exchange usage into the onSessionEnd totals", async () => {
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "text", text: "first" },
+          { kind: "usage_final", usage: { inputTokens: 10, outputTokens: 3, cost: 0.001 } },
+        ],
+        [
+          { kind: "text", text: "second" },
+          { kind: "usage_final", usage: { inputTokens: 20, outputTokens: 5, cost: 0.002 } },
+        ],
+      ],
+    });
+    const { io } = buffers();
+    const { transcript, calls } = recordingTranscript();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["first q", "second q"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+      transcript,
+    });
+    const end = calls[calls.length - 1]?.payload as {
+      turnCount: number;
+      inputTokens: number;
+      outputTokens: number;
+      costUsd: number;
+    };
+    expect(end.turnCount).toBe(2);
+    expect(end.inputTokens).toBe(30);
+    expect(end.outputTokens).toBe(8);
+    expect(end.costUsd).toBeCloseTo(0.003, 6);
+  });
+});

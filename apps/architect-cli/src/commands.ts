@@ -14,6 +14,9 @@ import {
   type Manifest,
 } from "@crossengin/kernel/manifest";
 
+import { PostgresTranscript, type Transcript } from "@crossengin/ai-architect-pg";
+import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+
 import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
   DEFAULT_CHAT_MAX_TOKENS,
@@ -58,6 +61,7 @@ export interface RunContext {
   readonly stdin?: AsyncIterable<string>;
   readonly lineReader?: LineReader;
   readonly providerOverride?: LlmProvider;
+  readonly transcriptOverride?: Transcript;
 }
 
 export async function runInit(
@@ -329,6 +333,23 @@ export async function runChat(
     provider = new AnthropicProvider({ apiKey, defaultModel: model });
   }
 
+  const persistFlag = getBooleanFlag(command, "persist");
+  let transcript: Transcript | undefined = ctx.transcriptOverride;
+  let pgConnection: PgConnection | null = null;
+  if (transcript === undefined && persistFlag) {
+    try {
+      const config = parsePgEnvConfig(ctx.env);
+      pgConnection = createNodePgConnection(config);
+      transcript = new PostgresTranscript(pgConnection);
+    } catch (err) {
+      printError(
+        ctx.io,
+        `chat: --persist requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
+
   try {
     const result = await runChatRepl({
       provider,
@@ -344,6 +365,8 @@ export async function runChat(
       oneShot,
       toolCatalog,
       maxToolIterations,
+      transcript,
+      autoApprove,
     });
     if (command.format === "json") {
       printJson(ctx.io, {
@@ -360,6 +383,12 @@ export async function runChat(
   } catch (err) {
     printError(ctx.io, `chat: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
+  } finally {
+    if (pgConnection !== null) {
+      await pgConnection.close().catch(() => {
+        // Best-effort close; ignore errors during cleanup.
+      });
+    }
   }
 }
 

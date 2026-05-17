@@ -14,9 +14,25 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.8 + M6 landed: **48
-packages + 1 app, 115 meta-schema tables, 5,625 tests**, all
-green, no type errors. M5.8 closed the authoring loop by
+M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 landed:
+**49 packages + 1 app, 119 meta-schema tables, 5,671 tests**,
+all green, no type errors. M5.7 added chat persistence:
+`@crossengin/ai-architect-pg` ships
+`PostgresArchitectSessionStore` / `…MessageStore` /
+`…ToolInvocationStore` / `…ProposalStore` plus a
+`PostgresTranscript` orchestrator that implements the
+`Transcript` lifecycle interface (`onSessionStart` /
+`onMessage` / `onToolInvocation` / `onProposal` /
+`onSessionEnd`). The chat engine emits events via this
+interface — `NullTranscript` is the default no-op, so
+non-persisted runs are unchanged. Four new META_ARCHITECT_*
+tables (sessions / messages / tool_invocations / proposals)
+with tenant RLS + FK chain. `crossengin chat --persist` reads
+PG env vars and writes a full audit trail of who proposed
+what, when, and whether it was applied. Operators can join
+sessions ⇒ messages ⇒ tool_invocations ⇒ proposals to
+reconstruct any developer's authoring history.
+M5.8 closed the authoring loop by
 adding a write tool with human-in-the-loop approval.
 `propose_manifest_edit({path, new_manifest_json})` shows the
 developer a diff + entity counts + new hash, prompts y/N (via
@@ -117,7 +133,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0056 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0057 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -126,7 +142,8 @@ ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
 ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
 M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
-human-in-the-loop approval).
+human-in-the-loop approval), ADR-0057 covers M5.7 (chat
+persistence to META_ARCHITECT_*).
 
 ## Architecture in 90 seconds
 
@@ -315,7 +332,19 @@ re-exporting everything.
   / computer use; `FetchLike` injection for tests).
 - **`ai-architect`** — AI Architect session contract, safety
   policy (refusals, gates, refusal copy, tenant settings, cost
-  ceilings, eval gate, incidents, redteam).
+  ceilings, eval gate, incidents, redteam). Plus session-record
+  zod schemas (`ArchitectSessionRecord` / `…MessageRecord` /
+  `…ToolInvocationRecord` / `…ProposalRecord`) that
+  ai-architect-pg materializes into Postgres rows.
+- **`ai-architect-pg`** — Postgres-backed transcript adapter for
+  chat sessions. 5 modules: session-store + message-store +
+  tool-invocation-store + proposal-store (each with append +
+  list helpers against META_ARCHITECT_*); transcript
+  (PostgresTranscript class threads sessionUUID + tenantId
+  through onMessage / onToolInvocation / onProposal / onSession
+  End — implements the `Transcript` interface architect-cli's
+  chat engine emits into). `crossengin chat --persist` wires
+  this in; tests use a fake transcript via ctx.transcriptOverride.
 
 ### Runtime + operations
 - **`jobs`** — Inngest-style job kinds, idempotency keys, dead
@@ -686,6 +715,23 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M5.7):** chat audit trail. The new
+`@crossengin/ai-architect-pg` package persists every chat
+session, message, tool invocation, and write proposal to four
+META_ARCHITECT_* tables. The chat engine emits lifecycle events
+(`onSessionStart` / `onMessage` / `onToolInvocation` /
+`onProposal` / `onSessionEnd`) into an abstract `Transcript`
+interface; `NullTranscript` (default) discards events,
+`PostgresTranscript` writes them. Sessions are unique per
+(tenant, session_id); messages are ordered by
+(turn_index, message_index); proposals record `decision` (one
+of auto_approved / interactive_approved / interactive_denied /
+no_changes / invalid_manifest) + `applied` + `denial_reason`.
+Operators query `SELECT * FROM meta.architect_proposals WHERE
+decision = 'interactive_approved'` to audit writes,
+`JOIN architect_messages ON session_id` to reconstruct the
+conversation context for any proposal.
+
 **No longer deferred (as of M5.8):** closed authoring loop.
 `crossengin chat --allow-file-write` now exposes
 `propose_manifest_edit({path, new_manifest_json})` as a tool
@@ -736,7 +782,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0056 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0057 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -748,7 +794,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (`ai-providers-anthropic`), ADR-0054 covers Phase 2 M5.5
 (architect-cli chat mode), ADR-0055 covers Phase 2 M5.6
 (architect-cli tool-driven chat), ADR-0056 covers Phase 2
-M5.8 (architect-cli write tools). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
+M5.7 (chat persistence to META_ARCHITECT_*). When you ship a
+new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.

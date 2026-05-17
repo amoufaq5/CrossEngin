@@ -1,21 +1,18 @@
 {
-  "name": "@crossengin/architect-cli",
+  "name": "@crossengin/ai-architect-pg",
   "version": "0.0.0",
   "private": true,
   "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module",
-  "main": "./dist/src/index.js",
-  "types": "./dist/src/index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/src/index.d.ts",
-      "import": "./dist/src/index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
-  "bin": {
-    "crossengin": "./dist/bin/crossengin.js"
-  },
-  "files": ["dist", "src", "bin"],
+  "files": ["dist", "src"],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -25,10 +22,6 @@
   },
   "dependencies": {
     "@crossengin/ai-architect": "workspace:*",
-    "@crossengin/ai-architect-pg": "workspace:*",
-    "@crossengin/ai-providers": "workspace:*",
-    "@crossengin/ai-providers-anthropic": "workspace:*",
-    "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "zod": "^3.23.0"
   },
