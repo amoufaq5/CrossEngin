@@ -12,6 +12,8 @@ import {
   executeToolCall,
   toolsToLlmTools,
   type ChatToolDefinition,
+  type WriteApprovalRequest,
+  type WriteApprover,
 } from "./tools.js";
 
 export const DEFAULT_ARCHITECT_SYSTEM_PROMPT = [
@@ -254,10 +256,24 @@ export function formatUsageLine(usage: Usage): string {
   return parts.join(" ");
 }
 
+export interface LineReader {
+  next(): Promise<string | null>;
+}
+
+export function lineReaderFromIterable(iter: AsyncIterable<string>): LineReader {
+  const it = iter[Symbol.asyncIterator]();
+  return {
+    async next() {
+      const r = await it.next();
+      return r.done === true ? null : r.value;
+    },
+  };
+}
+
 export interface ChatReplOptions {
   readonly provider: LlmProvider;
   readonly io: IoStreams;
-  readonly stdin: AsyncIterable<string>;
+  readonly lines: LineReader;
   readonly systemPrompt: string;
   readonly tenantId: string;
   readonly sessionId: string;
@@ -268,6 +284,29 @@ export interface ChatReplOptions {
   readonly oneShot: boolean;
   readonly toolCatalog?: readonly ChatToolDefinition[];
   readonly maxToolIterations?: number;
+}
+
+export function interactiveApprover(opts: {
+  readonly io: IoStreams;
+  readonly reader: LineReader;
+}): WriteApprover {
+  return {
+    async approve(req: WriteApprovalRequest): Promise<boolean> {
+      const action = req.isNew ? "CREATE" : "UPDATE";
+      opts.io.stdout.write(
+        `\n[propose_manifest_edit] ${action} ${req.path}\n` +
+          `  hash:    ${req.newHash}\n` +
+          `  entities: +${req.diffSummary.entitiesAdded.toString()} ` +
+          `-${req.diffSummary.entitiesRemoved.toString()} ` +
+          `~${req.diffSummary.entitiesModified.toString()}\n` +
+          `Apply? [y/N]: `,
+      );
+      const line = await opts.reader.next();
+      if (line === null) return false;
+      const trimmed = line.trim().toLowerCase();
+      return trimmed === "y" || trimmed === "yes";
+    },
+  };
 }
 
 export interface ChatExchangeResult {
@@ -528,7 +567,9 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
     );
   }
 
-  for await (const line of opts.stdin) {
+  while (true) {
+    const line = await opts.lines.next();
+    if (line === null) break;
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
     if (trimmed === "/exit" || trimmed === "/quit") break;

@@ -135,6 +135,8 @@ export function helpText(): string {
     "  --session-id <id>       With chat, set the session id (default: cli-<ts>)",
     "  --no-tools              With chat, disable manifest tools (text-only mode)",
     "  --allow-file-read       With chat, expose a read_file tool (json/yaml/txt/md)",
+    "  --allow-file-write      With chat, expose propose_manifest_edit (human approval)",
+    "  --auto-approve-writes   With chat, skip the y/N prompt for write tools",
     "  --max-tool-iterations N With chat, cap tool-dispatch loops per turn (default: 5)",
     "",
     "Environment (for apply):",

@@ -39,6 +39,7 @@ function buffers(
     },
     env: overrides.env ?? {},
     stdin: overrides.stdin,
+    lineReader: overrides.lineReader,
     providerOverride: overrides.providerOverride,
   };
   return { ctx, out: () => out.join(""), err: () => err.join("") };
@@ -399,6 +400,39 @@ describe("runChat", () => {
     );
     expect(code).toBe(2);
     expect(err()).toContain("invalid --max-tool-iterations");
+  });
+
+  it("returns exit 2 when --allow-file-write + one-shot but no --auto-approve-writes", async () => {
+    const { ctx, err } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: new StubProvider([
+        { kind: "text", text: "ok" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]),
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--allow-file-write"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--auto-approve-writes");
+  });
+
+  it("accepts --allow-file-write + --auto-approve-writes in one-shot mode", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "ack" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--allow-file-write", "--auto-approve-writes"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("ack");
   });
 
   it("accepts --no-tools without trying to build the catalog", async () => {

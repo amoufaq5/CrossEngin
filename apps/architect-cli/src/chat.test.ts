@@ -14,7 +14,9 @@ import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
   buildCompletionRequest,
   formatUsageLine,
+  interactiveApprover,
   jsonChunkRenderer,
+  lineReaderFromIterable,
   linesFromReadable,
   plainTextRenderer,
   runChatExchange,
@@ -290,7 +292,7 @@ describe("runChatRepl — one-shot", () => {
     const result = await runChatRepl({
       provider,
       io,
-      stdin: emptyAsyncIterable(),
+      lines: lineReaderFromIterable(emptyAsyncIterable()),
       systemPrompt: "sys",
       tenantId: TENANT,
       sessionId: SESSION,
@@ -310,7 +312,7 @@ describe("runChatRepl — one-shot", () => {
     const result = await runChatRepl({
       provider,
       io,
-      stdin: emptyAsyncIterable(),
+      lines: lineReaderFromIterable(emptyAsyncIterable()),
       systemPrompt: "sys",
       tenantId: TENANT,
       sessionId: SESSION,
@@ -334,7 +336,7 @@ describe("runChatRepl — interactive", () => {
     const result = await runChatRepl({
       provider,
       io,
-      stdin: asyncIter(["first question", "second question"]),
+      lines: lineReaderFromIterable(asyncIter(["first question", "second question"])),
       systemPrompt: "sys",
       tenantId: TENANT,
       sessionId: SESSION,
@@ -357,7 +359,7 @@ describe("runChatRepl — interactive", () => {
     const result = await runChatRepl({
       provider,
       io,
-      stdin: asyncIter(["hi", "/exit", "should not run"]),
+      lines: lineReaderFromIterable(asyncIter(["hi", "/exit", "should not run"])),
       systemPrompt: "sys",
       tenantId: TENANT,
       sessionId: SESSION,
@@ -373,7 +375,7 @@ describe("runChatRepl — interactive", () => {
     const result = await runChatRepl({
       provider,
       io,
-      stdin: asyncIter(["", "   ", "actual question"]),
+      lines: lineReaderFromIterable(asyncIter(["", "   ", "actual question"])),
       systemPrompt: "sys",
       tenantId: TENANT,
       sessionId: SESSION,
@@ -389,7 +391,7 @@ describe("runChatRepl — interactive", () => {
     await runChatRepl({
       provider,
       io,
-      stdin: asyncIter([]),
+      lines: lineReaderFromIterable(asyncIter([])),
       systemPrompt: "sys",
       tenantId: TENANT,
       sessionId: SESSION,
@@ -637,6 +639,97 @@ describe("runChatExchange — tool dispatch", () => {
     });
     const lines = out().trim().split("\n").map((l) => JSON.parse(l) as { kind: string });
     expect(lines.some((l) => l.kind === "tool_result")).toBe(true);
+  });
+});
+
+describe("lineReaderFromIterable + interactiveApprover", () => {
+  it("returns null on iterator exhaustion", async () => {
+    const reader = lineReaderFromIterable(asyncIter([]));
+    expect(await reader.next()).toBeNull();
+  });
+
+  it("yields lines in order", async () => {
+    const reader = lineReaderFromIterable(asyncIter(["a", "b", "c"]));
+    expect(await reader.next()).toBe("a");
+    expect(await reader.next()).toBe("b");
+    expect(await reader.next()).toBe("c");
+    expect(await reader.next()).toBeNull();
+  });
+
+  it("interactiveApprover approves on 'y' (case-insensitive, trims)", async () => {
+    const { io } = buffers();
+    const reader = lineReaderFromIterable(asyncIter(["  Y  "]));
+    const approver = interactiveApprover({ io, reader });
+    expect(
+      await approver.approve({
+        path: "/x",
+        isNew: true,
+        newHash: "h",
+        diffSummary: { entitiesAdded: 1, entitiesRemoved: 0, entitiesModified: 0 },
+      }),
+    ).toBe(true);
+  });
+
+  it("interactiveApprover approves on 'yes'", async () => {
+    const { io } = buffers();
+    const reader = lineReaderFromIterable(asyncIter(["yes"]));
+    const approver = interactiveApprover({ io, reader });
+    expect(
+      await approver.approve({
+        path: "/x",
+        isNew: false,
+        newHash: "h",
+        diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+      }),
+    ).toBe(true);
+  });
+
+  it("interactiveApprover denies on anything else", async () => {
+    const { io } = buffers();
+    const reader = lineReaderFromIterable(asyncIter(["n", "no", "maybe"]));
+    const approver = interactiveApprover({ io, reader });
+    for (const _ of [0, 1, 2]) {
+      void _;
+      expect(
+        await approver.approve({
+          path: "/x",
+          isNew: true,
+          newHash: "h",
+          diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("interactiveApprover denies on EOF", async () => {
+    const { io } = buffers();
+    const reader = lineReaderFromIterable(asyncIter([]));
+    const approver = interactiveApprover({ io, reader });
+    expect(
+      await approver.approve({
+        path: "/x",
+        isNew: true,
+        newHash: "h",
+        diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+      }),
+    ).toBe(false);
+  });
+
+  it("interactiveApprover writes a prompt to stdout including path + hash", async () => {
+    const { io, out } = buffers();
+    const reader = lineReaderFromIterable(asyncIter(["n"]));
+    const approver = interactiveApprover({ io, reader });
+    await approver.approve({
+      path: "/tmp/m.json",
+      isNew: true,
+      newHash: "deadbeef",
+      diffSummary: { entitiesAdded: 3, entitiesRemoved: 1, entitiesModified: 0 },
+    });
+    expect(out()).toContain("/tmp/m.json");
+    expect(out()).toContain("deadbeef");
+    expect(out()).toContain("CREATE");
+    expect(out()).toContain("+3");
+    expect(out()).toContain("-1");
   });
 });
 

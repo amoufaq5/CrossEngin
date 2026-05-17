@@ -14,9 +14,22 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M6 landed: **48 packages
-+ 1 app, 115 meta-schema tables, 5,606 tests**, all green, no
-type errors. M5.6 made `crossengin chat` a real authoring loop
+M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.8 + M6 landed: **48
+packages + 1 app, 115 meta-schema tables, 5,625 tests**, all
+green, no type errors. M5.8 closed the authoring loop by
+adding a write tool with human-in-the-loop approval.
+`propose_manifest_edit({path, new_manifest_json})` shows the
+developer a diff + entity counts + new hash, prompts y/N (via
+a shared `LineReader` that the REPL also uses, so the approval
+read doesn't compete with the for-await on stdin), and only
+writes the file on approval. `--allow-file-write` gates the
+tool; `--auto-approve-writes` skips the prompt (required for
+one-shot scripted use). Refactored ChatReplOptions: `stdin:
+AsyncIterable<string>` → `lines: LineReader` so the approver
+and the REPL share one source. `tools.ts` now ships an
+`autoApprover(approve = true)` and `chat.ts` exports
+`interactiveApprover({io, reader})`.
+M5.6 made `crossengin chat` a real authoring loop
 by adding tool dispatch. The CLI exposes
 `validate_manifest` / `hash_manifest` / `diff_manifests` /
 `summarize_manifest` (plus opt-in `read_file` under
@@ -104,7 +117,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0055 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0056 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -112,7 +125,8 @@ cli → M6 notifications + workflow bridge → M7 first vertical pack
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
 ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
-M5.6 (tool-driven chat).
+M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
+human-in-the-loop approval).
 
 ## Architecture in 90 seconds
 
@@ -672,6 +686,24 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M5.8):** closed authoring loop.
+`crossengin chat --allow-file-write` now exposes
+`propose_manifest_edit({path, new_manifest_json})` as a tool
+Claude can invoke. Every write proposal surfaces a diff
+(entities added / removed / modified) + the new hash to the
+developer, who approves (`y` / `yes`) or denies (`n` /
+anything else / EOF). Approved writes go to disk pretty-
+printed; denied / invalid / no-change proposals return
+typed `{applied: false, reason}` envelopes Claude can react
+to. `--auto-approve-writes` skips the prompt (required for
+one-shot scripted mode, where there's no human to ask).
+`WriteApprover` interface decouples approval policy from
+the tool itself — `autoApprover(true)` for scripted runs,
+`interactiveApprover({io, reader})` for the REPL. Both share
+the same `LineReader` the REPL uses, so the approval prompt
+and the chat prompt cooperate over one stdin without
+competing readers.
+
 **No longer deferred (as of M5.6):** tool-driven authoring loop.
 `crossengin chat` now exposes the manifest-side CLI helpers as
 tools Claude can call mid-conversation. The default catalog
@@ -704,7 +736,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0055 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0056 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -715,7 +747,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (`workflow-signal-bridge`), ADR-0053 covers Phase 2 M2.7
 (`ai-providers-anthropic`), ADR-0054 covers Phase 2 M5.5
 (architect-cli chat mode), ADR-0055 covers Phase 2 M5.6
-(architect-cli tool-driven chat). When you ship a new package,
+(architect-cli tool-driven chat), ADR-0056 covers Phase 2
+M5.8 (architect-cli write tools). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

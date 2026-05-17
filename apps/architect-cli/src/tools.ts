@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { access, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 import type { LlmTool } from "@crossengin/ai-providers";
 import {
@@ -23,8 +23,33 @@ export interface ChatToolDefinition {
 
 export interface ChatToolOptions {
   readonly allowFileRead?: boolean;
+  readonly allowFileWrite?: boolean;
   readonly fileRootDir?: string;
   readonly maxFileBytes?: number;
+  readonly approver?: WriteApprover;
+}
+
+export interface WriteApprovalRequest {
+  readonly path: string;
+  readonly isNew: boolean;
+  readonly newHash: string;
+  readonly diffSummary: {
+    readonly entitiesAdded: number;
+    readonly entitiesRemoved: number;
+    readonly entitiesModified: number;
+  };
+}
+
+export interface WriteApprover {
+  approve(request: WriteApprovalRequest): Promise<boolean>;
+}
+
+export function autoApprover(approve = true): WriteApprover {
+  return {
+    async approve() {
+      return approve;
+    },
+  };
 }
 
 const DEFAULT_MAX_FILE_BYTES = 1_048_576;
@@ -137,6 +162,31 @@ export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolD
       execute: async (input) => readFileTool(input, root, maxBytes),
     });
   }
+  if (opts.allowFileWrite === true && opts.approver !== undefined) {
+    const root = opts.fileRootDir ?? process.cwd();
+    const approver = opts.approver;
+    tools.push({
+      name: "propose_manifest_edit",
+      description:
+        "Propose writing a CrossEngin manifest to disk. The user is shown the diff against any existing file at the path and must approve before the write happens. On approval the file is written and the new hash is returned. On denial nothing is written. The manifest must validate against the kernel schema.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Destination path. Must end in .json. Resolved relative to the working directory.",
+          },
+          new_manifest_json: {
+            type: "string",
+            description: "The proposed manifest serialized as a JSON string.",
+          },
+        },
+        required: ["path", "new_manifest_json"],
+      },
+      execute: async (input) => proposeManifestEditTool(input, root, approver),
+    });
+  }
   return tools;
 }
 
@@ -183,6 +233,143 @@ async function readFileTool(
     throw new ToolExecutionError(`read_file: file exceeds ${maxBytes.toString()} bytes`);
   }
   return { path: absolute, contents };
+}
+
+async function proposeManifestEditTool(
+  input: ToolInput,
+  rootDir: string,
+  approver: WriteApprover,
+): Promise<unknown> {
+  const pathRaw = input["path"];
+  if (typeof pathRaw !== "string" || pathRaw.length === 0) {
+    throw new ToolExecutionError(`tool input missing string field "path"`);
+  }
+  if (!pathRaw.toLowerCase().endsWith(".json")) {
+    throw new ToolExecutionError(`propose_manifest_edit: path must end in .json`);
+  }
+  const newJsonRaw = input["new_manifest_json"];
+  if (typeof newJsonRaw !== "string" || newJsonRaw.length === 0) {
+    throw new ToolExecutionError(`tool input missing string field "new_manifest_json"`);
+  }
+  let proposedUnknown: unknown;
+  try {
+    proposedUnknown = JSON.parse(newJsonRaw);
+  } catch (err) {
+    throw new ToolExecutionError(
+      `new_manifest_json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const schemaResult = ManifestSchema.safeParse(proposedUnknown);
+  if (!schemaResult.success) {
+    return {
+      applied: false,
+      reason: "invalid_manifest",
+      errors: schemaResult.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    };
+  }
+  const proposed = schemaResult.data;
+  const validation = tryValidateManifest(proposed);
+  if (!validation.ok) {
+    return {
+      applied: false,
+      reason: "invalid_manifest",
+      errors: validation.errors,
+    };
+  }
+  const absolute = resolve(rootDir, pathRaw);
+  const existing = await loadExistingManifest(absolute);
+  const isNew = existing === null;
+  const oldHash = existing !== null ? manifestHash(existing) : null;
+  const newHash = manifestHash(proposed);
+  if (oldHash === newHash) {
+    return {
+      applied: false,
+      reason: "no_changes",
+      path: absolute,
+      hash: newHash,
+    };
+  }
+  const diff =
+    existing !== null
+      ? computeManifestDiff(existing, proposed)
+      : { addedEntities: proposed.entities ?? [], removedEntities: [], modifiedEntities: [] };
+  const diffSummary = {
+    entitiesAdded: diff.addedEntities.length,
+    entitiesRemoved: diff.removedEntities.length,
+    entitiesModified: diff.modifiedEntities.length,
+  };
+  const approved = await approver.approve({
+    path: absolute,
+    isNew,
+    newHash,
+    diffSummary,
+  });
+  if (!approved) {
+    return {
+      applied: false,
+      reason: "user_denied",
+      path: absolute,
+      diff_summary: diffSummary,
+    };
+  }
+  try {
+    await ensureParentExists(absolute);
+    await writeFile(absolute, JSON.stringify(proposed, null, 2) + "\n", "utf8");
+  } catch (err) {
+    throw new ToolExecutionError(
+      `propose_manifest_edit: failed to write ${absolute}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return {
+    applied: true,
+    path: absolute,
+    hash: newHash,
+    is_new: isNew,
+    diff_summary: diffSummary,
+    summary: buildManifestSummary(proposed),
+  };
+}
+
+async function loadExistingManifest(absolutePath: string): Promise<Manifest | null> {
+  try {
+    await access(absolutePath);
+  } catch {
+    return null;
+  }
+  let text: string;
+  try {
+    text = await readFile(absolutePath, "utf8");
+  } catch (err) {
+    throw new ToolExecutionError(
+      `propose_manifest_edit: failed to read existing ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ToolExecutionError(
+      `propose_manifest_edit: existing file at ${absolutePath} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const schemaResult = ManifestSchema.safeParse(parsed);
+  if (!schemaResult.success) return null;
+  return schemaResult.data;
+}
+
+async function ensureParentExists(absolutePath: string): Promise<void> {
+  const parent = dirname(absolutePath);
+  try {
+    await access(parent);
+  } catch {
+    throw new ToolExecutionError(
+      `propose_manifest_edit: parent directory does not exist: ${parent}`,
+    );
+  }
 }
 
 function isExtensionAllowed(path: string): boolean {

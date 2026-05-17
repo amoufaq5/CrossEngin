@@ -1,15 +1,18 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { emptyManifest } from "./manifest-io.js";
+import { emptyManifest, type Manifest } from "./manifest-io.js";
 import {
+  autoApprover,
   buildToolCatalog,
   executeToolCall,
   ToolExecutionError,
   toolsToLlmTools,
+  type WriteApprovalRequest,
+  type WriteApprover,
 } from "./tools.js";
 
 function manifestJson(name = "Test", slug = "test-pack"): string {
@@ -242,5 +245,213 @@ describe("ToolExecutionError", () => {
     const err = new ToolExecutionError("boom");
     expect(err.name).toBe("ToolExecutionError");
     expect(err.message).toBe("boom");
+  });
+});
+
+class RecordingApprover implements WriteApprover {
+  readonly requests: WriteApprovalRequest[] = [];
+
+  constructor(private readonly decision: boolean) {}
+
+  async approve(request: WriteApprovalRequest): Promise<boolean> {
+    this.requests.push(request);
+    return this.decision;
+  }
+}
+
+describe("autoApprover", () => {
+  it("approves by default", async () => {
+    const a = autoApprover();
+    expect(
+      await a.approve({
+        path: "/x",
+        isNew: true,
+        newHash: "h",
+        diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+      }),
+    ).toBe(true);
+  });
+
+  it("can be configured to deny", async () => {
+    const a = autoApprover(false);
+    expect(
+      await a.approve({
+        path: "/x",
+        isNew: true,
+        newHash: "h",
+        diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("buildToolCatalog — propose_manifest_edit gating", () => {
+  it("is absent unless allowFileWrite + approver are both set", () => {
+    expect(buildToolCatalog().map((t) => t.name)).not.toContain("propose_manifest_edit");
+    expect(
+      buildToolCatalog({ allowFileWrite: true }).map((t) => t.name),
+    ).not.toContain("propose_manifest_edit");
+    expect(
+      buildToolCatalog({
+        allowFileWrite: true,
+        approver: autoApprover(),
+      }).map((t) => t.name),
+    ).toContain("propose_manifest_edit");
+  });
+});
+
+describe("executeToolCall — propose_manifest_edit", () => {
+  it("CREATEs a new file when path does not exist", async () => {
+    const dir = await tempDir();
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver,
+      fileRootDir: dir,
+    });
+    const newManifest = JSON.stringify(emptyManifest({ name: "Brand New", slug: "brand-new" }));
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: newManifest },
+    });
+    expect(result.isError).toBe(false);
+    const parsed = JSON.parse(result.output) as { applied: boolean; is_new: boolean; hash: string };
+    expect(parsed.applied).toBe(true);
+    expect(parsed.is_new).toBe(true);
+    expect(approver.requests).toHaveLength(1);
+    expect(approver.requests[0]?.isNew).toBe(true);
+    const written = await readFile(join(dir, "m.json"), "utf8");
+    expect((JSON.parse(written) as Manifest).meta.name).toBe("Brand New");
+  });
+
+  it("UPDATEs an existing file and reports diff entity counts", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "m.json");
+    const before = emptyManifest({ name: "Before", slug: "x" });
+    await writeFile(path, JSON.stringify(before, null, 2), "utf8");
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver,
+      fileRootDir: dir,
+    });
+    const after = emptyManifest({ name: "After", slug: "x" });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: JSON.stringify(after) },
+    });
+    expect(result.isError).toBe(false);
+    const parsed = JSON.parse(result.output) as { applied: boolean; is_new: boolean };
+    expect(parsed.applied).toBe(true);
+    expect(parsed.is_new).toBe(false);
+    expect(approver.requests[0]?.isNew).toBe(false);
+  });
+
+  it("does NOT write when the approver denies", async () => {
+    const dir = await tempDir();
+    const approver = new RecordingApprover(false);
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver,
+      fileRootDir: dir,
+    });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: {
+        path: "denied.json",
+        new_manifest_json: JSON.stringify(emptyManifest({ name: "X", slug: "x" })),
+      },
+    });
+    const parsed = JSON.parse(result.output) as { applied: boolean; reason: string };
+    expect(parsed.applied).toBe(false);
+    expect(parsed.reason).toBe("user_denied");
+    await expect(readFile(join(dir, "denied.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("returns no_changes when the proposed manifest hashes identically", async () => {
+    const dir = await tempDir();
+    const manifest = emptyManifest({ name: "Same", slug: "same" });
+    await writeFile(join(dir, "m.json"), JSON.stringify(manifest, null, 2), "utf8");
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver,
+      fileRootDir: dir,
+    });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: {
+        path: "m.json",
+        new_manifest_json: JSON.stringify(manifest),
+      },
+    });
+    const parsed = JSON.parse(result.output) as { applied: boolean; reason: string };
+    expect(parsed.applied).toBe(false);
+    expect(parsed.reason).toBe("no_changes");
+    expect(approver.requests).toHaveLength(0);
+  });
+
+  it("returns invalid_manifest when the proposal fails schema validation", async () => {
+    const dir = await tempDir();
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver,
+      fileRootDir: dir,
+    });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: {
+        path: "bad.json",
+        new_manifest_json: JSON.stringify({ not: "a manifest" }),
+      },
+    });
+    const parsed = JSON.parse(result.output) as {
+      applied: boolean;
+      reason: string;
+      errors: unknown[];
+    };
+    expect(parsed.applied).toBe(false);
+    expect(parsed.reason).toBe("invalid_manifest");
+    expect(parsed.errors.length).toBeGreaterThan(0);
+    expect(approver.requests).toHaveLength(0);
+  });
+
+  it("rejects non-.json paths with an error envelope", async () => {
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver: autoApprover(),
+    });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: {
+        path: "evil.exe",
+        new_manifest_json: JSON.stringify(emptyManifest({ name: "X", slug: "x" })),
+      },
+    });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.output) as { error: string };
+    expect(parsed.error).toContain(".json");
+  });
+
+  it("rejects malformed new_manifest_json", async () => {
+    const tools = buildToolCatalog({
+      allowFileWrite: true,
+      approver: autoApprover(),
+    });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: { path: "x.json", new_manifest_json: "{not-json" },
+    });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.output) as { error: string };
+    expect(parsed.error).toContain("valid JSON");
   });
 });

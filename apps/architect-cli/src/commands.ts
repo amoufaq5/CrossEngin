@@ -21,10 +21,18 @@ import {
   DEFAULT_MAX_TOOL_ITERATIONS,
   DEFAULT_TENANT_ID,
   formatUsageLine,
+  interactiveApprover,
+  lineReaderFromIterable,
   linesFromReadable,
   runChatRepl,
+  type LineReader,
 } from "./chat.js";
-import { buildToolCatalog, type ChatToolDefinition } from "./tools.js";
+import {
+  autoApprover,
+  buildToolCatalog,
+  type ChatToolDefinition,
+  type WriteApprover,
+} from "./tools.js";
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import {
@@ -48,6 +56,7 @@ export interface RunContext {
   readonly io: IoStreams;
   readonly env: NodeJS.ProcessEnv;
   readonly stdin?: AsyncIterable<string>;
+  readonly lineReader?: LineReader;
   readonly providerOverride?: LlmProvider;
 }
 
@@ -266,6 +275,8 @@ export async function runChat(
   const oneShot = prompt !== undefined || getBooleanFlag(command, "one-shot");
   const toolsDisabled = getBooleanFlag(command, "no-tools");
   const allowFileRead = getBooleanFlag(command, "allow-file-read");
+  const allowFileWrite = getBooleanFlag(command, "allow-file-write");
+  const autoApprove = getBooleanFlag(command, "auto-approve-writes");
   const maxIterationsFlag = getStringFlag(command, "max-tool-iterations");
   const maxToolIterations =
     maxIterationsFlag !== null
@@ -275,9 +286,32 @@ export async function runChat(
     printError(ctx.io, `chat: invalid --max-tool-iterations: ${maxIterationsFlag ?? ""}`);
     return 2;
   }
+  const lines: LineReader =
+    ctx.lineReader ??
+    lineReaderFromIterable(
+      ctx.stdin ?? (oneShot ? emptyStdin() : linesFromReadable(process.stdin)),
+    );
+  let approver: WriteApprover | undefined;
+  if (allowFileWrite) {
+    if (autoApprove) {
+      approver = autoApprover(true);
+    } else if (oneShot) {
+      printError(
+        ctx.io,
+        "chat: --allow-file-write in one-shot mode requires --auto-approve-writes (no interactive prompt available).",
+      );
+      return 2;
+    } else {
+      approver = interactiveApprover({ io: ctx.io, reader: lines });
+    }
+  }
   let toolCatalog: readonly ChatToolDefinition[] | undefined;
   if (!toolsDisabled) {
-    toolCatalog = buildToolCatalog({ allowFileRead });
+    toolCatalog = buildToolCatalog({
+      allowFileRead,
+      allowFileWrite,
+      approver,
+    });
   }
 
   let provider: LlmProvider;
@@ -295,12 +329,11 @@ export async function runChat(
     provider = new AnthropicProvider({ apiKey, defaultModel: model });
   }
 
-  const stdin = ctx.stdin ?? (oneShot ? emptyStdin() : linesFromReadable(process.stdin));
   try {
     const result = await runChatRepl({
       provider,
       io: ctx.io,
-      stdin,
+      lines,
       systemPrompt,
       tenantId,
       sessionId,
