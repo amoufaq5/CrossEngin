@@ -15,8 +15,25 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M6 + M6.5 + M6.5.5 + M7 landed: **52 packages + 1 app, 119
-meta-schema tables, 5,896 tests**, all green, no type errors.
++ M6 + M6.5 + M6.5.5 + M7 + M7-wire landed: **52 packages + 1
+app, 119 meta-schema tables, 5,907 tests**, all green, no type
+errors. M7-wire closed the substrate-to-pack loop in the CLI.
+New `apps/architect-cli/src/pack-registry.ts` maps slug →
+manifest builder (today: just `operate-erp/core` →
+`buildErpCorePack()`; future packs add entries). `runApply`
+gains `--pack <slug>` and `--pack-schema <name>` flags
+(default schema: `public`). `buildPlan` validates the pack
+via `tryValidateManifest` before any DB write, then emits its
+DDL via `emitManifestCreate(manifest, {schema})`. The dry-run
+output streams META bootstrap SQL followed by pack DDL with a
+divider; JSON mode exposes `pack` + `metaStatementCount` +
+`packStatementCount` + `availablePacks`. Live apply
+concatenates both statement lists into one `MigrationApplier`
+run — atomic via advisory-lock + per-statement transactions.
+`crossengin apply --dry-run --pack=operate-erp/core` now
+produces ~730 statements total (META bootstrap + 4 ERP entity
+tables in `public` with FKs, check constraints, indexes —
+topologically ordered).
 M2.8.5 extended `@crossengin/ai-providers-openai` with the
 Responses API (`/v1/responses`) as an opt-in alternative to
 Chat Completions. 2 new modules: responses-api (`buildOpenAI
@@ -214,7 +231,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0062 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0063 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -230,7 +247,8 @@ persistence to META_ARCHITECT_*), ADR-0058 covers M7
 ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 + embeddings + tool calls), ADR-0061 covers M6.5.5
 (architect-cli router integration), ADR-0062 covers M2.8.5
-(OpenAI Responses API support).
+(OpenAI Responses API support), ADR-0063 covers M7-wire
+(CLI `--pack` apply).
 
 ## Architecture in 90 seconds
 
@@ -855,6 +873,15 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M7-wire):** the substrate-to-pack
+end-to-end loop. `crossengin apply --pack <slug>` now resolves
+a registered pack (today: `operate-erp/core`), validates its
+manifest, emits per-entity DDL via the kernel's
+`emitManifestCreate`, and concatenates with the meta bootstrap
+SQL into one atomic MigrationApplier run. Five years of
+contract work + nine months of runtime work produce a working
+binary that ships a working schema in one command.
+
 **No longer deferred (as of M2.8.5):** OpenAI Responses API.
 The provider opts into `/v1/responses` via the `defaultApiPath`
 constructor option (or per-call via `completeViaResponses`).
@@ -983,7 +1010,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0062 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0063 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1001,7 +1028,8 @@ Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`ai-router`), ADR-0060 covers Phase 2 M2.8
 (`ai-providers-openai`), ADR-0061 covers Phase 2 M6.5.5
 (architect-cli router integration), ADR-0062 covers Phase 2
-M2.8.5 (OpenAI Responses API support). When you ship a new package,
+M2.8.5 (OpenAI Responses API support), ADR-0063 covers Phase 2
+M7-wire (CLI `--pack` apply). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

@@ -4,5 +4,6 @@ export * from "./cli.js";
 export * from "./commands.js";
 export * from "./format.js";
 export * from "./manifest-io.js";
+export * from "./pack-registry.js";
 export * from "./router-setup.js";
 export * from "./tools.js";

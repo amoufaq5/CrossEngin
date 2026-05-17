@@ -1,4 +1,5 @@
 import { emitMetaBootstrapSql, META_SCHEMA_NAME, META_TABLES } from "@crossengin/kernel/bootstrap";
+import { emitManifestCreate, tryValidateManifest } from "@crossengin/kernel/manifest";
 import {
   MigrationApplier,
   createNodePgConnection,
@@ -8,9 +9,24 @@ import {
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
-import { getBooleanFlag } from "./cli.js";
+import { getBooleanFlag, getStringFlag } from "./cli.js";
 import { printError, printJson, printSuccess, type IoStreams } from "./format.js";
 import type { RunContext } from "./commands.js";
+import {
+  UnknownPackError,
+  listAvailablePacks,
+  resolvePack,
+  type PackEntry,
+} from "./pack-registry.js";
+
+const DEFAULT_PACK_SCHEMA = "public";
+
+interface ResolvedPlan {
+  readonly metaStatements: readonly string[];
+  readonly packStatements: readonly string[];
+  readonly pack: PackEntry | null;
+  readonly packSchema: string;
+}
 
 export async function runApply(
   command: ParsedCommand,
@@ -18,8 +34,26 @@ export async function runApply(
 ): Promise<number> {
   const dryRun = getBooleanFlag(command, "dry-run");
   const confirm = getBooleanFlag(command, "confirm");
+  const packSlug = getStringFlag(command, "pack");
+  const packSchema = getStringFlag(command, "pack-schema") ?? DEFAULT_PACK_SCHEMA;
+
+  let plan: ResolvedPlan;
+  try {
+    plan = buildPlan({ packSlug, packSchema });
+  } catch (err) {
+    if (err instanceof UnknownPackError) {
+      printError(ctx.io, `apply: ${err.message}`);
+      return 2;
+    }
+    if (err instanceof PackValidationError) {
+      printError(ctx.io, `apply: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+
   if (dryRun) {
-    return emitDryRun(ctx.io, command);
+    return emitDryRun(ctx.io, command, plan);
   }
   let config: ReturnType<typeof parsePgEnvConfig>;
   try {
@@ -40,13 +74,19 @@ export async function runApply(
     const applier = new MigrationApplier({
       connection: conn,
       schema: META_SCHEMA_NAME,
-      statements: emitMetaBootstrapSql(),
+      statements: [...plan.metaStatements, ...plan.packStatements],
     });
     const report = await applier.apply();
     if (command.format === "json") {
-      printJson(ctx.io, report);
+      printJson(ctx.io, { ...report, pack: plan.pack?.slug ?? null });
     } else {
       printSuccess(ctx.io, formatApplyReport(report));
+      if (plan.pack !== null) {
+        printSuccess(
+          ctx.io,
+          `applied pack '${plan.pack.slug}' (${plan.packStatements.length.toString()} statement(s) in schema '${plan.packSchema}').`,
+        );
+      }
     }
     if (!report.preconditions.ok || report.failed > 0) return 1;
     return 0;
@@ -58,20 +98,72 @@ export async function runApply(
   }
 }
 
-function emitDryRun(io: IoStreams, command: ParsedCommand): number {
-  const statements = emitMetaBootstrapSql();
+class PackValidationError extends Error {
+  readonly kind = "pack_validation_error" as const;
+
+  constructor(slug: string, errors: ReadonlyArray<{ path: string; message: string }>) {
+    const summary = errors.map((e) => `${e.path}: ${e.message}`).join("; ");
+    super(`pack '${slug}' failed validation: ${summary}`);
+    this.name = "PackValidationError";
+  }
+}
+
+function buildPlan(input: {
+  readonly packSlug: string | null;
+  readonly packSchema: string;
+}): ResolvedPlan {
+  const metaStatements = emitMetaBootstrapSql();
+  if (input.packSlug === null) {
+    return {
+      metaStatements,
+      packStatements: [],
+      pack: null,
+      packSchema: input.packSchema,
+    };
+  }
+  const pack = resolvePack(input.packSlug);
+  const manifest = pack.build();
+  const result = tryValidateManifest(manifest);
+  if (!result.ok) {
+    throw new PackValidationError(input.packSlug, result.errors);
+  }
+  const packStatements = emitManifestCreate(manifest, { schema: input.packSchema });
+  return {
+    metaStatements,
+    packStatements,
+    pack,
+    packSchema: input.packSchema,
+  };
+}
+
+function emitDryRun(io: IoStreams, command: ParsedCommand, plan: ResolvedPlan): number {
+  const allStatements = [...plan.metaStatements, ...plan.packStatements];
   if (command.format === "json") {
     printJson(io, {
       schema: META_SCHEMA_NAME,
       tableCount: META_TABLES.length,
-      statementCount: statements.length,
-      statements,
+      statementCount: allStatements.length,
+      metaStatementCount: plan.metaStatements.length,
+      packStatementCount: plan.packStatements.length,
+      pack: plan.pack === null
+        ? null
+        : { slug: plan.pack.slug, schema: plan.packSchema },
+      availablePacks: listAvailablePacks(),
+      statements: allStatements,
     });
     return 0;
   }
-  for (const stmt of statements) {
-    io.stdout.write(stmt + "\n");
+  for (const stmt of plan.metaStatements) io.stdout.write(stmt + "\n");
+  if (plan.packStatements.length > 0) {
+    io.stdout.write(
+      `\n-- ${plan.packStatements.length.toString()} pack statement(s) from '${plan.pack!.slug}' (schema '${plan.packSchema}')\n`,
+    );
+    for (const stmt of plan.packStatements) io.stdout.write(stmt + "\n");
   }
-  io.stdout.write(`-- ${statements.length.toString()} statement(s); ${META_TABLES.length.toString()} tables\n`);
+  io.stdout.write(
+    `-- ${allStatements.length.toString()} statement(s) total; ${META_TABLES.length.toString()} meta tables` +
+      (plan.pack !== null ? ` + pack '${plan.pack.slug}'` : "") +
+      "\n",
+  );
   return 0;
 }
