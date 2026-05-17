@@ -139,12 +139,14 @@ export function helpText(): string {
     "  --auto-approve-writes   With chat, skip the y/N prompt for write tools",
     "  --max-tool-iterations N With chat, cap tool-dispatch loops per turn (default: 5)",
     "  --persist               With chat, log session/messages/tools/proposals to Postgres",
+    "  --cost-ceiling-usd N    With chat, refuse calls whose estimated cost exceeds N USD",
     "",
     "Environment (for apply / chat --persist):",
     "  PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, PGAPPNAME",
     "",
     "Environment (for chat):",
-    "  ANTHROPIC_API_KEY       Required — your Anthropic API key.",
+    "  ANTHROPIC_API_KEY       Anthropic API key. At least one of the two is required.",
+    "  OPENAI_API_KEY          OpenAI API key. With both set, the router fans out.",
     "",
   ].join("\n");
 }

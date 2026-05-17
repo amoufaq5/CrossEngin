@@ -15,8 +15,22 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 landed: **52 packages + 1 app, 119 meta-schema tables,
-5,842 tests**, all green, no type errors. M2.8 added
+M6.5 + M6.5.5 + M7 landed: **52 packages + 1 app, 119 meta-schema
+tables, 5,856 tests**, all green, no type errors. M6.5.5 wired
+the ai-router into `architect-cli`'s `chat` subcommand. New
+`router-setup.ts` exports `DEFAULT_TASK_POLICIES` (7 tasks
+mapped to Anthropic-primary + OpenAI-fallback chains; cheap
+tasks like summarizer/classifier go to gpt-4o-mini primary) and
+`buildChatCompleter({env, forceModel?, costCeiling?})` which
+chooses adaptively: one API key → single provider (legacy
+behavior); both keys → `DefaultLlmRouter` wrapped in a
+`RouterAsProvider` adapter so the chat engine still sees a
+single `LlmProvider`-shaped interface. New `--cost-ceiling-usd`
+flag enforces per-request budget when the router is active.
+Strict `isAnthropicModel` check replaced with a union-aware
+check against `provider.models`. Session summary now reports
+`providerKind` (single | router) and `availableProviders`.
+M2.8 added
 `@crossengin/ai-providers-openai` — the second concrete
 `LlmProvider`, mirroring M2.7's Anthropic structure. 6 modules:
 pricing (5 chat models + 2 embedding models with current
@@ -183,7 +197,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0060 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0061 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -197,7 +211,8 @@ persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`pack-erp-core` — first vertical pack), ADR-0059 covers M6.5
 (`ai-router` — provider router with retry / cost / latency),
 ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
-+ embeddings + tool calls).
++ embeddings + tool calls), ADR-0061 covers M6.5.5
+(architect-cli router integration).
 
 ## Architecture in 90 seconds
 
@@ -822,6 +837,16 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M6.5.5):** the router is live in
+the CLI. `crossengin chat` now uses `buildChatCompleter` to
+adapt to whichever API keys are configured. One key →
+single-provider mode (legacy behavior preserved). Both keys →
+`DefaultLlmRouter` with default task policies (cheap tasks to
+gpt-4o-mini, premium tasks to opus, embeddings to OpenAI).
+New `--cost-ceiling-usd` flag enforces per-request budget when
+the router is active. The CLI's session-end summary reports
+which mode was used.
+
 **No longer deferred (as of M2.8):** the second real LLM
 provider + embeddings. `@crossengin/ai-providers-openai`
 covers OpenAI's Chat Completions (gpt-4o family + o1 family)
@@ -927,7 +952,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0060 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0061 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -943,7 +968,8 @@ M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
 M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
 Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`ai-router`), ADR-0060 covers Phase 2 M2.8
-(`ai-providers-openai`). When you ship a new package,
+(`ai-providers-openai`), ADR-0061 covers Phase 2 M6.5.5
+(architect-cli router integration). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

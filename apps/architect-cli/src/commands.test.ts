@@ -279,18 +279,83 @@ describe("runPatch", () => {
 });
 
 describe("runChat", () => {
-  it("returns exit 1 with helpful error when ANTHROPIC_API_KEY is missing", async () => {
+  it("returns exit 1 with helpful error when no provider keys are set", async () => {
     const { ctx, err } = buffers({ env: {} });
     const code = await runChat(parsed("chat"), ctx);
     expect(code).toBe(1);
     expect(err()).toContain("ANTHROPIC_API_KEY");
+    expect(err()).toContain("OPENAI_API_KEY");
   });
 
-  it("returns exit 2 when --model is not an Anthropic model", async () => {
+  it("accepts a single ANTHROPIC_API_KEY (legacy path)", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "ok" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(parsed("chat", "--prompt=hi"), ctx);
+    expect(code).toBe(0);
+    expect(out()).toContain("ok");
+  });
+
+  it("returns exit 2 when --model is not in the provider's model list", async () => {
     const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
     const code = await runChat(parsed("chat", "--model=gpt-4", "--prompt=hi"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("unsupported model");
+  });
+
+  it("accepts a Claude model when only ANTHROPIC_API_KEY is set", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "claude says hi" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(
+      parsed("chat", "--model=claude-sonnet-4-6", "--prompt=hi"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("claude says hi");
+  });
+
+  it("returns exit 2 on a malformed --cost-ceiling-usd value", async () => {
+    const { ctx, err } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: new StubProvider([
+        { kind: "text", text: "x" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]),
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--cost-ceiling-usd=zero"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--cost-ceiling-usd");
+  });
+
+  it("accepts --cost-ceiling-usd with a valid positive number", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "fine" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--cost-ceiling-usd=0.05"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("fine");
   });
 
   it("returns exit 2 when --max-tokens is not a positive number", async () => {

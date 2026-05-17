@@ -1,11 +1,12 @@
 import { readFile } from "node:fs/promises";
 
 import type { LlmProvider } from "@crossengin/ai-providers";
+import type { CostCeiling } from "@crossengin/ai-router";
+
 import {
-  AnthropicProvider,
-  isAnthropicModel,
-  type AnthropicModel,
-} from "@crossengin/ai-providers-anthropic";
+  buildChatCompleter,
+  NoProvidersConfiguredError,
+} from "./router-setup.js";
 import {
   computeManifestDiff,
   manifestHash,
@@ -20,7 +21,6 @@ import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@cr
 import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
   DEFAULT_CHAT_MAX_TOKENS,
-  DEFAULT_CHAT_MODEL,
   DEFAULT_MAX_TOOL_ITERATIONS,
   DEFAULT_TENANT_ID,
   formatUsageLine,
@@ -247,12 +247,8 @@ export async function runChat(
   command: ParsedCommand,
   ctx: RunContext,
 ): Promise<number> {
-  const modelFlag = getStringFlag(command, "model") ?? DEFAULT_CHAT_MODEL;
-  if (!isAnthropicModel(modelFlag)) {
-    printError(ctx.io, `chat: unsupported model: ${modelFlag}`);
-    return 2;
-  }
-  const model: AnthropicModel = modelFlag;
+  const modelFlag = getStringFlag(command, "model");
+  const model = modelFlag ?? undefined;
   const maxTokensFlag = getStringFlag(command, "max-tokens");
   const maxTokens =
     maxTokensFlag !== null ? Number.parseInt(maxTokensFlag, 10) : DEFAULT_CHAT_MAX_TOKENS;
@@ -318,19 +314,50 @@ export async function runChat(
     });
   }
 
+  const costCeilingFlag = getStringFlag(command, "cost-ceiling-usd");
+  let costCeiling: CostCeiling | undefined;
+  if (costCeilingFlag !== null) {
+    const parsed = Number.parseFloat(costCeilingFlag);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      printError(ctx.io, `chat: invalid --cost-ceiling-usd: ${costCeilingFlag}`);
+      return 2;
+    }
+    costCeiling = { maxUsdPerRequest: parsed };
+  }
+
   let provider: LlmProvider;
+  let providerInfo: { providerKind: "single" | "router"; availableProviders: readonly string[] } = {
+    providerKind: "single",
+    availableProviders: ["override"],
+  };
   if (ctx.providerOverride !== undefined) {
     provider = ctx.providerOverride;
   } else {
-    const apiKey = ctx.env["ANTHROPIC_API_KEY"];
-    if (apiKey === undefined || apiKey.length === 0) {
+    try {
+      const built = buildChatCompleter({
+        env: ctx.env,
+        forceModel: model,
+        costCeiling,
+      });
+      provider = built.provider;
+      providerInfo = {
+        providerKind: built.providerKind,
+        availableProviders: built.availableProviders,
+      };
+    } catch (err) {
+      if (err instanceof NoProvidersConfiguredError) {
+        printError(ctx.io, err.message);
+        return 1;
+      }
+      throw err;
+    }
+    if (model !== undefined && !provider.models.includes(model)) {
       printError(
         ctx.io,
-        "chat: ANTHROPIC_API_KEY is not set. Export it before running 'crossengin chat'.",
+        `chat: unsupported model: ${model} (available: ${provider.models.join(", ")})`,
       );
-      return 1;
+      return 2;
     }
-    provider = new AnthropicProvider({ apiKey, defaultModel: model });
   }
 
   const persistFlag = getBooleanFlag(command, "persist");
@@ -373,10 +400,16 @@ export async function runChat(
         ok: true,
         turns: result.turns,
         aggregateUsage: result.aggregateUsage,
+        providerKind: providerInfo.providerKind,
+        availableProviders: providerInfo.availableProviders,
       });
     } else {
+      const providerSuffix =
+        providerInfo.providerKind === "router"
+          ? ` (router over ${providerInfo.availableProviders.join(" + ")})`
+          : "";
       ctx.io.stdout.write(
-        `\nSession ended after ${result.turns.toString()} turn(s). Aggregate ${formatUsageLine(result.aggregateUsage)}.\n`,
+        `\nSession ended after ${result.turns.toString()} turn(s)${providerSuffix}. Aggregate ${formatUsageLine(result.aggregateUsage)}.\n`,
       );
     }
     return 0;
