@@ -1,3 +1,11 @@
+import { readFile } from "node:fs/promises";
+
+import type { LlmProvider } from "@crossengin/ai-providers";
+import {
+  AnthropicProvider,
+  isAnthropicModel,
+  type AnthropicModel,
+} from "@crossengin/ai-providers-anthropic";
 import {
   computeManifestDiff,
   manifestHash,
@@ -6,6 +14,15 @@ import {
   type Manifest,
 } from "@crossengin/kernel/manifest";
 
+import {
+  DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+  DEFAULT_CHAT_MAX_TOKENS,
+  DEFAULT_CHAT_MODEL,
+  DEFAULT_TENANT_ID,
+  formatUsageLine,
+  linesFromReadable,
+  runChatRepl,
+} from "./chat.js";
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import {
@@ -28,6 +45,8 @@ import {
 export interface RunContext {
   readonly io: IoStreams;
   readonly env: NodeJS.ProcessEnv;
+  readonly stdin?: AsyncIterable<string>;
+  readonly providerOverride?: LlmProvider;
 }
 
 export async function runInit(
@@ -209,12 +228,91 @@ export async function runPatch(
   return 0;
 }
 
-export function runChat(_command: ParsedCommand, ctx: RunContext): Promise<number> {
-  printSuccess(
-    ctx.io,
-    "chat mode is not implemented in M5; ships in M5.5 alongside the Anthropic SDK provider binding.",
-  );
-  return Promise.resolve(0);
+export async function runChat(
+  command: ParsedCommand,
+  ctx: RunContext,
+): Promise<number> {
+  const modelFlag = getStringFlag(command, "model") ?? DEFAULT_CHAT_MODEL;
+  if (!isAnthropicModel(modelFlag)) {
+    printError(ctx.io, `chat: unsupported model: ${modelFlag}`);
+    return 2;
+  }
+  const model: AnthropicModel = modelFlag;
+  const maxTokensFlag = getStringFlag(command, "max-tokens");
+  const maxTokens =
+    maxTokensFlag !== null ? Number.parseInt(maxTokensFlag, 10) : DEFAULT_CHAT_MAX_TOKENS;
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
+    printError(ctx.io, `chat: invalid --max-tokens: ${maxTokensFlag ?? ""}`);
+    return 2;
+  }
+  let systemPrompt = DEFAULT_ARCHITECT_SYSTEM_PROMPT;
+  const systemFlag = getStringFlag(command, "system");
+  if (systemFlag !== null) systemPrompt = systemFlag;
+  const systemFile = getStringFlag(command, "system-file");
+  if (systemFile !== null) {
+    try {
+      systemPrompt = await readFile(systemFile, "utf8");
+    } catch (err) {
+      printError(ctx.io, `chat: failed to read --system-file: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  const tenantId = getStringFlag(command, "tenant-id") ?? DEFAULT_TENANT_ID;
+  const sessionId =
+    getStringFlag(command, "session-id") ?? `cli-${Date.now().toString(36)}`;
+  const prompt = getStringFlag(command, "prompt") ?? undefined;
+  const oneShot = prompt !== undefined || getBooleanFlag(command, "one-shot");
+
+  let provider: LlmProvider;
+  if (ctx.providerOverride !== undefined) {
+    provider = ctx.providerOverride;
+  } else {
+    const apiKey = ctx.env["ANTHROPIC_API_KEY"];
+    if (apiKey === undefined || apiKey.length === 0) {
+      printError(
+        ctx.io,
+        "chat: ANTHROPIC_API_KEY is not set. Export it before running 'crossengin chat'.",
+      );
+      return 1;
+    }
+    provider = new AnthropicProvider({ apiKey, defaultModel: model });
+  }
+
+  const stdin = ctx.stdin ?? (oneShot ? emptyStdin() : linesFromReadable(process.stdin));
+  try {
+    const result = await runChatRepl({
+      provider,
+      io: ctx.io,
+      stdin,
+      systemPrompt,
+      tenantId,
+      sessionId,
+      model,
+      maxTokens,
+      format: command.format,
+      prompt,
+      oneShot,
+    });
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        ok: true,
+        turns: result.turns,
+        aggregateUsage: result.aggregateUsage,
+      });
+    } else {
+      ctx.io.stdout.write(
+        `\nSession ended after ${result.turns.toString()} turn(s). Aggregate ${formatUsageLine(result.aggregateUsage)}.\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    printError(ctx.io, `chat: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+async function* emptyStdin(): AsyncGenerator<string, void, void> {
+  // Intentionally empty — one-shot mode skips the REPL loop entirely.
 }
 
 export interface VersionInfo {

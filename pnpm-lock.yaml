@@ -17,6 +17,12 @@ importers:
 
   apps/architect-cli:
     dependencies:
+      '@crossengin/ai-providers':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers
+      '@crossengin/ai-providers-anthropic':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-anthropic
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

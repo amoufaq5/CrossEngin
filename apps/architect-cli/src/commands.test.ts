@@ -2,6 +2,16 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type {
+  CompletionChunk,
+  CompletionRequest,
+  EmbeddingRequest,
+  EmbeddingResponse,
+  LlmProvider,
+  ProviderCapabilities,
+  ProviderPricing,
+  Region,
+} from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import { parseArgs, type ParsedCommand } from "./cli.js";
@@ -17,7 +27,9 @@ import {
 } from "./commands.js";
 import { emptyManifest, type Manifest } from "./manifest-io.js";
 
-function buffers(): { ctx: RunContext; out: () => string; err: () => string } {
+function buffers(
+  overrides: Partial<RunContext> = {},
+): { ctx: RunContext; out: () => string; err: () => string } {
   const out: string[] = [];
   const err: string[] = [];
   const ctx: RunContext = {
@@ -25,9 +37,40 @@ function buffers(): { ctx: RunContext; out: () => string; err: () => string } {
       stdout: { write: (chunk: string) => out.push(chunk) },
       stderr: { write: (chunk: string) => err.push(chunk) },
     },
-    env: {},
+    env: overrides.env ?? {},
+    stdin: overrides.stdin,
+    providerOverride: overrides.providerOverride,
   };
   return { ctx, out: () => out.join(""), err: () => err.join("") };
+}
+
+class StubProvider implements LlmProvider {
+  readonly id = "stub";
+  readonly models: readonly string[] = ["stub-1"];
+  readonly capabilities: ProviderCapabilities = {
+    chat: true,
+    streaming: true,
+    toolUse: false,
+    jsonMode: false,
+    embedding: false,
+    maxContextTokens: 100_000,
+    supportsThinking: false,
+  };
+  readonly residency: readonly Region[] = ["us"];
+  readonly pricing: ProviderPricing = {
+    inputPerMillionTokens: 1,
+    outputPerMillionTokens: 2,
+  };
+
+  constructor(private readonly chunks: readonly CompletionChunk[]) {}
+
+  async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    for (const chunk of this.chunks) yield chunk;
+  }
+
+  async embed(_req: EmbeddingRequest): Promise<EmbeddingResponse> {
+    throw new Error("not implemented");
+  }
 }
 
 async function tempDir(): Promise<string> {
@@ -234,12 +277,128 @@ describe("runPatch", () => {
 });
 
 describe("runChat", () => {
-  it("prints the M5.5 deferral message", async () => {
-    const { ctx, out } = buffers();
+  it("returns exit 1 with helpful error when ANTHROPIC_API_KEY is missing", async () => {
+    const { ctx, err } = buffers({ env: {} });
+    const code = await runChat(parsed("chat"), ctx);
+    expect(code).toBe(1);
+    expect(err()).toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("returns exit 2 when --model is not an Anthropic model", async () => {
+    const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+    const code = await runChat(parsed("chat", "--model=gpt-4", "--prompt=hi"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("unsupported model");
+  });
+
+  it("returns exit 2 when --max-tokens is not a positive number", async () => {
+    const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+    const code = await runChat(parsed("chat", "--max-tokens=not-a-number"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --max-tokens");
+  });
+
+  it("runs a one-shot turn against the injected provider", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "Hi!" },
+      {
+        kind: "usage_final",
+        usage: { inputTokens: 8, outputTokens: 3, cost: 0.000033 },
+      },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(parsed("chat", "--prompt=hi"), ctx);
+    expect(code).toBe(0);
+    expect(out()).toContain("Hi!");
+    expect(out()).toContain("Aggregate tokens in=8 out=3");
+  });
+
+  it("emits a JSON summary in --format=json", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "ok" },
+      {
+        kind: "usage_final",
+        usage: { inputTokens: 1, outputTokens: 1, cost: 0.000001 },
+      },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(parsed("chat", "--prompt=hi", "--format=json"), ctx);
+    expect(code).toBe(0);
+    const text = out();
+    const marker = text.indexOf("\n{\n");
+    expect(marker).toBeGreaterThanOrEqual(0);
+    const last = JSON.parse(text.slice(marker + 1)) as {
+      ok: boolean;
+      turns: number;
+      aggregateUsage: { inputTokens: number; cost: number };
+    };
+    expect(last.ok).toBe(true);
+    expect(last.turns).toBe(1);
+    expect(last.aggregateUsage.inputTokens).toBe(1);
+  });
+
+  it("uses stdin lines for the REPL when no --prompt is given", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "answer" },
+      {
+        kind: "usage_final",
+        usage: { inputTokens: 5, outputTokens: 2, cost: 0.000007 },
+      },
+    ]);
+    const stdin = (async function* () {
+      yield "ask one thing";
+    })();
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+      stdin,
+    });
     const code = await runChat(parsed("chat"), ctx);
     expect(code).toBe(0);
-    expect(out()).toContain("not implemented in M5");
-    expect(out()).toContain("M5.5");
+    expect(out()).toContain("answer");
+    expect(out()).toContain("Aggregate tokens in=5 out=2");
+  });
+
+  it("reads --system-file when supplied", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "system.txt");
+    await writeFile(path, "You are a banana.", "utf8");
+    const provider = new StubProvider([
+      { kind: "text", text: "yes" },
+      {
+        kind: "usage_final",
+        usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+      },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--system-file", path),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("yes");
+  });
+
+  it("returns exit 1 when --system-file does not exist", async () => {
+    const { ctx, err } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: new StubProvider([]),
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--system-file=/nonexistent/x.txt"),
+      ctx,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("--system-file");
   });
 });
 

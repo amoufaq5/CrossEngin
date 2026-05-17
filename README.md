@@ -1,16 +1,17 @@
 # CrossEngin
 
 > **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 +
-> M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M6 landed. The four
-> runtime pillars (DDL + crypto + workflows + gateway) are in
-> place; both impure runtimes have Postgres-backed adapters; the
-> first binary `crossengin` ships with init / validate / diff /
-> patch / hash / apply / chat / version / help; M6 closed the
-> HTTP-webhook → workflow-signal chain via the signal bridge;
-> M2.7 added a real Anthropic Messages API client so the
-> Architect agent has a working backend with token-accurate cost.
-> **48 packages + 1 app, 115 meta-schema tables, 5,552 tests**,
-> all green, zero type errors. ADRs 0001–0053 fully drafted. M1
+> M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M6 landed. The
+> four runtime pillars (DDL + crypto + workflows + gateway) are
+> in place; both impure runtimes have Postgres-backed adapters;
+> the first binary `crossengin` ships with init / validate /
+> diff / patch / hash / apply / chat / version / help and
+> `crossengin chat` now talks to Claude end-to-end via the M2.7
+> Anthropic client (streaming tokens, USD cost, REPL or
+> one-shot); M6 closed the HTTP-webhook → workflow-signal chain
+> via the signal bridge.
+> **48 packages + 1 app, 115 meta-schema tables, 5,580 tests**,
+> all green, zero type errors. ADRs 0001–0054 fully drafted. M1
 > added `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
@@ -94,7 +95,7 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0053
+│   └── adr/          ADRs 0001-0054
 ├── apps/             1 workspace app  (architect-cli)
 ├── packages/         48 workspace packages
 ├── apps/             user-facing applications          [pending]
@@ -115,7 +116,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 53 architecture decisions.
+running index of 54 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at

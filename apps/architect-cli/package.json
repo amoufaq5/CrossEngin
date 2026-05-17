@@ -24,6 +24,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/ai-providers": "workspace:*",
+    "@crossengin/ai-providers-anthropic": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "zod": "^3.23.0"

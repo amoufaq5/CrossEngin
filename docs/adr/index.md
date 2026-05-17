@@ -56,13 +56,14 @@
 | [0051](0051-architect-cli.md) | Architect CLI (Phase 2 M5) | 2 | Proposed | 2026-05-16 |
 | [0052](0052-workflow-signal-bridge.md) | Workflow signal bridge (Phase 2 M6) | 2 | Proposed | 2026-05-16 |
 | [0053](0053-anthropic-provider-client.md) | Real Anthropic provider client (Phase 2 M2.7) | 2 | Proposed | 2026-05-17 |
+| [0054](0054-architect-cli-chat-mode.md) | Architect CLI chat mode (Phase 2 M5.5) | 2 | Proposed | 2026-05-17 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024, 0046.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -105,3 +106,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 25 | 0051 | 4,000 | Drafted alongside `apps/architect-cli` (Phase 2 M5) |
 | 26 | 0052 | 4,000 | Drafted alongside `@crossengin/workflow-signal-bridge` package (Phase 2 M6) |
 | 27 | 0053 | 4,000 | Drafted alongside `@crossengin/ai-providers-anthropic` package (Phase 2 M2.7) |
+| 28 | 0054 | 3,500 | Drafted alongside `architect-cli` chat mode (Phase 2 M5.5) |
