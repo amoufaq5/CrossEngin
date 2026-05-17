@@ -2,21 +2,23 @@
 
 > **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 +
 > M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 +
-> M5.8 + M6 landed. The four runtime pillars (DDL + crypto +
-> workflows + gateway) are in place; both impure runtimes have
-> Postgres-backed adapters; the first binary `crossengin` ships
-> with init / validate / diff / patch / hash / apply / chat /
-> version / help; `crossengin chat` talks to Claude end-to-end
-> (streaming tokens, USD cost, REPL or one-shot), can dispatch
-> read tools mid-turn (validate / hash / diff / summarize /
-> optional read_file), propose manifest writes with
+> M5.8 + M6 + M7 landed. The four runtime pillars (DDL + crypto
+> + workflows + gateway) are in place; both impure runtimes
+> have Postgres-backed adapters; the first binary `crossengin`
+> ships with init / validate / diff / patch / hash / apply /
+> chat / version / help; `crossengin chat` talks to Claude
+> end-to-end (streaming tokens, USD cost, REPL or one-shot),
+> can dispatch read tools mid-turn (validate / hash / diff /
+> summarize / optional read_file), propose manifest writes with
 > human-in-the-loop approval (`--allow-file-write`), AND
 > persist the full session / messages / tool invocations /
 > proposals to Postgres with `--persist` for full audit; M6
 > closed the HTTP-webhook → workflow-signal chain via the signal
-> bridge.
-> **49 packages + 1 app, 119 meta-schema tables, 5,671 tests**,
-> all green, zero type errors. ADRs 0001–0057 fully drafted. M1
+> bridge; M7 shipped the first vertical pack
+> (`@crossengin/pack-erp-core`) proving the substrate holds up
+> under a real schema.
+> **50 packages + 1 app, 119 meta-schema tables, 5,717 tests**,
+> all green, zero type errors. ADRs 0001–0058 fully drafted. M1
 > added `kernel-pg` (Postgres-backed migration applier). M2 added
 > `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
 > per-tenant key store). M2.5 + M2.6 wired crypto into six
@@ -83,6 +85,7 @@ Quick map by concern:
   `migration`, `ml-training`.
 - **Audit + compliance ops.** `incident-response`, `forensics`,
   `access-reviews`, `data-lineage`.
+- **Vertical packs.** `pack-erp-core`.
 
 Three compliance triangles closed at the contract layer:
 - **Privacy.** `tenant-lifecycle` (GDPR Art. 17 deletion) +
@@ -100,9 +103,9 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0057
+│   └── adr/          ADRs 0001-0058
 ├── apps/             1 workspace app  (architect-cli)
-├── packages/         49 workspace packages
+├── packages/         50 workspace packages
 ├── apps/             user-facing applications          [pending]
 ├── manifests/        declarative app packs             [pending]
 ├── infra/            terraform + helm + docker         [pending]
@@ -121,7 +124,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 57 architecture decisions.
+running index of 58 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at

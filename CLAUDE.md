@@ -14,9 +14,22 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 landed:
-**49 packages + 1 app, 119 meta-schema tables, 5,671 tests**,
-all green, no type errors. M5.7 added chat persistence:
+M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M7
+landed: **50 packages + 1 app, 119 meta-schema tables, 5,717
+tests**, all green, no type errors. M7 shipped the first
+vertical pack — `@crossengin/pack-erp-core`: a real Manifest
+with 4 entities (Account, Contact, Invoice, InvoiceLine all
+on the `auditable` trait), 3 relations (Account→Contacts
+cascade, Invoice→Account restrict, Invoice→Lines cascade),
+3 roles (erp_admin / erp_accountant / erp_viewer), per-entity
+permissions including transition grants, an entityLifecycle
+workflow for Invoice (draft → sent → paid|overdue|void with
+a 30-day SLA), 2 jobs (scheduled overdue-invoice-reminder +
+event-driven payment-received-handler), 2 list views. The
+`buildErpCorePack(opts)` builder returns the full Manifest;
+`tryValidateManifest` passes — every cross-reference resolves,
+proving the kernel's abstractions hold up under a real schema.
+M5.7 added chat persistence:
 `@crossengin/ai-architect-pg` ships
 `PostgresArchitectSessionStore` / `…MessageStore` /
 `…ToolInvocationStore` / `…ProposalStore` plus a
@@ -133,7 +146,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0057 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0058 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -143,7 +156,8 @@ ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
 ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
 M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
 human-in-the-loop approval), ADR-0057 covers M5.7 (chat
-persistence to META_ARCHITECT_*).
+persistence to META_ARCHITECT_*), ADR-0058 covers M7
+(`pack-erp-core` — first vertical pack).
 
 ## Architecture in 90 seconds
 
@@ -394,6 +408,21 @@ re-exporting everything.
   categories, template + audience + preference/suppression
   contracts, dispatch + delivery audit with retry/throttle/digest
   + quiet-hours decisions.
+
+### Vertical packs
+- **`pack-erp-core`** — first vertical pack. Declarative
+  `Manifest` with 4 entities (Account, Contact, Invoice,
+  InvoiceLine on the `auditable` trait), 3 relations, 3 roles
+  (erp_admin / erp_accountant / erp_viewer), per-entity
+  permissions + transition grants, an entityLifecycle workflow
+  for Invoice (draft → sent → paid|overdue|void with `mark_paid`
+  reachable from both sent + overdue; 30-day SLA on sent→paid),
+  2 jobs (scheduled cron overdue-invoice-reminder +
+  event-triggered payment-received-handler), 2 list views.
+  `buildErpCorePack(opts?)` returns the full Manifest; passes
+  `tryValidateManifest` end-to-end. Pattern for future
+  `pack-erp-healthcare` / `pack-erp-retail` / etc. that extend
+  via `meta.extends: ["operate-erp/core"]`.
 
 ### Business operations
 - **`billing`** — plans, subscriptions, metered usage, invoices,
@@ -715,6 +744,17 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M7):** the first vertical pack.
+`@crossengin/pack-erp-core` ships a real Manifest that exercises
+every kernel cross-validator. The substrate is now proven —
+entities, relations, roles, permissions, workflows, jobs, and
+views all resolve correctly under a realistic ERP schema. The
+Architect agent has a concrete starting point: `buildErpCorePack
+(opts)` returns a working Manifest a developer can validate +
+hash + apply via the existing CLI flow. Pattern set for future
+verticals (healthcare, retail, construction): same module shape,
+same cross-validators, optional `meta.extends` lineage.
+
 **No longer deferred (as of M5.7):** chat audit trail. The new
 `@crossengin/ai-architect-pg` package persists every chat
 session, message, tool invocation, and write proposal to four
@@ -782,7 +822,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0057 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0058 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -795,7 +835,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 (architect-cli chat mode), ADR-0055 covers Phase 2 M5.6
 (architect-cli tool-driven chat), ADR-0056 covers Phase 2
 M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
-M5.7 (chat persistence to META_ARCHITECT_*). When you ship a
-new package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
-0026-0037 batch.
+M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
+Phase 2 M7 (`pack-erp-core`). When you ship a new package,
+write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.
