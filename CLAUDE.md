@@ -13,12 +13,33 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 landed: **51 packages + 1 app, 119 meta-schema tables, 5,768
-tests**, all green, no type errors. M6.5 added
-`@crossengin/ai-router` — the orchestration layer between
-consumers and `LlmProvider` implementations. 5 modules: retry
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
+M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
+M6.5 + M7 landed: **52 packages + 1 app, 119 meta-schema tables,
+5,842 tests**, all green, no type errors. M2.8 added
+`@crossengin/ai-providers-openai` — the second concrete
+`LlmProvider`, mirroring M2.7's Anthropic structure. 6 modules:
+pricing (5 chat models + 2 embedding models with current
+per-token + cached + output rates), chat-api (Chat Completions
+request builder + response normalizer with `LlmMessage.toolUses`
+→ `tool_calls` translation), streaming (SSE parser for OpenAI's
+indexed-tool-call delta format; `delta.tool_calls[i].index`
+identifies a call across deltas; usage from the final
+`stream_options.include_usage` chunk), embeddings (the FIRST
+real `embed()` implementation — buildEmbeddingsRequest +
+normalizeEmbeddingResponse with sorted-by-index vectors + dim),
+errors (11 typed kinds matching Anthropic's shape so the
+router's `isRetryable()` check works uniformly across
+providers), provider (`OpenAIProvider.complete()` streaming +
+`completeNonStreaming()` + `embed()`; rejects embedding model
+in `complete()` and chat model in `embed()`). Zero runtime
+deps — pure `fetch` + `ReadableStream`. The router can now
+chain Anthropic + OpenAI with real fallback semantics; the
+chat substrate can route `--task=summarizer` to gpt-4o-mini
+($0.15/M) for cheap operations while keeping authoring on
+Claude. Embeddings finally have a real backend.
+M6.5 added `@crossengin/ai-router` — the orchestration layer
+between consumers and `LlmProvider` implementations. 5 modules: retry
 (exponential backoff + isRetryable check + withRetry wrapper),
 cost-tracker (CostCeiling interface + InMemoryCostTracker with
 rolling per-tenant windows + CostCeilingExceededError),
@@ -162,7 +183,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0059 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0060 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -174,7 +195,9 @@ M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
 human-in-the-loop approval), ADR-0057 covers M5.7 (chat
 persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`pack-erp-core` — first vertical pack), ADR-0059 covers M6.5
-(`ai-router` — provider router with retry / cost / latency).
+(`ai-router` — provider router with retry / cost / latency),
+ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
++ embeddings + tool calls).
 
 ## Architecture in 90 seconds
 
@@ -357,7 +380,33 @@ re-exporting everything.
   / `ProviderResolutionError` / `AllProvidersExhaustedError` —
   all non-retryable, so the router doesn't loop on them.
 - **`ai-providers-anthropic`** — real Anthropic Messages API
-  client implementing `LlmProvider`. Zero runtime deps (pure
+  client implementing `LlmProvider`.
+- **`ai-providers-openai`** — real OpenAI Chat Completions +
+  Embeddings client implementing `LlmProvider`. Zero runtime
+  deps (`fetch` + `ReadableStream`). 6 modules: pricing
+  (gpt-4o / gpt-4o-mini / gpt-4-turbo / o1 / o1-mini for chat;
+  text-embedding-3-small / text-embedding-3-large for
+  embeddings; per-token + cached input + output rates with
+  6-decimal cost rounding), chat-api (Chat Completions request
+  builder translating `LlmMessage.toolUses` → OpenAI's
+  `tool_calls` array; assistant.content goes to `null` when
+  paired with tool calls and no text), streaming (SSE parser
+  for the indexed-tool-call delta format — `tool_calls[i].
+  index` identifies a call across deltas; arguments come as
+  streamed JSON string fragments; usage from the final
+  `stream_options.include_usage` chunk), embeddings (the FIRST
+  real `embed()` implementation in the workspace; sorts vectors
+  by index + derives `dim`), errors (11 typed kinds with same
+  `isRetryable()` shape as Anthropic so the router treats them
+  uniformly; maps `rate_limit_exceeded` + `service_unavailable`
+  to the platform vocabulary), provider (`OpenAIProvider.
+  complete()` + `completeNonStreaming()` + `embed()`; type
+  guards reject embedding-model-in-chat and chat-model-in-embed
+  locally; optional `openai-organization` + `openai-project`
+  headers for enterprise routing). Capabilities `{embedding:
+  true, jsonMode: true, supportsThinking: false}` — the
+  complement of Anthropic's, so the router can route embedding
+  tasks to OpenAI automatically. Zero runtime deps (pure
   `fetch` + `ReadableStream`). 5 modules: pricing (5 Claude 4.x
   models with per-token + cached + cache-write rates, USD cost
   rounded to 6 decimals), messages-api (request builder
@@ -773,6 +822,20 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M2.8):** the second real LLM
+provider + embeddings. `@crossengin/ai-providers-openai`
+covers OpenAI's Chat Completions (gpt-4o family + o1 family)
+and Embeddings (text-embedding-3 family) APIs end-to-end. The
+M5.6 `LlmMessage.toolUses` extension translates cleanly into
+OpenAI's `tool_calls` format with no schema changes — proving
+the cross-provider pattern. The router (M6.5) now has two
+real providers to route between; embeddings have a real
+backend for the first time. Operators can configure
+`taskPolicies.summarizer = { primary: "openai/gpt-4o-mini",
+fallback: ["anthropic/claude-haiku-4-5"] }` to drop cheap
+summarization to a $0.15/M model while keeping authoring on
+Claude.
+
 **No longer deferred (as of M6.5):** policy routing across
 providers. `@crossengin/ai-router` lets a consumer hand off a
 `CompletionRequest` and get back a stream with: provider chosen
@@ -864,7 +927,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0059 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0060 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -879,7 +942,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
 M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
 Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
-(`ai-router`). When you ship a new package,
+(`ai-router`), ADR-0060 covers Phase 2 M2.8
+(`ai-providers-openai`). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

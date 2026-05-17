@@ -1,0 +1,278 @@
+import type {
+  CompletionChunk,
+  CompletionRequest,
+  EmbeddingRequest,
+  EmbeddingResponse,
+  LlmProvider,
+  ProviderCapabilities,
+  ProviderPricing,
+  Region,
+} from "@crossengin/ai-providers";
+
+import {
+  buildOpenAIChatRequest,
+  extractTextFromResponse,
+  extractToolCallsFromResponse,
+  normalizeChatUsage,
+  type OpenAIChatResponse,
+} from "./chat-api.js";
+import {
+  buildEmbeddingsRequest,
+  normalizeEmbeddingResponse,
+  type OpenAIEmbeddingsResponse,
+} from "./embeddings.js";
+import { OpenAIError, fromHttpResponse, fromNetworkError } from "./errors.js";
+import {
+  OPENAI_CHAT_PRICING,
+  OPENAI_DEFAULT_CHAT_MODEL,
+  OPENAI_DEFAULT_EMBEDDING_MODEL,
+  isOpenAIChatModel,
+  isOpenAIEmbeddingModel,
+  isOpenAIModel,
+  type OpenAIChatModel,
+  type OpenAIEmbeddingModel,
+} from "./pricing.js";
+import { readSseStream } from "./streaming.js";
+
+export const OPENAI_API_BASE_URL = "https://api.openai.com";
+
+export type FetchLike = (
+  url: string,
+  init: {
+    method: string;
+    headers: Record<string, string>;
+    body: string;
+    signal?: AbortSignal;
+  },
+) => Promise<{
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+  body: ReadableStream<Uint8Array> | null;
+}>;
+
+export interface OpenAIProviderOptions {
+  readonly apiKey: string;
+  readonly defaultChatModel?: OpenAIChatModel;
+  readonly defaultEmbeddingModel?: OpenAIEmbeddingModel;
+  readonly defaultMaxTokens?: number;
+  readonly baseUrl?: string;
+  readonly organization?: string;
+  readonly project?: string;
+  readonly residency?: readonly Region[];
+  readonly fetch?: FetchLike;
+}
+
+const PROVIDER_ID = "openai";
+
+export class OpenAIProvider implements LlmProvider {
+  readonly id = PROVIDER_ID;
+  readonly models: readonly string[];
+  readonly capabilities: ProviderCapabilities = {
+    chat: true,
+    streaming: true,
+    toolUse: true,
+    jsonMode: true,
+    embedding: true,
+    maxContextTokens: 128_000,
+    supportsThinking: false,
+  };
+  readonly residency: readonly Region[];
+  readonly pricing: ProviderPricing;
+
+  private readonly apiKey: string;
+  private readonly defaultChatModel: OpenAIChatModel;
+  private readonly defaultEmbeddingModel: OpenAIEmbeddingModel;
+  private readonly defaultMaxTokens: number | undefined;
+  private readonly baseUrl: string;
+  private readonly organization: string | undefined;
+  private readonly project: string | undefined;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: OpenAIProviderOptions) {
+    if (opts.apiKey.length === 0) {
+      throw new Error("OpenAIProvider: apiKey is required");
+    }
+    const chatModel = opts.defaultChatModel ?? OPENAI_DEFAULT_CHAT_MODEL;
+    if (!isOpenAIChatModel(chatModel)) {
+      throw new Error(`OpenAIProvider: unsupported defaultChatModel ${chatModel}`);
+    }
+    const embedModel = opts.defaultEmbeddingModel ?? OPENAI_DEFAULT_EMBEDDING_MODEL;
+    if (!isOpenAIEmbeddingModel(embedModel)) {
+      throw new Error(`OpenAIProvider: unsupported defaultEmbeddingModel ${embedModel}`);
+    }
+    this.apiKey = opts.apiKey;
+    this.defaultChatModel = chatModel;
+    this.defaultEmbeddingModel = embedModel;
+    this.defaultMaxTokens = opts.defaultMaxTokens;
+    this.baseUrl = opts.baseUrl ?? OPENAI_API_BASE_URL;
+    this.organization = opts.organization;
+    this.project = opts.project;
+    this.fetchImpl = opts.fetch ?? (globalThis.fetch as FetchLike);
+    this.models = [
+      ...Object.keys(OPENAI_CHAT_PRICING),
+      "text-embedding-3-small",
+      "text-embedding-3-large",
+    ];
+    this.residency = opts.residency ?? ["us", "eu"];
+    const p = OPENAI_CHAT_PRICING[this.defaultChatModel];
+    this.pricing = {
+      inputPerMillionTokens: p.inputUsdPerMillion,
+      outputPerMillionTokens: p.outputUsdPerMillion,
+      cachedInputPerMillionTokens: p.cachedInputUsdPerMillion,
+    };
+  }
+
+  async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    const model = this.resolveChatModel(req.model);
+    const built = buildOpenAIChatRequest(req, {
+      defaultModel: this.defaultChatModel,
+      defaultMaxTokens: this.defaultMaxTokens,
+      stream: true,
+    });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/chat/completions"), {
+        method: "POST",
+        headers: this.headers({ stream: true }),
+        body: JSON.stringify(built),
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    if (response.body === null) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: "OpenAI streaming response had no body",
+        status: response.status,
+      });
+    }
+    yield* readSseStream(response.body, model);
+  }
+
+  async completeNonStreaming(req: CompletionRequest): Promise<OpenAIChatResponse> {
+    const built = buildOpenAIChatRequest(req, {
+      defaultModel: this.defaultChatModel,
+      defaultMaxTokens: this.defaultMaxTokens,
+      stream: false,
+    });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/chat/completions"), {
+        method: "POST",
+        headers: this.headers({ stream: false }),
+        body: JSON.stringify(built),
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as OpenAIChatResponse;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
+    const model = this.resolveEmbeddingModel(req.model);
+    const built = buildEmbeddingsRequest({ texts: req.texts, model });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/embeddings"), {
+        method: "POST",
+        headers: this.headers({ stream: false }),
+        body: JSON.stringify(built),
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    let raw: OpenAIEmbeddingsResponse;
+    try {
+      raw = JSON.parse(text) as OpenAIEmbeddingsResponse;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI embeddings response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+    return normalizeEmbeddingResponse(model, raw);
+  }
+
+  private resolveChatModel(requested: string | undefined): OpenAIChatModel {
+    if (requested === undefined) return this.defaultChatModel;
+    if (!isOpenAIModel(requested)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `OpenAI provider does not support model: ${requested}`,
+      });
+    }
+    if (!isOpenAIChatModel(requested)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `model ${requested} is not a chat model — use embed() instead`,
+      });
+    }
+    return requested;
+  }
+
+  private resolveEmbeddingModel(requested: string | undefined): OpenAIEmbeddingModel {
+    if (requested === undefined) return this.defaultEmbeddingModel;
+    if (!isOpenAIModel(requested)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `OpenAI provider does not support model: ${requested}`,
+      });
+    }
+    if (!isOpenAIEmbeddingModel(requested)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `model ${requested} is not an embedding model — use complete() instead`,
+      });
+    }
+    return requested;
+  }
+
+  private url(path: string): string {
+    return `${this.baseUrl}${path}`;
+  }
+
+  private headers(opts: { stream: boolean }): Record<string, string> {
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${this.apiKey}`,
+      "content-type": "application/json",
+    };
+    if (this.organization !== undefined) {
+      headers["openai-organization"] = this.organization;
+    }
+    if (this.project !== undefined) {
+      headers["openai-project"] = this.project;
+    }
+    headers["accept"] = opts.stream ? "text/event-stream" : "application/json";
+    return headers;
+  }
+}
+
+export function summarizeChatResponse(response: OpenAIChatResponse, model: OpenAIChatModel) {
+  return {
+    text: extractTextFromResponse(response),
+    toolCalls: extractToolCallsFromResponse(response),
+    finishReason: response.choices[0]?.finish_reason ?? null,
+    usage: normalizeChatUsage(model, response.usage),
+  };
+}
