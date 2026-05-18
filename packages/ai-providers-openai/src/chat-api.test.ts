@@ -276,3 +276,120 @@ describe("extractToolCallsFromResponse", () => {
     expect(extractToolCallsFromResponse(response)).toEqual([]);
   });
 });
+
+describe("buildOpenAIChatRequest — image attachments (M2.X)", () => {
+  it("emits content as a [{type:text}, {type:image_url}] array for a user message with one image", () => {
+    const req = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: "what is this?",
+            attachments: [
+              { kind: "image", format: "png", bytes: "iVBORw0KGgo..." },
+            ],
+          },
+        ],
+        tenantId: "t",
+        sessionId: "s",
+      },
+      { defaultModel: "gpt-4o-mini" },
+    );
+    expect(req.messages).toHaveLength(1);
+    const userMsg = req.messages[0]!;
+    expect(userMsg.role).toBe("user");
+    const content = userMsg.content as ReadonlyArray<Record<string, unknown>>;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content).toHaveLength(2);
+    expect(content[0]).toEqual({ type: "text", text: "what is this?" });
+    expect(content[1]).toEqual({
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,iVBORw0KGgo..." },
+    });
+  });
+
+  it("preserves string content when no attachments are supplied", () => {
+    const req = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [{ role: "user", content: "hello" }],
+        tenantId: "t",
+        sessionId: "s",
+      },
+      { defaultModel: "gpt-4o-mini" },
+    );
+    expect(req.messages[0]!.content).toBe("hello");
+  });
+
+  it("emits image-only content array (no text part) when content is empty", () => {
+    const req = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: "",
+            attachments: [{ kind: "image", format: "jpeg", bytes: "/9j/4AAQ" }],
+          },
+        ],
+        tenantId: "t",
+        sessionId: "s",
+      },
+      { defaultModel: "gpt-4o-mini" },
+    );
+    const content = req.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
+    expect(content).toHaveLength(1);
+    expect(content[0]).toEqual({
+      type: "image_url",
+      image_url: { url: "data:image/jpeg;base64,/9j/4AAQ" },
+    });
+  });
+
+  it("translates each format into the correct data URL media-type", () => {
+    for (const format of ["png", "jpeg", "gif", "webp"] as const) {
+      const req = buildOpenAIChatRequest(
+        {
+          task: "planner",
+          messages: [
+            {
+              role: "user",
+              content: "x",
+              attachments: [{ kind: "image", format, bytes: "abc" }],
+            },
+          ],
+          tenantId: "t",
+          sessionId: "s",
+        },
+        { defaultModel: "gpt-4o-mini" },
+      );
+      const content = req.messages[0]!.content as ReadonlyArray<{ image_url?: { url: string } }>;
+      expect(content[1]!.image_url!.url).toBe(`data:image/${format};base64,abc`);
+    }
+  });
+});
+
+describe("extractTextFromResponse — content-part arrays (M2.X)", () => {
+  it("joins text parts and ignores image_url parts in a content-part response", () => {
+    const out = extractTextFromResponse({
+      id: "msg",
+      model: "gpt-4o",
+      object: "chat.completion",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "I see " },
+              { type: "text", text: "a cat" },
+            ],
+          },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 },
+    });
+    expect(out).toBe("I see a cat");
+  });
+});

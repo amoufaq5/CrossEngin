@@ -254,6 +254,7 @@ function unionCapabilities(providers: readonly LlmProvider[]): ProviderCapabilit
       embedding: false,
       maxContextTokens: 0,
       supportsThinking: false,
+      vision: false,
     };
   }
   return {
@@ -264,6 +265,7 @@ function unionCapabilities(providers: readonly LlmProvider[]): ProviderCapabilit
     embedding: providers.some((p) => p.capabilities.embedding),
     maxContextTokens: Math.max(...providers.map((p) => p.capabilities.maxContextTokens)),
     supportsThinking: providers.some((p) => p.capabilities.supportsThinking),
+    vision: providers.some((p) => p.capabilities.vision),
   };
 }
 

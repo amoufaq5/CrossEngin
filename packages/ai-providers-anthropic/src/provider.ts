@@ -52,6 +52,7 @@ export class AnthropicProvider implements LlmProvider {
     embedding: false,
     maxContextTokens: 200_000,
     supportsThinking: true,
+    vision: true,
   };
   readonly residency: readonly Region[];
   readonly pricing: ProviderPricing;

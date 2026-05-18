@@ -17,6 +17,7 @@ const DEFAULT_CAPABILITIES: ProviderCapabilities = {
   embedding: true,
   maxContextTokens: 128_000,
   supportsThinking: false,
+  vision: false,
 };
 
 const DEFAULT_PRICING: ProviderPricing = {

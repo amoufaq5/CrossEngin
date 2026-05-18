@@ -297,3 +297,94 @@ describe("extractToolCalls", () => {
     expect(extractToolCalls(response)).toEqual([]);
   });
 });
+
+describe("buildAnthropicRequest — image attachments (M2.X)", () => {
+  it("emits content as a [{type:text}, {type:image}] array for a user message with one image", () => {
+    const req = buildAnthropicRequest({
+      task: "planner",
+      messages: [
+        {
+          role: "user",
+          content: "what is this?",
+          attachments: [
+            { kind: "image", format: "png", bytes: "iVBORw0KGgo..." },
+          ],
+        },
+      ],
+      tenantId: "t",
+      sessionId: "s",
+    }, { defaultModel: "claude-sonnet-4-6" });
+    expect(req.messages).toHaveLength(1);
+    const userMsg = req.messages[0]!;
+    expect(userMsg.role).toBe("user");
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    const blocks = userMsg.content as ReadonlyArray<Record<string, unknown>>;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ type: "text", text: "what is this?" });
+    expect(blocks[1]).toEqual({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/png",
+        data: "iVBORw0KGgo...",
+      },
+    });
+  });
+
+  it("emits content as a string when no attachments are present (backward compat)", () => {
+    const req = buildAnthropicRequest({
+      task: "planner",
+      messages: [{ role: "user", content: "hello" }],
+      tenantId: "t",
+      sessionId: "s",
+    }, { defaultModel: "claude-sonnet-4-6" });
+    expect(req.messages[0]!.content).toBe("hello");
+  });
+
+  it("skips the text block when content is empty (image-only prompt)", () => {
+    const req = buildAnthropicRequest({
+      task: "planner",
+      messages: [
+        {
+          role: "user",
+          content: "",
+          attachments: [
+            { kind: "image", format: "webp", bytes: "abc" },
+          ],
+        },
+      ],
+      tenantId: "t",
+      sessionId: "s",
+    }, { defaultModel: "claude-sonnet-4-6" });
+    const blocks = req.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/webp",
+        data: "abc",
+      },
+    });
+  });
+
+  it("translates jpeg / gif / webp formats to the correct media_type", () => {
+    for (const format of ["png", "jpeg", "gif", "webp"] as const) {
+      const req = buildAnthropicRequest({
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: "x",
+            attachments: [{ kind: "image", format, bytes: "abc" }],
+          },
+        ],
+        tenantId: "t",
+        sessionId: "s",
+      }, { defaultModel: "claude-sonnet-4-6" });
+      const blocks = req.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
+      const imageBlock = blocks[1] as { source: { media_type: string } };
+      expect(imageBlock.source.media_type).toBe(`image/${format}`);
+    }
+  });
+});

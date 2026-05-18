@@ -109,6 +109,7 @@ export class BedrockProvider implements LlmProvider {
     embedding: true,
     maxContextTokens: 200_000,
     supportsThinking: false,
+    vision: true,
   };
   readonly residency: readonly Region[];
   readonly pricing: ProviderPricing;

@@ -14,12 +14,44 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 +
-M4.6 + M4.7 + M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
-M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 +
-M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app, 119
-meta-schema tables, 6,396 tests**, all green, no type errors.
-M2.9.7 closed M2.9.5 Q6 by shipping Bedrock multimodal
+M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4 +
+M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 +
+M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5
++ M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app,
+119 meta-schema tables, 6,425 tests**, all green, no type
+errors. M2.X closed M2.9.7 Q1 by extending the kernel
+`LlmMessage` schema with `attachments?: MessageAttachment[]`
+and threading vision content blocks through all three real
+providers. New types in `@crossengin/ai-providers/src/types.ts`:
+`IMAGE_ATTACHMENT_FORMATS = [png, jpeg, gif, webp]`,
+`ImageAttachmentSchema`, `MessageAttachmentSchema`
+(discriminated union on `kind`; only `"image"` today, but
+audio/video/document slot in cleanly), `imageMediaType(format)`
+helper. `LlmMessageSchema.superRefine` rejects attachments on
+non-user roles at parse time. `ProviderCapabilitiesSchema`
+gains `vision: z.boolean().default(false)`. All three real
+providers flip `vision: true`; mock provider keeps false.
+Provider translators wired:
+`@crossengin/ai-providers-anthropic/messages-api.ts` user
+branch emits `content: [{type: text}, {type: image, source:
+{type: base64, media_type: image/<format>, data}}]` when
+attachments present, falls back to string content otherwise;
+`AnthropicContentBlock` discriminated union grows the image
+variant. `@crossengin/ai-providers-openai/chat-api.ts`
+`OpenAIChatMessage.content` widens to `string | null |
+OpenAIContentPart[]`; user branch emits
+`[{type: text}, {type: image_url, image_url: {url:
+data:image/<format>;base64,<bytes>}}]`;
+`extractTextFromResponse` joins text parts + ignores image_url
+parts on content-part responses (forward-compat for vision
+model outputs). `@crossengin/ai-providers-bedrock/converse-
+api.ts` user branch appends `BedrockImageContentBlock` entries
+(the type already existed from M2.9.7) — kernel-side
+attachments now flow into the Bedrock builder's content array.
+Router's `unionCapabilities` ORs `vision` across configured
+providers so the chat substrate sees the union flag. Backward
+compat: messages without attachments produce byte-identical
+provider requests; existing 6,396 tests unchanged. M2.9.7 closed M2.9.5 Q6 by shipping Bedrock multimodal
 embeddings (`amazon.titan-embed-image-v1`) + chat image content
 block types. Two new surfaces in `@crossengin/ai-providers-
 bedrock`, all additive, zero kernel changes. First — new
@@ -579,7 +611,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0077 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0078 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -615,7 +647,8 @@ hot-reload via SIGHUP + periodic refresh), ADR-0076 covers
 M2.9.6 (Bedrock cacheControl threading + Titan parallelism
 closing M2.9 Q3 + M2.9.5 Q4), ADR-0077 covers M2.9.7 (Bedrock
 multimodal embeddings + image content block types closing
-M2.9.5 Q6).
+M2.9.5 Q6), ADR-0078 covers M2.X (kernel LlmMessage.attachments
++ vision capability closing M2.9.7 Q1).
 
 ## Architecture in 90 seconds
 
@@ -1506,7 +1539,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0077 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0078 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1543,7 +1576,9 @@ JWT auth + routes subcommand), ADR-0075 covers Phase 2 M4.7.6
 (URL-fetched JWKS + SIGHUP/periodic hot-reload), ADR-0076
 covers Phase 2 M2.9.6 (Bedrock cacheControl + Titan
 parallelism), ADR-0077 covers Phase 2 M2.9.7 (Bedrock
-multimodal embeddings + chat image content block types). When
-you ship a new package, write the matching ADR in the same
-session, following `0000-template.md` and the style of the
-existing 0026-0037 batch.
+multimodal embeddings + chat image content block types),
+ADR-0078 covers Phase 2 M2.X (kernel LlmMessage.attachments
++ vision capability — multimodal chat across Anthropic +
+OpenAI + Bedrock). When you ship a new package, write the
+matching ADR in the same session, following `0000-template.md`
+and the style of the existing 0026-0037 batch.

@@ -5,6 +5,9 @@ import {
   CostTelemetryRecordSchema,
   EmbeddingRequestSchema,
   EmbeddingResponseSchema,
+  ImageAttachmentSchema,
+  LlmMessageSchema,
+  MessageAttachmentSchema,
   NormalizedCompletionSchema,
   ProviderCapabilitiesSchema,
   ProviderPricingSchema,
@@ -12,6 +15,7 @@ import {
   TaskKindSchema,
   TaskPolicySchema,
   TenantResidencySchema,
+  imageMediaType,
 } from "./types.js";
 
 describe("RegionSchema", () => {
@@ -58,8 +62,22 @@ describe("ProviderCapabilitiesSchema", () => {
       embedding: false,
       maxContextTokens: 200_000,
       supportsThinking: false,
+      vision: false,
     };
     expect(ProviderCapabilitiesSchema.parse(c)).toEqual(c);
+  });
+
+  it("defaults vision to false when omitted (M2.X backward compat)", () => {
+    const parsed = ProviderCapabilitiesSchema.parse({
+      chat: true,
+      toolUse: true,
+      streaming: true,
+      jsonMode: true,
+      embedding: false,
+      maxContextTokens: 200_000,
+      supportsThinking: false,
+    });
+    expect(parsed.vision).toBe(false);
   });
 
   it("rejects non-positive maxContextTokens", () => {
@@ -269,5 +287,158 @@ describe("CostTelemetryRecordSchema", () => {
         occurredAt: "2026-05-12T00:00:00Z",
       }),
     ).not.toThrow();
+  });
+});
+
+describe("ImageAttachmentSchema (M2.X)", () => {
+  it("parses a valid PNG attachment", () => {
+    expect(() =>
+      ImageAttachmentSchema.parse({
+        kind: "image",
+        format: "png",
+        bytes: "iVBORw0KGgo...",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts each documented image format", () => {
+    for (const format of ["png", "jpeg", "gif", "webp"]) {
+      expect(() =>
+        ImageAttachmentSchema.parse({
+          kind: "image",
+          format,
+          bytes: "abc",
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects unsupported image formats", () => {
+    expect(() =>
+      ImageAttachmentSchema.parse({
+        kind: "image",
+        format: "svg",
+        bytes: "abc",
+      }),
+    ).toThrow();
+    expect(() =>
+      ImageAttachmentSchema.parse({
+        kind: "image",
+        format: "bmp",
+        bytes: "abc",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects empty bytes", () => {
+    expect(() =>
+      ImageAttachmentSchema.parse({
+        kind: "image",
+        format: "png",
+        bytes: "",
+      }),
+    ).toThrow();
+  });
+});
+
+describe("MessageAttachmentSchema (M2.X discriminated union)", () => {
+  it("parses image attachments via the kind discriminator", () => {
+    const parsed = MessageAttachmentSchema.parse({
+      kind: "image",
+      format: "jpeg",
+      bytes: "/9j/4AAQ...",
+    });
+    expect(parsed.kind).toBe("image");
+  });
+
+  it("rejects unknown kinds (future-extension safety)", () => {
+    expect(() =>
+      MessageAttachmentSchema.parse({
+        kind: "audio",
+        format: "mp3",
+        bytes: "...",
+      } as unknown),
+    ).toThrow();
+  });
+});
+
+describe("LlmMessageSchema with attachments (M2.X)", () => {
+  it("parses a user message with image attachments", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: "what is this?",
+        attachments: [{ kind: "image", format: "png", bytes: "abc" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("parses a user message with empty text + image (image-only prompt)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: "",
+        attachments: [{ kind: "image", format: "webp", bytes: "abc" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("parses a user message with no attachments (backward compat)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: "no images here",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects attachments on system messages", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "system",
+        content: "you are helpful",
+        attachments: [{ kind: "image", format: "png", bytes: "abc" }],
+      }),
+    ).toThrow(/user messages/);
+  });
+
+  it("rejects attachments on assistant messages", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: "here is my answer",
+        attachments: [{ kind: "image", format: "png", bytes: "abc" }],
+      }),
+    ).toThrow(/user messages/);
+  });
+
+  it("rejects attachments on tool messages", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        content: "tool output",
+        toolCallId: "tu_1",
+        attachments: [{ kind: "image", format: "png", bytes: "abc" }],
+      }),
+    ).toThrow(/user messages/);
+  });
+
+  it("permits an empty attachments array on non-user roles", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "system",
+        content: "you are helpful",
+        attachments: [],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("imageMediaType", () => {
+  it("returns the MIME-type form of each image format", () => {
+    expect(imageMediaType("png")).toBe("image/png");
+    expect(imageMediaType("jpeg")).toBe("image/jpeg");
+    expect(imageMediaType("gif")).toBe("image/gif");
+    expect(imageMediaType("webp")).toBe("image/webp");
   });
 });

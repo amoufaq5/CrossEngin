@@ -30,6 +30,7 @@ export const ProviderCapabilitiesSchema = z.object({
   embedding: z.boolean(),
   maxContextTokens: z.number().int().positive(),
   supportsThinking: z.boolean(),
+  vision: z.boolean().default(false),
 });
 export type ProviderCapabilities = z.infer<typeof ProviderCapabilitiesSchema>;
 
@@ -57,22 +58,53 @@ export const CacheControlSchema = z.object({
 });
 export type CacheControl = z.infer<typeof CacheControlSchema>;
 
-export const LlmMessageSchema = z.object({
-  role: z.enum(["system", "user", "assistant", "tool"]),
-  content: z.string(),
-  name: z.string().optional(),
-  toolCallId: z.string().optional(),
-  toolUses: z
-    .array(
-      z.object({
-        id: z.string().min(1),
-        name: z.string().min(1),
-        input: z.unknown(),
-      }),
-    )
-    .optional(),
+export const IMAGE_ATTACHMENT_FORMATS = ["png", "jpeg", "gif", "webp"] as const;
+export const ImageAttachmentFormatSchema = z.enum(IMAGE_ATTACHMENT_FORMATS);
+export type ImageAttachmentFormat = z.infer<typeof ImageAttachmentFormatSchema>;
+
+export const ImageAttachmentSchema = z.object({
+  kind: z.literal("image"),
+  format: ImageAttachmentFormatSchema,
+  bytes: z.string().min(1),
 });
+export type ImageAttachment = z.infer<typeof ImageAttachmentSchema>;
+
+export const MessageAttachmentSchema = z.discriminatedUnion("kind", [
+  ImageAttachmentSchema,
+]);
+export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
+
+export const LlmMessageSchema = z
+  .object({
+    role: z.enum(["system", "user", "assistant", "tool"]),
+    content: z.string(),
+    name: z.string().optional(),
+    toolCallId: z.string().optional(),
+    toolUses: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          name: z.string().min(1),
+          input: z.unknown(),
+        }),
+      )
+      .optional(),
+    attachments: z.array(MessageAttachmentSchema).optional(),
+  })
+  .superRefine((m, ctx) => {
+    if (m.attachments !== undefined && m.attachments.length > 0 && m.role !== "user") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["attachments"],
+        message: `attachments only allowed on user messages (got role '${m.role}')`,
+      });
+    }
+  });
 export type LlmMessage = z.infer<typeof LlmMessageSchema>;
+
+export function imageMediaType(format: ImageAttachmentFormat): string {
+  return `image/${format}`;
+}
 
 export const LlmToolSchema = z.object({
   name: z.string().min(1),

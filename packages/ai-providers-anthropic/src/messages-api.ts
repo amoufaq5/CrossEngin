@@ -26,6 +26,14 @@ export interface AnthropicMessage {
 export type AnthropicContentBlock =
   | { readonly type: "text"; readonly text: string }
   | {
+      readonly type: "image";
+      readonly source: {
+        readonly type: "base64";
+        readonly media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+        readonly data: string;
+      };
+    }
+  | {
       readonly type: "tool_use";
       readonly id: string;
       readonly name: string;
@@ -104,7 +112,28 @@ function splitSystem(
       continue;
     }
     if (m.role === "user") {
-      conversation.push({ role: "user", content: m.content });
+      const attachments = m.attachments ?? [];
+      if (attachments.length === 0) {
+        conversation.push({ role: "user", content: m.content });
+        continue;
+      }
+      const blocks: AnthropicContentBlock[] = [];
+      if (m.content.length > 0) {
+        blocks.push({ type: "text", text: m.content });
+      }
+      for (const a of attachments) {
+        if (a.kind === "image") {
+          blocks.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: `image/${a.format}`,
+              data: a.bytes,
+            },
+          });
+        }
+      }
+      conversation.push({ role: "user", content: blocks });
       continue;
     }
     if (m.role === "assistant") {

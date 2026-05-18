@@ -2,9 +2,16 @@ import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/
 
 import { computeChatUsageCost, type OpenAIChatModel } from "./pricing.js";
 
+export type OpenAIContentPart =
+  | { readonly type: "text"; readonly text: string }
+  | {
+      readonly type: "image_url";
+      readonly image_url: { readonly url: string };
+    };
+
 export interface OpenAIChatMessage {
   readonly role: "system" | "user" | "assistant" | "tool";
-  readonly content: string | null;
+  readonly content: string | null | readonly OpenAIContentPart[];
   readonly tool_calls?: readonly OpenAIToolCall[];
   readonly tool_call_id?: string;
   readonly name?: string;
@@ -90,7 +97,25 @@ export function buildOpenAIChatRequest(
 
 function translateMessage(m: LlmMessage): OpenAIChatMessage {
   if (m.role === "system") return { role: "system", content: m.content };
-  if (m.role === "user") return { role: "user", content: m.content };
+  if (m.role === "user") {
+    const attachments = m.attachments ?? [];
+    if (attachments.length === 0) {
+      return { role: "user", content: m.content };
+    }
+    const parts: OpenAIContentPart[] = [];
+    if (m.content.length > 0) {
+      parts.push({ type: "text", text: m.content });
+    }
+    for (const a of attachments) {
+      if (a.kind === "image") {
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:image/${a.format};base64,${a.bytes}` },
+        });
+      }
+    }
+    return { role: "user", content: parts };
+  }
   if (m.role === "tool") {
     return {
       role: "tool",
@@ -150,7 +175,13 @@ export function extractTextFromResponse(response: OpenAIChatResponse): string {
   const message = response.choices[0]?.message;
   if (message === undefined) return "";
   if (message.content === null) return "";
-  return message.content;
+  if (typeof message.content === "string") return message.content;
+  // Content-part arrays (vision responses) — assemble text parts only.
+  const out: string[] = [];
+  for (const part of message.content) {
+    if (part.type === "text") out.push(part.text);
+  }
+  return out.join("");
 }
 
 export function extractToolCallsFromResponse(

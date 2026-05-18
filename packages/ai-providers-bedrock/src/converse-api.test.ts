@@ -468,3 +468,95 @@ describe("extractToolCallsFromConverseResponse", () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => {
+  it("appends BedrockImageContentBlock entries to the user message content array", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: "what is this?",
+            attachments: [
+              { kind: "image", format: "png", bytes: "iVBORw0KGgo..." },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    const user = built.messages[0]!;
+    expect(user.role).toBe("user");
+    expect(user.content).toHaveLength(2);
+    expect(user.content[0]).toEqual({ text: "what is this?" });
+    expect(user.content[1]).toEqual({
+      image: {
+        format: "png",
+        source: { bytes: "iVBORw0KGgo..." },
+      },
+    });
+  });
+
+  it("falls back to a single {text} block when no attachments are present", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({ messages: [{ role: "user", content: "no images" }] }),
+      {},
+    );
+    expect(built.messages[0]!.content).toEqual([{ text: "no images" }]);
+  });
+
+  it("emits image-only content when content is empty + attachments present", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: "",
+            attachments: [{ kind: "image", format: "webp", bytes: "abc" }],
+          },
+        ],
+      }),
+      {},
+    );
+    expect(built.messages[0]!.content).toHaveLength(1);
+    expect(built.messages[0]!.content[0]).toEqual({
+      image: {
+        format: "webp",
+        source: { bytes: "abc" },
+      },
+    });
+  });
+
+  it("forwards multiple image attachments in input order", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: "compare these",
+            attachments: [
+              { kind: "image", format: "png", bytes: "first" },
+              { kind: "image", format: "jpeg", bytes: "second" },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    expect(built.messages[0]!.content).toHaveLength(3);
+    const second = built.messages[0]!.content[1] as { image: { format: string } };
+    const third = built.messages[0]!.content[2] as { image: { format: string } };
+    expect(second.image.format).toBe("png");
+    expect(third.image.format).toBe("jpeg");
+  });
+
+  it("falls back to [{text}] when content is empty AND attachments is empty (edge case)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [{ role: "user", content: "" }],
+      }),
+      {},
+    );
+    expect(built.messages[0]!.content).toEqual([{ text: "" }]);
+  });
+});

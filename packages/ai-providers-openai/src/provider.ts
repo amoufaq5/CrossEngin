@@ -90,6 +90,7 @@ export class OpenAIProvider implements LlmProvider {
     embedding: true,
     maxContextTokens: 128_000,
     supportsThinking: false,
+    vision: true,
   };
   readonly residency: readonly Region[];
   readonly pricing: ProviderPricing;

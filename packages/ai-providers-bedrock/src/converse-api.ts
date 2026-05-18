@@ -177,7 +177,24 @@ export function buildBedrockConverseRequest(
       continue;
     }
     if (m.role === "user") {
-      messages.push({ role: "user", content: [{ text: m.content }] });
+      const userBlocks: BedrockContentBlock[] = [];
+      if (m.content.length > 0) {
+        userBlocks.push({ text: m.content });
+      }
+      for (const a of m.attachments ?? []) {
+        if (a.kind === "image") {
+          userBlocks.push({
+            image: {
+              format: a.format,
+              source: { bytes: a.bytes },
+            },
+          });
+        }
+      }
+      if (userBlocks.length === 0) {
+        userBlocks.push({ text: m.content });
+      }
+      messages.push({ role: "user", content: userBlocks });
       continue;
     }
     messages.push(translateAssistantMessage(m));
