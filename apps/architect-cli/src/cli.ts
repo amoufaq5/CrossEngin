@@ -131,6 +131,8 @@ export function helpText(): string {
     "                          Delete a route by id (requires PG env)",
     "  gateway routes register-pack <slug> [--api-version v1] [--dry-run]",
     "                          Generate + upsert CRUD + transition routes from a registered pack",
+    "  gateway routes unregister-pack <slug> [--api-version v1] [--dry-run]",
+    "                          Delete every route whose id matches the regen for a pack",
     "  version                 Print the CLI version + workspace info",
     "  help                    Show this help text",
     "",

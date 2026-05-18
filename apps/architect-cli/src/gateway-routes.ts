@@ -50,10 +50,14 @@ export async function runGatewayRoutes(
     );
     return 2;
   }
-  // register-pack --dry-run is the only path that doesn't need PG. Short-circuit
+  // {register|unregister}-pack --dry-run preview paths don't need PG. Short-circuit
   // before resolving the registry so operators can preview routes without a DB.
-  if (action === "register-pack" && getBooleanFlag(command, "dry-run")) {
-    return runRoutesRegisterPack(command, ctx, null);
+  if (
+    (action === "register-pack" || action === "unregister-pack") &&
+    getBooleanFlag(command, "dry-run")
+  ) {
+    if (action === "register-pack") return runRoutesRegisterPack(command, ctx, null);
+    return runRoutesUnregisterPack(command, ctx, null);
   }
   const handle = await resolveRegistry(ctx);
   if (handle === null) return 1;
@@ -67,10 +71,12 @@ export async function runGatewayRoutes(
         return await runRoutesUnregister(command, ctx, handle.registry);
       case "register-pack":
         return await runRoutesRegisterPack(command, ctx, handle.registry);
+      case "unregister-pack":
+        return await runRoutesUnregisterPack(command, ctx, handle.registry);
       default:
         printError(
           ctx.io,
-          `gateway routes: unknown action '${action}'. expected one of: list, register, unregister, register-pack`,
+          `gateway routes: unknown action '${action}'. expected one of: list, register, unregister, register-pack, unregister-pack`,
         );
         return 2;
     }
@@ -362,4 +368,114 @@ async function runRoutesRegisterPack(
 
 export function listAvailablePackSlugs(): readonly string[] {
   return listAvailablePacks();
+}
+
+async function runRoutesUnregisterPack(
+  command: ParsedCommand,
+  ctx: RunContext,
+  registry: PostgresRouteRegistry | null,
+): Promise<number> {
+  const slug = command.positional[2];
+  if (slug === undefined) {
+    printError(
+      ctx.io,
+      "gateway routes unregister-pack: missing slug. usage: crossengin gateway routes unregister-pack <slug> [--api-version v1] [--dry-run]",
+    );
+    return 2;
+  }
+  let resolved;
+  try {
+    resolved = resolvePack(slug);
+  } catch (err) {
+    if (err instanceof UnknownPackError) {
+      printError(
+        ctx.io,
+        `gateway routes unregister-pack: ${err.message}`,
+      );
+      return 2;
+    }
+    throw err;
+  }
+  let resolvedManifest: Manifest;
+  try {
+    resolvedManifest = await resolveManifest(resolved.build(), {
+      registry: packManifestRegistry(),
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway routes unregister-pack: failed to resolve pack '${slug}': ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  const apiVersion = getStringFlag(command, "api-version") ?? undefined;
+  let records: readonly PackRouteRecord[];
+  try {
+    records = generatePackRoutes({
+      manifest: resolvedManifest,
+      packSlug: slug,
+      ...(apiVersion !== undefined ? { apiVersion } : {}),
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway routes unregister-pack: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  const dryRun = getBooleanFlag(command, "dry-run");
+  if (dryRun) {
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        pack: slug,
+        count: records.length,
+        dryRun: true,
+        routes: records.map((r) => ({
+          id: r.route.id,
+          method: r.route.method,
+          operationId: r.route.operationId,
+        })),
+      });
+    } else {
+      printSuccess(
+        ctx.io,
+        `-- dry-run: ${records.length.toString()} route id(s) would be deleted for pack '${slug}':`,
+      );
+      for (const r of records) {
+        ctx.io.stdout.write(
+          `  ${r.route.id}  ${r.route.method.padEnd(6)} ${formatPath(r.route).padEnd(40)} ${r.route.operationId}\n`,
+        );
+      }
+    }
+    return 0;
+  }
+  if (registry === null) {
+    printError(
+      ctx.io,
+      "gateway routes unregister-pack: registry not resolved (internal error — should have been short-circuited via --dry-run)",
+    );
+    return 1;
+  }
+  let deleted = 0;
+  const notFound: string[] = [];
+  for (const r of records) {
+    const removed = await registry.deleteByRouteId(r.route.id);
+    if (removed) deleted += 1;
+    else notFound.push(r.route.id);
+  }
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      pack: slug,
+      attempted: records.length,
+      deleted,
+      notFound: notFound.length,
+      notFoundIds: notFound,
+    });
+  } else {
+    printSuccess(
+      ctx.io,
+      `unregistered ${deleted.toString()} of ${records.length.toString()} route(s) for pack '${slug}'.${notFound.length > 0 ? ` (${notFound.length.toString()} route id(s) not found — already removed)` : ""}`,
+    );
+  }
+  return 0;
 }

@@ -498,3 +498,168 @@ describe("runGatewayRoutes register-pack (M4.8)", () => {
     expect(insert?.params?.[14]).toBe("11111111-2222-3333-4444-555555555555");
   });
 });
+
+describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
+  it("exits 2 when slug is missing", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("unregister-pack"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/missing slug/);
+  });
+
+  it("exits 2 when slug is unknown", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "bogus/pack"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/unknown pack/);
+  });
+
+  it("--dry-run prints the list of route ids WITHOUT calling DELETE", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "operate-erp/core", "--dry-run"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).toMatch(/dry-run: 24 route id\(s\) would be deleted/);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(0);
+  });
+
+  it("happy path: issues DELETE for every generated route id + reports deleted count", async () => {
+    const { io, outChunks } = makeIo();
+    // Pre-populate stored rows so deletes return rowCount: 1
+    const seededRoutes: RouteDefinition[] = [];
+    // The fake registry's INSERT path doesn't reflect the real generation, but we'll
+    // pre-populate stored to have matching IDs.
+    const { registry, capture } = fakeRegistry(seededRoutes);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    // First, register-pack to seed the rows
+    await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "operate-erp/core"),
+      ctx,
+    );
+    // Now unregister
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "operate-erp/core"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(24);
+    expect(outChunks.join("")).toMatch(/unregistered 24 of 24/);
+  });
+
+  it("reports the not-found count when some routes don't exist", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    // Skip the register-pack — DELETEs on empty stored set return rowCount: 0
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "operate-erp/core"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).toMatch(/unregistered 0 of 24/);
+    expect(outChunks.join("")).toMatch(/24 route id\(s\) not found — already removed/);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(24);
+  });
+
+  it("--format=json emits {pack, attempted, deleted, notFound, notFoundIds}", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "operate-erp/core", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      pack: string;
+      attempted: number;
+      deleted: number;
+      notFound: number;
+      notFoundIds: string[];
+    };
+    expect(parsed.pack).toBe("operate-erp/core");
+    expect(parsed.attempted).toBe(24);
+    expect(parsed.deleted).toBe(0);
+    expect(parsed.notFound).toBe(24);
+    expect(parsed.notFoundIds).toHaveLength(24);
+    expect(parsed.notFoundIds[0]).toMatch(/^rt_[a-f0-9]{16}$/);
+  });
+
+  it("--dry-run --format=json emits a different shape: {pack, count, dryRun, routes}", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/core",
+        "--dry-run",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      pack: string;
+      count: number;
+      dryRun: boolean;
+      routes: Array<{ id: string; method: string; operationId: string }>;
+    };
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.count).toBe(24);
+    expect(parsed.routes[0]?.id).toMatch(/^rt_/);
+    expect(parsed.routes[0]?.method).toBeDefined();
+    expect(parsed.routes[0]?.operationId).toBeDefined();
+  });
+
+  it("--api-version override generates the same hash as register-pack with --api-version", async () => {
+    const { io } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    // register with v2
+    await runGatewayRoutes(
+      parseRoutesArgs(
+        "register-pack",
+        "operate-erp/core",
+        "--api-version",
+        "v2",
+      ),
+      ctx,
+    );
+    const registeredIds = capture
+      .filter((c) => c.sql.includes("INSERT"))
+      .map((c) => c.params?.[0] as string);
+    // unregister with v2
+    await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/core",
+        "--api-version",
+        "v2",
+      ),
+      ctx,
+    );
+    const deletedIds = capture
+      .filter((c) => c.sql.includes("DELETE"))
+      .map((c) => c.params?.[0] as string);
+    // Same set: registered IDs match deleted IDs exactly (apiVersion is part of
+    // the operationId-stable route content, so route_id is reused unless slug
+    // changes; but since both invocations use the same slug + manifest, IDs match)
+    expect(new Set(deletedIds)).toEqual(new Set(registeredIds));
+  });
+});

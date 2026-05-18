@@ -15,11 +15,32 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4
-+ M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M5 + M5.5 +
-M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 +
-M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55
-packages + 1 app, 119 meta-schema tables, 6,460 tests**, all
-green, no type errors. M4.8 closed M4.7's manifest-driven
++ M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M5 +
+M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6
++ M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,468 tests**,
+all green, no type errors. M4.8.x ships the companion to M4.8:
+`crossengin gateway routes unregister-pack <slug> [--api-
+version v1] [--dry-run]`. Same generation pipeline as
+register-pack (resolvePack → resolveManifest →
+generatePackRoutes) but instead of `registry.upsert` per
+route, it calls `registry.deleteByRouteId(r.route.id)` —
+re-deriving the deterministic hash IDs guarantees we look up
+exactly the rows register-pack would have created. Soft-fail
+semantics: missing routes report as `notFound` rather than
+erroring (re-running idempotently surfaces "unregistered 0 of
+N (N not found — already removed)"). Skips
+tryValidateManifest — operators tearing down a pack don't need
+post-resolve validation. Dispatcher short-circuit extended to
+cover `unregister-pack --dry-run` so operators preview without
+PG. Output shapes: human "unregistered N of M route(s) for
+pack 'X'" (optional partial-miss suffix), JSON {pack,
+attempted, deleted, notFound, notFoundIds[]}; dry-run human
+prints rt_<hex> + method + path + operationId, dry-run JSON
+emits {pack, count, dryRun, routes[{id, method, operationId}]}.
+End-to-end verified: `crossengin gateway routes
+unregister-pack operate-erp/payments --dry-run` emits the
+34-row route-ID list without touching PG. M4.8 closed M4.7's manifest-driven
 route-registration open question. New
 `apps/architect-cli/src/gateway-pack-routes.ts` exports a pure
 `generatePackRoutes({manifest, packSlug, apiVersion?})`
@@ -641,7 +662,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0080 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -680,7 +701,9 @@ multimodal embeddings + image content block types closing
 M2.9.5 Q6), ADR-0078 covers M2.X (kernel LlmMessage.attachments
 + vision capability closing M2.9.7 Q1), ADR-0079 covers M4.8
 (gateway routes from pack manifest — bulk register-pack
-closing M4.7 manifest-driven question).
+closing M4.7 manifest-driven question), ADR-0080 covers
+M4.8.x (gateway routes unregister-pack — symmetric tear-down
+via deterministic ID re-derivation).
 
 ## Architecture in 90 seconds
 
@@ -1571,7 +1594,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0079 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0080 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1613,7 +1636,8 @@ ADR-0078 covers Phase 2 M2.X (kernel LlmMessage.attachments
 + vision capability — multimodal chat across Anthropic +
 OpenAI + Bedrock), ADR-0079 covers Phase 2 M4.8 (gateway
 routes from pack manifest — bulk register-pack via the
-M7.6.5 extends resolver). When you ship a new package, write
-the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+M7.6.5 extends resolver), ADR-0080 covers Phase 2 M4.8.x
+(gateway routes unregister-pack — symmetric tear-down). When
+you ship a new package, write the matching ADR in the same
+session, following `0000-template.md` and the style of the
+existing 0026-0037 batch.
