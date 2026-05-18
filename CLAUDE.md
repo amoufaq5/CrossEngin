@@ -14,12 +14,42 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4 +
-M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 +
-M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5
-+ M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app,
-119 meta-schema tables, 6,425 tests**, all green, no type
-errors. M2.X closed M2.9.7 Q1 by extending the kernel
+M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4
++ M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M5 + M5.5 +
+M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 +
+M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55
+packages + 1 app, 119 meta-schema tables, 6,460 tests**, all
+green, no type errors. M4.8 closed M4.7's manifest-driven
+route-registration open question. New
+`apps/architect-cli/src/gateway-pack-routes.ts` exports a pure
+`generatePackRoutes({manifest, packSlug, apiVersion?})`
+function that derives `RouteDefinition[]` from the resolved
+manifest: 5 standard CRUD routes per entity
+(list/read/create/update/delete with appropriate HTTP method +
+idempotency + scope) plus one route per `entityLifecycle`
+workflow transition (`POST /v1/<plural>/:id/transitions/<name>`).
+Pluralizer kebabifies CamelCase + adds `s` (or `ies` for
+consonant+y endings); `entityKey` produces snake_case for
+operationIds + scopes. `routeIdFor({packSlug, operationId})`
+emits `rt_<sha256(...).slice(0,16)>` — deterministic, regex-
+safe, collision-free within a pack. New CLI action:
+`crossengin gateway routes register-pack <slug>
+[--api-version v1] [--dry-run] [--created-by <uuid>]` resolves
+the pack via the M7.6.5 packManifestRegistry, validates
+post-resolve via tryValidateManifest, generates the route
+list, and either upserts every row via `PostgresRouteRegistry
+.upsert` (registered N route(s) for pack '<slug>') or prints
+the route table without writing (`--dry-run`). The dispatcher
+short-circuits the `--dry-run` path before resolving the
+registry so operators can preview routes without a running
+database. Three packs immediately bulk-deployable:
+core → 24 routes (4 entities × 5 CRUD + 4 invoice transitions);
+payments resolved → 34 (+1 entity, +5 payment transitions);
+healthcare resolved → 47 (+2 entities, +5 encounter, +3
+observation transitions). End-to-end verified:
+`crossengin gateway routes register-pack operate-erp/
+healthcare --dry-run` emits the 47-row route table without
+touching PG. M2.X closed M2.9.7 Q1 by extending the kernel
 `LlmMessage` schema with `attachments?: MessageAttachment[]`
 and threading vision content blocks through all three real
 providers. New types in `@crossengin/ai-providers/src/types.ts`:
@@ -611,7 +641,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0078 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0079 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -648,7 +678,9 @@ M2.9.6 (Bedrock cacheControl threading + Titan parallelism
 closing M2.9 Q3 + M2.9.5 Q4), ADR-0077 covers M2.9.7 (Bedrock
 multimodal embeddings + image content block types closing
 M2.9.5 Q6), ADR-0078 covers M2.X (kernel LlmMessage.attachments
-+ vision capability closing M2.9.7 Q1).
++ vision capability closing M2.9.7 Q1), ADR-0079 covers M4.8
+(gateway routes from pack manifest — bulk register-pack
+closing M4.7 manifest-driven question).
 
 ## Architecture in 90 seconds
 
@@ -1539,7 +1571,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0078 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0079 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1579,6 +1611,9 @@ parallelism), ADR-0077 covers Phase 2 M2.9.7 (Bedrock
 multimodal embeddings + chat image content block types),
 ADR-0078 covers Phase 2 M2.X (kernel LlmMessage.attachments
 + vision capability — multimodal chat across Anthropic +
-OpenAI + Bedrock). When you ship a new package, write the
-matching ADR in the same session, following `0000-template.md`
-and the style of the existing 0026-0037 batch.
+OpenAI + Bedrock), ADR-0079 covers Phase 2 M4.8 (gateway
+routes from pack manifest — bulk register-pack via the
+M7.6.5 extends resolver). When you ship a new package, write
+the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.

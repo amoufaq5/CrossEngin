@@ -376,3 +376,125 @@ describe("formatRoutesTable + formatPath", () => {
     expect(lines[2]).toContain("rt_route0001");
   });
 });
+
+describe("runGatewayRoutes register-pack (M4.8)", () => {
+  it("exits 2 when slug is missing", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("register-pack"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/missing slug/);
+  });
+
+  it("exits 2 when slug is unknown (UnknownPackError)", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "bogus/pack"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/unknown pack/);
+  });
+
+  it("--dry-run prints generated routes WITHOUT calling upsert", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "operate-erp/core", "--dry-run"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).toMatch(/dry-run: 24 route\(s\)/);
+    // 4 entities x 5 CRUD + 4 invoice transitions = 24
+    const inserts = capture.filter((c) => c.sql.includes("INSERT"));
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("happy path: upserts every generated route + reports the count", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "operate-erp/payments"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const inserts = capture.filter((c) => c.sql.includes("INSERT"));
+    // core pack: 4 entities * 5 CRUD + 4 invoice transitions = 24
+    // payments adds: 1 entity * 5 CRUD + 5 payment transitions = 10
+    // total resolved = 34
+    expect(inserts).toHaveLength(34);
+    expect(outChunks.join("")).toMatch(/registered 34 route\(s\)/);
+  });
+
+  it("--format=json emits {pack, count, dryRun, routes}", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "register-pack",
+        "operate-erp/core",
+        "--dry-run",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      pack: string;
+      count: number;
+      dryRun: boolean;
+      routes: unknown[];
+    };
+    expect(parsed.pack).toBe("operate-erp/core");
+    expect(parsed.count).toBe(24);
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.routes).toHaveLength(24);
+  });
+
+  it("--api-version override threads into pathSegments + apiVersion fields", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs(
+        "register-pack",
+        "operate-erp/core",
+        "--api-version",
+        "v2",
+        "--dry-run",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    const parsed = JSON.parse(outChunks.join("")) as {
+      routes: Array<{ apiVersion: string; pathSegments: Array<{ value?: string }> }>;
+    };
+    expect(parsed.routes.every((r) => r.apiVersion === "v2")).toBe(true);
+    expect(parsed.routes.every((r) => r.pathSegments[0]?.value === "v2")).toBe(true);
+  });
+
+  it("--created-by is threaded into the upsert (param index 14)", async () => {
+    const { io } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs(
+        "register-pack",
+        "operate-erp/core",
+        "--created-by",
+        "11111111-2222-3333-4444-555555555555",
+      ),
+      ctx,
+    );
+    const insert = capture.find((c) => c.sql.includes("INSERT"));
+    expect(insert?.params?.[14]).toBe("11111111-2222-3333-4444-555555555555");
+  });
+});

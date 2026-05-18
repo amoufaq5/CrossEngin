@@ -6,15 +6,30 @@ import {
 } from "@crossengin/api-gateway";
 import { PostgresRouteRegistry } from "@crossengin/api-gateway-pg";
 import {
+  resolveManifest,
+  tryValidateManifest,
+  type Manifest,
+} from "@crossengin/kernel/manifest";
+import {
   createNodePgConnection,
   parsePgEnvConfig,
   type PgConnection,
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
-import { getStringFlag } from "./cli.js";
+import { getBooleanFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson, printSuccess } from "./format.js";
+import {
+  generatePackRoutes,
+  type PackRouteRecord,
+} from "./gateway-pack-routes.js";
+import {
+  listAvailablePacks,
+  packManifestRegistry,
+  resolvePack,
+  UnknownPackError,
+} from "./pack-registry.js";
 
 const DEFAULT_REGISTERED_BY = "00000000-0000-4000-8000-000000000000";
 
@@ -35,6 +50,11 @@ export async function runGatewayRoutes(
     );
     return 2;
   }
+  // register-pack --dry-run is the only path that doesn't need PG. Short-circuit
+  // before resolving the registry so operators can preview routes without a DB.
+  if (action === "register-pack" && getBooleanFlag(command, "dry-run")) {
+    return runRoutesRegisterPack(command, ctx, null);
+  }
   const handle = await resolveRegistry(ctx);
   if (handle === null) return 1;
   try {
@@ -45,10 +65,12 @@ export async function runGatewayRoutes(
         return await runRoutesRegister(command, ctx, handle.registry);
       case "unregister":
         return await runRoutesUnregister(command, ctx, handle.registry);
+      case "register-pack":
+        return await runRoutesRegisterPack(command, ctx, handle.registry);
       default:
         printError(
           ctx.io,
-          `gateway routes: unknown action '${action}'. expected one of: list, register, unregister`,
+          `gateway routes: unknown action '${action}'. expected one of: list, register, unregister, register-pack`,
         );
         return 2;
     }
@@ -223,4 +245,121 @@ export function formatPath(route: RouteDefinition): string {
     else parts.push("*");
   }
   return "/" + parts.join("/");
+}
+
+async function runRoutesRegisterPack(
+  command: ParsedCommand,
+  ctx: RunContext,
+  registry: PostgresRouteRegistry | null,
+): Promise<number> {
+  const slug = command.positional[2];
+  if (slug === undefined) {
+    printError(
+      ctx.io,
+      "gateway routes register-pack: missing slug. usage: crossengin gateway routes register-pack <slug> [--api-version v1] [--dry-run] [--created-by <uuid>]",
+    );
+    return 2;
+  }
+  let resolved;
+  try {
+    resolved = resolvePack(slug);
+  } catch (err) {
+    if (err instanceof UnknownPackError) {
+      printError(
+        ctx.io,
+        `gateway routes register-pack: ${err.message}`,
+      );
+      return 2;
+    }
+    throw err;
+  }
+  let resolvedManifest: Manifest;
+  try {
+    resolvedManifest = await resolveManifest(resolved.build(), {
+      registry: packManifestRegistry(),
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway routes register-pack: failed to resolve pack '${slug}': ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  const validation = tryValidateManifest(resolvedManifest);
+  if (!validation.ok) {
+    printError(
+      ctx.io,
+      `gateway routes register-pack: pack '${slug}' failed validation: ${validation.errors.map((e) => `${e.path}: ${e.message}`).join("; ")}`,
+    );
+    return 1;
+  }
+  const apiVersion = getStringFlag(command, "api-version") ?? undefined;
+  let records: readonly PackRouteRecord[];
+  try {
+    records = generatePackRoutes({
+      manifest: resolvedManifest,
+      packSlug: slug,
+      ...(apiVersion !== undefined ? { apiVersion } : {}),
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway routes register-pack: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  const dryRun = getBooleanFlag(command, "dry-run");
+  if (dryRun) {
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        pack: slug,
+        count: records.length,
+        dryRun: true,
+        routes: records.map((r) => r.route),
+      });
+    } else {
+      const routes = records.map((r) => r.route);
+      ctx.io.stdout.write(formatRoutesTable(routes));
+      printSuccess(
+        ctx.io,
+        `-- dry-run: ${records.length.toString()} route(s) generated for pack '${slug}' (not written).`,
+      );
+    }
+    return 0;
+  }
+  if (registry === null) {
+    printError(
+      ctx.io,
+      "gateway routes register-pack: registry not resolved (internal error — should have been short-circuited via --dry-run)",
+    );
+    return 1;
+  }
+  const createdBy = getStringFlag(command, "created-by") ?? DEFAULT_REGISTERED_BY;
+  for (const r of records) {
+    await registry.upsert(r.route, createdBy);
+  }
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      pack: slug,
+      count: records.length,
+      dryRun: false,
+      routes: records.map((r) => r.route),
+    });
+  } else {
+    printSuccess(
+      ctx.io,
+      `registered ${records.length.toString()} route(s) for pack '${slug}'.`,
+    );
+    for (const r of records) {
+      const path = formatPath(r.route);
+      ctx.io.stdout.write(
+        `  ${r.route.method.padEnd(6)} ${path.padEnd(40)} -> ${r.route.operationId}\n`,
+      );
+    }
+  }
+  return 0;
+}
+
+export function listAvailablePackSlugs(): readonly string[] {
+  return listAvailablePacks();
 }

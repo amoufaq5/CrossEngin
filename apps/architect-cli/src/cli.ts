@@ -129,6 +129,8 @@ export function helpText(): string {
     "                          Upsert a route from a JSON file (requires PG env)",
     "  gateway routes unregister <rt_id>",
     "                          Delete a route by id (requires PG env)",
+    "  gateway routes register-pack <slug> [--api-version v1] [--dry-run]",
+    "                          Generate + upsert CRUD + transition routes from a registered pack",
     "  version                 Print the CLI version + workspace info",
     "  help                    Show this help text",
     "",
