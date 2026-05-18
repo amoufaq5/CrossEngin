@@ -1,4 +1,10 @@
-import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import type {
+  CacheControl,
+  CompletionRequest,
+  LlmMessage,
+  LlmTool,
+  Usage,
+} from "@crossengin/ai-providers";
 
 import { buildBedrockUsage, type BedrockChatModel } from "./pricing.js";
 
@@ -22,18 +28,35 @@ export interface BedrockToolResultContentBlock {
   };
 }
 
+export interface BedrockCachePointBlock {
+  readonly cachePoint: {
+    readonly type: "default";
+  };
+}
+
 export type BedrockContentBlock =
   | BedrockTextContentBlock
   | BedrockToolUseContentBlock
-  | BedrockToolResultContentBlock;
+  | BedrockToolResultContentBlock
+  | BedrockCachePointBlock;
 
 export interface BedrockMessage {
   readonly role: "user" | "assistant";
   readonly content: readonly BedrockContentBlock[];
 }
 
-export interface BedrockSystemBlock {
-  readonly text: string;
+export type BedrockSystemBlock =
+  | { readonly text: string }
+  | BedrockCachePointBlock;
+
+export const BEDROCK_CACHE_POINT: BedrockCachePointBlock = {
+  cachePoint: { type: "default" },
+};
+
+export function isCachePointBlock(
+  block: BedrockContentBlock | BedrockSystemBlock,
+): block is BedrockCachePointBlock {
+  return "cachePoint" in block;
 }
 
 export interface BedrockInferenceConfig {
@@ -128,6 +151,8 @@ export function buildBedrockConverseRequest(
     messages.push(translateAssistantMessage(m));
   }
 
+  applyCacheBreakpoints(systemBlocks, messages, req.cacheControl);
+
   const inference: BedrockInferenceConfig = {
     maxTokens: req.maxTokens ?? opts.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
@@ -142,6 +167,35 @@ export function buildBedrockConverseRequest(
       : {}),
   };
   return request;
+}
+
+function applyCacheBreakpoints(
+  systemBlocks: BedrockSystemBlock[],
+  messages: BedrockMessage[],
+  cacheControl: CacheControl | undefined,
+): void {
+  if (cacheControl === undefined) return;
+  const cacheSystem =
+    cacheControl.systemPrompt !== undefined ||
+    cacheControl.toolSchemas !== undefined;
+  if (cacheSystem && systemBlocks.length > 0) {
+    systemBlocks.push(BEDROCK_CACHE_POINT);
+  }
+  if (
+    cacheControl.conversationHistory !== undefined &&
+    messages.length >= 2
+  ) {
+    const historyIdx = messages.length - 2;
+    messages[historyIdx] = appendCachePoint(messages[historyIdx]!);
+  }
+  if (cacheControl.retrievedContext !== undefined && messages.length >= 1) {
+    const lastIdx = messages.length - 1;
+    messages[lastIdx] = appendCachePoint(messages[lastIdx]!);
+  }
+}
+
+function appendCachePoint(m: BedrockMessage): BedrockMessage {
+  return { role: m.role, content: [...m.content, BEDROCK_CACHE_POINT] };
 }
 
 function translateAssistantMessage(m: LlmMessage): BedrockMessage {

@@ -14,11 +14,38 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 +
-M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 +
-M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 +
-M7.8 + M7.9 landed: **55 packages + 1 app, 119 meta-schema
-tables, 6,344 tests**, all green, no type errors. M4.7.6 closed
+M2.9.5 + M2.9.6 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 +
+M4.7 + M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 +
+M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 +
+M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app, 119
+meta-schema tables, 6,359 tests**, all green, no type errors.
+M2.9.6 closed M2.9 Q3 + M2.9.5 Q4 with two additive opt-in
+features for the Bedrock provider. First — kernel-level
+`CompletionRequest.cacheControl` now threads into Bedrock
+`cachePoint` content blocks: `systemPrompt` and/or `toolSchemas`
+appends a cachePoint to the end of the `system` array;
+`conversationHistory` appends one to the penultimate message's
+content (no-op when `messages.length < 2`); `retrievedContext`
+appends one to the last message's content. Three independent
+placements; operators set any combination. Anthropic-on-Bedrock
++ Claude 3.5/3.7/Opus 4 get the documented 90%-off cached-
+input rate at $0.30/$1.50/$0.30 per million via the existing
+`BEDROCK_CHAT_PRICING[model].cachedInputUsdPerMillion` path —
+no extra cost-accounting work. New types:
+`BedrockCachePointBlock`, `BEDROCK_CACHE_POINT` constant,
+`isCachePointBlock` discriminator. `extractTextFromConverse
+Response` + `extractToolCallsFromConverseResponse` already
+discriminate via `"text" in block` / `"toolUse" in block`,
+so cachePoint blocks fall through silently (regression-tested).
+Second — `titanConcurrency` constructor option (default 4,
+range [1, 100]) parallelizes the Titan single-text-only loop
+in `embedViaTitan`. Refactored from sequential `for (const
+text of texts)` to chunked Promise.all (chunks of `titan
+Concurrency` size), preserving input order via pre-allocated
+result array indexed by request position regardless of
+completion order. Cohere unchanged — its native batching
+(96 texts per call) already covers parallelism for that
+family. M4.7.6 closed
 M4.7.5's two follow-up questions: cloud-IdP-friendly JWKS URL
 fetching + hot-reload. `apps/architect-cli/src/gateway-jwks.ts`
 gained `loadJwksFromUrl(url, opts?)` (injectable FetchLike,
@@ -520,7 +547,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0075 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0076 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -552,7 +579,9 @@ M6.5.6 (architect-cli Bedrock integration — env-var detection +
 three-deep task fallback chains), ADR-0074 covers M4.7.5
 (gateway JWT auth + routes subcommand closing M4.7's open
 questions), ADR-0075 covers M4.7.6 (URL-fetched JWKS +
-hot-reload via SIGHUP + periodic refresh).
+hot-reload via SIGHUP + periodic refresh), ADR-0076 covers
+M2.9.6 (Bedrock cacheControl threading + Titan parallelism
+closing M2.9 Q3 + M2.9.5 Q4).
 
 ## Architecture in 90 seconds
 
@@ -1443,7 +1472,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0075 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0076 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1477,7 +1506,8 @@ Phase 2 M2.9.5 (Bedrock Titan + Cohere embeddings closing
 M2.9's open Q4), ADR-0073 covers Phase 2 M6.5.6 (architect-cli
 Bedrock integration), ADR-0074 covers Phase 2 M4.7.5 (gateway
 JWT auth + routes subcommand), ADR-0075 covers Phase 2 M4.7.6
-(URL-fetched JWKS + SIGHUP/periodic hot-reload). When you ship
-a new package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
-0026-0037 batch.
+(URL-fetched JWKS + SIGHUP/periodic hot-reload), ADR-0076
+covers Phase 2 M2.9.6 (Bedrock cacheControl + Titan
+parallelism). When you ship a new package, write the matching
+ADR in the same session, following `0000-template.md` and the
+style of the existing 0026-0037 batch.

@@ -166,6 +166,160 @@ describe("buildBedrockConverseRequest", () => {
   });
 });
 
+describe("buildBedrockConverseRequest — cacheControl threading (M2.9.6)", () => {
+  it("omits all cachePoint blocks when cacheControl is undefined", () => {
+    const built = buildBedrockConverseRequest(baseReq(), {});
+    for (const block of built.system ?? []) {
+      expect("cachePoint" in block).toBe(false);
+    }
+    for (const msg of built.messages) {
+      for (const block of msg.content) {
+        expect("cachePoint" in block).toBe(false);
+      }
+    }
+  });
+
+  it("appends a cachePoint to the system array when systemPrompt is set", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "system", content: "you are helpful" },
+          { role: "user", content: "hi" },
+        ],
+        cacheControl: { systemPrompt: "sp1" },
+      }),
+      {},
+    );
+    expect(built.system).toHaveLength(2);
+    expect(built.system?.[0]).toEqual({ text: "you are helpful" });
+    expect(built.system?.[1]).toEqual({ cachePoint: { type: "default" } });
+  });
+
+  it("appends a cachePoint to the system array when toolSchemas is set", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "system", content: "you are helpful" },
+          { role: "user", content: "hi" },
+        ],
+        cacheControl: { toolSchemas: "ts1" },
+      }),
+      {},
+    );
+    const sys = built.system ?? [];
+    expect(sys.some((b) => "cachePoint" in b)).toBe(true);
+  });
+
+  it("does NOT append a system cachePoint when system blocks are empty", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [{ role: "user", content: "hi" }],
+        cacheControl: { systemPrompt: "sp1" },
+      }),
+      {},
+    );
+    expect(built.system).toBeUndefined();
+  });
+
+  it("appends a cachePoint to the last message when retrievedContext is set", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "user", content: "ping" },
+          { role: "assistant", content: "pong" },
+          { role: "user", content: "the new context here" },
+        ],
+        cacheControl: { retrievedContext: "rc1" },
+      }),
+      {},
+    );
+    const last = built.messages[built.messages.length - 1]!;
+    expect(last.role).toBe("user");
+    expect(last.content[last.content.length - 1]).toEqual({
+      cachePoint: { type: "default" },
+    });
+    // earlier messages have no cachePoint
+    for (let i = 0; i < built.messages.length - 1; i++) {
+      const msg = built.messages[i]!;
+      for (const block of msg.content) {
+        expect("cachePoint" in block).toBe(false);
+      }
+    }
+  });
+
+  it("appends a cachePoint to the penultimate message when conversationHistory is set", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "user", content: "ping" },
+          { role: "assistant", content: "pong" },
+          { role: "user", content: "the new question" },
+        ],
+        cacheControl: { conversationHistory: "ch1" },
+      }),
+      {},
+    );
+    const penultimate = built.messages[built.messages.length - 2]!;
+    expect(penultimate.role).toBe("assistant");
+    expect(penultimate.content[penultimate.content.length - 1]).toEqual({
+      cachePoint: { type: "default" },
+    });
+    const last = built.messages[built.messages.length - 1]!;
+    expect(last.content.every((b) => !("cachePoint" in b))).toBe(true);
+  });
+
+  it("conversationHistory is a no-op when messages.length < 2", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [{ role: "user", content: "single message" }],
+        cacheControl: { conversationHistory: "ch1" },
+      }),
+      {},
+    );
+    for (const msg of built.messages) {
+      for (const block of msg.content) {
+        expect("cachePoint" in block).toBe(false);
+      }
+    }
+  });
+
+  it("combines system + history + retrievedContext cache markers in one request", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "system", content: "instructions" },
+          { role: "user", content: "ping" },
+          { role: "assistant", content: "pong" },
+          { role: "user", content: "now" },
+        ],
+        cacheControl: {
+          systemPrompt: "sp1",
+          conversationHistory: "ch1",
+          retrievedContext: "rc1",
+        },
+      }),
+      {},
+    );
+    // system: [text, cachePoint]
+    expect(built.system).toHaveLength(2);
+    expect("cachePoint" in built.system![1]!).toBe(true);
+    // penultimate (assistant): ends in cachePoint
+    expect(
+      "cachePoint" in
+        built.messages[built.messages.length - 2]!.content[
+          built.messages[built.messages.length - 2]!.content.length - 1
+        ]!,
+    ).toBe(true);
+    // last (user): ends in cachePoint
+    expect(
+      "cachePoint" in
+        built.messages[built.messages.length - 1]!.content[
+          built.messages[built.messages.length - 1]!.content.length - 1
+        ]!,
+    ).toBe(true);
+  });
+});
+
 describe("normalizeConverseUsage", () => {
   it("includes cached input only when > 0", () => {
     const u = normalizeConverseUsage(
@@ -212,6 +366,17 @@ describe("extractTextFromConverseResponse", () => {
       ]),
     );
     expect(text).toBe("beforeafter");
+  });
+
+  it("skips cachePoint blocks (M2.9.6 forward-compat)", () => {
+    const text = extractTextFromConverseResponse(
+      withContent([
+        { text: "hello" },
+        { cachePoint: { type: "default" } },
+        { text: "world" },
+      ]),
+    );
+    expect(text).toBe("helloworld");
   });
 });
 

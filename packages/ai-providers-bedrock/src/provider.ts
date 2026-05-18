@@ -74,11 +74,15 @@ export interface BedrockProviderOptions {
   readonly defaultMaxTokens?: number;
   readonly defaultEmbeddingDimensions?: number;
   readonly defaultCohereInputType?: CohereEmbedInputType;
+  readonly titanConcurrency?: number;
   readonly baseUrl?: string;
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
   readonly clock?: () => Date;
 }
+
+export const DEFAULT_TITAN_CONCURRENCY = 4;
+export const MAX_TITAN_CONCURRENCY = 100;
 
 const PROVIDER_ID = "bedrock";
 const SERVICE = "bedrock";
@@ -108,6 +112,7 @@ export class BedrockProvider implements LlmProvider {
   private readonly defaultMaxTokens: number | undefined;
   private readonly defaultEmbeddingDimensions: number | undefined;
   private readonly defaultCohereInputType: CohereEmbedInputType | undefined;
+  private readonly titanConcurrency: number;
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
   private readonly clock: () => Date;
@@ -140,6 +145,17 @@ export class BedrockProvider implements LlmProvider {
     this.defaultMaxTokens = opts.defaultMaxTokens;
     this.defaultEmbeddingDimensions = opts.defaultEmbeddingDimensions;
     this.defaultCohereInputType = opts.defaultCohereInputType;
+    const concurrency = opts.titanConcurrency ?? DEFAULT_TITAN_CONCURRENCY;
+    if (
+      !Number.isInteger(concurrency) ||
+      concurrency < 1 ||
+      concurrency > MAX_TITAN_CONCURRENCY
+    ) {
+      throw new Error(
+        `BedrockProvider: titanConcurrency must be an integer in [1, ${MAX_TITAN_CONCURRENCY.toString()}], got ${concurrency.toString()}`,
+      );
+    }
+    this.titanConcurrency = concurrency;
     this.baseUrl = opts.baseUrl ?? `https://bedrock-runtime.${this.region}.amazonaws.com`;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
     this.clock = opts.clock ?? (() => new Date());
@@ -222,10 +238,10 @@ export class BedrockProvider implements LlmProvider {
     model: BedrockEmbeddingModel,
     texts: readonly string[],
   ): Promise<EmbeddingAggregation> {
-    const vectors: number[][] = [];
-    let totalTokens = 0;
-    let dim = 0;
-    for (const text of texts) {
+    const callOne = async (text: string): Promise<{
+      embedding: readonly number[];
+      tokens: number;
+    }> => {
       const body = buildTitanEmbedRequest({
         model,
         text,
@@ -235,9 +251,28 @@ export class BedrockProvider implements LlmProvider {
       });
       const raw = await this.invokeModelJson(model, body);
       const parsed = parseTitanEmbedResponse(raw);
-      vectors.push([...parsed.embedding]);
-      totalTokens += parsed.inputTextTokenCount;
-      if (dim === 0) dim = parsed.embedding.length;
+      return { embedding: parsed.embedding, tokens: parsed.inputTextTokenCount };
+    };
+    const results = new Array<{
+      embedding: readonly number[];
+      tokens: number;
+    }>(texts.length);
+    for (let start = 0; start < texts.length; start += this.titanConcurrency) {
+      const end = Math.min(start + this.titanConcurrency, texts.length);
+      const chunk = await Promise.all(
+        texts.slice(start, end).map((t) => callOne(t)),
+      );
+      for (let i = 0; i < chunk.length; i++) {
+        results[start + i] = chunk[i]!;
+      }
+    }
+    let totalTokens = 0;
+    let dim = 0;
+    const vectors: number[][] = [];
+    for (const r of results) {
+      vectors.push([...r.embedding]);
+      totalTokens += r.tokens;
+      if (dim === 0) dim = r.embedding.length;
     }
     return { vectors, dim, inputTokens: totalTokens };
   }

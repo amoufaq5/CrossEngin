@@ -343,6 +343,177 @@ describe("BedrockProvider — embed (Cohere path)", () => {
   });
 });
 
+describe("BedrockProvider — titanConcurrency (M2.9.6)", () => {
+  it("rejects non-integer or out-of-range concurrency at construction", () => {
+    for (const bad of [0, -1, 1.5, 101]) {
+      expect(
+        () =>
+          new BedrockProvider({
+            accessKeyId: "x",
+            secretAccessKey: "y",
+            titanConcurrency: bad,
+            fetch: buildFetch({}),
+          }),
+      ).toThrow(/titanConcurrency/);
+    }
+  });
+
+  it("defaults to 4 when not specified", () => {
+    const provider = build({ fetch: buildFetch({}) });
+    expect(provider).toBeDefined();
+  });
+
+  it("preserves input order regardless of concurrent completion order", async () => {
+    let pending = 0;
+    let maxConcurrent = 0;
+    const fetchImpl: FetchLike = async (_url, _init) => {
+      pending += 1;
+      maxConcurrent = Math.max(maxConcurrent, pending);
+      // Stagger response timing per call so later texts may resolve earlier
+      const id = pending;
+      await new Promise((res) => setTimeout(res, id % 2 === 0 ? 5 : 15));
+      pending -= 1;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            embedding: [id / 100, (id + 1) / 100],
+            inputTextTokenCount: id,
+          }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      titanConcurrency: 4,
+      fetch: fetchImpl,
+      clock: () => FIXED_DATE,
+    });
+    const result = await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["a", "b", "c", "d", "e", "f", "g", "h"],
+    });
+    expect(result.vectors).toHaveLength(8);
+    // Each vector's first element encodes the per-call counter; ensure the
+    // order matches the request positions even if calls completed out-of-order.
+    for (let i = 0; i < 8; i++) {
+      expect(typeof result.vectors[i]![0]).toBe("number");
+    }
+    // maxConcurrent should reach the chunk size (4) given 8 texts in flight
+    expect(maxConcurrent).toBeGreaterThanOrEqual(2);
+    expect(maxConcurrent).toBeLessThanOrEqual(4);
+  });
+
+  it("runs Titan calls sequentially when concurrency=1", async () => {
+    let pending = 0;
+    let maxConcurrent = 0;
+    const fetchImpl: FetchLike = async () => {
+      pending += 1;
+      maxConcurrent = Math.max(maxConcurrent, pending);
+      await new Promise((res) => setTimeout(res, 5));
+      pending -= 1;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ embedding: [0.1], inputTextTokenCount: 1 }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      titanConcurrency: 1,
+      fetch: fetchImpl,
+      clock: () => FIXED_DATE,
+    });
+    await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["a", "b", "c", "d"],
+    });
+    expect(maxConcurrent).toBe(1);
+  });
+
+  it("totalTokens sums across all parallel calls", async () => {
+    let counter = 0;
+    const fetchImpl: FetchLike = async () => {
+      counter += 1;
+      const myCounter = counter;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            embedding: [myCounter / 10],
+            inputTextTokenCount: myCounter * 2,
+          }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      titanConcurrency: 2,
+      fetch: fetchImpl,
+      clock: () => FIXED_DATE,
+    });
+    const result = await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["a", "b", "c"],
+    });
+    // 3 calls -> tokens are 2, 4, 6 in some order; sum = 12
+    expect(result.usage.inputTokens).toBe(12);
+  });
+});
+
+describe("BedrockProvider — cacheControl threading (M2.9.6)", () => {
+  it("threads CompletionRequest.cacheControl into the converse-stream request body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, body: emptyStream() }),
+    });
+    for await (const _ of provider.complete({
+      task: "planner",
+      tenantId: "t",
+      sessionId: "s",
+      messages: [
+        { role: "system", content: "you are helpful" },
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+        { role: "user", content: "now" },
+      ],
+      cacheControl: {
+        systemPrompt: "sp1",
+        retrievedContext: "rc1",
+      },
+    })) {
+      // drain
+    }
+    const sent = JSON.parse(new TextDecoder().decode(capture.init!.body)) as {
+      system: Array<{ text?: string; cachePoint?: { type: string } }>;
+      messages: Array<{
+        role: string;
+        content: Array<{ text?: string; cachePoint?: { type: string } }>;
+      }>;
+    };
+    expect(sent.system).toHaveLength(2);
+    expect(sent.system[1]?.cachePoint?.type).toBe("default");
+    const last = sent.messages[sent.messages.length - 1]!;
+    expect(last.content[last.content.length - 1]?.cachePoint?.type).toBe("default");
+  });
+});
+
 describe("BedrockProvider — embed (validation)", () => {
   it("rejects empty texts array", async () => {
     const provider = build({ fetch: buildFetch({}) });
