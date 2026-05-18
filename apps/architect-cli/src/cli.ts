@@ -158,8 +158,10 @@ export function helpText(): string {
     "  PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, PGAPPNAME",
     "",
     "Environment (for chat):",
-    "  ANTHROPIC_API_KEY       Anthropic API key. At least one of the two is required.",
-    "  OPENAI_API_KEY          OpenAI API key. With both set, the router fans out.",
+    "  ANTHROPIC_API_KEY       Anthropic API key. At least one chat provider is required.",
+    "  OPENAI_API_KEY          OpenAI API key. With two+ providers set, the router fans out.",
+    "  AWS_ACCESS_KEY_ID,      AWS credentials for Bedrock (chat + embeddings). Optionally",
+    "  AWS_SECRET_ACCESS_KEY     AWS_SESSION_TOKEN (STS) + AWS_REGION (default: us-east-1).",
     "",
   ].join("\n");
 }

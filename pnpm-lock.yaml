@@ -29,6 +29,9 @@ importers:
       '@crossengin/ai-providers-anthropic':
         specifier: workspace:*
         version: link:../../packages/ai-providers-anthropic
+      '@crossengin/ai-providers-bedrock':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-bedrock
       '@crossengin/ai-providers-openai':
         specifier: workspace:*
         version: link:../../packages/ai-providers-openai

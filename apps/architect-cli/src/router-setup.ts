@@ -11,6 +11,13 @@ import type {
   TenantResidency,
 } from "@crossengin/ai-providers";
 import { AnthropicProvider, isAnthropicModel } from "@crossengin/ai-providers-anthropic";
+import {
+  BedrockProvider,
+  BEDROCK_DEFAULT_MODEL,
+  isBedrockChatModel,
+  isBedrockEmbeddingModel,
+  type BedrockChatModel,
+} from "@crossengin/ai-providers-bedrock";
 import { OpenAIProvider, isOpenAIModel } from "@crossengin/ai-providers-openai";
 import {
   DefaultLlmRouter,
@@ -22,31 +29,50 @@ import {
 export const DEFAULT_TASK_POLICIES: TaskPolicyMap = {
   planner: {
     primary: "anthropic/claude-opus-4-7",
-    fallback: ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"],
+    fallback: [
+      "anthropic/claude-sonnet-4-6",
+      "openai/gpt-4o",
+      "bedrock/anthropic.claude-opus-4-20250514-v1:0",
+    ],
   },
   executor: {
     primary: "anthropic/claude-sonnet-4-6",
-    fallback: ["openai/gpt-4o-mini"],
+    fallback: [
+      "openai/gpt-4o-mini",
+      "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+    ],
   },
   summarizer: {
     primary: "openai/gpt-4o-mini",
-    fallback: ["anthropic/claude-haiku-4-5"],
+    fallback: [
+      "anthropic/claude-haiku-4-5",
+      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+    ],
   },
   "diff-narrator": {
     primary: "anthropic/claude-haiku-4-5",
-    fallback: ["openai/gpt-4o-mini"],
+    fallback: [
+      "openai/gpt-4o-mini",
+      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+    ],
   },
   embedding: {
     primary: "openai/text-embedding-3-small",
-    fallback: [],
+    fallback: ["bedrock/amazon.titan-embed-text-v2:0"],
   },
   rerank: {
     primary: "anthropic/claude-haiku-4-5",
-    fallback: ["openai/gpt-4o-mini"],
+    fallback: [
+      "openai/gpt-4o-mini",
+      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+    ],
   },
   classifier: {
     primary: "openai/gpt-4o-mini",
-    fallback: ["anthropic/claude-haiku-4-5"],
+    fallback: [
+      "anthropic/claude-haiku-4-5",
+      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+    ],
   },
 };
 
@@ -67,7 +93,7 @@ export class NoProvidersConfiguredError extends Error {
 
   constructor() {
     super(
-      "chat: no provider configured. Set ANTHROPIC_API_KEY and/or OPENAI_API_KEY before running 'crossengin chat'.",
+      "chat: no provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, and/or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY before running 'crossengin chat'.",
     );
     this.name = "NoProvidersConfiguredError";
   }
@@ -92,6 +118,29 @@ export function buildChatCompleter(input: BuildProviderInput): BuildProviderOutp
       new OpenAIProvider({
         apiKey: openaiKey,
         defaultChatModel: resolveOpenAIChatDefault(input.forceModel),
+      }),
+    );
+  }
+  const awsAccessKey = input.env["AWS_ACCESS_KEY_ID"];
+  const awsSecretKey = input.env["AWS_SECRET_ACCESS_KEY"];
+  if (
+    awsAccessKey !== undefined &&
+    awsAccessKey.length > 0 &&
+    awsSecretKey !== undefined &&
+    awsSecretKey.length > 0
+  ) {
+    const sessionToken = input.env["AWS_SESSION_TOKEN"];
+    const region = input.env["AWS_REGION"] ?? input.env["AWS_DEFAULT_REGION"];
+    providers.set(
+      "bedrock",
+      new BedrockProvider({
+        accessKeyId: awsAccessKey,
+        secretAccessKey: awsSecretKey,
+        ...(sessionToken !== undefined && sessionToken.length > 0
+          ? { sessionToken }
+          : {}),
+        ...(region !== undefined && region.length > 0 ? { region } : {}),
+        defaultModel: resolveBedrockDefault(input.forceModel),
       }),
     );
   }
@@ -133,6 +182,17 @@ function resolveOpenAIChatDefault(forceModel: string | undefined): "gpt-4o" | "g
     }
   }
   return "gpt-4o-mini";
+}
+
+function resolveBedrockDefault(forceModel: string | undefined): BedrockChatModel {
+  if (forceModel !== undefined && isBedrockChatModel(forceModel)) {
+    return forceModel;
+  }
+  return BEDROCK_DEFAULT_MODEL;
+}
+
+export function isBedrockModelRef(value: string): boolean {
+  return isBedrockChatModel(value) || isBedrockEmbeddingModel(value);
 }
 
 function filterPoliciesByAvailable(

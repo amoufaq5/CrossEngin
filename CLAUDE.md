@@ -15,10 +15,30 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 +
-M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 +
-M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55
-packages + 1 app, 119 meta-schema tables, 6,259 tests**, all
-green, no type errors. M2.9.5 closed M2.9's open Q4 by
+M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 +
+M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55
+packages + 1 app, 119 meta-schema tables, 6,269 tests**, all
+green, no type errors. M6.5.6 wired the M2.9 / M2.9.5 Bedrock
+provider into `architect-cli`'s `chat` subcommand by extending
+`router-setup.ts` env-var detection. `AWS_ACCESS_KEY_ID` +
+`AWS_SECRET_ACCESS_KEY` (required pair) plus optional
+`AWS_SESSION_TOKEN` (STS) + `AWS_REGION` / `AWS_DEFAULT_REGION`
+(default us-east-1) trigger BedrockProvider construction.
+`DEFAULT_TASK_POLICIES` extended so every task fallback chain
+ends with a Bedrock entry — planner adds `bedrock/anthropic.
+claude-opus-4-20250514-v1:0`, executor adds Sonnet-on-Bedrock,
+summarizer/diff-narrator/rerank/classifier add Haiku-on-
+Bedrock, and the previously-empty embedding fallback gains
+`bedrock/amazon.titan-embed-text-v2:0` at the same $0.02/M as
+OpenAI's text-embedding-3-small. The `filterPoliciesByAvailable`
+filter strips Bedrock entries when AWS env is unset — tenants
+running with one or two providers see the same single/two-way
+router behavior as before. New `resolveBedrockDefault(forceModel)`
+helper mirrors the Anthropic + OpenAI ones. Three-key envs
+return a 3-provider router with `availableProviders: ["anthropic",
+"openai", "bedrock"]` for real failover diversity across
+independent control planes. Help text + NoProvidersConfiguredError
+message now mention all three credential paths. M2.9.5 closed M2.9's open Q4 by
 implementing `embed()` for the Bedrock provider. New
 `embeddings.ts` module dispatches on model family — Amazon Titan
 (`amazon.titan-embed-text-v2:0` at $0.02/M with selectable 256 /
@@ -437,7 +457,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0072 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0073 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -464,7 +484,9 @@ ADR-0069 covers M4.7 (CLI gateway binding),
 ADR-0070 covers M7.9 (`pack-erp-healthcare` — third vertical
 pack), ADR-0071 covers M2.9 (`ai-providers-bedrock` — third
 real LlmProvider), ADR-0072 covers M2.9.5 (Bedrock Titan +
-Cohere embeddings closing M2.9's open Q4).
+Cohere embeddings closing M2.9's open Q4), ADR-0073 covers
+M6.5.6 (architect-cli Bedrock integration — env-var detection +
+three-deep task fallback chains).
 
 ## Architecture in 90 seconds
 
@@ -1355,7 +1377,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0072 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0073 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1386,6 +1408,7 @@ M4.7 (CLI gateway binding), ADR-0070 covers Phase 2 M7.9
 Phase 2 M2.9 (`ai-providers-bedrock` — third real LlmProvider
 with AWS sig v4 + binary event-stream parsing), ADR-0072 covers
 Phase 2 M2.9.5 (Bedrock Titan + Cohere embeddings closing
-M2.9's open Q4). When you ship a new package, write the
+M2.9's open Q4), ADR-0073 covers Phase 2 M6.5.6 (architect-cli
+Bedrock integration). When you ship a new package, write the
 matching ADR in the same session, following `0000-template.md`
 and the style of the existing 0026-0037 batch.

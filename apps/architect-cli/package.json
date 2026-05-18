@@ -28,6 +28,7 @@
     "@crossengin/ai-architect-pg": "workspace:*",
     "@crossengin/ai-providers": "workspace:*",
     "@crossengin/ai-providers-anthropic": "workspace:*",
+    "@crossengin/ai-providers-bedrock": "workspace:*",
     "@crossengin/ai-providers-openai": "workspace:*",
     "@crossengin/ai-router": "workspace:*",
     "@crossengin/api-gateway": "workspace:*",
