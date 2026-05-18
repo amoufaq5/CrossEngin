@@ -70,13 +70,14 @@
 | [0065](0065-erp-payments-pack.md) | Second vertical pack — ERP Payments (Phase 2 M7.5) | 2 | Proposed | 2026-05-17 |
 | [0066](0066-payment-signal-bridge-wiring.md) | Payment signal-bridge wiring (Phase 2 M7.8) | 2 | Proposed | 2026-05-17 |
 | [0067](0067-cli-sessions-subcommands.md) | CLI `sessions` subcommands (Phase 2 M5.9) | 2 | Proposed | 2026-05-17 |
+| [0068](0068-cli-extends-resolver-wiring.md) | Kernel `extends` resolver wiring (Phase 2 M7.6.5) | 2 | Proposed | 2026-05-18 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024, 0046.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057, 0058, 0059, 0060, 0061, 0062, 0063, 0064, 0065, 0066, 0067.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057, 0058, 0059, 0060, 0061, 0062, 0063, 0064, 0065, 0066, 0067, 0068.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -133,3 +134,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 39 | 0065 | 3,500 | Drafted alongside `@crossengin/pack-erp-payments` (Phase 2 M7.5) |
 | 40 | 0066 | 3,000 | Drafted alongside payment signal-bridge wiring (Phase 2 M7.8) |
 | 41 | 0067 | 3,000 | Drafted alongside CLI `sessions` subcommands (Phase 2 M5.9) |
+| 42 | 0068 | 2,500 | Drafted alongside kernel `extends` resolver wiring (Phase 2 M7.6.5) |

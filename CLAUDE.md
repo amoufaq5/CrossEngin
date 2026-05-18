@@ -15,9 +15,29 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 + M7.8
-landed: **53 packages + 1 app, 119 meta-schema tables, 6,003
-tests**, all green, no type errors. M5.9 added three CLI
++ M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7
++ M7.8 landed: **53 packages + 1 app, 119 meta-schema tables,
+6,004 tests**, all green, no type errors. M7.6.5 wired the kernel's
+existing `resolveManifest` (from `packages/kernel/src/manifest/
+extends.ts`) into the CLI's apply pipeline. `buildErpPaymentsPack
+()` refactored to return a child-only manifest (1 entity, 1
+relation, etc.) with `meta.extends: ["operate-erp/core"]`; the
+inline merge with `buildErpCorePack()` is gone. `apps/
+architect-cli/src/pack-registry.ts` gained `packManifestRegistry
+()` factory wrapping `PACK_REGISTRY` as a `ManifestRegistry`
+implementation; `apps/architect-cli/src/apply.ts`'s `buildPlan`
+became async, calling `resolveManifest(rawManifest, {registry:
+packManifestRegistry()})` before `tryValidateManifest`. Added
+typed error handling for `ExtendsCycleError` ("pack extends-chain
+cycle") and `UnknownParentManifestError` ("pack references
+unknown parent: <slug>. Available: <list>"). Pack-erp-payments
+tests refactored: identity tests (slug, version, extends, child
+counts) use `buildErpPaymentsPack()` directly; composition tests
+(5 entities merged, cross-pack FK resolves) use a new
+`buildResolvedPayments()` helper. End-to-end verified: `crossengin
+apply --dry-run --pack=operate-erp/payments` still emits all 5
+entity tables with M7.7 tenant scoping intact — the resolver
+merges, the emitter sees one unified manifest. M5.9 added three CLI
 subcommands for the chat audit data: `crossengin sessions
 list` renders a table of recent sessions for a tenant;
 `crossengin sessions show <id>` dumps one session's full
@@ -299,7 +319,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0067 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0068 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -320,7 +340,8 @@ ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 scoping via `tenant_owned` trait), ADR-0065 covers M7.5
 (`pack-erp-payments` — second vertical pack proving cross-pack
 composition), ADR-0066 covers M7.8 (payment signal-bridge
-wiring), ADR-0067 covers M5.9 (CLI sessions subcommands).
+wiring), ADR-0067 covers M5.9 (CLI sessions subcommands),
+ADR-0068 covers M7.6.5 (kernel `extends` resolver wiring).
 
 ## Architecture in 90 seconds
 
@@ -621,10 +642,13 @@ re-exporting everything.
   and P5D), 2 jobs (event-triggered provider webhook handler
   on `billing.payment_received` for the M6 signal bridge to
   consume; hourly settlement sweep as backstop), 1 list view.
-  `buildErpPaymentsPack()` merges core + new additions into
-  one unified manifest — `tryValidateManifest` passes;
-  cross-pack Payment → Invoice FK resolves via merge. Pattern
-  for future packs that `extends` an existing pack.
+  As of M7.6.5, `buildErpPaymentsPack()` returns a child-only
+  manifest with `meta.extends: ["operate-erp/core"]`; the
+  kernel's `resolveManifest` merges the parent at apply
+  time. Cross-pack Payment → Invoice FK resolves via the
+  merged manifest. Pattern for future packs that extend an
+  existing pack — author declares `extends`, kernel does the
+  merge work.
 - **`pack-erp-core`** — first vertical pack. Declarative
   `Manifest` with 4 entities (Account, Contact, Invoice,
   InvoiceLine on the `auditable` trait), 3 relations, 3 roles
@@ -985,19 +1009,25 @@ correlationKey: "pi_xxx", tenantId, idempotencyKey})`. Pattern
 for future webhook-driven packs (`pack-erp-shipping` for
 carriers, etc.).
 
-**No longer deferred (as of M7.5):** cross-pack composition.
-`@crossengin/pack-erp-payments` extends `pack-erp-core` by
-calling `buildErpCorePack()` and merging its own additions
-into the resulting Manifest. The combined manifest validates
-end-to-end; cross-pack references (Payment.invoice_id →
-Invoice) resolve internally via the merge. `meta.extends`
-documents the dependency for future marketplace tooling.
-`crossengin apply --pack=operate-erp/payments` produces a
-deployment-grade Postgres schema covering both core + payment
-tables in one atomic apply, all with M7.7's per-tenant
-isolation auto-applied. Pattern set for future verticals that
-build on existing ones (e.g., `pack-erp-healthcare` extends
-core, `pack-erp-payments-stripe` extends payments).
+**No longer deferred (as of M7.5 + M7.6.5):** cross-pack
+composition with kernel-driven extends resolution.
+`@crossengin/pack-erp-payments` declares `meta.extends:
+["operate-erp/core"]` and returns ONLY the payments-specific
+additions (1 entity, 1 relation, 1 workflow, 2 jobs, 1 view).
+The kernel's `resolveManifest(manifest, {registry})` — which
+already existed in `packages/kernel/src/manifest/extends.ts` —
+loads the parent by slug from the CLI's `packManifestRegistry()`
+and merges entities + traits + relations + roles + permissions
++ workflows + jobs + views into one unified manifest. Cycle
+detection (`ExtendsCycleError`) and unknown-parent errors
+(`UnknownParentManifestError`) surface as typed exit codes in
+the CLI. `crossengin apply --pack=operate-erp/payments` produces
+a deployment-grade Postgres schema covering both core + payment
+tables in one atomic apply, all with M7.7's per-tenant isolation
+auto-applied. Pattern set for future verticals that build on
+existing ones — author declares `extends`, kernel does the
+merge work, marketplace can enumerate dependencies without
+running pack builders.
 
 **No longer deferred (as of M7.7):** per-tenant isolation on
 pack tables. The kernel's `tenant_owned` built-in trait now
@@ -1146,7 +1176,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0067 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0068 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1170,7 +1200,8 @@ M7-wire (CLI `--pack` apply), ADR-0064 covers Phase 2 M7.7
 covers Phase 2 M7.5 (pack-erp-payments — cross-pack
 composition), ADR-0066 covers Phase 2 M7.8 (payment
 signal-bridge wiring), ADR-0067 covers Phase 2 M5.9 (CLI
-sessions subcommands). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+sessions subcommands), ADR-0068 covers Phase 2 M7.6.5
+(kernel `extends` resolver wiring). When you ship a new
+package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.

@@ -1,5 +1,11 @@
 import { emitMetaBootstrapSql, META_SCHEMA_NAME, META_TABLES } from "@crossengin/kernel/bootstrap";
-import { emitManifestCreate, tryValidateManifest } from "@crossengin/kernel/manifest";
+import {
+  ExtendsCycleError,
+  UnknownParentManifestError,
+  emitManifestCreate,
+  resolveManifest,
+  tryValidateManifest,
+} from "@crossengin/kernel/manifest";
 import {
   MigrationApplier,
   createNodePgConnection,
@@ -15,6 +21,7 @@ import type { RunContext } from "./commands.js";
 import {
   UnknownPackError,
   listAvailablePacks,
+  packManifestRegistry,
   resolvePack,
   type PackEntry,
 } from "./pack-registry.js";
@@ -39,7 +46,7 @@ export async function runApply(
 
   let plan: ResolvedPlan;
   try {
-    plan = buildPlan({ packSlug, packSchema });
+    plan = await buildPlan({ packSlug, packSchema });
   } catch (err) {
     if (err instanceof UnknownPackError) {
       printError(ctx.io, `apply: ${err.message}`);
@@ -47,6 +54,17 @@ export async function runApply(
     }
     if (err instanceof PackValidationError) {
       printError(ctx.io, `apply: ${err.message}`);
+      return 1;
+    }
+    if (err instanceof ExtendsCycleError) {
+      printError(ctx.io, `apply: pack extends-chain cycle: ${err.message}`);
+      return 1;
+    }
+    if (err instanceof UnknownParentManifestError) {
+      printError(
+        ctx.io,
+        `apply: pack references unknown parent: ${err.message}. Available: ${listAvailablePacks().join(", ")}`,
+      );
       return 1;
     }
     throw err;
@@ -108,10 +126,10 @@ class PackValidationError extends Error {
   }
 }
 
-function buildPlan(input: {
+async function buildPlan(input: {
   readonly packSlug: string | null;
   readonly packSchema: string;
-}): ResolvedPlan {
+}): Promise<ResolvedPlan> {
   const metaStatements = emitMetaBootstrapSql();
   if (input.packSlug === null) {
     return {
@@ -122,7 +140,10 @@ function buildPlan(input: {
     };
   }
   const pack = resolvePack(input.packSlug);
-  const manifest = pack.build();
+  const rawManifest = pack.build();
+  const manifest = await resolveManifest(rawManifest, {
+    registry: packManifestRegistry(),
+  });
   const result = tryValidateManifest(manifest);
   if (!result.ok) {
     throw new PackValidationError(input.packSlug, result.errors);

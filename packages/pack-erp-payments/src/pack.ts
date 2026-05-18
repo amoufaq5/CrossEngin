@@ -1,5 +1,5 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
+import { ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
 
 import { ERP_PAYMENTS_ENTITIES } from "./entities.js";
 import { ERP_PAYMENTS_JOBS } from "./jobs.js";
@@ -19,7 +19,6 @@ export interface BuildErpPaymentsPackOptions {
 export function buildErpPaymentsPack(
   opts: BuildErpPaymentsPackOptions = {},
 ): Manifest {
-  const core = buildErpCorePack();
   return {
     manifestVersion: "1.0",
     meta: {
@@ -34,15 +33,11 @@ export function buildErpPaymentsPack(
         ? { compliancePacks: [...opts.compliancePacks] }
         : {}),
     },
-    entities: [...(core.entities ?? []), ...ERP_PAYMENTS_ENTITIES],
-    relations: [...(core.relations ?? []), ...ERP_PAYMENTS_RELATIONS],
-    roles: { ...(core.roles ?? {}) },
-    permissions: {
-      ...(core.permissions ?? {}),
-      ...ERP_PAYMENTS_PERMISSIONS,
-    },
-    workflows: { ...(core.workflows ?? {}), ...ERP_PAYMENTS_WORKFLOWS },
-    jobs: { ...(core.jobs ?? {}), ...ERP_PAYMENTS_JOBS },
-    views: { ...(core.views ?? {}), ...ERP_PAYMENTS_VIEWS },
+    entities: [...ERP_PAYMENTS_ENTITIES],
+    relations: [...ERP_PAYMENTS_RELATIONS],
+    permissions: { ...ERP_PAYMENTS_PERMISSIONS },
+    workflows: { ...ERP_PAYMENTS_WORKFLOWS },
+    jobs: { ...ERP_PAYMENTS_JOBS },
+    views: { ...ERP_PAYMENTS_VIEWS },
   };
 }

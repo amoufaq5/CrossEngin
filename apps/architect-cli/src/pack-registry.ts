@@ -1,4 +1,4 @@
-import type { Manifest } from "@crossengin/kernel/manifest";
+import type { Manifest, ManifestRegistry } from "@crossengin/kernel/manifest";
 import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
 import {
   buildErpPaymentsPack,
@@ -25,6 +25,17 @@ export const PACK_REGISTRY: Readonly<Record<string, PackEntry>> = {
     build: () => buildErpPaymentsPack(),
   },
 };
+
+export function packManifestRegistry(
+  registry: Readonly<Record<string, PackEntry>> = PACK_REGISTRY,
+): ManifestRegistry {
+  return {
+    async getManifest(slug: string): Promise<Manifest | null> {
+      const entry = registry[slug];
+      return entry !== undefined ? entry.build() : null;
+    },
+  };
+}
 
 export class UnknownPackError extends Error {
   readonly kind = "unknown_pack" as const;
