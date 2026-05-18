@@ -6,13 +6,18 @@ import {
   BEDROCK_DEFAULT_EMBEDDING_MODEL,
   BEDROCK_EMBEDDING_MODELS,
   BEDROCK_EMBEDDING_PRICING,
+  BEDROCK_MULTIMODAL_EMBEDDING_MODELS,
+  BEDROCK_MULTIMODAL_EMBEDDING_PRICING,
   buildBedrockEmbeddingUsage,
+  buildBedrockMultimodalEmbeddingUsage,
   buildBedrockUsage,
   computeBedrockChatCost,
   computeBedrockEmbeddingCost,
+  computeBedrockMultimodalEmbeddingCost,
   isBedrockChatModel,
   isBedrockEmbeddingModel,
   isBedrockModel,
+  isBedrockMultimodalEmbeddingModel,
 } from "./pricing.js";
 
 describe("BEDROCK_CHAT_MODELS", () => {
@@ -195,9 +200,83 @@ describe("isBedrockEmbeddingModel + isBedrockModel", () => {
     expect(isBedrockEmbeddingModel("text-embedding-3-small")).toBe(false);
   });
 
-  it("isBedrockModel accepts both chat + embedding models", () => {
+  it("isBedrockEmbeddingModel rejects multimodal models (separate category)", () => {
+    expect(isBedrockEmbeddingModel("amazon.titan-embed-image-v1")).toBe(false);
+  });
+
+  it("isBedrockModel accepts chat + embedding + multimodal embedding models", () => {
     expect(isBedrockModel("anthropic.claude-3-5-sonnet-20241022-v2:0")).toBe(true);
     expect(isBedrockModel("amazon.titan-embed-text-v2:0")).toBe(true);
+    expect(isBedrockModel("amazon.titan-embed-image-v1")).toBe(true);
     expect(isBedrockModel("gpt-4o")).toBe(false);
+  });
+});
+
+describe("BEDROCK_MULTIMODAL_EMBEDDING_MODELS + pricing (M2.9.7)", () => {
+  it("lists titan-embed-image-v1 as a multimodal model", () => {
+    expect(BEDROCK_MULTIMODAL_EMBEDDING_MODELS).toEqual([
+      "amazon.titan-embed-image-v1",
+    ]);
+  });
+
+  it("titan-embed-image-v1 has dual-billing: $0.80/M text + $0.00006/image", () => {
+    const p = BEDROCK_MULTIMODAL_EMBEDDING_PRICING["amazon.titan-embed-image-v1"];
+    expect(p.textUsdPerMillion).toBe(0.8);
+    expect(p.imageUsdPerImage).toBe(0.00006);
+  });
+
+  it("isBedrockMultimodalEmbeddingModel discriminates correctly", () => {
+    expect(isBedrockMultimodalEmbeddingModel("amazon.titan-embed-image-v1")).toBe(true);
+    expect(isBedrockMultimodalEmbeddingModel("amazon.titan-embed-text-v2:0")).toBe(false);
+    expect(isBedrockMultimodalEmbeddingModel("cohere.embed-english-v3")).toBe(false);
+  });
+});
+
+describe("computeBedrockMultimodalEmbeddingCost", () => {
+  it("image-only: cost = imageCount * imageUsdPerImage", () => {
+    const cost = computeBedrockMultimodalEmbeddingCost("amazon.titan-embed-image-v1", {
+      textInputTokens: 0,
+      imageCount: 1,
+    });
+    expect(cost).toBe(0.00006);
+  });
+
+  it("text-only: cost = textTokens * textUsdPerMillion / 1_000_000", () => {
+    const cost = computeBedrockMultimodalEmbeddingCost("amazon.titan-embed-image-v1", {
+      textInputTokens: 1_000_000,
+      imageCount: 0,
+    });
+    expect(cost).toBe(0.8);
+  });
+
+  it("combined: text + image are summed and rounded to 6 decimals", () => {
+    const cost = computeBedrockMultimodalEmbeddingCost("amazon.titan-embed-image-v1", {
+      textInputTokens: 500_000,
+      imageCount: 2,
+    });
+    // 500_000 * 0.8 / 1_000_000 + 2 * 0.00006 = 0.4 + 0.00012 = 0.40012
+    expect(cost).toBe(0.40012);
+  });
+
+  it("zero of both → zero cost", () => {
+    expect(
+      computeBedrockMultimodalEmbeddingCost("amazon.titan-embed-image-v1", {
+        textInputTokens: 0,
+        imageCount: 0,
+      }),
+    ).toBe(0);
+  });
+});
+
+describe("buildBedrockMultimodalEmbeddingUsage", () => {
+  it("Usage has inputTokens = text tokens, outputTokens = 0", () => {
+    const usage = buildBedrockMultimodalEmbeddingUsage("amazon.titan-embed-image-v1", {
+      textInputTokens: 42,
+      imageCount: 1,
+    });
+    expect(usage.inputTokens).toBe(42);
+    expect(usage.outputTokens).toBe(0);
+    expect(usage.cachedInputTokens).toBeUndefined();
+    expect(usage.cost).toBeGreaterThan(0);
   });
 });

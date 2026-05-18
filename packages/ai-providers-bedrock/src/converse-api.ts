@@ -34,11 +34,43 @@ export interface BedrockCachePointBlock {
   };
 }
 
+export const BEDROCK_IMAGE_FORMATS = ["png", "jpeg", "gif", "webp"] as const;
+export type BedrockImageFormat = (typeof BEDROCK_IMAGE_FORMATS)[number];
+
+export interface BedrockImageContentBlock {
+  readonly image: {
+    readonly format: BedrockImageFormat;
+    readonly source: {
+      readonly bytes: string;
+    };
+  };
+}
+
 export type BedrockContentBlock =
   | BedrockTextContentBlock
   | BedrockToolUseContentBlock
   | BedrockToolResultContentBlock
+  | BedrockImageContentBlock
   | BedrockCachePointBlock;
+
+export function isBedrockImageFormat(value: string): value is BedrockImageFormat {
+  return (BEDROCK_IMAGE_FORMATS as readonly string[]).includes(value);
+}
+
+export function buildBedrockImageBlock(input: {
+  readonly format: BedrockImageFormat;
+  readonly imageBase64: string;
+}): BedrockImageContentBlock {
+  if (input.imageBase64.length === 0) {
+    throw new Error("buildBedrockImageBlock: imageBase64 must be non-empty");
+  }
+  return {
+    image: {
+      format: input.format,
+      source: { bytes: input.imageBase64 },
+    },
+  };
+}
 
 export interface BedrockMessage {
   readonly role: "user" | "assistant";

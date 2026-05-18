@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildBedrockConverseRequest,
+  buildBedrockImageBlock,
   extractTextFromConverseResponse,
   extractToolCallsFromConverseResponse,
+  isBedrockImageFormat,
   normalizeConverseUsage,
   type BedrockConverseResponse,
 } from "./converse-api.js";
@@ -377,6 +379,61 @@ describe("extractTextFromConverseResponse", () => {
       ]),
     );
     expect(text).toBe("helloworld");
+  });
+
+  it("skips image blocks (M2.9.7 forward-compat)", () => {
+    const text = extractTextFromConverseResponse(
+      withContent([
+        { text: "before" },
+        { image: { format: "png", source: { bytes: "..." } } },
+        { text: "after" },
+      ]),
+    );
+    expect(text).toBe("beforeafter");
+  });
+});
+
+describe("buildBedrockImageBlock (M2.9.7)", () => {
+  it("emits a {image: {format, source: {bytes}}} block for valid input", () => {
+    const block = buildBedrockImageBlock({
+      format: "png",
+      imageBase64: "iVBORw0KGgo...",
+    });
+    expect(block).toEqual({
+      image: {
+        format: "png",
+        source: { bytes: "iVBORw0KGgo..." },
+      },
+    });
+  });
+
+  it("accepts each documented format (png/jpeg/gif/webp)", () => {
+    for (const format of ["png", "jpeg", "gif", "webp"] as const) {
+      const block = buildBedrockImageBlock({ format, imageBase64: "abc" });
+      expect(block.image.format).toBe(format);
+    }
+  });
+
+  it("rejects empty imageBase64", () => {
+    expect(() =>
+      buildBedrockImageBlock({ format: "png", imageBase64: "" }),
+    ).toThrow(/non-empty/);
+  });
+});
+
+describe("isBedrockImageFormat", () => {
+  it("accepts the documented formats", () => {
+    expect(isBedrockImageFormat("png")).toBe(true);
+    expect(isBedrockImageFormat("jpeg")).toBe(true);
+    expect(isBedrockImageFormat("gif")).toBe(true);
+    expect(isBedrockImageFormat("webp")).toBe(true);
+  });
+
+  it("rejects unsupported formats", () => {
+    expect(isBedrockImageFormat("svg")).toBe(false);
+    expect(isBedrockImageFormat("bmp")).toBe(false);
+    expect(isBedrockImageFormat("")).toBe(false);
+    expect(isBedrockImageFormat("JPEG")).toBe(false); // case sensitive
   });
 });
 

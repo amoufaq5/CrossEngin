@@ -14,12 +14,44 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 +
-M4.7 + M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 +
-M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 +
-M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app, 119
-meta-schema tables, 6,359 tests**, all green, no type errors.
-M2.9.6 closed M2.9 Q3 + M2.9.5 Q4 with two additive opt-in
+M2.9.5 + M2.9.6 + M2.9.7 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 +
+M4.6 + M4.7 + M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
+M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 +
+M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app, 119
+meta-schema tables, 6,396 tests**, all green, no type errors.
+M2.9.7 closed M2.9.5 Q6 by shipping Bedrock multimodal
+embeddings (`amazon.titan-embed-image-v1`) + chat image content
+block types. Two new surfaces in `@crossengin/ai-providers-
+bedrock`, all additive, zero kernel changes. First — new
+provider-native method `embedMultimodal({model?, text?, image
+Base64?, dimensions?})` POSTs to `/model/amazon.titan-embed-
+image-v1/invoke` with sig-v4. Takes EITHER text OR image OR
+both; returns `{vector, dim, model, usage: {inputTextTokens,
+imageCount, cost}}`. Dual billing: $0.80/M text tokens + flat
+$0.00006 per image (combined inputs sum both tracks). 256/384/
+1024-dim output (default 1024). New types in pricing.ts:
+`BEDROCK_MULTIMODAL_EMBEDDING_MODELS`,
+`BedrockMultimodalEmbeddingPricing`,
+`computeBedrockMultimodalEmbeddingCost`,
+`buildBedrockMultimodalEmbeddingUsage`,
+`isBedrockMultimodalEmbeddingModel`. `BedrockModel` union
+expands to three families (chat / embedding / multimodal
+embedding); `isBedrockModel` accepts all three. `embed()` (the
+kernel-facing method) now rejects `model: "amazon.titan-embed-
+image-v1"` with a redirect error pointing to `embedMultimodal`
+— catches the typo case that would silently pick the wrong
+billing track. Second — Bedrock chat `BedrockImageContentBlock`
+type added to the discriminated union (`{image: {format,
+source: {bytes}}}`); `BEDROCK_IMAGE_FORMATS = [png, jpeg, gif,
+webp]`; `buildBedrockImageBlock({format, imageBase64})` factory;
+`isBedrockImageFormat` discriminator. `extractTextFromConverse
+Response` + `extractToolCallsFromConverseResponse` skip image
+blocks via the existing `"text" in block` / `"toolUse" in
+block` discriminators (regression-tested). No
+`buildBedrockConverseRequest` wiring yet — the kernel
+`LlmMessage.content: string` is text-only; the types are ready
+for a future M2.X kernel extension that adds structured
+content. M2.9.6 closed M2.9 Q3 + M2.9.5 Q4 with two additive opt-in
 features for the Bedrock provider. First — kernel-level
 `CompletionRequest.cacheControl` now threads into Bedrock
 `cachePoint` content blocks: `systemPrompt` and/or `toolSchemas`
@@ -547,7 +579,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0076 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0077 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -581,7 +613,9 @@ three-deep task fallback chains), ADR-0074 covers M4.7.5
 questions), ADR-0075 covers M4.7.6 (URL-fetched JWKS +
 hot-reload via SIGHUP + periodic refresh), ADR-0076 covers
 M2.9.6 (Bedrock cacheControl threading + Titan parallelism
-closing M2.9 Q3 + M2.9.5 Q4).
+closing M2.9 Q3 + M2.9.5 Q4), ADR-0077 covers M2.9.7 (Bedrock
+multimodal embeddings + image content block types closing
+M2.9.5 Q6).
 
 ## Architecture in 90 seconds
 
@@ -1472,7 +1506,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0076 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0077 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1508,6 +1542,8 @@ Bedrock integration), ADR-0074 covers Phase 2 M4.7.5 (gateway
 JWT auth + routes subcommand), ADR-0075 covers Phase 2 M4.7.6
 (URL-fetched JWKS + SIGHUP/periodic hot-reload), ADR-0076
 covers Phase 2 M2.9.6 (Bedrock cacheControl + Titan
-parallelism). When you ship a new package, write the matching
-ADR in the same session, following `0000-template.md` and the
-style of the existing 0026-0037 batch.
+parallelism), ADR-0077 covers Phase 2 M2.9.7 (Bedrock
+multimodal embeddings + chat image content block types). When
+you ship a new package, write the matching ADR in the same
+session, following `0000-template.md` and the style of the
+existing 0026-0037 batch.

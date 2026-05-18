@@ -21,10 +21,13 @@ import {
   buildCohereEmbedRequest,
   buildEmbeddingResponse,
   buildTitanEmbedRequest,
+  buildTitanMultimodalRequest,
   parseCohereEmbedResponse,
   parseTitanEmbedResponse,
+  parseTitanMultimodalResponse,
   type CohereEmbedInputType,
   type EmbeddingAggregation,
+  type MultimodalEmbeddingResult,
 } from "./embeddings.js";
 import {
   BedrockError,
@@ -37,10 +40,14 @@ import {
   BEDROCK_CHAT_PRICING,
   BEDROCK_DEFAULT_EMBEDDING_MODEL,
   BEDROCK_EMBEDDING_MODELS,
+  BEDROCK_MULTIMODAL_EMBEDDING_MODELS,
+  buildBedrockMultimodalEmbeddingUsage,
   isBedrockChatModel,
   isBedrockEmbeddingModel,
+  isBedrockMultimodalEmbeddingModel,
   type BedrockChatModel,
   type BedrockEmbeddingModel,
+  type BedrockMultimodalEmbeddingModel,
 } from "./pricing.js";
 import { signRequest, type AwsCredentials } from "./signing.js";
 
@@ -92,6 +99,7 @@ export class BedrockProvider implements LlmProvider {
   readonly models: readonly string[] = [
     ...BEDROCK_CHAT_MODELS,
     ...BEDROCK_EMBEDDING_MODELS,
+    ...BEDROCK_MULTIMODAL_EMBEDDING_MODELS,
   ];
   readonly capabilities: ProviderCapabilities = {
     chat: true,
@@ -300,7 +308,7 @@ export class BedrockProvider implements LlmProvider {
   }
 
   private async invokeModelJson(
-    model: BedrockEmbeddingModel,
+    model: BedrockEmbeddingModel | BedrockMultimodalEmbeddingModel,
     requestBody: unknown,
   ): Promise<unknown> {
     const body = new TextEncoder().encode(JSON.stringify(requestBody));
@@ -349,6 +357,12 @@ export class BedrockProvider implements LlmProvider {
 
   private resolveEmbeddingModel(requested: string | undefined): BedrockEmbeddingModel {
     if (requested === undefined) return this.defaultEmbeddingModel;
+    if (isBedrockMultimodalEmbeddingModel(requested)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `model '${requested}' is a multimodal embedding model — call embedMultimodal() instead`,
+      });
+    }
     if (!isBedrockEmbeddingModel(requested)) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -356,6 +370,50 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return requested;
+  }
+
+  async embedMultimodal(input: {
+    readonly model?: BedrockMultimodalEmbeddingModel;
+    readonly text?: string;
+    readonly imageBase64?: string;
+    readonly dimensions?: number;
+  }): Promise<MultimodalEmbeddingResult> {
+    const model = input.model ?? "amazon.titan-embed-image-v1";
+    if (!isBedrockMultimodalEmbeddingModel(model)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `embedMultimodal: model '${model}' is not a known Bedrock multimodal embedding model`,
+      });
+    }
+    const body = buildTitanMultimodalRequest({
+      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.imageBase64 !== undefined ? { imageBase64: input.imageBase64 } : {}),
+      ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
+    });
+    const raw = await this.invokeModelJson(model, body);
+    const parsed = parseTitanMultimodalResponse(raw);
+    if (parsed.message !== null && parsed.message.length > 0) {
+      throw new BedrockError({
+        kind: "model_stream_error",
+        message: `titan multimodal embed returned message: ${parsed.message.slice(0, 480)}`,
+      });
+    }
+    const imageCount =
+      typeof input.imageBase64 === "string" && input.imageBase64.length > 0 ? 1 : 0;
+    const usage = buildBedrockMultimodalEmbeddingUsage(model, {
+      textInputTokens: parsed.inputTextTokenCount,
+      imageCount,
+    });
+    return {
+      vector: [...parsed.embedding],
+      dim: parsed.embedding.length,
+      model,
+      usage: {
+        inputTextTokens: parsed.inputTextTokenCount,
+        imageCount,
+        cost: usage.cost,
+      },
+    };
   }
 
   private async signedFetch(input: {

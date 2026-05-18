@@ -98,7 +98,7 @@ describe("BedrockProvider — constructor", () => {
   it("exposes id, models, capabilities, pricing", () => {
     const provider = build({ fetch: buildFetch({}) });
     expect(provider.id).toBe("bedrock");
-    expect(provider.models.length).toBe(12); // 8 chat + 4 embedding
+    expect(provider.models.length).toBe(13); // 8 chat + 4 embedding + 1 multimodal
     expect(provider.models).toContain("amazon.titan-embed-text-v2:0");
     expect(provider.capabilities.chat).toBe(true);
     expect(provider.capabilities.streaming).toBe(true);
@@ -548,6 +548,160 @@ describe("BedrockProvider — embed (validation)", () => {
         model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
       }),
     ).rejects.toMatchObject({ kind: "invalid_request_error" });
+  });
+
+  it("rejects a multimodal embedding model via embed() with a redirect to embedMultimodal()", async () => {
+    const provider = build({ fetch: buildFetch({}) });
+    await expect(
+      provider.embed({
+        tenantId: "t",
+        sessionId: "s",
+        texts: ["x"],
+        model: "amazon.titan-embed-image-v1",
+      }),
+    ).rejects.toThrow(/embedMultimodal/);
+  });
+});
+
+describe("BedrockProvider — embedMultimodal (M2.9.7)", () => {
+  it("POSTs text-only to /model/amazon.titan-embed-image-v1/invoke and returns embedding + usage", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          embedding: [0.1, 0.2, 0.3],
+          inputTextTokenCount: 5,
+          message: null,
+        }),
+      }),
+    });
+    const result = await provider.embedMultimodal({ text: "a tabby cat" });
+    expect(capture.url).toContain(
+      "/model/amazon.titan-embed-image-v1/invoke",
+    );
+    expect(capture.init?.headers["accept"]).toBe("application/json");
+    expect(result.vector).toEqual([0.1, 0.2, 0.3]);
+    expect(result.dim).toBe(3);
+    expect(result.model).toBe("amazon.titan-embed-image-v1");
+    expect(result.usage.inputTextTokens).toBe(5);
+    expect(result.usage.imageCount).toBe(0);
+    // 5 * 0.8 / 1_000_000 = 0.000004
+    expect(result.usage.cost).toBe(Number(((5 * 0.8) / 1_000_000).toFixed(6)));
+  });
+
+  it("image-only request sends inputImage and reports imageCount: 1", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          embedding: new Array(1024).fill(0.01),
+          inputTextTokenCount: 0,
+          message: null,
+        }),
+      }),
+    });
+    const result = await provider.embedMultimodal({
+      imageBase64: "iVBORw0KGgoAAAANSUhEUgAA...",
+    });
+    const sent = JSON.parse(new TextDecoder().decode(capture.init!.body)) as {
+      inputText?: string;
+      inputImage?: string;
+      embeddingConfig: { outputEmbeddingLength: number };
+    };
+    expect(sent.inputText).toBeUndefined();
+    expect(sent.inputImage).toBe("iVBORw0KGgoAAAANSUhEUgAA...");
+    expect(sent.embeddingConfig.outputEmbeddingLength).toBe(1024);
+    expect(result.dim).toBe(1024);
+    expect(result.usage.inputTextTokens).toBe(0);
+    expect(result.usage.imageCount).toBe(1);
+    expect(result.usage.cost).toBe(0.00006);
+  });
+
+  it("text + image combined: cost = text-token cost + per-image cost", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: JSON.stringify({
+          embedding: [0.1],
+          inputTextTokenCount: 1_000_000,
+          message: null,
+        }),
+      }),
+    });
+    const result = await provider.embedMultimodal({
+      text: "describe this image",
+      imageBase64: "abc",
+    });
+    expect(result.usage.imageCount).toBe(1);
+    // 1_000_000 * 0.8 / 1_000_000 + 0.00006 = 0.80006
+    expect(result.usage.cost).toBe(0.80006);
+  });
+
+  it("forwards 256/384/1024 dimensions correctly", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          embedding: new Array(256).fill(0.01),
+          inputTextTokenCount: 1,
+          message: null,
+        }),
+      }),
+    });
+    await provider.embedMultimodal({ text: "x", dimensions: 256 });
+    const sent = JSON.parse(new TextDecoder().decode(capture.init!.body)) as {
+      embeddingConfig: { outputEmbeddingLength: number };
+    };
+    expect(sent.embeddingConfig.outputEmbeddingLength).toBe(256);
+  });
+
+  it("rejects invalid dimensions at request-build time", async () => {
+    const provider = build({ fetch: buildFetch({}) });
+    await expect(
+      provider.embedMultimodal({ text: "x", dimensions: 512 }),
+    ).rejects.toThrow(/dimensions must be one of/);
+  });
+
+  it("rejects neither-text-nor-image input", async () => {
+    const provider = build({ fetch: buildFetch({}) });
+    await expect(provider.embedMultimodal({})).rejects.toThrow(
+      /at least one of text or imageBase64/,
+    );
+  });
+
+  it("throws model_stream_error when the response includes a non-null message", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: JSON.stringify({
+          embedding: [],
+          inputTextTokenCount: 0,
+          message: "image content blocked by safety filter",
+        }),
+      }),
+    });
+    await expect(
+      provider.embedMultimodal({ imageBase64: "blocked" }),
+    ).rejects.toMatchObject({ kind: "model_stream_error" });
+  });
+
+  it("rejects unknown model strings as multimodal", async () => {
+    const provider = build({ fetch: buildFetch({}) });
+    await expect(
+      provider.embedMultimodal({
+        text: "x",
+        model: "amazon.titan-embed-text-v2:0" as never,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+  });
+});
+
+describe("BedrockProvider — capabilities + models (M2.9.7)", () => {
+  it("models list includes the multimodal embedding model", () => {
+    const provider = build({ fetch: buildFetch({}) });
+    expect(provider.models).toContain("amazon.titan-embed-image-v1");
+    expect(provider.models.length).toBe(13); // 8 chat + 4 embedding + 1 multimodal
   });
 });
 

@@ -6,9 +6,13 @@ import {
   buildCohereEmbedRequest,
   buildEmbeddingResponse,
   buildTitanEmbedRequest,
+  buildTitanMultimodalRequest,
   COHERE_MAX_BATCH_SIZE,
   parseCohereEmbedResponse,
   parseTitanEmbedResponse,
+  parseTitanMultimodalResponse,
+  TITAN_MULTIMODAL_DEFAULT_DIMENSIONS,
+  TITAN_MULTIMODAL_VALID_DIMENSIONS,
   TITAN_V2_DEFAULT_DIMENSIONS,
 } from "./embeddings.js";
 import { BedrockError } from "./errors.js";
@@ -198,5 +202,98 @@ describe("approximateTokenCount", () => {
   it("approximates 1 token per 4 characters", () => {
     expect(approximateTokenCount("12345678")).toBe(2);
     expect(approximateTokenCount("123456789")).toBe(3);
+  });
+});
+
+describe("buildTitanMultimodalRequest (M2.9.7)", () => {
+  it("text-only: emits {inputText, embeddingConfig} with default 1024 dimensions", () => {
+    const req = buildTitanMultimodalRequest({ text: "hello world" });
+    expect(req).toEqual({
+      inputText: "hello world",
+      embeddingConfig: { outputEmbeddingLength: TITAN_MULTIMODAL_DEFAULT_DIMENSIONS },
+    });
+    expect(req.inputImage).toBeUndefined();
+  });
+
+  it("image-only: emits {inputImage, embeddingConfig}", () => {
+    const req = buildTitanMultimodalRequest({ imageBase64: "iVBORw0KGgo..." });
+    expect(req).toEqual({
+      inputImage: "iVBORw0KGgo...",
+      embeddingConfig: { outputEmbeddingLength: 1024 },
+    });
+    expect(req.inputText).toBeUndefined();
+  });
+
+  it("text + image: emits both fields", () => {
+    const req = buildTitanMultimodalRequest({
+      text: "a cat",
+      imageBase64: "iVBORw0KGgo...",
+    });
+    expect(req.inputText).toBe("a cat");
+    expect(req.inputImage).toBe("iVBORw0KGgo...");
+  });
+
+  it("accepts 256/384/1024 dimensions", () => {
+    for (const dim of TITAN_MULTIMODAL_VALID_DIMENSIONS) {
+      const req = buildTitanMultimodalRequest({ text: "x", dimensions: dim });
+      expect(req.embeddingConfig?.outputEmbeddingLength).toBe(dim);
+    }
+  });
+
+  it("rejects invalid dimensions", () => {
+    expect(() =>
+      buildTitanMultimodalRequest({ text: "x", dimensions: 512 }),
+    ).toThrow(BedrockError);
+    expect(() =>
+      buildTitanMultimodalRequest({ text: "x", dimensions: 768 }),
+    ).toThrow(BedrockError);
+  });
+
+  it("rejects empty input (neither text nor image)", () => {
+    expect(() => buildTitanMultimodalRequest({})).toThrow(BedrockError);
+  });
+
+  it("rejects empty text and empty image strings as no input", () => {
+    expect(() =>
+      buildTitanMultimodalRequest({ text: "", imageBase64: "" }),
+    ).toThrow(BedrockError);
+  });
+});
+
+describe("parseTitanMultimodalResponse", () => {
+  it("returns embedding + token count + null message on success", () => {
+    const parsed = parseTitanMultimodalResponse({
+      embedding: [0.1, 0.2, 0.3],
+      inputTextTokenCount: 5,
+      message: null,
+    });
+    expect(parsed.embedding).toEqual([0.1, 0.2, 0.3]);
+    expect(parsed.inputTextTokenCount).toBe(5);
+    expect(parsed.message).toBeNull();
+  });
+
+  it("captures error message when present", () => {
+    const parsed = parseTitanMultimodalResponse({
+      embedding: [],
+      inputTextTokenCount: 0,
+      message: "image too large",
+    });
+    expect(parsed.message).toBe("image too large");
+  });
+
+  it("defaults inputTextTokenCount to 0 when missing", () => {
+    const parsed = parseTitanMultimodalResponse({ embedding: [0.1] });
+    expect(parsed.inputTextTokenCount).toBe(0);
+  });
+
+  it("throws when embedding array is missing", () => {
+    expect(() => parseTitanMultimodalResponse({})).toThrow(BedrockError);
+    expect(() =>
+      parseTitanMultimodalResponse({ embedding: "not-an-array" }),
+    ).toThrow(BedrockError);
+  });
+
+  it("throws on null payload", () => {
+    expect(() => parseTitanMultimodalResponse(null)).toThrow(BedrockError);
   });
 });

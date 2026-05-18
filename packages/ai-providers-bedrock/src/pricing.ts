@@ -22,7 +22,10 @@ export const BEDROCK_EMBEDDING_MODELS = [
 
 export type BedrockEmbeddingModel = (typeof BEDROCK_EMBEDDING_MODELS)[number];
 
-export type BedrockModel = BedrockChatModel | BedrockEmbeddingModel;
+export type BedrockModel =
+  | BedrockChatModel
+  | BedrockEmbeddingModel
+  | BedrockMultimodalEmbeddingModel;
 
 export interface BedrockChatPricing {
   readonly inputUsdPerMillion: number;
@@ -144,8 +147,65 @@ export function isBedrockEmbeddingModel(
 }
 
 export function isBedrockModel(value: string): value is BedrockModel {
-  return isBedrockChatModel(value) || isBedrockEmbeddingModel(value);
+  return (
+    isBedrockChatModel(value) ||
+    isBedrockEmbeddingModel(value) ||
+    isBedrockMultimodalEmbeddingModel(value)
+  );
 }
 
 export const BEDROCK_DEFAULT_EMBEDDING_MODEL: BedrockEmbeddingModel =
   "amazon.titan-embed-text-v2:0";
+
+export const BEDROCK_MULTIMODAL_EMBEDDING_MODELS = [
+  "amazon.titan-embed-image-v1",
+] as const;
+
+export type BedrockMultimodalEmbeddingModel =
+  (typeof BEDROCK_MULTIMODAL_EMBEDDING_MODELS)[number];
+
+export interface BedrockMultimodalEmbeddingPricing {
+  readonly textUsdPerMillion: number;
+  readonly imageUsdPerImage: number;
+}
+
+export const BEDROCK_MULTIMODAL_EMBEDDING_PRICING: Readonly<
+  Record<BedrockMultimodalEmbeddingModel, BedrockMultimodalEmbeddingPricing>
+> = {
+  "amazon.titan-embed-image-v1": {
+    textUsdPerMillion: 0.8,
+    imageUsdPerImage: 0.00006,
+  },
+};
+
+export interface BedrockMultimodalCostInput {
+  readonly textInputTokens: number;
+  readonly imageCount: number;
+}
+
+export function computeBedrockMultimodalEmbeddingCost(
+  model: BedrockMultimodalEmbeddingModel,
+  input: BedrockMultimodalCostInput,
+): number {
+  const p = BEDROCK_MULTIMODAL_EMBEDDING_PRICING[model];
+  const textCost = (input.textInputTokens * p.textUsdPerMillion) / 1_000_000;
+  const imageCost = input.imageCount * p.imageUsdPerImage;
+  return Number((textCost + imageCost).toFixed(6));
+}
+
+export function buildBedrockMultimodalEmbeddingUsage(
+  model: BedrockMultimodalEmbeddingModel,
+  input: BedrockMultimodalCostInput,
+): Usage {
+  return {
+    inputTokens: input.textInputTokens,
+    outputTokens: 0,
+    cost: computeBedrockMultimodalEmbeddingCost(model, input),
+  };
+}
+
+export function isBedrockMultimodalEmbeddingModel(
+  value: string,
+): value is BedrockMultimodalEmbeddingModel {
+  return (BEDROCK_MULTIMODAL_EMBEDDING_MODELS as readonly string[]).includes(value);
+}

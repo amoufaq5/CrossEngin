@@ -174,3 +174,91 @@ export function approximateTokenCount(text: string): number {
   if (text.length === 0) return 0;
   return Math.max(1, Math.ceil(text.length / 4));
 }
+
+export const TITAN_MULTIMODAL_VALID_DIMENSIONS: readonly number[] = [256, 384, 1024];
+export const TITAN_MULTIMODAL_DEFAULT_DIMENSIONS = 1024;
+
+export interface TitanMultimodalEmbedRequest {
+  readonly inputText?: string;
+  readonly inputImage?: string;
+  readonly embeddingConfig?: { readonly outputEmbeddingLength: number };
+}
+
+export interface TitanMultimodalEmbedResponse {
+  readonly embedding: readonly number[];
+  readonly inputTextTokenCount: number;
+  readonly message: string | null;
+}
+
+export interface BuildTitanMultimodalRequestInput {
+  readonly text?: string;
+  readonly imageBase64?: string;
+  readonly dimensions?: number;
+}
+
+export function buildTitanMultimodalRequest(
+  input: BuildTitanMultimodalRequestInput,
+): TitanMultimodalEmbedRequest {
+  const hasText = typeof input.text === "string" && input.text.length > 0;
+  const hasImage =
+    typeof input.imageBase64 === "string" && input.imageBase64.length > 0;
+  if (!hasText && !hasImage) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: "titan-embed-image-v1 requires at least one of text or imageBase64",
+    });
+  }
+  const dim = input.dimensions ?? TITAN_MULTIMODAL_DEFAULT_DIMENSIONS;
+  if (!TITAN_MULTIMODAL_VALID_DIMENSIONS.includes(dim)) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `titan-embed-image-v1 dimensions must be one of ${TITAN_MULTIMODAL_VALID_DIMENSIONS.join("/")}, got ${dim.toString()}`,
+    });
+  }
+  return {
+    ...(hasText ? { inputText: input.text } : {}),
+    ...(hasImage ? { inputImage: input.imageBase64 } : {}),
+    embeddingConfig: { outputEmbeddingLength: dim },
+  };
+}
+
+export function parseTitanMultimodalResponse(
+  raw: unknown,
+): TitanMultimodalEmbedResponse {
+  if (typeof raw !== "object" || raw === null) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "titan multimodal embedding response is not an object",
+    });
+  }
+  const obj = raw as {
+    embedding?: unknown;
+    inputTextTokenCount?: unknown;
+    message?: unknown;
+  };
+  if (!Array.isArray(obj.embedding)) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "titan multimodal embedding response missing 'embedding' array",
+    });
+  }
+  const tokens =
+    typeof obj.inputTextTokenCount === "number" ? obj.inputTextTokenCount : 0;
+  const message = typeof obj.message === "string" ? obj.message : null;
+  return {
+    embedding: obj.embedding as readonly number[],
+    inputTextTokenCount: tokens,
+    message,
+  };
+}
+
+export interface MultimodalEmbeddingResult {
+  readonly vector: readonly number[];
+  readonly dim: number;
+  readonly model: string;
+  readonly usage: {
+    readonly inputTextTokens: number;
+    readonly imageCount: number;
+    readonly cost: number;
+  };
+}
