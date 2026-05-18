@@ -46,12 +46,13 @@ export async function runGatewayRoutes(
   if (action === undefined) {
     printError(
       ctx.io,
-      "gateway routes: missing action. usage: crossengin gateway routes <list|register|unregister> [args]",
+      "gateway routes: missing action. usage: crossengin gateway routes <list|register|unregister|register-pack|unregister-pack|sync-pack> [args]",
     );
     return 2;
   }
   // {register|unregister}-pack --dry-run preview paths don't need PG. Short-circuit
   // before resolving the registry so operators can preview routes without a DB.
+  // sync-pack ALWAYS needs PG (even --dry-run reads the stored set for the diff).
   if (
     (action === "register-pack" || action === "unregister-pack") &&
     getBooleanFlag(command, "dry-run")
@@ -73,10 +74,12 @@ export async function runGatewayRoutes(
         return await runRoutesRegisterPack(command, ctx, handle.registry);
       case "unregister-pack":
         return await runRoutesUnregisterPack(command, ctx, handle.registry);
+      case "sync-pack":
+        return await runRoutesSyncPack(command, ctx, handle.registry);
       default:
         printError(
           ctx.io,
-          `gateway routes: unknown action '${action}'. expected one of: list, register, unregister, register-pack, unregister-pack`,
+          `gateway routes: unknown action '${action}'. expected one of: list, register, unregister, register-pack, unregister-pack, sync-pack`,
         );
         return 2;
     }
@@ -476,6 +479,144 @@ async function runRoutesUnregisterPack(
       ctx.io,
       `unregistered ${deleted.toString()} of ${records.length.toString()} route(s) for pack '${slug}'.${notFound.length > 0 ? ` (${notFound.length.toString()} route id(s) not found — already removed)` : ""}`,
     );
+  }
+  return 0;
+}
+
+async function runRoutesSyncPack(
+  command: ParsedCommand,
+  ctx: RunContext,
+  registry: PostgresRouteRegistry,
+): Promise<number> {
+  const slug = command.positional[2];
+  if (slug === undefined) {
+    printError(
+      ctx.io,
+      "gateway routes sync-pack: missing slug. usage: crossengin gateway routes sync-pack <slug> [--api-version v1] [--dry-run] [--created-by <uuid>]",
+    );
+    return 2;
+  }
+  let resolved;
+  try {
+    resolved = resolvePack(slug);
+  } catch (err) {
+    if (err instanceof UnknownPackError) {
+      printError(ctx.io, `gateway routes sync-pack: ${err.message}`);
+      return 2;
+    }
+    throw err;
+  }
+  let resolvedManifest: Manifest;
+  try {
+    resolvedManifest = await resolveManifest(resolved.build(), {
+      registry: packManifestRegistry(),
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway routes sync-pack: failed to resolve pack '${slug}': ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  const validation = tryValidateManifest(resolvedManifest);
+  if (!validation.ok) {
+    printError(
+      ctx.io,
+      `gateway routes sync-pack: pack '${slug}' failed validation: ${validation.errors.map((e) => `${e.path}: ${e.message}`).join("; ")}`,
+    );
+    return 1;
+  }
+  const apiVersion = getStringFlag(command, "api-version") ?? undefined;
+  let records: readonly PackRouteRecord[];
+  try {
+    records = generatePackRoutes({
+      manifest: resolvedManifest,
+      packSlug: slug,
+      ...(apiVersion !== undefined ? { apiVersion } : {}),
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway routes sync-pack: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  const stored = await registry.listAll();
+  const generatedIds = new Set(records.map((r) => r.route.id));
+  const storedIds = new Set(stored.map((r) => r.id));
+  const added = records.filter((r) => !storedIds.has(r.route.id));
+  const persistent = records.filter((r) => storedIds.has(r.route.id));
+  const external = stored.filter((r) => !generatedIds.has(r.id));
+
+  const dryRun = getBooleanFlag(command, "dry-run");
+  if (dryRun) {
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        pack: slug,
+        dryRun: true,
+        total: records.length,
+        added: added.length,
+        persistent: persistent.length,
+        external: external.length,
+        externalIds: external.map((r) => r.id),
+      });
+    } else {
+      printSuccess(
+        ctx.io,
+        `-- dry-run: pack '${slug}' would sync ${records.length.toString()} route(s) (${added.length.toString()} added, ${persistent.length.toString()} refreshed, ${external.length.toString()} external — left alone).`,
+      );
+      if (added.length > 0) {
+        ctx.io.stdout.write("added:\n");
+        for (const r of added) {
+          ctx.io.stdout.write(
+            `  ${r.route.id}  ${r.route.method.padEnd(6)} ${formatPath(r.route).padEnd(40)} ${r.route.operationId}\n`,
+          );
+        }
+      }
+      if (persistent.length > 0) {
+        ctx.io.stdout.write("refreshed:\n");
+        for (const r of persistent) {
+          ctx.io.stdout.write(
+            `  ${r.route.id}  ${r.route.method.padEnd(6)} ${formatPath(r.route).padEnd(40)} ${r.route.operationId}\n`,
+          );
+        }
+      }
+      if (external.length > 0) {
+        ctx.io.stdout.write("external (not part of this pack, left alone):\n");
+        for (const r of external) {
+          ctx.io.stdout.write(
+            `  ${r.id}  ${r.method.padEnd(6)} ${formatPath(r).padEnd(40)} ${r.operationId}\n`,
+          );
+        }
+      }
+    }
+    return 0;
+  }
+  const createdBy = getStringFlag(command, "created-by") ?? DEFAULT_REGISTERED_BY;
+  for (const r of records) {
+    await registry.upsert(r.route, createdBy);
+  }
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      pack: slug,
+      dryRun: false,
+      total: records.length,
+      added: added.length,
+      persistent: persistent.length,
+      external: external.length,
+      externalIds: external.map((r) => r.id),
+    });
+  } else {
+    printSuccess(
+      ctx.io,
+      `synced ${records.length.toString()} route(s) for pack '${slug}' (${added.length.toString()} added, ${persistent.length.toString()} refreshed${external.length > 0 ? `, ${external.length.toString()} external — left alone` : ""}).`,
+    );
+    if (external.length > 0) {
+      ctx.io.stdout.write(`external route id(s) (not part of '${slug}'):\n`);
+      for (const r of external) {
+        ctx.io.stdout.write(`  ${r.id}\n`);
+      }
+    }
   }
   return 0;
 }

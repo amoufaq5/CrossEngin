@@ -15,11 +15,34 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4
-+ M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M5 +
-M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6
-+ M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,468 tests**,
-all green, no type errors. M4.8.x ships the companion to M4.8:
++ M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y
++ M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 +
+M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,480 tests**,
+all green, no type errors. M4.8.y completes the three-verb
+gateway-routes pack vocabulary: `crossengin gateway routes
+sync-pack <slug> [--api-version v1] [--dry-run] [--created-by
+<uuid>]`. Re-generates the desired route set, calls
+`registry.listAll()` for the stored set, classifies route IDs
+into three buckets: `added` (generated but not stored —
+will be upserted), `persistent` (in both — will be refreshed
+via upsert), `external` (in stored but not generated — left
+alone, reported). Upserts all generated routes (both buckets);
+NEVER deletes external routes — without a `source_pack`
+column or previous-manifest snapshot we cannot reliably
+classify them as "obsolete from this pack" vs "from a
+different pack" vs "operator-curated." sync-pack ALWAYS needs
+PG (even --dry-run reads the stored set for the diff) —
+documented departure from M4.8 / M4.8.x where --dry-run was
+PG-free. Output shapes: human "synced N route(s) for pack 'X'
+(A added, B refreshed[, C external — left alone])" with
+optional external-IDs list, JSON {pack, dryRun, total, added,
+persistent, external, externalIds[]}; dry-run human prints
+three sections (added / refreshed / external) with rt_<hex> +
+method + path + operationId per row. Idempotent by design:
+second invocation on unchanged manifest reports (0 added, N
+refreshed, 0 external) and writes N upserts. CI-grade: one
+command per deploy step that's safe to re-run. M4.8.x ships the companion to M4.8:
 `crossengin gateway routes unregister-pack <slug> [--api-
 version v1] [--dry-run]`. Same generation pipeline as
 register-pack (resolvePack → resolveManifest →
@@ -662,7 +685,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0080 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0081 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -703,7 +726,9 @@ M2.9.5 Q6), ADR-0078 covers M2.X (kernel LlmMessage.attachments
 (gateway routes from pack manifest — bulk register-pack
 closing M4.7 manifest-driven question), ADR-0080 covers
 M4.8.x (gateway routes unregister-pack — symmetric tear-down
-via deterministic ID re-derivation).
+via deterministic ID re-derivation), ADR-0081 covers M4.8.y
+(gateway routes sync-pack — composite diff/upsert command
+that completes the three-verb pack-routes vocabulary).
 
 ## Architecture in 90 seconds
 
@@ -1594,7 +1619,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0080 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0081 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1637,7 +1662,9 @@ ADR-0078 covers Phase 2 M2.X (kernel LlmMessage.attachments
 OpenAI + Bedrock), ADR-0079 covers Phase 2 M4.8 (gateway
 routes from pack manifest — bulk register-pack via the
 M7.6.5 extends resolver), ADR-0080 covers Phase 2 M4.8.x
-(gateway routes unregister-pack — symmetric tear-down). When
-you ship a new package, write the matching ADR in the same
+(gateway routes unregister-pack — symmetric tear-down),
+ADR-0081 covers Phase 2 M4.8.y (gateway routes sync-pack —
+composite diff/upsert + external-route reporting). When you
+ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

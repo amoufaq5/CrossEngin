@@ -663,3 +663,219 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
     expect(new Set(deletedIds)).toEqual(new Set(registeredIds));
   });
 });
+
+describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
+  it("exits 2 when slug is missing", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/missing slug/);
+  });
+
+  it("exits 2 when slug is unknown", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "bogus/pack"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/unknown pack/);
+  });
+
+  it("happy path on empty store: all 24 core routes classified as added", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const inserts = capture.filter((c) => c.sql.includes("INSERT"));
+    expect(inserts).toHaveLength(24);
+    expect(outChunks.join("")).toMatch(/synced 24 route\(s\)/);
+    expect(outChunks.join("")).toMatch(/24 added/);
+    expect(outChunks.join("")).toMatch(/0 refreshed/);
+  });
+
+  it("after register-pack, sync-pack reclassifies all routes as refreshed (persistent)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "operate-erp/core"),
+      ctx,
+    );
+    const beforeSync = capture.length;
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const newCalls = capture.slice(beforeSync);
+    const newInserts = newCalls.filter((c) => c.sql.includes("INSERT"));
+    expect(newInserts).toHaveLength(24);
+    const out = outChunks.join("");
+    expect(out).toMatch(/synced 24 route\(s\)/);
+    expect(out).toMatch(/0 added/);
+    expect(out).toMatch(/24 refreshed/);
+  });
+
+  it("reports external routes (stored but not generated) without deleting them", async () => {
+    const { io, outChunks } = makeIo();
+    const externalRoute = fixtureRoute({
+      id: "rt_externalabc12345",
+      operationId: "other.foo",
+    });
+    const { registry, capture } = fakeRegistry([externalRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(0);
+    const out = outChunks.join("");
+    expect(out).toMatch(/1 external — left alone/);
+    expect(out).toMatch(/rt_externalabc12345/);
+  });
+
+  it("--dry-run computes the diff WITHOUT calling upsert", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--dry-run"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const inserts = capture.filter((c) => c.sql.includes("INSERT"));
+    expect(inserts).toHaveLength(0);
+    const out = outChunks.join("");
+    expect(out).toMatch(/dry-run: pack 'operate-erp\/core' would sync 24 route\(s\)/);
+    expect(out).toMatch(/24 added/);
+  });
+
+  it("--format=json emits {pack, dryRun, total, added, persistent, external, externalIds}", async () => {
+    const { io, outChunks } = makeIo();
+    const externalRoute = fixtureRoute({ id: "rt_externalabc12345" });
+    const { registry } = fakeRegistry([externalRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      pack: string;
+      dryRun: boolean;
+      total: number;
+      added: number;
+      persistent: number;
+      external: number;
+      externalIds: string[];
+    };
+    expect(parsed.pack).toBe("operate-erp/core");
+    expect(parsed.dryRun).toBe(false);
+    expect(parsed.total).toBe(24);
+    expect(parsed.added).toBe(24);
+    expect(parsed.persistent).toBe(0);
+    expect(parsed.external).toBe(1);
+    expect(parsed.externalIds).toEqual(["rt_externalabc12345"]);
+  });
+
+  it("--dry-run --format=json includes externalIds for inspection", async () => {
+    const { io, outChunks } = makeIo();
+    const externalRoute = fixtureRoute({ id: "rt_externalabc12345" });
+    const { registry } = fakeRegistry([externalRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "sync-pack",
+        "operate-erp/core",
+        "--dry-run",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      dryRun: boolean;
+      externalIds: string[];
+    };
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.externalIds).toEqual(["rt_externalabc12345"]);
+  });
+
+  it("--api-version override propagates into all upserts", async () => {
+    const { io } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--api-version", "v2"),
+      ctx,
+    );
+    const inserts = capture.filter((c) => c.sql.includes("INSERT"));
+    expect(inserts).toHaveLength(24);
+    for (const insert of inserts) {
+      expect(insert.params?.[4]).toBe("v2");
+    }
+  });
+
+  it("--created-by is threaded into the upsert (param index 14)", async () => {
+    const { io } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs(
+        "sync-pack",
+        "operate-erp/core",
+        "--created-by",
+        "11111111-2222-3333-4444-555555555555",
+      ),
+      ctx,
+    );
+    const insert = capture.find((c) => c.sql.includes("INSERT"));
+    expect(insert?.params?.[14]).toBe("11111111-2222-3333-4444-555555555555");
+  });
+
+  it("payments pack on empty store: all 34 routes added (cross-pack composition)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/payments"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).toMatch(/synced 34 route\(s\)/);
+    expect(outChunks.join("")).toMatch(/34 added/);
+  });
+
+  it("sync-pack is idempotent: second invocation reports refreshed=24, added=0", async () => {
+    const { io } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx);
+    const beforeSecond = capture.length;
+    const { io: io2, outChunks: outChunks2 } = makeIo();
+    const ctx2: GatewayRoutesContext = { io: io2, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core"),
+      ctx2,
+    );
+    expect(code).toBe(0);
+    const newCalls = capture.slice(beforeSecond);
+    const newInserts = newCalls.filter((c) => c.sql.includes("INSERT"));
+    expect(newInserts).toHaveLength(24);
+    const out = outChunks2.join("");
+    expect(out).toMatch(/0 added/);
+    expect(out).toMatch(/24 refreshed/);
+  });
+});

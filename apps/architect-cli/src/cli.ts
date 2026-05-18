@@ -133,6 +133,8 @@ export function helpText(): string {
     "                          Generate + upsert CRUD + transition routes from a registered pack",
     "  gateway routes unregister-pack <slug> [--api-version v1] [--dry-run]",
     "                          Delete every route whose id matches the regen for a pack",
+    "  gateway routes sync-pack <slug> [--api-version v1] [--dry-run] [--created-by <uuid>]",
+    "                          Upsert generated routes; report external routes left alone",
     "  version                 Print the CLI version + workspace info",
     "  help                    Show this help text",
     "",
