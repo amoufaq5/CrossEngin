@@ -1,10 +1,10 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 
-const AUDITABLE = ["auditable"] as const;
+const PACK_TRAITS = ["auditable", "tenant_owned"] as const;
 
 export const ACCOUNT_ENTITY: Entity = {
   name: "Account",
-  traits: [...AUDITABLE],
+  traits: [...PACK_TRAITS],
   fields: [
     {
       name: "name",
@@ -28,12 +28,11 @@ export const ACCOUNT_ENTITY: Entity = {
     { name: "billing_email", type: { kind: "email" }, required: true },
     { name: "country", type: { kind: "country_code" } },
   ],
-  indexes: [{ fields: ["status"] }, { fields: ["name"] }],
 };
 
 export const CONTACT_ENTITY: Entity = {
   name: "Contact",
-  traits: [...AUDITABLE],
+  traits: [...PACK_TRAITS],
   fields: [
     {
       name: "account_id",
@@ -66,7 +65,7 @@ export const CONTACT_ENTITY: Entity = {
 
 export const INVOICE_ENTITY: Entity = {
   name: "Invoice",
-  traits: [...AUDITABLE],
+  traits: [...PACK_TRAITS],
   fields: [
     {
       name: "account_id",
@@ -120,7 +119,7 @@ export const INVOICE_ENTITY: Entity = {
 
 export const INVOICE_LINE_ENTITY: Entity = {
   name: "InvoiceLine",
-  traits: [...AUDITABLE],
+  traits: [...PACK_TRAITS],
   fields: [
     {
       name: "invoice_id",

@@ -15,9 +15,22 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M6 + M6.5 + M6.5.5 + M7 + M7-wire landed: **52 packages + 1
-app, 119 meta-schema tables, 5,907 tests**, all green, no type
-errors. M7-wire closed the substrate-to-pack loop in the CLI.
++ M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.7 landed: **52 packages
++ 1 app, 119 meta-schema tables, 5,914 tests**, all green, no
+type errors. M7.7 fixed the biggest open question from M7-wire:
+pack tables now isolate per tenant at the DB level. The kernel's
+`tenant_owned` built-in trait gained a `tenant_id UUID NOT NULL`
+(indexed) field; `emitEntity` now emits a cross-schema FK
+(`<table>_tenant_fk` → `meta.tenants(id) ON DELETE CASCADE`),
+`ENABLE ROW LEVEL SECURITY`, and a `<table>_tenant_isolation`
+policy (`tenant_id = current_setting('app.current_tenant_id',
+true)::UUID` — matches META exactly) for entities declaring the
+trait. Pack-erp-core's four entities (Account, Contact,
+Invoice, InvoiceLine) now use `["auditable", "tenant_owned"]`.
+`crossengin apply --pack=operate-erp/core` now produces
+deployment-grade DDL — every pack table carries `tenant_id`, FK
+to `meta.tenants`, RLS enabled, isolation policy.
+M7-wire closed the substrate-to-pack loop in the CLI.
 New `apps/architect-cli/src/pack-registry.ts` maps slug →
 manifest builder (today: just `operate-erp/core` →
 `buildErpCorePack()`; future packs add entries). `runApply`
@@ -231,7 +244,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0063 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0064 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -248,7 +261,8 @@ ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 + embeddings + tool calls), ADR-0061 covers M6.5.5
 (architect-cli router integration), ADR-0062 covers M2.8.5
 (OpenAI Responses API support), ADR-0063 covers M7-wire
-(CLI `--pack` apply).
+(CLI `--pack` apply), ADR-0064 covers M7.7 (pack tenant
+scoping via `tenant_owned` trait).
 
 ## Architecture in 90 seconds
 
@@ -873,6 +887,16 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M7.7):** per-tenant isolation on
+pack tables. The kernel's `tenant_owned` built-in trait now
+injects `tenant_id UUID NOT NULL` (indexed), a cross-schema FK
+to `meta.tenants(id) ON DELETE CASCADE`, `ENABLE ROW LEVEL
+SECURITY`, and a `<table>_tenant_isolation` policy that uses
+the same `current_setting('app.current_tenant_id', true)::UUID`
+expression as every META table. Pack-erp-core's four entities
+opt in via `["auditable", "tenant_owned"]`; the resulting SQL
+is production-grade for multi-tenant deployments.
+
 **No longer deferred (as of M7-wire):** the substrate-to-pack
 end-to-end loop. `crossengin apply --pack <slug>` now resolves
 a registered pack (today: `operate-erp/core`), validates its
@@ -1010,7 +1034,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0063 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0064 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1029,7 +1053,8 @@ Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`ai-providers-openai`), ADR-0061 covers Phase 2 M6.5.5
 (architect-cli router integration), ADR-0062 covers Phase 2
 M2.8.5 (OpenAI Responses API support), ADR-0063 covers Phase 2
-M7-wire (CLI `--pack` apply). When you ship a new package,
+M7-wire (CLI `--pack` apply), ADR-0064 covers Phase 2 M7.7
+(pack tenant scoping via `tenant_owned` trait). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

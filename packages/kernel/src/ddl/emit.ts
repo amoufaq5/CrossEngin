@@ -1,4 +1,5 @@
 import type { Entity, Field, Trait } from "@crossengin/types/meta-schema";
+import { TENANT_ID_COLUMN, TENANT_OWNED_TRAIT } from "./built-in-traits.js";
 import { emitColumn } from "./column.js";
 import { indexName, qualifyTable, quoteIdent, toTableName } from "./identifiers.js";
 import {
@@ -8,6 +9,12 @@ import {
   expandTraits,
   type ResolvedIndex,
 } from "./resolution.js";
+
+const TENANT_RLS_USING =
+  "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+
+const META_TENANTS_SCHEMA = "meta";
+const META_TENANTS_TABLE = "tenants";
 
 export interface EmitContext {
   readonly schema: string;
@@ -50,8 +57,42 @@ export function emitIndexes(entity: Entity, context: EmitContext): string[] {
   return indexes.map((idx) => makeIndex(context.schema, tableName, idx));
 }
 
+export function isTenantOwned(entity: Entity): boolean {
+  return (entity.traits ?? []).includes(TENANT_OWNED_TRAIT);
+}
+
+export function emitTenantFk(entity: Entity, context: EmitContext): string {
+  const tableName = toTableName(entity.name);
+  const constraintName = `${tableName}_tenant_fk`;
+  return (
+    `ALTER TABLE ${qualifyTable(context.schema, tableName)} ` +
+    `ADD CONSTRAINT ${quoteIdent(constraintName)} ` +
+    `FOREIGN KEY (${quoteIdent(TENANT_ID_COLUMN)}) ` +
+    `REFERENCES ${quoteIdent(META_TENANTS_SCHEMA)}.${quoteIdent(META_TENANTS_TABLE)}("id") ` +
+    `ON DELETE CASCADE;`
+  );
+}
+
+export function emitTenantRls(entity: Entity, context: EmitContext): string[] {
+  const tableName = toTableName(entity.name);
+  const qualified = qualifyTable(context.schema, tableName);
+  const policyName = `${tableName}_tenant_isolation`;
+  return [
+    `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
+    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_RLS_USING});`,
+  ];
+}
+
 export function emitEntity(entity: Entity, context: EmitContext): string[] {
-  return [emitCreateTable(entity, context), ...emitIndexes(entity, context)];
+  const statements: string[] = [
+    emitCreateTable(entity, context),
+    ...emitIndexes(entity, context),
+  ];
+  if (isTenantOwned(entity)) {
+    statements.push(emitTenantFk(entity, context));
+    statements.push(...emitTenantRls(entity, context));
+  }
+  return statements;
 }
 
 function makeIndex(schema: string, tableName: string, idx: ResolvedIndex): string {

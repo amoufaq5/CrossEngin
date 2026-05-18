@@ -31,6 +31,15 @@ const VERSIONED_FIELDS: readonly Field[] = [
   },
 ];
 
+const TENANT_OWNED_FIELDS: readonly Field[] = [
+  {
+    name: "tenant_id",
+    type: { kind: "uuid" },
+    required: true,
+    indexed: true,
+  },
+];
+
 const GXP_SIGNED_FIELDS: readonly Field[] = [
   {
     name: "e_signature_required",
@@ -44,7 +53,10 @@ export const BUILT_IN_TRAIT_FIELDS: ReadonlyMap<string, readonly Field[]> = new 
   ["auditable", AUDITABLE_FIELDS],
   ["soft_deletable", SOFT_DELETABLE_FIELDS],
   ["versioned", VERSIONED_FIELDS],
-  ["tenant_owned", []],
+  ["tenant_owned", TENANT_OWNED_FIELDS],
   ["gxp_signed", GXP_SIGNED_FIELDS],
   ["part_11_compliant", []],
 ]);
+
+export const TENANT_OWNED_TRAIT = "tenant_owned" as const;
+export const TENANT_ID_COLUMN = "tenant_id" as const;

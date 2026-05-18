@@ -106,15 +106,25 @@ describe("emitCreateTable — traits", () => {
     expect(sql).toContain(`"deleted_by" UUID`);
   });
 
-  it("treats tenant_owned and part_11_compliant as no-column traits", () => {
+  it("tenant_owned trait adds a tenant_id UUID NOT NULL column", () => {
     const entity: Entity = {
       name: "Patient",
       fields: [{ name: "first_name", type: { kind: "text" } }],
-      traits: ["tenant_owned", "part_11_compliant"],
+      traits: ["tenant_owned"],
     };
     const sql = emitCreateTable(entity, { schema });
-    expect(sql).not.toContain(`tenant_owned`);
+    expect(sql).toContain(`"tenant_id" UUID NOT NULL`);
+  });
+
+  it("treats part_11_compliant as a marker trait with no columns", () => {
+    const entity: Entity = {
+      name: "Patient",
+      fields: [{ name: "first_name", type: { kind: "text" } }],
+      traits: ["part_11_compliant"],
+    };
+    const sql = emitCreateTable(entity, { schema });
     expect(sql).not.toContain(`part_11_compliant`);
+    expect(sql).not.toContain(`tenant_id`);
   });
 
   it("accepts a custom trait from context.customTraits", () => {
@@ -284,5 +294,73 @@ describe("emitEntity", () => {
     expect(statements[0]).toMatch(/^CREATE TABLE/);
     expect(statements.slice(1).every((s) => s.startsWith("CREATE "))).toBe(true);
     expect(statements.length).toBeGreaterThan(1);
+  });
+});
+
+describe("emitEntity — tenant_owned trait", () => {
+  it("emits tenant_id column + index", () => {
+    const entity: Entity = {
+      name: "Invoice",
+      fields: [{ name: "total", type: { kind: "decimal", precision: 14, scale: 2 } }],
+      traits: ["tenant_owned"],
+    };
+    const statements = emitEntity(entity, { schema });
+    expect(statements[0]).toContain(`"tenant_id" UUID NOT NULL`);
+    expect(statements.some((s) => /CREATE INDEX.*"tenant_id"/.test(s))).toBe(true);
+  });
+
+  it("emits the cross-schema FK to meta.tenants(id)", () => {
+    const entity: Entity = {
+      name: "Invoice",
+      fields: [{ name: "total", type: { kind: "decimal", precision: 14, scale: 2 } }],
+      traits: ["tenant_owned"],
+    };
+    const statements = emitEntity(entity, { schema });
+    const fk = statements.find((s) => s.includes("FOREIGN KEY"));
+    expect(fk).toBeDefined();
+    expect(fk).toContain(`"meta"."tenants"`);
+    expect(fk).toContain(`ON DELETE CASCADE`);
+  });
+
+  it("emits ENABLE ROW LEVEL SECURITY + a tenant_isolation policy", () => {
+    const entity: Entity = {
+      name: "Invoice",
+      fields: [{ name: "total", type: { kind: "decimal", precision: 14, scale: 2 } }],
+      traits: ["tenant_owned"],
+    };
+    const statements = emitEntity(entity, { schema });
+    expect(statements.some((s) => /ALTER TABLE.*ENABLE ROW LEVEL SECURITY/.test(s))).toBe(true);
+    const policy = statements.find((s) => s.startsWith("CREATE POLICY"));
+    expect(policy).toBeDefined();
+    expect(policy).toContain(`invoice_tenant_isolation`);
+    expect(policy).toContain(
+      `tenant_id = current_setting('app.current_tenant_id', true)::UUID`,
+    );
+  });
+
+  it("entities without tenant_owned get no RLS / FK / tenant_id", () => {
+    const entity: Entity = {
+      name: "Plan",
+      fields: [{ name: "name", type: { kind: "text" } }],
+    };
+    const statements = emitEntity(entity, { schema });
+    const sql = statements.join("\n");
+    expect(sql).not.toContain("tenant_id");
+    expect(sql).not.toContain("ROW LEVEL SECURITY");
+    expect(sql).not.toContain("CREATE POLICY");
+  });
+
+  it("works alongside other traits (auditable + tenant_owned)", () => {
+    const entity: Entity = {
+      name: "Account",
+      fields: [{ name: "name", type: { kind: "text" }, required: true }],
+      traits: ["auditable", "tenant_owned"],
+    };
+    const statements = emitEntity(entity, { schema });
+    const create = statements[0]!;
+    expect(create).toContain(`"created_at"`);
+    expect(create).toContain(`"updated_at"`);
+    expect(create).toContain(`"tenant_id"`);
+    expect(statements.some((s) => /ENABLE ROW LEVEL SECURITY/.test(s))).toBe(true);
   });
 });

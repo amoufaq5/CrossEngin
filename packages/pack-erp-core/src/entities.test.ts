@@ -22,6 +22,12 @@ describe("ERP_CORE_ENTITIES", () => {
     }
   });
 
+  it("each entity uses the tenant_owned trait (M7.7 — RLS + tenant_id auto-injected)", () => {
+    for (const e of ERP_CORE_ENTITIES) {
+      expect(e.traits).toContain("tenant_owned");
+    }
+  });
+
   it("no entity declares the implicit id field", () => {
     for (const e of ERP_CORE_ENTITIES) {
       expect(e.fields.map((f) => f.name)).not.toContain("id");
