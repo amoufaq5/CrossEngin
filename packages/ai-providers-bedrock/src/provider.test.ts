@@ -98,13 +98,26 @@ describe("BedrockProvider — constructor", () => {
   it("exposes id, models, capabilities, pricing", () => {
     const provider = build({ fetch: buildFetch({}) });
     expect(provider.id).toBe("bedrock");
-    expect(provider.models.length).toBe(8);
+    expect(provider.models.length).toBe(12); // 8 chat + 4 embedding
+    expect(provider.models).toContain("amazon.titan-embed-text-v2:0");
     expect(provider.capabilities.chat).toBe(true);
     expect(provider.capabilities.streaming).toBe(true);
-    expect(provider.capabilities.embedding).toBe(false);
+    expect(provider.capabilities.embedding).toBe(true);
     expect(provider.capabilities.maxContextTokens).toBe(200_000);
     expect(provider.pricing.inputPerMillionTokens).toBeGreaterThan(0);
     expect(provider.pricing.outputPerMillionTokens).toBeGreaterThan(0);
+  });
+
+  it("rejects unknown defaultEmbeddingModel", () => {
+    expect(
+      () =>
+        new BedrockProvider({
+          accessKeyId: "x",
+          secretAccessKey: "y",
+          defaultEmbeddingModel: "text-embedding-3-small" as never,
+          fetch: buildFetch({}),
+        }),
+    ).toThrow(/defaultEmbeddingModel/);
   });
 
   it("derives residency from region prefix", () => {
@@ -132,16 +145,238 @@ describe("BedrockProvider — constructor", () => {
   });
 });
 
-describe("BedrockProvider — embed", () => {
-  it("rejects with BedrockError (Titan embeddings not implemented in M2.9)", async () => {
+describe("BedrockProvider — embed (Titan path)", () => {
+  function buildTitanFetch(
+    responses: ReadonlyArray<{ embedding: number[]; inputTextTokenCount: number }>,
+  ): { fetch: FetchLike; captures: FetchCapture[] } {
+    const captures: FetchCapture[] = [];
+    let i = 0;
+    const fetchImpl: FetchLike = async (url, init) => {
+      const capture: FetchCapture = { url: null, init: null };
+      capture.url = url;
+      capture.init = init;
+      captures.push(capture);
+      const body = responses[i++];
+      if (body === undefined) {
+        throw new Error(`unexpected fetch call ${i.toString()}`);
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(body),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    return { fetch: fetchImpl, captures };
+  }
+
+  it("makes one InvokeModel call per text and aggregates vectors + tokens", async () => {
+    const { fetch, captures } = buildTitanFetch([
+      { embedding: [0.1, 0.2, 0.3], inputTextTokenCount: 4 },
+      { embedding: [0.4, 0.5, 0.6], inputTextTokenCount: 5 },
+    ]);
+    const provider = build({ fetch });
+    const result = await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["hello", "world"],
+    });
+    expect(captures).toHaveLength(2);
+    for (const c of captures) {
+      expect(c.url).toContain(
+        "/model/amazon.titan-embed-text-v2%3A0/invoke",
+      );
+      expect(c.init?.headers["accept"]).toBe("application/json");
+    }
+    expect(result.vectors).toHaveLength(2);
+    expect(result.vectors[0]).toEqual([0.1, 0.2, 0.3]);
+    expect(result.vectors[1]).toEqual([0.4, 0.5, 0.6]);
+    expect(result.dim).toBe(3);
+    expect(result.model).toBe("amazon.titan-embed-text-v2:0");
+    expect(result.usage.inputTokens).toBe(9);
+    expect(result.usage.outputTokens).toBe(0);
+    expect(result.usage.cost).toBe(
+      Number(((9 * 0.02) / 1_000_000).toFixed(6)),
+    );
+  });
+
+  it("sends inputText + dimensions + normalize for titan-embed-text-v2", async () => {
+    const { fetch, captures } = buildTitanFetch([
+      { embedding: [0.1], inputTextTokenCount: 1 },
+    ]);
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      defaultEmbeddingDimensions: 512,
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["just one"],
+    });
+    const sentBody = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<string, unknown>;
+    expect(sentBody["inputText"]).toBe("just one");
+    expect(sentBody["dimensions"]).toBe(512);
+    expect(sentBody["normalize"]).toBe(true);
+  });
+
+  it("sends inputText only (no dimensions field) for titan-embed-text-v1", async () => {
+    const { fetch, captures } = buildTitanFetch([
+      { embedding: [0.1, 0.2], inputTextTokenCount: 2 },
+    ]);
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      defaultEmbeddingModel: "amazon.titan-embed-text-v1",
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["legacy"],
+    });
+    const sentBody = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<string, unknown>;
+    expect(sentBody["inputText"]).toBe("legacy");
+    expect(sentBody).not.toHaveProperty("dimensions");
+    expect(sentBody).not.toHaveProperty("normalize");
+  });
+});
+
+describe("BedrockProvider — embed (Cohere path)", () => {
+  it("sends one batched InvokeModel call and uses meta.billed_units.input_tokens", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      defaultEmbeddingModel: "cohere.embed-english-v3",
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          id: "abc",
+          embeddings: [[0.1, 0.2], [0.3, 0.4]],
+          texts: ["a", "b"],
+          response_type: "embeddings_floats",
+          meta: { billed_units: { input_tokens: 7 } },
+        }),
+      }),
+      clock: () => FIXED_DATE,
+    });
+    const result = await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["a", "b"],
+    });
+    expect(capture.url).toContain(
+      "/model/cohere.embed-english-v3/invoke",
+    );
+    const sentBody = JSON.parse(new TextDecoder().decode(capture.init!.body)) as {
+      texts: string[];
+      input_type: string;
+    };
+    expect(sentBody.texts).toEqual(["a", "b"]);
+    expect(sentBody.input_type).toBe("search_document");
+    expect(result.vectors).toEqual([[0.1, 0.2], [0.3, 0.4]]);
+    expect(result.dim).toBe(2);
+    expect(result.model).toBe("cohere.embed-english-v3");
+    expect(result.usage.inputTokens).toBe(7);
+  });
+
+  it("falls back to approximate token count when meta.billed_units is missing", async () => {
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      defaultEmbeddingModel: "cohere.embed-english-v3",
+      fetch: buildFetch({
+        text: JSON.stringify({
+          id: "abc",
+          embeddings: [[0.1]],
+          texts: ["the quick brown fox jumps over the lazy dog"],
+        }),
+      }),
+      clock: () => FIXED_DATE,
+    });
+    const result = await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["the quick brown fox jumps over the lazy dog"],
+    });
+    // 43 chars → ceil(43/4) = 11 tokens; cost = 11 * 0.10 / 1_000_000 = $0.0000011 → rounds to 0.000001
+    expect(result.usage.inputTokens).toBeGreaterThan(0);
+    expect(result.usage.cost).toBeGreaterThan(0);
+  });
+
+  it("honours --default-cohere-input-type override", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = new BedrockProvider({
+      accessKeyId: "AKIDEXAMPLE",
+      secretAccessKey: "secret/secret",
+      region: "us-east-1",
+      defaultEmbeddingModel: "cohere.embed-multilingual-v3",
+      defaultCohereInputType: "search_query",
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          id: "x",
+          embeddings: [[0.1]],
+          texts: ["q"],
+        }),
+      }),
+      clock: () => FIXED_DATE,
+    });
+    await provider.embed({
+      tenantId: "t",
+      sessionId: "s",
+      texts: ["q"],
+    });
+    const sentBody = JSON.parse(new TextDecoder().decode(capture.init!.body)) as {
+      input_type: string;
+    };
+    expect(sentBody.input_type).toBe("search_query");
+  });
+});
+
+describe("BedrockProvider — embed (validation)", () => {
+  it("rejects empty texts array", async () => {
     const provider = build({ fetch: buildFetch({}) });
     await expect(
       provider.embed({
         tenantId: "t",
         sessionId: "s",
-        texts: ["one"],
-      }),
+        texts: [],
+      } as never),
     ).rejects.toThrow(BedrockError);
+  });
+
+  it("rejects an unknown model name", async () => {
+    const provider = build({ fetch: buildFetch({}) });
+    await expect(
+      provider.embed({
+        tenantId: "t",
+        sessionId: "s",
+        texts: ["x"],
+        model: "text-embedding-3-small",
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+  });
+
+  it("rejects a chat model used as an embedding model", async () => {
+    const provider = build({ fetch: buildFetch({}) });
+    await expect(
+      provider.embed({
+        tenantId: "t",
+        sessionId: "s",
+        texts: ["x"],
+        model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
   });
 });
 

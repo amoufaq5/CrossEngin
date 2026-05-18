@@ -17,6 +17,16 @@ import {
   type BedrockConverseResponse,
 } from "./converse-api.js";
 import {
+  bedrockEmbeddingFamily,
+  buildCohereEmbedRequest,
+  buildEmbeddingResponse,
+  buildTitanEmbedRequest,
+  parseCohereEmbedResponse,
+  parseTitanEmbedResponse,
+  type CohereEmbedInputType,
+  type EmbeddingAggregation,
+} from "./embeddings.js";
+import {
   BedrockError,
   fromHttpResponse,
   fromNetworkError,
@@ -25,8 +35,12 @@ import { readConverseEventStream } from "./event-stream.js";
 import {
   BEDROCK_CHAT_MODELS,
   BEDROCK_CHAT_PRICING,
+  BEDROCK_DEFAULT_EMBEDDING_MODEL,
+  BEDROCK_EMBEDDING_MODELS,
   isBedrockChatModel,
+  isBedrockEmbeddingModel,
   type BedrockChatModel,
+  type BedrockEmbeddingModel,
 } from "./pricing.js";
 import { signRequest, type AwsCredentials } from "./signing.js";
 
@@ -56,7 +70,10 @@ export interface BedrockProviderOptions {
   readonly sessionToken?: string;
   readonly region?: string;
   readonly defaultModel?: BedrockChatModel;
+  readonly defaultEmbeddingModel?: BedrockEmbeddingModel;
   readonly defaultMaxTokens?: number;
+  readonly defaultEmbeddingDimensions?: number;
+  readonly defaultCohereInputType?: CohereEmbedInputType;
   readonly baseUrl?: string;
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
@@ -68,13 +85,16 @@ const SERVICE = "bedrock";
 
 export class BedrockProvider implements LlmProvider {
   readonly id = PROVIDER_ID;
-  readonly models: readonly string[] = [...BEDROCK_CHAT_MODELS];
+  readonly models: readonly string[] = [
+    ...BEDROCK_CHAT_MODELS,
+    ...BEDROCK_EMBEDDING_MODELS,
+  ];
   readonly capabilities: ProviderCapabilities = {
     chat: true,
     streaming: true,
     toolUse: true,
     jsonMode: false,
-    embedding: false,
+    embedding: true,
     maxContextTokens: 200_000,
     supportsThinking: false,
   };
@@ -84,7 +104,10 @@ export class BedrockProvider implements LlmProvider {
   private readonly credentials: AwsCredentials;
   private readonly region: string;
   private readonly defaultModel: BedrockChatModel;
+  private readonly defaultEmbeddingModel: BedrockEmbeddingModel;
   private readonly defaultMaxTokens: number | undefined;
+  private readonly defaultEmbeddingDimensions: number | undefined;
+  private readonly defaultCohereInputType: CohereEmbedInputType | undefined;
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
   private readonly clock: () => Date;
@@ -100,6 +123,12 @@ export class BedrockProvider implements LlmProvider {
     if (!isBedrockChatModel(model)) {
       throw new Error(`BedrockProvider: unsupported defaultModel ${model}`);
     }
+    const embedModel = opts.defaultEmbeddingModel ?? BEDROCK_DEFAULT_EMBEDDING_MODEL;
+    if (!isBedrockEmbeddingModel(embedModel)) {
+      throw new Error(
+        `BedrockProvider: unsupported defaultEmbeddingModel ${embedModel}`,
+      );
+    }
     this.credentials = {
       accessKeyId: opts.accessKeyId,
       secretAccessKey: opts.secretAccessKey,
@@ -107,7 +136,10 @@ export class BedrockProvider implements LlmProvider {
     };
     this.region = opts.region ?? BEDROCK_DEFAULT_REGION;
     this.defaultModel = model;
+    this.defaultEmbeddingModel = embedModel;
     this.defaultMaxTokens = opts.defaultMaxTokens;
+    this.defaultEmbeddingDimensions = opts.defaultEmbeddingDimensions;
+    this.defaultCohereInputType = opts.defaultCohereInputType;
     this.baseUrl = opts.baseUrl ?? `https://bedrock-runtime.${this.region}.amazonaws.com`;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
     this.clock = opts.clock ?? (() => new Date());
@@ -168,14 +200,91 @@ export class BedrockProvider implements LlmProvider {
     }
   }
 
-  embed(_req: EmbeddingRequest): Promise<EmbeddingResponse> {
-    return Promise.reject(
-      new BedrockError({
+  async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
+    const model = this.resolveEmbeddingModel(req.model);
+    if (req.texts.length === 0) {
+      throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "BedrockProvider does not implement embed() — route embedding tasks to openai or a dedicated Titan embeddings provider",
-      }),
-    );
+        message: "embed: at least one text is required",
+      });
+    }
+    const family = bedrockEmbeddingFamily(model);
+    let aggregation: EmbeddingAggregation;
+    if (family === "titan") {
+      aggregation = await this.embedViaTitan(model, req.texts);
+    } else {
+      aggregation = await this.embedViaCohere(model, req.texts);
+    }
+    return buildEmbeddingResponse({ model, aggregation });
+  }
+
+  private async embedViaTitan(
+    model: BedrockEmbeddingModel,
+    texts: readonly string[],
+  ): Promise<EmbeddingAggregation> {
+    const vectors: number[][] = [];
+    let totalTokens = 0;
+    let dim = 0;
+    for (const text of texts) {
+      const body = buildTitanEmbedRequest({
+        model,
+        text,
+        ...(this.defaultEmbeddingDimensions !== undefined
+          ? { dimensions: this.defaultEmbeddingDimensions }
+          : {}),
+      });
+      const raw = await this.invokeModelJson(model, body);
+      const parsed = parseTitanEmbedResponse(raw);
+      vectors.push([...parsed.embedding]);
+      totalTokens += parsed.inputTextTokenCount;
+      if (dim === 0) dim = parsed.embedding.length;
+    }
+    return { vectors, dim, inputTokens: totalTokens };
+  }
+
+  private async embedViaCohere(
+    model: BedrockEmbeddingModel,
+    texts: readonly string[],
+  ): Promise<EmbeddingAggregation> {
+    const body = buildCohereEmbedRequest({
+      texts,
+      ...(this.defaultCohereInputType !== undefined
+        ? { inputType: this.defaultCohereInputType }
+        : {}),
+    });
+    const raw = await this.invokeModelJson(model, body);
+    const parsed = parseCohereEmbedResponse(raw);
+    const vectors = parsed.embeddings.map((v) => [...v]);
+    const dim = vectors[0]?.length ?? 0;
+    const reported = parsed.meta?.billed_units?.input_tokens;
+    const inputTokens =
+      typeof reported === "number" && reported > 0
+        ? reported
+        : approximateCohereTokens(texts);
+    return { vectors, dim, inputTokens };
+  }
+
+  private async invokeModelJson(
+    model: BedrockEmbeddingModel,
+    requestBody: unknown,
+  ): Promise<unknown> {
+    const body = new TextEncoder().encode(JSON.stringify(requestBody));
+    const path = `/model/${encodeURIComponent(model)}/invoke`;
+    const response = await this.signedFetch({
+      url: `${this.baseUrl}${path}`,
+      path,
+      body,
+      accept: "application/json",
+    });
+    const text = await response.text();
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `failed to parse bedrock invoke response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
   }
 
   extractText(response: BedrockConverseResponse): string {
@@ -198,6 +307,17 @@ export class BedrockProvider implements LlmProvider {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `model '${requested}' is not a known Bedrock chat model`,
+      });
+    }
+    return requested;
+  }
+
+  private resolveEmbeddingModel(requested: string | undefined): BedrockEmbeddingModel {
+    if (requested === undefined) return this.defaultEmbeddingModel;
+    if (!isBedrockEmbeddingModel(requested)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `model '${requested}' is not a known Bedrock embedding model`,
       });
     }
     return requested;
@@ -262,4 +382,13 @@ function deriveDefaultResidency(region: string): readonly Region[] {
   if (region.startsWith("ap-") || region.startsWith("me-")) return ["ap"];
   if (region.startsWith("sa-")) return ["sa"];
   return ["us"];
+}
+
+function approximateCohereTokens(texts: readonly string[]): number {
+  let total = 0;
+  for (const t of texts) {
+    if (t.length === 0) continue;
+    total += Math.max(1, Math.ceil(t.length / 4));
+  }
+  return total;
 }

@@ -13,6 +13,17 @@ export const BEDROCK_CHAT_MODELS = [
 
 export type BedrockChatModel = (typeof BEDROCK_CHAT_MODELS)[number];
 
+export const BEDROCK_EMBEDDING_MODELS = [
+  "amazon.titan-embed-text-v2:0",
+  "amazon.titan-embed-text-v1",
+  "cohere.embed-english-v3",
+  "cohere.embed-multilingual-v3",
+] as const;
+
+export type BedrockEmbeddingModel = (typeof BEDROCK_EMBEDDING_MODELS)[number];
+
+export type BedrockModel = BedrockChatModel | BedrockEmbeddingModel;
+
 export interface BedrockChatPricing {
   readonly inputUsdPerMillion: number;
   readonly outputUsdPerMillion: number;
@@ -95,3 +106,46 @@ export function buildBedrockUsage(
 export function isBedrockChatModel(value: string): value is BedrockChatModel {
   return (BEDROCK_CHAT_MODELS as readonly string[]).includes(value);
 }
+
+export interface BedrockEmbeddingPricing {
+  readonly inputUsdPerMillion: number;
+}
+
+export const BEDROCK_EMBEDDING_PRICING: Readonly<Record<BedrockEmbeddingModel, BedrockEmbeddingPricing>> = {
+  "amazon.titan-embed-text-v2:0": { inputUsdPerMillion: 0.02 },
+  "amazon.titan-embed-text-v1": { inputUsdPerMillion: 0.1 },
+  "cohere.embed-english-v3": { inputUsdPerMillion: 0.1 },
+  "cohere.embed-multilingual-v3": { inputUsdPerMillion: 0.1 },
+};
+
+export function computeBedrockEmbeddingCost(
+  model: BedrockEmbeddingModel,
+  inputTokens: number,
+): number {
+  const p = BEDROCK_EMBEDDING_PRICING[model];
+  return Number(((inputTokens * p.inputUsdPerMillion) / 1_000_000).toFixed(6));
+}
+
+export function buildBedrockEmbeddingUsage(
+  model: BedrockEmbeddingModel,
+  inputTokens: number,
+): Usage {
+  return {
+    inputTokens,
+    outputTokens: 0,
+    cost: computeBedrockEmbeddingCost(model, inputTokens),
+  };
+}
+
+export function isBedrockEmbeddingModel(
+  value: string,
+): value is BedrockEmbeddingModel {
+  return (BEDROCK_EMBEDDING_MODELS as readonly string[]).includes(value);
+}
+
+export function isBedrockModel(value: string): value is BedrockModel {
+  return isBedrockChatModel(value) || isBedrockEmbeddingModel(value);
+}
+
+export const BEDROCK_DEFAULT_EMBEDDING_MODEL: BedrockEmbeddingModel =
+  "amazon.titan-embed-text-v2:0";

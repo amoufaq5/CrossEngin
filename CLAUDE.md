@@ -13,12 +13,39 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 + M3
-+ M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 + M5.5 + M5.6
-+ M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 +
-M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app, 119
-meta-schema tables, 6,214 tests**, all green, no type errors.
-M2.9 shipped the third real `LlmProvider` —
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
+M2.9.5 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 +
+M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 +
+M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55
+packages + 1 app, 119 meta-schema tables, 6,259 tests**, all
+green, no type errors. M2.9.5 closed M2.9's open Q4 by
+implementing `embed()` for the Bedrock provider. New
+`embeddings.ts` module dispatches on model family — Amazon Titan
+(`amazon.titan-embed-text-v2:0` at $0.02/M with selectable 256 /
+512 / 1024 dimensions, `amazon.titan-embed-text-v1` at $0.10/M)
+uses a single-text-only `InvokeModel` request shape and the
+provider loops over `texts: string[]`; Cohere (`cohere.
+embed-english-v3` / `cohere.embed-multilingual-v3` at $0.10/M)
+uses a batched `{texts, input_type}` request and the provider
+makes one call per batch (max 96 per AWS). Token counts come
+from Titan's `inputTextTokenCount` or Cohere's `meta.
+billed_units.input_tokens` when reported; falls back to
+ceil(chars/4) approximation otherwise. `BedrockProvider`
+capabilities flip `embedding: false → true`; `models` expands
+from 8 to 12 (4 new embedding models); constructor gains
+`defaultEmbeddingModel` (default titan-embed-text-v2:0),
+`defaultEmbeddingDimensions` (Titan v2 only — 256/512/1024),
+`defaultCohereInputType` (search_document/_query/classification/
+clustering). Same sig v4 path as chat; both endpoints hit
+`POST /model/{modelId}/invoke`. Cost rounds to 6 decimals;
+output_tokens always 0 for embeddings. Router (M6.5) now has a
+second embedding-capable provider — operators serving non-
+English markets can route `task: "embedding"` to
+`cohere.embed-multilingual-v3` for 100+ language coverage while
+keeping OpenAI's `text-embedding-3-small` as fallback. AWS-
+native end-to-end story closed: a tenant with strict residency
+requirements can now serve both chat completion AND vector
+search entirely inside their AWS account in their region. M2.9 shipped the third real `LlmProvider` —
 `@crossengin/ai-providers-bedrock`. AWS Bedrock converse-stream
 client implementing the same contract as M2.7 (Anthropic) +
 M2.8 (OpenAI). Zero runtime deps — pure `fetch` + `node:crypto`
@@ -410,7 +437,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0071 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0072 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -436,7 +463,8 @@ ADR-0068 covers M7.6.5 (kernel `extends` resolver wiring),
 ADR-0069 covers M4.7 (CLI gateway binding),
 ADR-0070 covers M7.9 (`pack-erp-healthcare` — third vertical
 pack), ADR-0071 covers M2.9 (`ai-providers-bedrock` — third
-real LlmProvider).
+real LlmProvider), ADR-0072 covers M2.9.5 (Bedrock Titan +
+Cohere embeddings closing M2.9's open Q4).
 
 ## Architecture in 90 seconds
 
@@ -621,24 +649,32 @@ re-exporting everything.
 - **`ai-providers-bedrock`** — real AWS Bedrock client
   implementing `LlmProvider`. Zero runtime deps; pure `fetch` +
   `node:crypto` + from-scratch AWS Signature V4. Speaks Bedrock's
-  `converse-stream` (binary event-stream framing, NOT SSE) and
-  `converse` (non-streaming) endpoints. 6 modules: pricing (8
-  chat models — Claude on Bedrock, Llama 3.1 70B/405B, Mistral
-  Large, Titan Premier), signing (sig v4 with HMAC chain
+  `converse-stream` (binary event-stream framing, NOT SSE),
+  `converse` (non-streaming), and `invoke` (embeddings via Titan
+  or Cohere) endpoints. 7 modules: pricing (8 chat models —
+  Claude on Bedrock, Llama 3.1 70B/405B, Mistral Large, Titan
+  Premier + 4 embedding models — Titan v2/v1, Cohere
+  english/multilingual), signing (sig v4 with HMAC chain
   verified against the AWS-documented `f4780e2d...` reference
-  signing key), converse-api (request builder + response
-  normalizer), event-stream (binary frame parser →
-  CompletionChunk; tracks contentBlockIndex → toolUseId across
-  deltas; throws BedrockError on `:message-type: exception`),
-  errors (12 typed kinds including `model_stream_error` for
+  signing key), converse-api (chat request builder + response
+  normalizer), embeddings (family-dispatched request builders —
+  Titan single-text with selectable 256/512/1024 dimensions;
+  Cohere batched up to 96 texts with input_type selector),
+  event-stream (binary frame parser → CompletionChunk; tracks
+  contentBlockIndex → toolUseId across deltas; throws
+  BedrockError on `:message-type: exception`), errors (12
+  typed kinds including `model_stream_error` for
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
-  classes), provider (BedrockProvider with complete + non-
-  streaming + embed-rejects). Capabilities: `{chat: true,
-  streaming: true, toolUse: true, jsonMode: false,
-  embedding: false, maxContextTokens: 200_000}`. The router
-  now has THREE real providers to chain — Anthropic + OpenAI +
-  AWS — for true failover diversity across independent control
-  planes.
+  classes), provider (BedrockProvider with complete +
+  completeNonStreaming + embed — embed dispatches on family,
+  loops over Titan or batches Cohere). Capabilities:
+  `{chat: true, streaming: true, toolUse: true, jsonMode: false,
+  embedding: true, maxContextTokens: 200_000}`. The router has
+  THREE real chat providers to chain — Anthropic + OpenAI + AWS
+  — and TWO embedding providers — OpenAI's text-embedding-3 +
+  Bedrock's Titan/Cohere. Real failover diversity across
+  independent control planes; AWS-native end-to-end for tenants
+  with strict residency requirements.
 - **`ai-providers-anthropic`** — real Anthropic Messages API
   client implementing `LlmProvider`.
 - **`ai-providers-openai`** — real OpenAI Chat Completions +
@@ -1319,7 +1355,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0071 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0072 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1348,7 +1384,8 @@ sessions subcommands), ADR-0068 covers Phase 2 M7.6.5
 M4.7 (CLI gateway binding), ADR-0070 covers Phase 2 M7.9
 (`pack-erp-healthcare` — third vertical pack), ADR-0071 covers
 Phase 2 M2.9 (`ai-providers-bedrock` — third real LlmProvider
-with AWS sig v4 + binary event-stream parsing). When you ship
-a new package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
-0026-0037 batch.
+with AWS sig v4 + binary event-stream parsing), ADR-0072 covers
+Phase 2 M2.9.5 (Bedrock Titan + Cohere embeddings closing
+M2.9's open Q4). When you ship a new package, write the
+matching ADR in the same session, following `0000-template.md`
+and the style of the existing 0026-0037 batch.

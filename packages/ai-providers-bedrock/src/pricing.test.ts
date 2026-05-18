@@ -3,9 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   BEDROCK_CHAT_MODELS,
   BEDROCK_CHAT_PRICING,
+  BEDROCK_DEFAULT_EMBEDDING_MODEL,
+  BEDROCK_EMBEDDING_MODELS,
+  BEDROCK_EMBEDDING_PRICING,
+  buildBedrockEmbeddingUsage,
   buildBedrockUsage,
   computeBedrockChatCost,
+  computeBedrockEmbeddingCost,
   isBedrockChatModel,
+  isBedrockEmbeddingModel,
+  isBedrockModel,
 } from "./pricing.js";
 
 describe("BEDROCK_CHAT_MODELS", () => {
@@ -123,5 +130,74 @@ describe("isBedrockChatModel", () => {
     expect(isBedrockChatModel("gpt-4o")).toBe(false);
     expect(isBedrockChatModel("claude-sonnet-4-6")).toBe(false);
     expect(isBedrockChatModel("")).toBe(false);
+  });
+
+  it("returns false for embedding model strings", () => {
+    expect(isBedrockChatModel("amazon.titan-embed-text-v2:0")).toBe(false);
+  });
+});
+
+describe("BEDROCK_EMBEDDING_MODELS + pricing", () => {
+  it("lists 4 embedding models (2 Titan + 2 Cohere)", () => {
+    expect(BEDROCK_EMBEDDING_MODELS).toHaveLength(4);
+    expect(BEDROCK_EMBEDDING_MODELS).toContain("amazon.titan-embed-text-v2:0");
+    expect(BEDROCK_EMBEDDING_MODELS).toContain("amazon.titan-embed-text-v1");
+    expect(BEDROCK_EMBEDDING_MODELS).toContain("cohere.embed-english-v3");
+    expect(BEDROCK_EMBEDDING_MODELS).toContain("cohere.embed-multilingual-v3");
+  });
+
+  it("default embedding model is titan-embed-text-v2 (cheapest at $0.02/M)", () => {
+    expect(BEDROCK_DEFAULT_EMBEDDING_MODEL).toBe("amazon.titan-embed-text-v2:0");
+  });
+
+  it("titan v2 is 5x cheaper than titan v1 (matching AWS published rates)", () => {
+    expect(BEDROCK_EMBEDDING_PRICING["amazon.titan-embed-text-v2:0"].inputUsdPerMillion).toBe(0.02);
+    expect(BEDROCK_EMBEDDING_PRICING["amazon.titan-embed-text-v1"].inputUsdPerMillion).toBe(0.1);
+  });
+
+  it("cohere models match the documented $0.10/M rate", () => {
+    expect(BEDROCK_EMBEDDING_PRICING["cohere.embed-english-v3"].inputUsdPerMillion).toBe(0.1);
+    expect(BEDROCK_EMBEDDING_PRICING["cohere.embed-multilingual-v3"].inputUsdPerMillion).toBe(0.1);
+  });
+});
+
+describe("computeBedrockEmbeddingCost", () => {
+  it("computes cost rounded to 6 decimals", () => {
+    expect(computeBedrockEmbeddingCost("amazon.titan-embed-text-v2:0", 1_000_000)).toBe(0.02);
+    expect(computeBedrockEmbeddingCost("amazon.titan-embed-text-v2:0", 500_000)).toBe(0.01);
+    expect(computeBedrockEmbeddingCost("amazon.titan-embed-text-v2:0", 1)).toBe(0);
+    expect(computeBedrockEmbeddingCost("cohere.embed-english-v3", 1_000)).toBe(0.0001);
+  });
+
+  it("zero tokens → zero cost", () => {
+    expect(computeBedrockEmbeddingCost("amazon.titan-embed-text-v2:0", 0)).toBe(0);
+  });
+});
+
+describe("buildBedrockEmbeddingUsage", () => {
+  it("Usage has outputTokens: 0 and computed cost", () => {
+    const usage = buildBedrockEmbeddingUsage("amazon.titan-embed-text-v2:0", 5);
+    expect(usage.inputTokens).toBe(5);
+    expect(usage.outputTokens).toBe(0);
+    expect(usage.cachedInputTokens).toBeUndefined();
+    expect(usage.cost).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("isBedrockEmbeddingModel + isBedrockModel", () => {
+  it("isBedrockEmbeddingModel accepts embedding models", () => {
+    expect(isBedrockEmbeddingModel("amazon.titan-embed-text-v2:0")).toBe(true);
+    expect(isBedrockEmbeddingModel("cohere.embed-english-v3")).toBe(true);
+  });
+
+  it("isBedrockEmbeddingModel rejects chat models + unknowns", () => {
+    expect(isBedrockEmbeddingModel("anthropic.claude-3-5-sonnet-20241022-v2:0")).toBe(false);
+    expect(isBedrockEmbeddingModel("text-embedding-3-small")).toBe(false);
+  });
+
+  it("isBedrockModel accepts both chat + embedding models", () => {
+    expect(isBedrockModel("anthropic.claude-3-5-sonnet-20241022-v2:0")).toBe(true);
+    expect(isBedrockModel("amazon.titan-embed-text-v2:0")).toBe(true);
+    expect(isBedrockModel("gpt-4o")).toBe(false);
   });
 });

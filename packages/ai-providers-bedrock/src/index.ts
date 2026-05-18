@@ -1,4 +1,5 @@
 export * from "./converse-api.js";
+export * from "./embeddings.js";
 export * from "./errors.js";
 export * from "./event-stream.js";
 export * from "./pricing.js";
