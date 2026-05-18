@@ -974,6 +974,9 @@ importers:
       '@crossengin/views':
         specifier: workspace:*
         version: link:../views
+      '@crossengin/workflow-signal-bridge':
+        specifier: workspace:*
+        version: link:../workflow-signal-bridge
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -981,6 +984,9 @@ importers:
       '@crossengin/config':
         specifier: workspace:*
         version: link:../config
+      '@crossengin/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing

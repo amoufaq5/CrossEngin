@@ -15,9 +15,26 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 landed: **53
-packages + 1 app, 119 meta-schema tables, 5,964 tests**, all
-green, no type errors. M7.5 shipped the second vertical pack —
++ M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 + M7.8 landed:
+**53 packages + 1 app, 119 meta-schema tables, 5,983 tests**,
+all green, no type errors. M7.8 wired pack-erp-payments to
+M6's `workflow-signal-bridge`. New `signal-bridge.ts` module
+exports `PAYMENT_SIGNAL_NAMES` (5 lifecycle signals matching
+the payment_lifecycle workflow's transitions),
+`PROVIDER_EVENT_SIGNAL_MAP` (Stripe + Adyen + Braintree event
+types → canonical signal names), `paymentReferenceExtractor()`
+backed by a new `FirstMatchingPathExtractor` that tries
+multiple dotted paths (Stripe's `data.object.id`, Adyen's
+`pspReference`, Braintree's `transaction.id`, generic
+`provider_reference`), `buildPaymentSignalBridge(opts)`
+factory, and `buildPaymentBridgesByEvent(opts)` that returns
+a map of one bridge per provider event type. End-to-end test
+proves: real HMAC-signed Stripe-shaped webhook → bridge
+verifies → extractor finds `pi_xxx` → submitSignal called
+with `payment.captured` + correct correlation key + idempotency
+key. The pack's `erp-payments-provider-webhook` job declaration
+now has matching code-side wiring.
+M7.5 shipped the second vertical pack —
 `@crossengin/pack-erp-payments` — proving the cross-pack
 composition story. The pack adds 1 entity (Payment with both
 `auditable` + `tenant_owned` traits; 13 user-fields including
@@ -267,7 +284,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0065 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0066 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -287,7 +304,8 @@ ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 (CLI `--pack` apply), ADR-0064 covers M7.7 (pack tenant
 scoping via `tenant_owned` trait), ADR-0065 covers M7.5
 (`pack-erp-payments` — second vertical pack proving cross-pack
-composition).
+composition), ADR-0066 covers M7.8 (payment signal-bridge
+wiring).
 
 ## Architecture in 90 seconds
 
@@ -926,6 +944,20 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M7.8):** webhook → workflow signal
+wiring for payments. `pack-erp-payments/src/signal-bridge.ts`
+exports the canonical signal-name vocabulary, the provider
+event-type → signal-name map (Stripe + Adyen + Braintree), a
+multi-path correlation extractor (handles `data.object.id`,
+`pspReference`, `transaction.id`, generic `provider_reference`),
+and factory functions that wrap M6's `WorkflowSignalBridge`
+with the right defaults. End-to-end verified: HMAC-signed
+Stripe-shaped `payment_intent.succeeded` webhook → bridge
+extracts `pi_xxx` → `submitSignal({signalName: "payment.captured",
+correlationKey: "pi_xxx", tenantId, idempotencyKey})`. Pattern
+for future webhook-driven packs (`pack-erp-shipping` for
+carriers, etc.).
+
 **No longer deferred (as of M7.5):** cross-pack composition.
 `@crossengin/pack-erp-payments` extends `pack-erp-core` by
 calling `buildErpCorePack()` and merging its own additions
@@ -1087,7 +1119,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0065 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0066 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1109,7 +1141,8 @@ M2.8.5 (OpenAI Responses API support), ADR-0063 covers Phase 2
 M7-wire (CLI `--pack` apply), ADR-0064 covers Phase 2 M7.7
 (pack tenant scoping via `tenant_owned` trait), ADR-0065
 covers Phase 2 M7.5 (pack-erp-payments — cross-pack
-composition). When you ship a new package,
+composition), ADR-0066 covers Phase 2 M7.8 (payment
+signal-bridge wiring). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

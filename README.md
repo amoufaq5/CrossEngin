@@ -2,7 +2,7 @@
 
 > **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 +
 > M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 +
-> M2.8.5 + M5.7 + M5.8 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 landed. The four runtime pillars (DDL + crypto
+> M2.8.5 + M5.7 + M5.8 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 + M7.8 landed. The four runtime pillars (DDL + crypto
 > + workflows + gateway) are in place; both impure runtimes
 > have Postgres-backed adapters; the first binary `crossengin`
 > ships with init / validate / diff / patch / hash / apply /
@@ -17,8 +17,8 @@
 > bridge; M7 shipped the first vertical pack
 > (`@crossengin/pack-erp-core`) proving the substrate holds up
 > under a real schema.
-> **53 packages + 1 app, 119 meta-schema tables, 5,964 tests**,
-> all green, zero type errors. ADRs 0001–0065 fully drafted.
+> **53 packages + 1 app, 119 meta-schema tables, 5,983 tests**,
+> all green, zero type errors. ADRs 0001–0066 fully drafted.
 > `crossengin apply --dry-run --pack=operate-erp/payments`
 > produces the META bootstrap SQL + 4 ERP entity tables + the
 > Payment table (cross-pack composition, all tenant-scoped) in
@@ -108,7 +108,7 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0065
+│   └── adr/          ADRs 0001-0066
 ├── apps/             1 workspace app  (architect-cli)
 ├── packages/         53 workspace packages
 ├── apps/             user-facing applications          [pending]
@@ -129,7 +129,7 @@ The Phase 2 implementation plan is in
 If you're a human contributor, start with
 **[`docs/vision.md`](docs/vision.md)** — the north-star concept
 document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 65 architecture decisions.
+running index of 66 architecture decisions.
 
 Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
 the template at

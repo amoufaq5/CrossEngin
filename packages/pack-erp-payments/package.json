@@ -27,10 +27,12 @@
     "@crossengin/pack-erp-core": "workspace:*",
     "@crossengin/types": "workspace:*",
     "@crossengin/views": "workspace:*",
+    "@crossengin/workflow-signal-bridge": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@crossengin/config": "workspace:*",
+    "@crossengin/sdk": "workspace:*",
     "@crossengin/testing": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
