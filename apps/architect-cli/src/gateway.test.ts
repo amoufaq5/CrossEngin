@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { parseArgs } from "./cli.js";
 import type { IoStreams } from "./format.js";
 import { buildDefaultGatewayHandlers } from "./gateway-handlers.js";
+import type { FetchLike } from "./gateway-jwks.js";
 import {
   runGateway,
   type GatewayContext,
@@ -283,7 +284,7 @@ describe("runGateway start (in-memory + runtime override)", () => {
     expect(errChunks.join("")).toMatch(/PG/);
   });
 
-  it("rejects --jwt-issuer without --jwks-file", async () => {
+  it("rejects --jwt-issuer without --jwks-file or --jwks-url", async () => {
     const { io, errChunks } = makeIo();
     const ctx: GatewayContext = {
       io,
@@ -302,6 +303,193 @@ describe("runGateway start (in-memory + runtime override)", () => {
     const code = await runGateway(command, ctx);
     expect(code).toBe(2);
     expect(errChunks.join("")).toMatch(/--jwks-file/);
+  });
+
+  it("rejects --jwks-file and --jwks-url together", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      runtimeOverride: buildRealRuntime(),
+      waitForShutdown: () => Promise.resolve(),
+    };
+    const command = parseGatewayArgs(
+      "start",
+      "--in-memory",
+      "--port",
+      "0",
+      "--jwks-file",
+      "/tmp/x.json",
+      "--jwks-url",
+      "https://example.com/jwks",
+      "--jwt-issuer",
+      "i",
+      "--jwt-audience",
+      "a",
+    );
+    const code = await runGateway(command, ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/mutually exclusive/);
+  });
+
+  it("--jwks-url + valid response → started event includes jwksSource", async () => {
+    const { io, outChunks } = makeIo();
+    const fetchImpl: FetchLike = async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({ keys: [{ kid: "k1", publicKeyBase64: "AAAA" }] }),
+    });
+    const factory: typeof import("./gateway-server.js").startGatewayServer = async () => ({
+      host: "127.0.0.1",
+      port: 12345,
+      close: async () => undefined,
+    });
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      runtimeOverride: buildRealRuntime(),
+      serverFactory: factory,
+      waitForShutdown: () => Promise.resolve(),
+      jwksFetch: fetchImpl,
+      registerReloadHandler: () => () => undefined,
+    };
+    const command = parseGatewayArgs(
+      "start",
+      "--in-memory",
+      "--port",
+      "0",
+      "--format",
+      "json",
+      "--jwks-url",
+      "https://example.com/jwks",
+      "--jwt-issuer",
+      "https://issuer.example",
+      "--jwt-audience",
+      "https://aud.example",
+    );
+    const code = await runGateway(command, ctx);
+    expect(code).toBe(0);
+    const out = outChunks.join("");
+    const blocks = out
+      .split(/(?<=^})\n/m)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const parsed = blocks.map((b) => JSON.parse(b) as Record<string, unknown>);
+    const started = parsed.find((b) => b["kind"] === "started");
+    expect(started).toBeDefined();
+    expect(started?.["jwksSource"]).toBe("https://example.com/jwks");
+  });
+
+  it("--jwks-url + 404 exits 2 with a JwksLoadError message", async () => {
+    const { io, errChunks } = makeIo();
+    const fetchImpl: FetchLike = async () => ({
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+    });
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      runtimeOverride: buildRealRuntime(),
+      waitForShutdown: () => Promise.resolve(),
+      jwksFetch: fetchImpl,
+    };
+    const command = parseGatewayArgs(
+      "start",
+      "--in-memory",
+      "--port",
+      "0",
+      "--jwks-url",
+      "https://example.com/jwks",
+      "--jwt-issuer",
+      "i",
+      "--jwt-audience",
+      "a",
+    );
+    const code = await runGateway(command, ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/status 404/);
+  });
+
+  it("registerReloadHandler is invoked when --jwks-url is set, triggering refresh", async () => {
+    const { io, outChunks } = makeIo();
+    let fetches = 0;
+    const fetchImpl: FetchLike = async () => {
+      fetches += 1;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ keys: [{ kid: "k" + fetches.toString(), publicKeyBase64: "AAAA" }] }),
+      };
+    };
+    let captured: (() => void) | null = null;
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      runtimeOverride: buildRealRuntime(),
+      serverFactory: async () => ({
+        host: "127.0.0.1",
+        port: 12345,
+        close: async () => undefined,
+      }),
+      waitForShutdown: () => Promise.resolve(),
+      jwksFetch: fetchImpl,
+      registerReloadHandler: (handler) => {
+        captured = handler;
+        return () => undefined;
+      },
+    };
+    const command = parseGatewayArgs(
+      "start",
+      "--in-memory",
+      "--port",
+      "0",
+      "--format",
+      "json",
+      "--jwks-url",
+      "https://example.com/jwks",
+      "--jwt-issuer",
+      "i",
+      "--jwt-audience",
+      "a",
+    );
+    await runGateway(command, ctx);
+    expect(captured).not.toBeNull();
+    expect(fetches).toBe(1); // initial load
+    captured!();
+    await new Promise((res) => setTimeout(res, 5));
+    expect(fetches).toBe(2);
+    const out = outChunks.join("");
+    expect(out).toMatch(/"kind":\s*"jwks_refresh"/);
+  });
+
+  it("--jwks-refresh-seconds in --jwks-file mode is rejected (exit 2)", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      runtimeOverride: buildRealRuntime(),
+      waitForShutdown: () => Promise.resolve(),
+    };
+    const command = parseGatewayArgs(
+      "start",
+      "--in-memory",
+      "--port",
+      "0",
+      "--jwks-file",
+      "/tmp/whatever.json",
+      "--jwt-issuer",
+      "i",
+      "--jwt-audience",
+      "a",
+      "--jwks-refresh-seconds",
+      "30",
+    );
+    const code = await runGateway(command, ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/only supported with --jwks-url/);
   });
 
   it("passes a probe through the runtime override so the wiring is exercised", async () => {

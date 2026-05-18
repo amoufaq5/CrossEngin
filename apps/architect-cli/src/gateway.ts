@@ -32,7 +32,10 @@ import {
 import {
   JwksLoadError,
   resolveJwtFlags,
+  DEFAULT_JWKS_REFRESH_SECONDS,
+  type FetchLike,
   type JwtFlagsResult,
+  type RefreshableJwksProvider,
 } from "./gateway-jwks.js";
 import {
   runGatewayRoutes,
@@ -55,6 +58,8 @@ export interface GatewayContext extends RunContext, GatewayRoutesContext {
   readonly pgConnectionOverride?: PgConnection;
   readonly serverFactory?: typeof startGatewayServer;
   readonly waitForShutdown?: () => Promise<void>;
+  readonly jwksFetch?: FetchLike;
+  readonly registerReloadHandler?: (handler: () => void) => () => void;
 }
 
 export async function runGateway(
@@ -107,9 +112,12 @@ async function runGatewayStart(
   try {
     jwt = await resolveJwtFlags({
       jwksFile: getStringFlag(command, "jwks-file"),
+      jwksUrl: getStringFlag(command, "jwks-url"),
+      jwksRefreshSeconds: getStringFlag(command, "jwks-refresh-seconds"),
       jwtIssuer: getStringFlag(command, "jwt-issuer"),
       jwtAudience: getStringFlag(command, "jwt-audience"),
       clockSkewSeconds: getStringFlag(command, "clock-skew-seconds"),
+      ...(ctx.jwksFetch !== undefined ? { fetch: ctx.jwksFetch } : {}),
     });
   } catch (err) {
     if (err instanceof JwksLoadError) {
@@ -122,6 +130,8 @@ async function runGatewayStart(
     );
     return 1;
   }
+
+  const jwksRefreshSecondsFlag = getStringFlag(command, "jwks-refresh-seconds");
 
   let built: BuiltRuntime;
   try {
@@ -168,18 +178,36 @@ async function runGatewayStart(
     return 1;
   }
 
+  const reloadCleanup = installJwksReloadHandlers({
+    refreshable: jwt.refreshable,
+    jwksSource: jwt.refreshable?.source,
+    refreshSecondsFlag: jwksRefreshSecondsFlag,
+    isUrl: getStringFlag(command, "jwks-url") !== null,
+    command,
+    ctx,
+  });
+
   if (command.format === "json") {
     printJson(ctx.io, {
       kind: "started",
       host: server.host,
       port: server.port,
       mode: built.mode,
+      ...(jwt.refreshable !== undefined
+        ? { jwksSource: jwt.refreshable.source }
+        : {}),
     });
   } else {
     printSuccess(
       ctx.io,
       `gateway listening on http://${server.host}:${server.port.toString()} (mode: ${built.mode})`,
     );
+    if (jwt.refreshable !== undefined) {
+      printSuccess(
+        ctx.io,
+        `JWKS loaded from ${jwt.refreshable.source}; SIGHUP triggers reload`,
+      );
+    }
     printSuccess(
       ctx.io,
       `built-in routes: GET /__ping, GET /__health  —  Ctrl+C to stop`,
@@ -189,6 +217,7 @@ async function runGatewayStart(
   try {
     await (ctx.waitForShutdown ?? waitForShutdownSignal)();
   } finally {
+    reloadCleanup();
     await server.close().catch(() => undefined);
     if (built.pgConnection !== null) {
       await built.pgConnection.close().catch(() => undefined);
@@ -198,6 +227,71 @@ async function runGatewayStart(
     printSuccess(ctx.io, "gateway stopped");
   }
   return 0;
+}
+
+interface InstallReloadHandlersInput {
+  readonly refreshable: RefreshableJwksProvider | undefined;
+  readonly jwksSource: string | undefined;
+  readonly refreshSecondsFlag: string | null;
+  readonly isUrl: boolean;
+  readonly command: ParsedCommand;
+  readonly ctx: GatewayContext;
+}
+
+function installJwksReloadHandlers(input: InstallReloadHandlersInput): () => void {
+  if (input.refreshable === undefined) return () => undefined;
+  const refreshable = input.refreshable;
+  const emitRefresh = (result: { ok: boolean; error?: string }): void => {
+    if (input.command.format === "json") {
+      printJson(input.ctx.io, {
+        kind: "jwks_refresh",
+        source: refreshable.source,
+        ...result,
+      });
+    } else if (result.ok) {
+      printSuccess(input.ctx.io, `JWKS reloaded from ${refreshable.source}`);
+    } else {
+      printError(
+        input.ctx.io,
+        `JWKS reload from ${refreshable.source} failed: ${result.error ?? "unknown"}`,
+      );
+    }
+  };
+  const trigger = (): void => {
+    void refreshable.refresh().then(
+      () => emitRefresh({ ok: true }),
+      (err: unknown) =>
+        emitRefresh({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+    );
+  };
+  const unregister =
+    input.ctx.registerReloadHandler !== undefined
+      ? input.ctx.registerReloadHandler(trigger)
+      : ((): (() => void) => {
+          process.on("SIGHUP", trigger);
+          return () => process.off("SIGHUP", trigger);
+        })();
+  let periodicSeconds: number;
+  if (input.refreshSecondsFlag !== null) {
+    periodicSeconds = Number.parseInt(input.refreshSecondsFlag, 10);
+  } else if (input.isUrl) {
+    periodicSeconds = DEFAULT_JWKS_REFRESH_SECONDS;
+  } else {
+    periodicSeconds = 0;
+  }
+  if (periodicSeconds > 0) {
+    refreshable.startPeriodicRefresh({
+      intervalMs: periodicSeconds * 1000,
+      onResult: emitRefresh,
+    });
+  }
+  return () => {
+    unregister();
+    refreshable.stopPeriodicRefresh();
+  };
 }
 
 interface BuildRuntimeInput {

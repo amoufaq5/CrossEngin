@@ -15,10 +15,44 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 +
-M4.7.5 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 +
-M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 +
-M7.9 landed: **55 packages + 1 app, 119 meta-schema tables,
-6,315 tests**, all green, no type errors. M4.7.5 closed M4.7's
+M4.7.5 + M4.7.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 +
+M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 +
+M7.8 + M7.9 landed: **55 packages + 1 app, 119 meta-schema
+tables, 6,344 tests**, all green, no type errors. M4.7.6 closed
+M4.7.5's two follow-up questions: cloud-IdP-friendly JWKS URL
+fetching + hot-reload. `apps/architect-cli/src/gateway-jwks.ts`
+gained `loadJwksFromUrl(url, opts?)` (injectable FetchLike,
+10s default timeout, AbortSignal-translated to typed
+JwksLoadError on timeout), `normalizeJwksEntry` accepts BOTH
+CrossEngin-native `{kid, publicKeyBase64}` AND RFC 7517 OKP/
+Ed25519 `{kid, kty: "OKP", crv: "Ed25519", alg?: "EdDSA",
+x: <base64url>}` entries (RSA / EC / oct rejected at parse
+time with a clear EdDSA-only message), and a `Refreshable
+JwksProvider` class wrapping an initial provider + a loader
+function; `refresh()` atomically swaps the inner pointer on
+success, keeps old keys on loader failure, and exposes
+`startPeriodicRefresh({intervalMs, onResult})` /
+`stopPeriodicRefresh()` (timer `.unref()`'d so it doesn't
+keep the event loop alive). `runGatewayStart` integrated:
+new flags `--jwks-url <url>` (mutually exclusive with
+`--jwks-file`) and `--jwks-refresh-seconds <n>` (range [0,
+86400]; defaults to 300 in URL mode, 0 in file mode where
+SIGHUP is the reload path). After server boot the runtime
+installs a SIGHUP handler + a periodic-refresh interval if
+configured; both emit structured `{kind: "jwks_refresh",
+source, ok, error?}` events (NDJSON in JSON format mode,
+human prints otherwise). Initial JWKS load is hard-fail (exit
+2 with typed JwksLoadError); subsequent refreshes are soft-
+fail (old keys retained on loader error). `GatewayContext`
+gained two test seams — `jwksFetch?: FetchLike` and
+`registerReloadHandler?` — so the URL + SIGHUP paths are
+exhaustively tested without real network/signals. End-to-end
+verified: `crossengin gateway start --jwks-url http://...
+--jwks-refresh-seconds 1` boots; SIGHUP triggers a
+`jwks_refresh` event; periodic refresh fires every second.
+RSA/oct JWKS endpoints, fs.watch hot-reload, lazy-on-miss
+refresh, cached-on-disk JWKS responses, and per-tenant JWKS
+isolation deferred to M4.7.7+. M4.7.5 closed M4.7's
 two biggest open questions: JWT auth + routes management. New
 `apps/architect-cli/src/gateway-jwks.ts` loads JWKS keys from a
 JSON file shaped `{keys: [{kid, publicKeyBase64}, ...]}` and
@@ -486,7 +520,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0074 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0075 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -517,7 +551,8 @@ Cohere embeddings closing M2.9's open Q4), ADR-0073 covers
 M6.5.6 (architect-cli Bedrock integration — env-var detection +
 three-deep task fallback chains), ADR-0074 covers M4.7.5
 (gateway JWT auth + routes subcommand closing M4.7's open
-questions).
+questions), ADR-0075 covers M4.7.6 (URL-fetched JWKS +
+hot-reload via SIGHUP + periodic refresh).
 
 ## Architecture in 90 seconds
 
@@ -1408,7 +1443,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0074 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0075 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1441,7 +1476,8 @@ with AWS sig v4 + binary event-stream parsing), ADR-0072 covers
 Phase 2 M2.9.5 (Bedrock Titan + Cohere embeddings closing
 M2.9's open Q4), ADR-0073 covers Phase 2 M6.5.6 (architect-cli
 Bedrock integration), ADR-0074 covers Phase 2 M4.7.5 (gateway
-JWT auth + routes subcommand). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+JWT auth + routes subcommand), ADR-0075 covers Phase 2 M4.7.6
+(URL-fetched JWKS + SIGHUP/periodic hot-reload). When you ship
+a new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.
