@@ -33,6 +33,7 @@
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/pack-erp-core": "workspace:*",
+    "@crossengin/pack-erp-payments": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

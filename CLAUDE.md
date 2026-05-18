@@ -15,9 +15,32 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.7 landed: **52 packages
-+ 1 app, 119 meta-schema tables, 5,914 tests**, all green, no
-type errors. M7.7 fixed the biggest open question from M7-wire:
++ M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 landed: **53
+packages + 1 app, 119 meta-schema tables, 5,964 tests**, all
+green, no type errors. M7.5 shipped the second vertical pack —
+`@crossengin/pack-erp-payments` — proving the cross-pack
+composition story. The pack adds 1 entity (Payment with both
+`auditable` + `tenant_owned` traits; 13 user-fields including
+provider enum, provider_reference unique-within-provider,
+amount + refund_amount decimal(14,2), 6-state lifecycle),
+1 relation (Invoice → Payment one-to-many RESTRICT), 5
+permission transitions (admin-only refund + delete; everyone
+else for capture/settle/fail/cancel), the `payment_lifecycle`
+workflow (pending → captured → settled active; refunded /
+failed / cancelled terminal; refund reachable from captured +
+settled; 2 SLAs), 2 jobs (event-triggered payment-provider
+webhook handler + hourly settlement sweep backstop), 1 list
+view. `buildErpPaymentsPack()` calls `buildErpCorePack()` and
+merges its additions — the resulting manifest declares
+`extends: ["operate-erp/core"]` for documentation but applies
+as one unified manifest (5 entities, 4 relations, 5 permission
+sets, 2 workflows, 4 jobs, 3 views). `tryValidateManifest`
+passes; cross-pack Payment.invoice_id → Invoice reference
+resolves internally via merge. Pack-erp-payments registered in
+the architect-cli pack-registry; `crossengin apply
+--pack=operate-erp/payments` produces deployment-grade SQL
+covering both core and payment tables.
+M7.7 fixed the biggest open question from M7-wire:
 pack tables now isolate per tenant at the DB level. The kernel's
 `tenant_owned` built-in trait gained a `tenant_id UUID NOT NULL`
 (indexed) field; `emitEntity` now emits a cross-schema FK
@@ -244,7 +267,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0064 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0065 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -262,7 +285,9 @@ ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 (architect-cli router integration), ADR-0062 covers M2.8.5
 (OpenAI Responses API support), ADR-0063 covers M7-wire
 (CLI `--pack` apply), ADR-0064 covers M7.7 (pack tenant
-scoping via `tenant_owned` trait).
+scoping via `tenant_owned` trait), ADR-0065 covers M7.5
+(`pack-erp-payments` — second vertical pack proving cross-pack
+composition).
 
 ## Architecture in 90 seconds
 
@@ -553,6 +578,20 @@ re-exporting everything.
   + quiet-hours decisions.
 
 ### Vertical packs
+- **`pack-erp-payments`** — second vertical pack. Extends
+  `operate-erp/core` via `meta.extends`. 1 entity (Payment
+  with auditable + tenant_owned, references Invoice), 1
+  relation (Invoice → Payment), 5 permission transitions,
+  `payment_lifecycle` workflow (6 states: pending → captured
+  → settled active; refunded / failed / cancelled terminal;
+  refund reachable from captured or settled; 2 SLAs at P1D
+  and P5D), 2 jobs (event-triggered provider webhook handler
+  on `billing.payment_received` for the M6 signal bridge to
+  consume; hourly settlement sweep as backstop), 1 list view.
+  `buildErpPaymentsPack()` merges core + new additions into
+  one unified manifest — `tryValidateManifest` passes;
+  cross-pack Payment → Invoice FK resolves via merge. Pattern
+  for future packs that `extends` an existing pack.
 - **`pack-erp-core`** — first vertical pack. Declarative
   `Manifest` with 4 entities (Account, Contact, Invoice,
   InvoiceLine on the `auditable` trait), 3 relations, 3 roles
@@ -887,6 +926,20 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M7.5):** cross-pack composition.
+`@crossengin/pack-erp-payments` extends `pack-erp-core` by
+calling `buildErpCorePack()` and merging its own additions
+into the resulting Manifest. The combined manifest validates
+end-to-end; cross-pack references (Payment.invoice_id →
+Invoice) resolve internally via the merge. `meta.extends`
+documents the dependency for future marketplace tooling.
+`crossengin apply --pack=operate-erp/payments` produces a
+deployment-grade Postgres schema covering both core + payment
+tables in one atomic apply, all with M7.7's per-tenant
+isolation auto-applied. Pattern set for future verticals that
+build on existing ones (e.g., `pack-erp-healthcare` extends
+core, `pack-erp-payments-stripe` extends payments).
+
 **No longer deferred (as of M7.7):** per-tenant isolation on
 pack tables. The kernel's `tenant_owned` built-in trait now
 injects `tenant_id UUID NOT NULL` (indexed), a cross-schema FK
@@ -1034,7 +1087,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0064 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0065 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1054,7 +1107,9 @@ Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (architect-cli router integration), ADR-0062 covers Phase 2
 M2.8.5 (OpenAI Responses API support), ADR-0063 covers Phase 2
 M7-wire (CLI `--pack` apply), ADR-0064 covers Phase 2 M7.7
-(pack tenant scoping via `tenant_owned` trait). When you ship a new package,
+(pack tenant scoping via `tenant_owned` trait), ADR-0065
+covers Phase 2 M7.5 (pack-erp-payments — cross-pack
+composition). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

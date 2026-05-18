@@ -12,6 +12,13 @@ describe("PACK_REGISTRY", () => {
     expect(PACK_REGISTRY).toHaveProperty("operate-erp/core");
   });
 
+  it("includes operate-erp/payments (M7.5 — extends core)", () => {
+    expect(PACK_REGISTRY).toHaveProperty("operate-erp/payments");
+    expect(PACK_REGISTRY["operate-erp/payments"]?.build().meta.extends).toEqual([
+      "operate-erp/core",
+    ]);
+  });
+
   it("every entry's build() returns a valid Manifest shape", () => {
     for (const entry of Object.values(PACK_REGISTRY)) {
       const m = entry.build();

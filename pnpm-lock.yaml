@@ -44,6 +44,9 @@ importers:
       '@crossengin/pack-erp-core':
         specifier: workspace:*
         version: link:../../packages/pack-erp-core
+      '@crossengin/pack-erp-payments':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-payments
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -925,6 +928,46 @@ importers:
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
+      '@crossengin/views':
+        specifier: workspace:*
+        version: link:../views
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/pack-erp-payments:
+    dependencies:
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
       '@crossengin/types':
         specifier: workspace:*
         version: link:../types

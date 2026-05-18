@@ -1,5 +1,9 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
+import {
+  buildErpPaymentsPack,
+  ERP_PAYMENTS_PACK_SLUG,
+} from "@crossengin/pack-erp-payments";
 
 export interface PackEntry {
   readonly slug: string;
@@ -13,6 +17,12 @@ export const PACK_REGISTRY: Readonly<Record<string, PackEntry>> = {
     description:
       "Core ERP entities (Account, Contact, Invoice, InvoiceLine) with billing workflow.",
     build: () => buildErpCorePack(),
+  },
+  [ERP_PAYMENTS_PACK_SLUG]: {
+    slug: ERP_PAYMENTS_PACK_SLUG,
+    description:
+      "Payment entity + lifecycle workflow on top of operate-erp/core. Adds payment-provider webhook handler + settlement sweep jobs.",
+    build: () => buildErpPaymentsPack(),
   },
 };
 
