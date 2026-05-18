@@ -14,10 +14,36 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
-+ M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7
-+ M7.8 landed: **53 packages + 1 app, 119 meta-schema tables,
-6,004 tests**, all green, no type errors. M7.6.5 wired the kernel's
++ M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 + M5.5 + M5.6 + M5.7
++ M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.6.5
++ M7.7 + M7.8 landed: **53 packages + 1 app, 119 meta-schema
+tables, 6,038 tests**, all green, no type errors. M4.7 closed
+the substrate-to-binary loop for the gateway pillar.
+`crossengin gateway start [--port N] [--host A] [--in-memory]`
+boots the M4 `GatewayRuntime` against a Node `http.createServer`
+and the M4.5 Postgres-backed stores (idempotency / route registry
+/ rate limit / pipeline executions). Built-in routes `GET /__ping`
++ `GET /__health` register at startup with `requiredScopes: []`
+and `idempotencyRequired: false` so the server is responsive even
+with an empty route registry; both flow through the full 17-stage
+pipeline. New modules: `apps/architect-cli/src/gateway.ts` (CLI
+entry + runtime construction), `gateway-server.ts` (Node HTTP
+adapter — `buildIncomingFromNode`, `writeOutgoing`, `readBody`
+with 1 MB cap, `generateRequestId` returning `req_<24-hex>`), and
+`gateway-handlers.ts` (`platform.ping` + `platform.health`
+handlers). `--in-memory` swaps PG adapters for in-memory
+equivalents; default mode reads `PGHOST/PGDATABASE/...` env vars
+and persists pipeline executions to `meta.gateway_pipeline_
+executions`. `PostgresRouteRegistry.ensureLoaded()` runs as a
+per-request `beforeHandle` so the route cache stays warm. SIGINT
+/ SIGTERM trigger graceful shutdown — server closes, PG connection
+closes, exit 0. End-to-end verified: `curl http://127.0.0.1:14250
+/__ping` returns 200 + `{status:"ok",at:<ISO>}`; `/__health`
+reports `uptimeSeconds` since boot; `/nope` returns 404 via the
+gateway's `match_route` stage. JSON format mode emits NDJSON-
+style records (`{kind:"started",...}` on boot, one
+`{kind:"request",...}` per request). JWT mode + manifest-driven
+route registration deferred to M4.7.5 + M4.8. M7.6.5 wired the kernel's
 existing `resolveManifest` (from `packages/kernel/src/manifest/
 extends.ts`) into the CLI's apply pipeline. `buildErpPaymentsPack
 ()` refactored to return a child-only manifest (1 entity, 1
@@ -319,7 +345,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0068 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0069 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -341,7 +367,8 @@ scoping via `tenant_owned` trait), ADR-0065 covers M7.5
 (`pack-erp-payments` — second vertical pack proving cross-pack
 composition), ADR-0066 covers M7.8 (payment signal-bridge
 wiring), ADR-0067 covers M5.9 (CLI sessions subcommands),
-ADR-0068 covers M7.6.5 (kernel `extends` resolver wiring).
+ADR-0068 covers M7.6.5 (kernel `extends` resolver wiring),
+ADR-0069 covers M4.7 (CLI gateway binding).
 
 ## Architecture in 90 seconds
 
@@ -971,17 +998,21 @@ without 4xx/5xx, terminating outcome not last, duration
 inconsistent, rate-limit decision orphaned. summarize / bulkVerify
 power periodic SLO + audit sweeps over the execution stream.
 
-**No longer deferred (as of M5):** the developer entry point.
-`apps/architect-cli` ships a `crossengin` binary with the M5
-subcommand surface: `init` (scaffold a manifest), `validate`
-(zod-check + summary), `diff` (computeManifestDiff with human
-or JSON output), `patch` (write a manifest patch), `hash`
-(deterministic manifestHash), `apply` (--dry-run emits the
-3,061-line meta-schema SQL; live mode uses MigrationApplier
-against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
-`version`, `help`. Every subcommand has --format human|json.
-Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
-is the first binary that composes contracts → real artifact.
+**No longer deferred (as of M5 + M4.7):** the developer entry
+point + a running gateway. `apps/architect-cli` ships a
+`crossengin` binary with the M5 subcommand surface: `init`
+(scaffold a manifest), `validate` (zod-check + summary), `diff`
+(computeManifestDiff with human or JSON output), `patch` (write
+a manifest patch), `hash` (deterministic manifestHash), `apply`
+(--dry-run emits the 3,061-line meta-schema SQL; live mode uses
+MigrationApplier against PGHOST/PGDATABASE), `chat` (wired in
+M5.5 — see below), `gateway start` (M4.7 — boots the gateway
+runtime against a Node HTTP server, in-memory or Postgres-backed,
+with built-in `/__ping` + `/__health` routes), `version`, `help`.
+Every subcommand has --format human|json. Exit codes: 0 success /
+1 runtime problem / 2 misuse. The CLI is the first binary that
+composes contracts → real artifact, and now also the binary that
+turns the M4 gateway runtime into a real listening HTTP server.
 
 **No longer deferred (as of M5.9):** the chat audit trail is
 queryable from the CLI. `crossengin sessions list / show /
@@ -1176,7 +1207,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0068 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0069 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1201,7 +1232,8 @@ covers Phase 2 M7.5 (pack-erp-payments — cross-pack
 composition), ADR-0066 covers Phase 2 M7.8 (payment
 signal-bridge wiring), ADR-0067 covers Phase 2 M5.9 (CLI
 sessions subcommands), ADR-0068 covers Phase 2 M7.6.5
-(kernel `extends` resolver wiring). When you ship a new
-package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
-0026-0037 batch.
+(kernel `extends` resolver wiring), ADR-0069 covers Phase 2
+M4.7 (CLI gateway binding). When you ship a new package,
+write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.

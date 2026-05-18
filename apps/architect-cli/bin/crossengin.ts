@@ -14,6 +14,7 @@ import {
   runVersion,
   type RunContext,
 } from "../src/commands.js";
+import { runGateway } from "../src/gateway.js";
 import { runSessions } from "../src/sessions.js";
 import { printError } from "../src/format.js";
 
@@ -61,6 +62,8 @@ async function main(): Promise<number> {
       return runChat(command, ctx);
     case "sessions":
       return runSessions(command, ctx);
+    case "gateway":
+      return runGateway(command, ctx);
   }
 }
 

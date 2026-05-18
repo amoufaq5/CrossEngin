@@ -35,6 +35,15 @@ importers:
       '@crossengin/ai-router':
         specifier: workspace:*
         version: link:../../packages/ai-router
+      '@crossengin/api-gateway':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway
+      '@crossengin/api-gateway-pg':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway-pg
+      '@crossengin/api-gateway-runtime':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway-runtime
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

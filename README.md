@@ -1,7 +1,7 @@
 # CrossEngin
 
 > **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 +
-> M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 +
+> M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 + M5.5 + M5.6 +
 > M2.8.5 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 landed. The four runtime pillars (DDL + crypto
 > + workflows + gateway) are in place; both impure runtimes
 > have Postgres-backed adapters; the first binary `crossengin`
@@ -17,8 +17,8 @@
 > bridge; M7 shipped the first vertical pack
 > (`@crossengin/pack-erp-core`) proving the substrate holds up
 > under a real schema.
-> **53 packages + 1 app, 119 meta-schema tables, 6,004 tests**,
-> all green, zero type errors. ADRs 0001–0068 fully drafted.
+> **53 packages + 1 app, 119 meta-schema tables, 6,038 tests**,
+> all green, zero type errors. ADRs 0001–0069 fully drafted.
 > `crossengin apply --dry-run --pack=operate-erp/payments`
 > produces the META bootstrap SQL + 4 ERP entity tables + the
 > Payment table (cross-pack composition, all tenant-scoped) in
