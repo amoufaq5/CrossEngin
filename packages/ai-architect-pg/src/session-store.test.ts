@@ -147,6 +147,30 @@ describe("PostgresArchitectSessionStore.getById", () => {
   });
 });
 
+describe("PostgresArchitectSessionStore.getBySessionId", () => {
+  it("looks up by (tenant_id, session_id) compound key", async () => {
+    const conn = mockConnection((sql, params) => {
+      expect(sql).toContain("WHERE tenant_id = $1 AND session_id = $2");
+      expect(params).toEqual([TENANT, "cli-abc"]);
+      return { rows: [sessionRow()], rowCount: 1 };
+    });
+    const store = new PostgresArchitectSessionStore(conn);
+    const record = await store.getBySessionId({
+      tenantId: TENANT,
+      sessionId: "cli-abc",
+    });
+    expect(record?.sessionId).toBe("cli-abc");
+  });
+
+  it("returns null when no row matches", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const store = new PostgresArchitectSessionStore(conn);
+    expect(
+      await store.getBySessionId({ tenantId: TENANT, sessionId: "missing" }),
+    ).toBeNull();
+  });
+});
+
 describe("PostgresArchitectSessionStore.listForTenant", () => {
   it("returns records ordered by started_at DESC with limit", async () => {
     const conn = mockConnection((sql, params) => {

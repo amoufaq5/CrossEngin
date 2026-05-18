@@ -104,6 +104,18 @@ export class PostgresArchitectSessionStore {
     return row !== undefined ? rowToRecord(row) : null;
   }
 
+  async getBySessionId(input: {
+    readonly tenantId: string;
+    readonly sessionId: string;
+  }): Promise<ArchitectSessionRecord | null> {
+    const result = await this.conn.query<Row>(
+      `SELECT * FROM ${SCHEMA}.${TABLE} WHERE tenant_id = $1 AND session_id = $2`,
+      [input.tenantId, input.sessionId],
+    );
+    const row = result.rows[0];
+    return row !== undefined ? rowToRecord(row) : null;
+  }
+
   async listForTenant(input: {
     readonly tenantId: string;
     readonly limit?: number;

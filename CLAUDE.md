@@ -15,9 +15,24 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8
-+ M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 + M7.8 landed:
-**53 packages + 1 app, 119 meta-schema tables, 5,983 tests**,
-all green, no type errors. M7.8 wired pack-erp-payments to
++ M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.7 + M7.8
+landed: **53 packages + 1 app, 119 meta-schema tables, 6,003
+tests**, all green, no type errors. M5.9 added three CLI
+subcommands for the chat audit data: `crossengin sessions
+list` renders a table of recent sessions for a tenant;
+`crossengin sessions show <id>` dumps one session's full
+transcript (header + messages + tool invocations + proposals)
+with truncation for terminal viewing; `crossengin sessions
+replay <id>` renders the messages as chat-style output
+(`You:` / `Architect:` / `[tool result ← tu_1]`) matching the
+live REPL's look. New `apps/architect-cli/src/sessions.ts`
+dispatches on positional action; `getBySessionId({tenantId,
+sessionId})` added to `PostgresArchitectSessionStore` so the
+CLI looks up by the user-visible session_id string (UUID lookup
+also supported via regex check). Tests inject store overrides
+via the new `SessionsContext.storesOverride` so the offline
+CI path mirrors the chat side's `transcriptOverride`.
+M7.8 wired pack-erp-payments to
 M6's `workflow-signal-bridge`. New `signal-bridge.ts` module
 exports `PAYMENT_SIGNAL_NAMES` (5 lifecycle signals matching
 the payment_lifecycle workflow's transitions),
@@ -284,7 +299,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0066 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0067 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -305,7 +320,7 @@ ADR-0060 covers M2.8 (`ai-providers-openai` — Chat Completions
 scoping via `tenant_owned` trait), ADR-0065 covers M7.5
 (`pack-erp-payments` — second vertical pack proving cross-pack
 composition), ADR-0066 covers M7.8 (payment signal-bridge
-wiring).
+wiring), ADR-0067 covers M5.9 (CLI sessions subcommands).
 
 ## Architecture in 90 seconds
 
@@ -944,6 +959,18 @@ against PGHOST/PGDATABASE), `chat` (wired in M5.5 — see below),
 Exit codes: 0 success / 1 runtime problem / 2 misuse. The CLI
 is the first binary that composes contracts → real artifact.
 
+**No longer deferred (as of M5.9):** the chat audit trail is
+queryable from the CLI. `crossengin sessions list / show /
+replay` reads from META_ARCHITECT_* via the existing M5.7
+stores and renders sessions as human-readable transcripts.
+The new `getBySessionId({tenantId, sessionId})` on the
+session store makes the (tenant_id, session_id) compound key
+first-class. Operators debugging a "Claude gave wrong manifest"
+report find the session via `list`, inspect the full
+transcript via `show`, and re-read the conversation
+chat-style via `replay`. M5.6 tool dispatch + M5.8 write
+approvals surface verbatim in the audit data.
+
 **No longer deferred (as of M7.8):** webhook → workflow signal
 wiring for payments. `pack-erp-payments/src/signal-bridge.ts`
 exports the canonical signal-name vocabulary, the provider
@@ -1119,7 +1146,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0066 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0067 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1142,7 +1169,8 @@ M7-wire (CLI `--pack` apply), ADR-0064 covers Phase 2 M7.7
 (pack tenant scoping via `tenant_owned` trait), ADR-0065
 covers Phase 2 M7.5 (pack-erp-payments — cross-pack
 composition), ADR-0066 covers Phase 2 M7.8 (payment
-signal-bridge wiring). When you ship a new package,
+signal-bridge wiring), ADR-0067 covers Phase 2 M5.9 (CLI
+sessions subcommands). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

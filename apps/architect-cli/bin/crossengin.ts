@@ -14,6 +14,7 @@ import {
   runVersion,
   type RunContext,
 } from "../src/commands.js";
+import { runSessions } from "../src/sessions.js";
 import { printError } from "../src/format.js";
 
 const CLI_VERSION = "0.0.0";
@@ -58,6 +59,8 @@ async function main(): Promise<number> {
       return runApply(command, ctx);
     case "chat":
       return runChat(command, ctx);
+    case "sessions":
+      return runSessions(command, ctx);
   }
 }
 

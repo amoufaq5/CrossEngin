@@ -6,6 +6,7 @@ export const SUBCOMMANDS = [
   "hash",
   "apply",
   "chat",
+  "sessions",
   "version",
   "help",
 ] as const;
@@ -118,6 +119,9 @@ export function helpText(): string {
     "  apply [--dry-run] [--pack <slug>]",
     "                          Apply the meta-schema + optional vertical pack DDL",
     "  chat                    Interactive AI Architect session (Claude-backed)",
+    "  sessions list           List persisted chat sessions (requires PG env)",
+    "  sessions show <id>      Render one session's full transcript",
+    "  sessions replay <id>    Replay one session as chat-style output",
     "  version                 Print the CLI version + workspace info",
     "  help                    Show this help text",
     "",
