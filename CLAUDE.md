@@ -16,8 +16,32 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 + M5.5 + M5.6 + M5.7
 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.6.5
-+ M7.7 + M7.8 landed: **53 packages + 1 app, 119 meta-schema
-tables, 6,038 tests**, all green, no type errors. M4.7 closed
++ M7.7 + M7.8 + M7.9 landed: **54 packages + 1 app, 119
+meta-schema tables, 6,113 tests**, all green, no type errors.
+M7.9 shipped the third vertical pack — `@crossengin/pack-erp-
+healthcare`. Three FHIR-shaped entities (Patient with auditable +
+tenant_owned + 12 user fields including mrn unique-per-account,
+sex_assigned_at_birth, blood_type, allergies, preferred_language,
+emergency contact; Encounter referencing Patient with FHIR
+EncounterClass enum + 6-state lifecycle scheduled → checked_in →
+in_progress → completed | cancelled | no_show; Observation
+referencing both Encounter and Patient with code_system enum
+matching LOINC/SNOMED/ICD-10 + value_quantity decimal(18,6) +
+FHIR R4 ObservationStatus). Three relations: Account → Patient,
+Patient → Encounter restrict, Encounter → Observation cascade.
+Two new role contributions: erp_clinician + erp_front_desk merge
+with core's three. Two lifecycle workflows: encounter_lifecycle
+(5 transitions + 2 SLAs; only mark_no_show is automatic for the
+sweep job) and observation_lifecycle (4 states matching FHIR R4
+exactly; mark_in_error is admin-only for amendment discipline).
+Three jobs: daily encounter-reminder, 15-min no-show-sweep,
+event-triggered FHIR R4 export on `healthcare.encounter.
+completed`. compliancePacks defaults to ["hipaa", "21_cfr_11"].
+Registered in architect-cli's pack registry; `crossengin apply
+--pack=operate-erp/healthcare` emits 65 pack statements
+covering all 7 entities (4 core + 3 healthcare) with M7.7
+tenant scoping intact, exercises the M7.6.5 resolver with a
+second downstream consumer. M4.7 closed
 the substrate-to-binary loop for the gateway pillar.
 `crossengin gateway start [--port N] [--host A] [--in-memory]`
 boots the M4 `GatewayRuntime` against a Node `http.createServer`
@@ -345,7 +369,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0069 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0070 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -368,7 +392,9 @@ scoping via `tenant_owned` trait), ADR-0065 covers M7.5
 composition), ADR-0066 covers M7.8 (payment signal-bridge
 wiring), ADR-0067 covers M5.9 (CLI sessions subcommands),
 ADR-0068 covers M7.6.5 (kernel `extends` resolver wiring),
-ADR-0069 covers M4.7 (CLI gateway binding).
+ADR-0069 covers M4.7 (CLI gateway binding),
+ADR-0070 covers M7.9 (`pack-erp-healthcare` — third vertical
+pack).
 
 ## Architecture in 90 seconds
 
@@ -659,6 +685,29 @@ re-exporting everything.
   + quiet-hours decisions.
 
 ### Vertical packs
+- **`pack-erp-healthcare`** — third vertical pack. Extends
+  `operate-erp/core` via `meta.extends`. 3 entities (Patient
+  with auditable + tenant_owned, references Account + Contact;
+  Encounter referencing Patient with FHIR EncounterClass +
+  6-state lifecycle; Observation referencing Encounter +
+  Patient with FHIR R4 status enum + code_system covering
+  LOINC/SNOMED/ICD-10). 3 relations (Account→Patient restrict,
+  Patient→Encounter restrict, Encounter→Observation cascade).
+  2 new roles (erp_clinician + erp_front_desk) that merge with
+  core's three. 2 workflows: encounter_lifecycle (scheduled →
+  checked_in → in_progress → completed | cancelled | no_show;
+  only mark_no_show is automatic, used by the 15-min sweep job;
+  2 SLAs at PT30M + P1D) and observation_lifecycle (FHIR R4 4
+  states; entered_in_error is admin-only via permission gate
+  for amendment discipline). 3 jobs (daily encounter-reminder
+  at 08:00 UTC with phi i/o data class; */15 no-show-sweep;
+  event-triggered fhir-export on `healthcare.encounter.
+  completed` for downstream EHR integration). 3 list views.
+  compliancePacks defaults to ["hipaa", "21_cfr_11"] — the
+  meta-level signal for downstream tooling. Cross-pack
+  references (Patient → Account, Patient → Contact) resolve via
+  the M7.6.5 kernel resolver; standalone manifest fails
+  validation by design (intentional — resolver merges first).
 - **`pack-erp-payments`** — second vertical pack. Extends
   `operate-erp/core` via `meta.extends`. 1 entity (Payment
   with auditable + tenant_owned, references Invoice), 1
@@ -1040,25 +1089,25 @@ correlationKey: "pi_xxx", tenantId, idempotencyKey})`. Pattern
 for future webhook-driven packs (`pack-erp-shipping` for
 carriers, etc.).
 
-**No longer deferred (as of M7.5 + M7.6.5):** cross-pack
-composition with kernel-driven extends resolution.
-`@crossengin/pack-erp-payments` declares `meta.extends:
-["operate-erp/core"]` and returns ONLY the payments-specific
-additions (1 entity, 1 relation, 1 workflow, 2 jobs, 1 view).
-The kernel's `resolveManifest(manifest, {registry})` — which
-already existed in `packages/kernel/src/manifest/extends.ts` —
+**No longer deferred (as of M7.5 + M7.6.5 + M7.9):** cross-pack
+composition with kernel-driven extends resolution, exercised by
+TWO downstream consumers. `pack-erp-payments` and
+`pack-erp-healthcare` both declare `meta.extends: ["operate-erp/
+core"]`; both return only their child additions; both resolve
+via the kernel's `resolveManifest(manifest, {registry})` (which
 loads the parent by slug from the CLI's `packManifestRegistry()`
 and merges entities + traits + relations + roles + permissions
-+ workflows + jobs + views into one unified manifest. Cycle
-detection (`ExtendsCycleError`) and unknown-parent errors
-(`UnknownParentManifestError`) surface as typed exit codes in
-the CLI. `crossengin apply --pack=operate-erp/payments` produces
-a deployment-grade Postgres schema covering both core + payment
-tables in one atomic apply, all with M7.7's per-tenant isolation
-auto-applied. Pattern set for future verticals that build on
-existing ones — author declares `extends`, kernel does the
-merge work, marketplace can enumerate dependencies without
-running pack builders.
++ workflows + jobs + views into one unified manifest). The
+healthcare pack adds 2 new roles (erp_clinician + erp_front_
+desk) that merge with core's three — proving role contributions
+flow correctly. `crossengin apply --pack=operate-erp/payments`
+emits 5 entity tables; `--pack=operate-erp/healthcare` emits 7
+(4 core + 3 healthcare); both with M7.7 tenant isolation
+intact. Cycle detection (`ExtendsCycleError`) and unknown-
+parent errors (`UnknownParentManifestError`) surface as typed
+CLI exit codes. Pattern set for future verticals — declare
+extends, kernel does the merge, marketplace enumerates
+dependencies without running pack builders.
 
 **No longer deferred (as of M7.7):** per-tenant isolation on
 pack tables. The kernel's `tenant_owned` built-in trait now
@@ -1207,7 +1256,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0069 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0070 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1233,7 +1282,8 @@ composition), ADR-0066 covers Phase 2 M7.8 (payment
 signal-bridge wiring), ADR-0067 covers Phase 2 M5.9 (CLI
 sessions subcommands), ADR-0068 covers Phase 2 M7.6.5
 (kernel `extends` resolver wiring), ADR-0069 covers Phase 2
-M4.7 (CLI gateway binding). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+M4.7 (CLI gateway binding), ADR-0070 covers Phase 2 M7.9
+(`pack-erp-healthcare` — third vertical pack). When you ship
+a new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.

@@ -19,6 +19,13 @@ describe("PACK_REGISTRY", () => {
     ]);
   });
 
+  it("includes operate-erp/healthcare (M7.9 — extends core)", () => {
+    expect(PACK_REGISTRY).toHaveProperty("operate-erp/healthcare");
+    expect(
+      PACK_REGISTRY["operate-erp/healthcare"]?.build().meta.extends,
+    ).toEqual(["operate-erp/core"]);
+  });
+
   it("every entry's build() returns a valid Manifest shape", () => {
     for (const entry of Object.values(PACK_REGISTRY)) {
       const m = entry.build();

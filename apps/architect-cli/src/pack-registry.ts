@@ -1,6 +1,10 @@
 import type { Manifest, ManifestRegistry } from "@crossengin/kernel/manifest";
 import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
 import {
+  buildErpHealthcarePack,
+  ERP_HEALTHCARE_PACK_SLUG,
+} from "@crossengin/pack-erp-healthcare";
+import {
   buildErpPaymentsPack,
   ERP_PAYMENTS_PACK_SLUG,
 } from "@crossengin/pack-erp-payments";
@@ -23,6 +27,12 @@ export const PACK_REGISTRY: Readonly<Record<string, PackEntry>> = {
     description:
       "Payment entity + lifecycle workflow on top of operate-erp/core. Adds payment-provider webhook handler + settlement sweep jobs.",
     build: () => buildErpPaymentsPack(),
+  },
+  [ERP_HEALTHCARE_PACK_SLUG]: {
+    slug: ERP_HEALTHCARE_PACK_SLUG,
+    description:
+      "Patient + Encounter + Observation entities on top of operate-erp/core. FHIR-shaped fields, encounter_lifecycle + observation_lifecycle workflows, HIPAA + 21 CFR 11 compliance defaults, FHIR R4 export job.",
+    build: () => buildErpHealthcarePack(),
   },
 };
 
