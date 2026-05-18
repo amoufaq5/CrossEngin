@@ -13,12 +13,53 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M3 + M3.5
-+ M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 + M5.5 + M5.6 + M5.7
-+ M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 + M7.6.5
-+ M7.7 + M7.8 + M7.9 landed: **54 packages + 1 app, 119
-meta-schema tables, 6,113 tests**, all green, no type errors.
-M7.9 shipped the third vertical pack — `@crossengin/pack-erp-
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 + M3
++ M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 + M5.5 + M5.6
++ M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M7 + M7-wire + M7.5 +
+M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55 packages + 1 app, 119
+meta-schema tables, 6,214 tests**, all green, no type errors.
+M2.9 shipped the third real `LlmProvider` —
+`@crossengin/ai-providers-bedrock`. AWS Bedrock converse-stream
+client implementing the same contract as M2.7 (Anthropic) +
+M2.8 (OpenAI). Zero runtime deps — pure `fetch` + `node:crypto`
+with from-scratch AWS Signature V4 (verified against the
+AWS-documented `f4780e2d...` reference signing key). 6 modules:
+pricing (8 chat models — Claude on Bedrock matches first-party
+pricing including 90%-off cached input + Llama 3.1 70B/405B +
+Mistral Large 2407 + Titan Text Premier; per-million rates +
+6-decimal cost rounding), signing (AWS sig v4 with HMAC chain
+kSecret → kDate → kRegion → kService → aws4_request,
+URI-encoded canonical request, signed headers always include
+host + x-amz-date + x-amz-content-sha256), converse-api
+(CompletionRequest → BedrockConverseRequest: system messages
+lifted to top-level system array, assistant.toolUses translated
+to content blocks with toolUseId, tool-role messages folded
+back as user messages with toolResult blocks per Bedrock's
+quirk), event-stream (AWS event-stream BINARY frame parser —
+4-byte BE length prelude + headers + JSON payload + CRC, NOT
+SSE; parses headers byte-by-byte, dispatches on
+`:event-type` to map messageStart / contentBlockStart /
+contentBlockDelta / contentBlockStop / messageStop / metadata →
+CompletionChunk; tracks contentBlockIndex → toolUseId across
+deltas; throws BedrockError on `:message-type: exception`),
+errors (12 typed kinds including `model_stream_error` for
+ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
+classes — ThrottlingException, ValidationException,
+ServiceUnavailableException, ExpiredTokenException etc. — to
+kernel-level kinds; same isRetryable shape as M2.7 / M2.8),
+provider (BedrockProvider class with complete() +
+completeNonStreaming() + embed() rejects with typed error
+directing to OpenAI; constructor accepts accessKeyId +
+secretAccessKey + optional sessionToken + region + clock
+injectable for sig v4 testing). Residency derived from region
+prefix (us-* → ["us"], eu-* → ["eu"], ap-*/me-* → ["ap"], sa-*
+→ ["sa"]). Capabilities: `{chat: true, streaming: true,
+toolUse: true, jsonMode: false, embedding: false,
+maxContextTokens: 200_000}`. Router (M6.5) now has three real
+providers to chain — failover diversity across three
+independent control planes (Anthropic + OpenAI + AWS). Titan
+embeddings + JWKS-style OIDC role assumption + automatic env
+detection in CLI deferred to M2.9.5 / M6.5.6. M7.9 shipped the third vertical pack — `@crossengin/pack-erp-
 healthcare`. Three FHIR-shaped entities (Patient with auditable +
 tenant_owned + 12 user fields including mrn unique-per-account,
 sex_assigned_at_birth, blood_type, allergies, preferred_language,
@@ -369,7 +410,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0070 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0071 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -394,7 +435,8 @@ wiring), ADR-0067 covers M5.9 (CLI sessions subcommands),
 ADR-0068 covers M7.6.5 (kernel `extends` resolver wiring),
 ADR-0069 covers M4.7 (CLI gateway binding),
 ADR-0070 covers M7.9 (`pack-erp-healthcare` — third vertical
-pack).
+pack), ADR-0071 covers M2.9 (`ai-providers-bedrock` — third
+real LlmProvider).
 
 ## Architecture in 90 seconds
 
@@ -576,6 +618,27 @@ re-exporting everything.
   future latency-based routing. Throws `CostCeilingExceededError`
   / `ProviderResolutionError` / `AllProvidersExhaustedError` —
   all non-retryable, so the router doesn't loop on them.
+- **`ai-providers-bedrock`** — real AWS Bedrock client
+  implementing `LlmProvider`. Zero runtime deps; pure `fetch` +
+  `node:crypto` + from-scratch AWS Signature V4. Speaks Bedrock's
+  `converse-stream` (binary event-stream framing, NOT SSE) and
+  `converse` (non-streaming) endpoints. 6 modules: pricing (8
+  chat models — Claude on Bedrock, Llama 3.1 70B/405B, Mistral
+  Large, Titan Premier), signing (sig v4 with HMAC chain
+  verified against the AWS-documented `f4780e2d...` reference
+  signing key), converse-api (request builder + response
+  normalizer), event-stream (binary frame parser →
+  CompletionChunk; tracks contentBlockIndex → toolUseId across
+  deltas; throws BedrockError on `:message-type: exception`),
+  errors (12 typed kinds including `model_stream_error` for
+  ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
+  classes), provider (BedrockProvider with complete + non-
+  streaming + embed-rejects). Capabilities: `{chat: true,
+  streaming: true, toolUse: true, jsonMode: false,
+  embedding: false, maxContextTokens: 200_000}`. The router
+  now has THREE real providers to chain — Anthropic + OpenAI +
+  AWS — for true failover diversity across independent control
+  planes.
 - **`ai-providers-anthropic`** — real Anthropic Messages API
   client implementing `LlmProvider`.
 - **`ai-providers-openai`** — real OpenAI Chat Completions +
@@ -1256,7 +1319,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0070 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0071 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1283,7 +1346,9 @@ signal-bridge wiring), ADR-0067 covers Phase 2 M5.9 (CLI
 sessions subcommands), ADR-0068 covers Phase 2 M7.6.5
 (kernel `extends` resolver wiring), ADR-0069 covers Phase 2
 M4.7 (CLI gateway binding), ADR-0070 covers Phase 2 M7.9
-(`pack-erp-healthcare` — third vertical pack). When you ship
+(`pack-erp-healthcare` — third vertical pack), ADR-0071 covers
+Phase 2 M2.9 (`ai-providers-bedrock` — third real LlmProvider
+with AWS sig v4 + binary event-stream parsing). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
