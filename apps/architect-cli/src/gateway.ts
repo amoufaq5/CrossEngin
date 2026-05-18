@@ -11,6 +11,7 @@ import {
   InMemoryRateLimitChecker,
   InMemoryRouteRegistry,
   type IdempotencyStore,
+  type JwksProvider,
   type PrincipalResolver,
   type RateLimitChecker,
 } from "@crossengin/api-gateway-runtime";
@@ -29,6 +30,15 @@ import {
   type GatewayMode,
 } from "./gateway-handlers.js";
 import {
+  JwksLoadError,
+  resolveJwtFlags,
+  type JwtFlagsResult,
+} from "./gateway-jwks.js";
+import {
+  runGatewayRoutes,
+  type GatewayRoutesContext,
+} from "./gateway-routes.js";
+import {
   startGatewayServer,
   type PipelineExecutionSink,
   type RequestLogEntry,
@@ -40,7 +50,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_RATE_LIMIT = 1_000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60;
 
-export interface GatewayContext extends RunContext {
+export interface GatewayContext extends RunContext, GatewayRoutesContext {
   readonly runtimeOverride?: GatewayRuntime;
   readonly pgConnectionOverride?: PgConnection;
   readonly serverFactory?: typeof startGatewayServer;
@@ -55,18 +65,21 @@ export async function runGateway(
   if (action === undefined) {
     printError(
       ctx.io,
-      "gateway: missing action. usage: crossengin gateway <start> [options]",
+      "gateway: missing action. usage: crossengin gateway <start|routes> [options]",
     );
     return 2;
   }
-  if (action !== "start") {
-    printError(
-      ctx.io,
-      `gateway: unknown action '${action}'. expected one of: start`,
-    );
-    return 2;
+  if (action === "start") {
+    return runGatewayStart(command, ctx);
   }
-  return runGatewayStart(command, ctx);
+  if (action === "routes") {
+    return runGatewayRoutes(command, ctx);
+  }
+  printError(
+    ctx.io,
+    `gateway: unknown action '${action}'. expected one of: start, routes`,
+  );
+  return 2;
 }
 
 interface BuiltRuntime {
@@ -90,9 +103,29 @@ async function runGatewayStart(
   const host = getStringFlag(command, "host") ?? DEFAULT_HOST;
   const inMemory = getBooleanFlag(command, "in-memory");
 
+  let jwt: JwtFlagsResult;
+  try {
+    jwt = await resolveJwtFlags({
+      jwksFile: getStringFlag(command, "jwks-file"),
+      jwtIssuer: getStringFlag(command, "jwt-issuer"),
+      jwtAudience: getStringFlag(command, "jwt-audience"),
+      clockSkewSeconds: getStringFlag(command, "clock-skew-seconds"),
+    });
+  } catch (err) {
+    if (err instanceof JwksLoadError) {
+      printError(ctx.io, `gateway start: ${err.message}`);
+      return 2;
+    }
+    printError(
+      ctx.io,
+      `gateway start: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
   let built: BuiltRuntime;
   try {
-    built = await buildRuntime({ inMemory, ctx });
+    built = await buildRuntime({ inMemory, ctx, jwt });
   } catch (err) {
     printError(
       ctx.io,
@@ -170,6 +203,23 @@ async function runGatewayStart(
 interface BuildRuntimeInput {
   readonly inMemory: boolean;
   readonly ctx: GatewayContext;
+  readonly jwt: JwtFlagsResult;
+}
+
+function jwtRuntimeOptions(jwt: JwtFlagsResult): {
+  jwksProvider?: JwksProvider;
+  jwtIssuer?: string;
+  jwtAudience?: string;
+  clockSkewSeconds?: number;
+} {
+  return {
+    ...(jwt.jwksProvider !== undefined ? { jwksProvider: jwt.jwksProvider } : {}),
+    ...(jwt.jwtIssuer !== undefined ? { jwtIssuer: jwt.jwtIssuer } : {}),
+    ...(jwt.jwtAudience !== undefined ? { jwtAudience: jwt.jwtAudience } : {}),
+    ...(jwt.clockSkewSeconds !== undefined
+      ? { clockSkewSeconds: jwt.clockSkewSeconds }
+      : {}),
+  };
 }
 
 async function buildRuntime(input: BuildRuntimeInput): Promise<BuiltRuntime> {
@@ -182,6 +232,7 @@ async function buildRuntime(input: BuildRuntimeInput): Promise<BuiltRuntime> {
       executionSink: undefined,
     };
   }
+  const jwtOpts = jwtRuntimeOptions(input.jwt);
   const startedAt = new Date();
   if (input.inMemory) {
     const { handlers, routes } = buildDefaultGatewayHandlers({
@@ -199,6 +250,7 @@ async function buildRuntime(input: BuildRuntimeInput): Promise<BuiltRuntime> {
         limit: DEFAULT_RATE_LIMIT,
         windowSeconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
       }),
+      ...jwtOpts,
     });
     return {
       runtime,
@@ -231,6 +283,7 @@ async function buildRuntime(input: BuildRuntimeInput): Promise<BuiltRuntime> {
     principalResolver,
     idempotencyStore,
     rateLimitChecker,
+    ...jwtOpts,
   });
   return {
     runtime,

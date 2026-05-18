@@ -102,6 +102,16 @@ describe("runGateway action dispatch", () => {
     expect(code).toBe(2);
     expect(errChunks.join("")).toMatch(/unknown action 'explode'/);
   });
+
+  it("dispatches the 'routes' action to the routes subcommand handler", async () => {
+    const { io, errChunks } = makeIo();
+    // No registry override + no PG env → routes handler exits 1 with PG-missing error
+    const ctx: GatewayContext = { io, env: {} };
+    const command = parseGatewayArgs("routes", "list");
+    const code = await runGateway(command, ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toMatch(/PG/);
+  });
 });
 
 describe("runGateway start (in-memory + runtime override)", () => {
@@ -271,6 +281,27 @@ describe("runGateway start (in-memory + runtime override)", () => {
     const code = await runGateway(command, ctx);
     expect(code).toBe(1);
     expect(errChunks.join("")).toMatch(/PG/);
+  });
+
+  it("rejects --jwt-issuer without --jwks-file", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      runtimeOverride: buildRealRuntime(),
+      waitForShutdown: () => Promise.resolve(),
+    };
+    const command = parseGatewayArgs(
+      "start",
+      "--in-memory",
+      "--port",
+      "0",
+      "--jwt-issuer",
+      "https://issuer.example",
+    );
+    const code = await runGateway(command, ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/--jwks-file/);
   });
 
   it("passes a probe through the runtime override so the wiring is exercised", async () => {

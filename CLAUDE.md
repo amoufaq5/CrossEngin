@@ -14,11 +14,40 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M5 +
-M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 +
-M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed: **55
-packages + 1 app, 119 meta-schema tables, 6,269 tests**, all
-green, no type errors. M6.5.6 wired the M2.9 / M2.9.5 Bedrock
+M2.9.5 + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 +
+M4.7.5 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 +
+M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 +
+M7.9 landed: **55 packages + 1 app, 119 meta-schema tables,
+6,315 tests**, all green, no type errors. M4.7.5 closed M4.7's
+two biggest open questions: JWT auth + routes management. New
+`apps/architect-cli/src/gateway-jwks.ts` loads JWKS keys from a
+JSON file shaped `{keys: [{kid, publicKeyBase64}, ...]}` and
+returns an `InMemoryJwksProvider`; `resolveJwtFlags` is the
+flag-glue layer that validates the all-or-nothing constraint
+(`--jwks-file` requires both `--jwt-issuer` + `--jwt-audience`;
+JWT options without `--jwks-file` are rejected with exit 2).
+`runGatewayStart` resolves JWT flags BEFORE building the
+runtime and spreads them via `jwtRuntimeOptions(jwt)` into the
+`GatewayRuntime` constructor (both in-memory and Postgres
+modes). New `gateway-routes.ts` adds `crossengin gateway routes
+<list|register|unregister>` mirroring the M5.9 sessions
+subcommand pattern — list renders a 7-column table (route_id /
+method / path / version / operation / scopes / deprecated) or
+JSON; register reads a JSON file, validates via
+`RouteDefinitionSchema.parse()`, calls `registry.upsert`;
+unregister deletes by route id with proper exit-code semantics.
+`PostgresRouteRegistry` gained two additive methods —
+`listAll()` returning RouteDefinition[] sorted by api_version /
+method / route_id, and `deleteByRouteId(routeId)` returning
+boolean + invalidating the cache. End-to-end verified:
+`crossengin gateway start --jwks-file /tmp/jwks.json --jwt-
+issuer X --jwt-audience Y` boots with JWT auth wired; anonymous
+GET /__ping returns 200 (empty scopes); malformed Bearer
+returns 401 + RFC 9457 problem detail with WWW-Authenticate
+challenge. Documented constraint: the CrossEngin JWT verifier
+accepts EdDSA only with base64-encoded public keys — different
+from RSA JWKS most IdPs emit. URL-fetched JWKS, hot-reload, RSA
+support, and bulk route management deferred to M4.7.6+. M6.5.6 wired the M2.9 / M2.9.5 Bedrock
 provider into `architect-cli`'s `chat` subcommand by extending
 `router-setup.ts` env-var detection. `AWS_ACCESS_KEY_ID` +
 `AWS_SECRET_ACCESS_KEY` (required pair) plus optional
@@ -457,7 +486,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0073 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0074 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -486,7 +515,9 @@ pack), ADR-0071 covers M2.9 (`ai-providers-bedrock` — third
 real LlmProvider), ADR-0072 covers M2.9.5 (Bedrock Titan +
 Cohere embeddings closing M2.9's open Q4), ADR-0073 covers
 M6.5.6 (architect-cli Bedrock integration — env-var detection +
-three-deep task fallback chains).
+three-deep task fallback chains), ADR-0074 covers M4.7.5
+(gateway JWT auth + routes subcommand closing M4.7's open
+questions).
 
 ## Architecture in 90 seconds
 
@@ -1377,7 +1408,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0073 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0074 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1409,6 +1440,8 @@ Phase 2 M2.9 (`ai-providers-bedrock` — third real LlmProvider
 with AWS sig v4 + binary event-stream parsing), ADR-0072 covers
 Phase 2 M2.9.5 (Bedrock Titan + Cohere embeddings closing
 M2.9's open Q4), ADR-0073 covers Phase 2 M6.5.6 (architect-cli
-Bedrock integration). When you ship a new package, write the
-matching ADR in the same session, following `0000-template.md`
-and the style of the existing 0026-0037 batch.
+Bedrock integration), ADR-0074 covers Phase 2 M4.7.5 (gateway
+JWT auth + routes subcommand). When you ship a new package,
+write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.

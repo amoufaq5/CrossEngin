@@ -194,6 +194,27 @@ export class PostgresRouteRegistry implements RouteRegistry {
     await this.loadCompiled();
   }
 
+  async listAll(): Promise<readonly RouteDefinition[]> {
+    const result = await this.conn.query<RouteRow>(
+      `SELECT route_id, operation_id, method, path_segments, api_version,
+              is_deprecated, deprecated_since, sunset_at, successor_operation_id,
+              required_scopes, rate_limit_policy_id, idempotency_required,
+              request_schema_sha256, response_schema_sha256
+         FROM ${SCHEMA}.${TABLE}
+        ORDER BY api_version, method, route_id`,
+    );
+    return result.rows.map(rowToRoute);
+  }
+
+  async deleteByRouteId(routeId: string): Promise<boolean> {
+    const result = await this.conn.query(
+      `DELETE FROM ${SCHEMA}.${TABLE} WHERE route_id = $1`,
+      [routeId],
+    );
+    this.cache = null;
+    return result.rowCount > 0;
+  }
+
   private async loadCompiled(): Promise<readonly CompiledRoute[]> {
     if (this.pendingLoad !== null) {
       return this.pendingLoad;

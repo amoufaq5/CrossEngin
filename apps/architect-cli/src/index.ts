@@ -5,6 +5,8 @@ export * from "./commands.js";
 export * from "./format.js";
 export * from "./gateway.js";
 export * from "./gateway-handlers.js";
+export * from "./gateway-jwks.js";
+export * from "./gateway-routes.js";
 export * from "./gateway-server.js";
 export * from "./manifest-io.js";
 export * from "./pack-registry.js";

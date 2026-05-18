@@ -189,3 +189,88 @@ describe("PostgresRouteRegistry — upsert", () => {
     expect(insert?.params?.[0]).toBe("rt_route0099");
   });
 });
+
+describe("PostgresRouteRegistry — listAll", () => {
+  it("returns RouteDefinitions for every stored row, ordered by api_version + method + route_id", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(
+      [
+        routeRow({ route_id: "rt_route0001", method: "GET" }),
+        routeRow({ route_id: "rt_route0002", method: "POST" }),
+      ],
+      capture,
+    );
+    const registry = new PostgresRouteRegistry({ conn });
+    const all = await registry.listAll();
+    expect(all).toHaveLength(2);
+    expect(all[0]!.id).toBe("rt_route0001");
+    expect(all[0]!.method).toBe("GET");
+    expect(all[1]!.id).toBe("rt_route0002");
+    const select = capture.find((c) => c.sql.includes("SELECT"));
+    expect(select?.sql).toContain("ORDER BY api_version, method, route_id");
+  });
+
+  it("returns an empty array when no rows match", async () => {
+    const conn = mockConnection([]);
+    const registry = new PostgresRouteRegistry({ conn });
+    const all = await registry.listAll();
+    expect(all).toEqual([]);
+  });
+});
+
+describe("PostgresRouteRegistry — deleteByRouteId", () => {
+  it("issues DELETE WHERE route_id and returns true when a row was removed", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn: PgConnection = {
+      query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        capture.push({ sql, params });
+        if (sql.includes("DELETE")) return { rows: [], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    const registry = new PostgresRouteRegistry({ conn });
+    const removed = await registry.deleteByRouteId("rt_route0042");
+    expect(removed).toBe(true);
+    const del = capture.find((c) => c.sql.includes("DELETE"));
+    expect(del?.sql).toContain("WHERE route_id = $1");
+    expect(del?.params?.[0]).toBe("rt_route0042");
+  });
+
+  it("returns false when no row matched the route id", async () => {
+    const conn: PgConnection = {
+      query: vi.fn(async (): Promise<PgQueryResult> => ({ rows: [], rowCount: 0 })) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    const registry = new PostgresRouteRegistry({ conn });
+    expect(await registry.deleteByRouteId("rt_unknown1")).toBe(false);
+  });
+
+  it("invalidates the cache so subsequent lookups reload from the DB", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    let selectCount = 0;
+    const conn: PgConnection = {
+      query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        capture.push({ sql, params });
+        if (sql.includes("SELECT")) {
+          selectCount += 1;
+          return { rows: [routeRow()], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    const registry = new PostgresRouteRegistry({ conn });
+    await registry.ensureLoaded();
+    expect(selectCount).toBe(1);
+    await registry.deleteByRouteId("rt_route0001");
+    await registry.ensureLoaded();
+    expect(selectCount).toBe(2);
+  });
+});
