@@ -1418,6 +1418,158 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — getGuardrail (M2.X.5.aa.z.8)", () => {
+  function detailBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      guardrailId: "gr12345",
+      guardrailArn: "arn:aws:bedrock:us-east-1:123:guardrail/gr12345",
+      name: "tenant-x-policy",
+      version: "DRAFT",
+      status: "READY",
+      createdAt: "2026-04-01T00:00:00Z",
+      updatedAt: "2026-05-01T00:00:00Z",
+      blockedInputMessaging: "blocked",
+      blockedOutputsMessaging: "blocked",
+      ...overrides,
+    });
+  }
+
+  it("GETs control-plane /guardrails/{id} without query when no version", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    await provider.getGuardrail("gr12345");
+    expect(capture.url).toBe(
+      "https://bedrock.us-east-1.amazonaws.com/guardrails/gr12345",
+    );
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("threads guardrailVersion as a query parameter", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody({ version: "3" }) }),
+    });
+    await provider.getGuardrail("gr12345", "3");
+    expect(capture.url).toContain("/guardrails/gr12345?");
+    expect(capture.url).toContain("guardrailVersion=3");
+  });
+
+  it("URI-encodes the identifier path component", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    const arn = "arn:aws:bedrock:us-east-1:123:guardrail/gr12345";
+    await provider.getGuardrail(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates inputs BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getGuardrail("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    await expect(provider.getGuardrail("gr12345", "")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("parses a complete detail response with all policy types", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          description: "PII redaction policy",
+          kmsKeyArn: "arn:aws:kms:us-east-1:123:key/xyz",
+          contentPolicy: {
+            filters: [
+              { type: "HATE", inputStrength: "HIGH", outputStrength: "MEDIUM" },
+            ],
+          },
+          sensitiveInformationPolicy: {
+            piiEntities: [{ type: "EMAIL", action: "ANONYMIZE" }],
+          },
+          contextualGroundingPolicy: {
+            filters: [{ type: "GROUNDING", threshold: 0.7 }],
+          },
+        }),
+      }),
+    });
+    const detail = await provider.getGuardrail("gr12345");
+    expect(detail.description).toBe("PII redaction policy");
+    expect(detail.kmsKeyArn).toMatch(/^arn:aws:kms:/);
+    expect(detail.contentPolicy?.filters[0]!.type).toBe("HATE");
+    expect(detail.sensitiveInformationPolicy?.piiEntities?.[0]!.action).toBe(
+      "ANONYMIZE",
+    );
+    expect(detail.contextualGroundingPolicy?.filters[0]!.threshold).toBe(0.7);
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such guardrail",
+        }),
+      }),
+    });
+    await expect(provider.getGuardrail("gr00000")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.getGuardrail("gr12345")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: "<html>oops</html>" }),
+    });
+    await expect(provider.getGuardrail("gr12345")).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.getGuardrail("gr12345")).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — listGuardrails (M2.X.5.aa.z.7)", () => {
   function listBody(opts: {
     items?: ReadonlyArray<Record<string, unknown>>;

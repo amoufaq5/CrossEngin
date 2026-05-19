@@ -54,7 +54,9 @@ import {
 } from "./guardrails.js";
 import {
   buildGuardrailListQuery,
+  parseGuardrailDetail,
   parseGuardrailListResponse,
+  type BedrockGuardrailDetail,
   type BedrockGuardrailListResponse,
   type BedrockListGuardrailsOptions,
 } from "./guardrails-api.js";
@@ -567,6 +569,38 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async getGuardrail(
+    guardrailIdentifier: string,
+    guardrailVersion?: string,
+  ): Promise<BedrockGuardrailDetail> {
+    if (guardrailIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "getGuardrail: guardrailIdentifier must be a non-empty string",
+      });
+    }
+    if (guardrailVersion !== undefined && guardrailVersion.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "getGuardrail: guardrailVersion must be a non-empty string when provided",
+      });
+    }
+    const path = `/guardrails/${encodeURIComponent(guardrailIdentifier)}`;
+    const query: Record<string, string> =
+      guardrailVersion !== undefined ? { guardrailVersion } : {};
+    const text = await this.signedControlPlaneGet({ path, query });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getGuardrail: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseGuardrailDetail(raw);
   }
 
   async listGuardrails(

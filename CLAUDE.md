@@ -18,15 +18,60 @@ M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
-M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.6 +
+M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,976 tests**,
-all green, no type errors. M2.X.5.aa.z.7 ships the second
+**55 packages + 1 app, 119 meta-schema tables, 7,003 tests**,
+all green, no type errors. M2.X.5.aa.z.8 ships
+`BedrockProvider.getGuardrail(guardrailIdentifier,
+guardrailVersion?)` — the rich-detail companion to
+listGuardrails. While listGuardrails returns shallow summaries
+sufficient for "show me every guardrail" audits, getGuardrail
+returns the FULL policy bytes operators need for compliance
+disclosures (SOC 2 / HIPAA / GDPR), drift detection between
+authoring + runtime, and multi-version diffs. Response shape is
+~5x the summary: 9 required top-level fields (guardrailId /
+guardrailArn / name / version / status / createdAt / updatedAt
+/ blockedInputMessaging / blockedOutputsMessaging) + 9 optional
+(description / kmsKeyArn / statusReasons /
+failureRecommendations + FIVE nested policy types). Five typed
+policies modeled: contentPolicy ({filters[]} of {type:
+SEXUAL|VIOLENCE|HATE|INSULTS|MISCONDUCT|PROMPT_ATTACK,
+inputStrength: NONE|LOW|MEDIUM|HIGH, outputStrength:
+same-tuple}), contextualGroundingPolicy ({filters[]} of {type:
+GROUNDING|RELEVANCE, threshold: finite-number}),
+sensitiveInformationPolicy ({piiEntities[]} of {type: string —
+30+ AWS-extensible values, action: BLOCK|ANONYMIZE} +
+{regexes[]} of {name, pattern, action, description?}),
+topicPolicy ({topics[]} of {name, type: string — currently
+only DENY, definition, examples?}), wordPolicy ({words[]} of
+{text} + {managedWordLists[]} of {type: string — currently
+only PROFANITY}). Validation discipline: stable AWS
+vocabularies (4 enum tuples: filter strength, content filter
+type, contextual grounding type, PII action) get strict
+discriminators that throw on unknown; growing AWS vocabularies
+(PII entity types, topic types, managed word list types)
+preserve raw string for forward-compat. Field naming
+asymmetry preserved verbatim: ListGuardrails uses {id, arn};
+GetGuardrail uses {guardrailId, guardrailArn} — operators
+map between them. Provider method validates both inputs
+non-empty BEFORE the fetch, URI-encodes the path component
+(ARN colons → %3A), threads optional guardrailVersion as a
+query parameter (omitted → AWS returns DRAFT), reuses
+signedControlPlaneGet rail. parseGuardrailDetail strict
+parser: each policy parsed only when present in the response
+(AWS only returns configured policies); missing required
+top-level fields throw api_error. Bedrock control-plane
+surface now has 6 of N operations (listBatches + getBatch +
+stopBatch + createBatch + listGuardrails + getGuardrail);
+Bedrock module count up to 11 (batch-api + converse-api +
+embeddings + errors + event-stream + guardrails +
+guardrails-api + pricing + provider + signing + index).
+M2.X.5.aa.z.7 ships the second
 Bedrock control-plane enumeration after listBatches:
 `BedrockProvider.listGuardrails(options?)` against AWS's
 `ListGuardrails` endpoint. Operators can now audit which
@@ -1588,7 +1633,10 @@ batch jobs supported), ADR-0109 covers M2.X.5.aa.z.7 (Bedrock
 listGuardrails — second control-plane enumeration after
 listBatches; new guardrails-api.ts module separated from
 inference-time guardrails.ts; pattern now proven twice for
-paginated control-plane reads).
+paginated control-plane reads), ADR-0110 covers M2.X.5.aa.z.8
+(Bedrock getGuardrail with policy detail — rich companion to
+listGuardrails; five typed policy types; stable enums get
+strict discriminators while growing enums stay as strings).
 
 ## Architecture in 90 seconds
 
@@ -1801,8 +1849,8 @@ re-exporting everything.
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
   classes), provider (BedrockProvider with complete +
   completeNonStreaming + embed + embedMultimodal + listBatches
-  + getBatch + stopBatch + createBatch + listGuardrails —
-  embed dispatches on
+  + getBatch + stopBatch + createBatch + listGuardrails +
+  getGuardrail — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2642,7 +2690,16 @@ the M2.X.5.aa.z.3 pattern; new guardrails-api.ts module
 keeps inference-time guardrails.ts and control-plane concerns
 separated; six-value status tuple matching AWS uppercase
 verbatim; behavioral note documented — guardrailIdentifier
-toggles between roster-mode and version-history-mode).
+toggles between roster-mode and version-history-mode),
+ADR-0110 covers Phase 2 M2.X.5.aa.z.8 (Bedrock getGuardrail
+with policy detail — full guardrail body returned for
+compliance disclosures + drift detection + multi-version
+diffs; five typed nested policy types modeled with stable
+4-tuple enums for filter strength + content filter type +
+contextual grounding type + PII action; growing enums like
+PII entity type preserved as strings for forward-compat;
+field naming asymmetry preserved (ListGuardrails uses
+{id, arn}; GetGuardrail uses {guardrailId, guardrailArn})).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
