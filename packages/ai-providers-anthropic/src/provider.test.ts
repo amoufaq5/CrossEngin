@@ -45,7 +45,7 @@ interface CapturedCall {
   url: string;
   method: string;
   headers: Record<string, string>;
-  body: string;
+  body: string | Uint8Array;
 }
 
 function buildFetch(opts: {
@@ -302,5 +302,105 @@ describe("summarizeResponse helper", () => {
     expect(summary.toolCalls).toEqual([]);
     expect(summary.stopReason).toBe("end_turn");
     expect(summary.usage.cost).toBeGreaterThan(0);
+  });
+});
+
+describe("AnthropicProvider Files API (M2.X.5.aa.z.1)", () => {
+  function fileResponseBody(): string {
+    return JSON.stringify({
+      id: "file_abc123",
+      type: "file",
+      filename: "spec.pdf",
+      mime_type: "application/pdf",
+      size_bytes: 1024,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+  }
+
+  function buildProvider(opts: Parameters<typeof buildFetch>[0]): AnthropicProvider {
+    return new AnthropicProvider({
+      apiKey: "sk-ant-test",
+      defaultModel: "claude-sonnet-4-6",
+      fetch: buildFetch(opts),
+    });
+  }
+
+  it("uploadFile POSTs multipart/form-data to /v1/files with the beta header", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = buildProvider({
+      capture: captured,
+      responseBody: fileResponseBody(),
+    });
+    const file = await provider.uploadFile({
+      bytes: new TextEncoder().encode("PDF_BYTES"),
+      filename: "spec.pdf",
+      contentType: "application/pdf",
+    });
+    expect(file.id).toBe("file_abc123");
+    expect(file.type).toBe("file");
+    expect(captured[0]!.url).toBe("https://api.anthropic.com/v1/files");
+    expect(captured[0]!.method).toBe("POST");
+    expect(captured[0]!.headers["content-type"]).toMatch(/^multipart\/form-data; boundary=/);
+    expect(captured[0]!.headers["anthropic-beta"]).toContain("files-api-2025-04-14");
+  });
+
+  it("retrieveFile GETs /v1/files/{id} with the beta header", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = buildProvider({
+      capture: captured,
+      responseBody: fileResponseBody(),
+    });
+    const file = await provider.retrieveFile("file_abc123");
+    expect(file.id).toBe("file_abc123");
+    expect(captured[0]!.url).toBe("https://api.anthropic.com/v1/files/file_abc123");
+    expect(captured[0]!.method).toBe("GET");
+    expect(captured[0]!.headers["anthropic-beta"]).toContain("files-api-2025-04-14");
+  });
+
+  it("retrieveFile rejects empty fileId", async () => {
+    const provider = buildProvider({});
+    await expect(provider.retrieveFile("")).rejects.toThrow(/fileId is required/);
+  });
+
+  it("deleteFile DELETEs /v1/files/{id} and returns the deletion envelope", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = buildProvider({
+      capture: captured,
+      responseBody: JSON.stringify({
+        id: "file_abc123",
+        type: "file_deleted",
+      }),
+    });
+    const result = await provider.deleteFile("file_abc123");
+    expect(result.type).toBe("file_deleted");
+    expect(captured[0]!.method).toBe("DELETE");
+  });
+
+  it("deleteFile surfaces HTTP errors as AnthropicError", async () => {
+    const provider = buildProvider({
+      status: 404,
+      responseBody: JSON.stringify({
+        error: { type: "not_found_error", message: "file not found" },
+      }),
+    });
+    await expect(provider.deleteFile("file_bogus")).rejects.toMatchObject({
+      kind: "not_found_error",
+    });
+  });
+
+  it("merges files-api beta with existing anthropicBeta headers (deduplicates)", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new AnthropicProvider({
+      apiKey: "sk-ant-test",
+      defaultModel: "claude-sonnet-4-6",
+      anthropicBeta: ["files-api-2025-04-14", "other-beta-feature"],
+      fetch: buildFetch({ capture: captured, responseBody: fileResponseBody() }),
+    });
+    await provider.retrieveFile("file_abc");
+    const beta = captured[0]!.headers["anthropic-beta"]!;
+    // Should contain files-api-2025-04-14 only once
+    const matches = beta.match(/files-api-2025-04-14/g);
+    expect(matches).toHaveLength(1);
+    expect(beta).toContain("other-beta-feature");
   });
 });

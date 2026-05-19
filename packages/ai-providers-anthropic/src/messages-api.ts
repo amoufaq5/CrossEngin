@@ -56,7 +56,8 @@ export type AnthropicContentBlock =
             readonly type: "text";
             readonly media_type: "text/plain" | "text/markdown" | "text/csv";
             readonly data: string;
-          };
+          }
+        | { readonly type: "file"; readonly file_id: string };
       readonly title?: string;
     }
   | {
@@ -288,9 +289,10 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
     };
   }
   if (block.type === "file_id") {
-    throw new Error(
-      "Anthropic provider does not support file_id content blocks — OpenAI Files API is OpenAI-specific. Use a document block with inline bytes, or document_url with a publicly-accessible URL instead.",
-    );
+    return {
+      type: "document",
+      source: { type: "file", file_id: block.fileId },
+    };
   }
   if (block.type === "tool_use") {
     return {

@@ -11,6 +11,12 @@ import type {
 
 import { AnthropicError, fromHttpResponse, fromNetworkError } from "./errors.js";
 import {
+  ANTHROPIC_FILES_BETA_HEADER,
+  buildAnthropicMultipartUpload,
+  type AnthropicFile,
+  type AnthropicFileDeleteResponse,
+} from "./files-api.js";
+import {
   buildAnthropicRequest,
   type AnthropicResponse,
   extractText,
@@ -25,7 +31,7 @@ export const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com";
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
+  init: { method: string; headers: Record<string, string>; body: string | Uint8Array; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; text(): Promise<string>; body: ReadableStream<Uint8Array> | null }>;
 
 export interface AnthropicProviderOptions {
@@ -170,6 +176,127 @@ export class AnthropicProvider implements LlmProvider {
       });
     }
     return requested;
+  }
+
+  async uploadFile(input: {
+    readonly bytes: Uint8Array;
+    readonly filename: string;
+    readonly contentType?: string;
+  }): Promise<AnthropicFile> {
+    const multipart = buildAnthropicMultipartUpload({
+      bytes: input.bytes,
+      filename: input.filename,
+      ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
+    });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/files"), {
+        method: "POST",
+        headers: {
+          "x-api-key": this.apiKey,
+          "anthropic-version": this.apiVersion,
+          "anthropic-beta": this.filesApiBetaHeader(),
+          "content-type": multipart.contentType,
+          accept: "application/json",
+        },
+        body: multipart.body,
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as AnthropicFile;
+    } catch (err) {
+      throw new AnthropicError({
+        kind: "api_error",
+        message: `failed to parse Anthropic file upload response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async retrieveFile(fileId: string): Promise<AnthropicFile> {
+    if (fileId.length === 0) {
+      throw new AnthropicError({
+        kind: "invalid_request_error",
+        message: "retrieveFile: fileId is required",
+      });
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(this.url(`/v1/files/${encodeURIComponent(fileId)}`), {
+        method: "GET",
+        headers: this.filesApiHeaders(),
+        body: "",
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as AnthropicFile;
+    } catch (err) {
+      throw new AnthropicError({
+        kind: "api_error",
+        message: `failed to parse Anthropic file retrieve response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async deleteFile(fileId: string): Promise<AnthropicFileDeleteResponse> {
+    if (fileId.length === 0) {
+      throw new AnthropicError({
+        kind: "invalid_request_error",
+        message: "deleteFile: fileId is required",
+      });
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(this.url(`/v1/files/${encodeURIComponent(fileId)}`), {
+        method: "DELETE",
+        headers: this.filesApiHeaders(),
+        body: "",
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as AnthropicFileDeleteResponse;
+    } catch (err) {
+      throw new AnthropicError({
+        kind: "api_error",
+        message: `failed to parse Anthropic file delete response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  private filesApiBetaHeader(): string {
+    if (this.anthropicBeta.includes(ANTHROPIC_FILES_BETA_HEADER)) {
+      return this.anthropicBeta.join(",");
+    }
+    return [...this.anthropicBeta, ANTHROPIC_FILES_BETA_HEADER].join(",");
+  }
+
+  private filesApiHeaders(): Record<string, string> {
+    return {
+      "x-api-key": this.apiKey,
+      "anthropic-version": this.apiVersion,
+      "anthropic-beta": this.filesApiBetaHeader(),
+      accept: "application/json",
+    };
   }
 
   private url(path: string): string {

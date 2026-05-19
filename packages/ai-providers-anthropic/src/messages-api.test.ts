@@ -696,23 +696,30 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     expect(block.source.data).toBe(csv);
   });
 
-  it("file_id block throws on Anthropic (OpenAI Files API is OpenAI-specific) (M2.X.5.aa.z)", () => {
-    expect(() =>
-      buildAnthropicRequest(
-        {
-          task: "planner",
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "file_id", fileId: "file-abc123" }],
-            },
-          ],
-          tenantId: "ten-1",
-          sessionId: "ses-1",
-        },
-        { defaultModel: "claude-sonnet-4-6" },
-      ),
-    ).toThrow(/Anthropic provider does not support file_id/);
+  it("file_id block translates to Anthropic file-source document (M2.X.5.aa.z.1)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "summarize" },
+              { type: "file_id", fileId: "file_abc123" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toEqual({
+      type: "document",
+      source: { type: "file", file_id: "file_abc123" },
+    });
   });
 
   it("office format documents THROW on Anthropic with conversion guidance (M2.X.5.aa.x.1)", () => {

@@ -1,4 +1,5 @@
 export * from "./errors.js";
+export * from "./files-api.js";
 export * from "./messages-api.js";
 export * from "./moderation.js";
 export * from "./pricing.js";
