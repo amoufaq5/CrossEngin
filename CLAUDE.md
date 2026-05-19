@@ -15,13 +15,36 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 +
-M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M3 + M3.5 + M3.6 + M3.7
-+ M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x +
-M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
-M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire + M7.5 +
-M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,677 tests**,
-all green, no type errors. M6.6 migrates `@crossengin/ai-router`
+M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M2.X.8 + M3 + M3.5 +
+M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
+M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
+M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
++ M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,706 tests**,
+all green, no type errors. M2.X.8 ships standalone OpenAI
+Moderations API support in `@crossengin/ai-providers-openai`,
+closing ADR-0086 Q1. New `moderations-api.ts` module exports
+`OPENAI_MODERATION_MODELS` (4 models: omni-moderation-latest as
+default + 2024-09-26 dated + 2 legacy text-moderation models),
+`OPENAI_MODERATION_CATEGORY_KEYS` (11 documented categories),
+`buildModerationRequest` (input validation: rejects empty
+string / empty array / array-with-empty-string at build time),
+`normalizeModerationResponse` (folds raw response into
+`{model, anyFlagged, results, flaggedCategoriesPerResult}` —
+operator-facing summary plus raw results preserved),
+`highestCategoryScore(result)` (returns top scoring category,
+useful for soft-threshold policies). `OpenAIProvider.moderate
+({input, model?})` POSTs to `/v1/moderations` with same
+network / HTTP / parse error handling as other endpoints.
+`OpenAIProviderOptions.defaultModerationModel?` validated at
+construction; unsupported model throws synchronously. Input
+accepts `string | readonly string[]` (batch up to 32 strings
+per OpenAI's docs); per-call `model` override checked at call
+time. Use cases: pre-screen user input before paying for a
+chat call ($0.0001 moderation vs $0.005+ chat), bulk content
+audits, soft-threshold risk scoring. Provider-specific method
+(not on `LlmProvider` interface) because Anthropic + Bedrock
+don't expose standalone moderation endpoints. M6.6 migrates `@crossengin/ai-router`
 to use the kernel cross-provider helpers, validating M2.X.6.x
 + M2.X.7 with a real non-test consumer + closing a latent bug
 exposed by M2.X.5. Three coordinated changes in retry.ts +
@@ -978,7 +1001,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0091 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0092 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1056,7 +1079,10 @@ shared tuple, symmetric with M2.X.6.x's moderation helper),
 ADR-0091 covers M6.6 (router uses kernel cross-provider
 helpers — retry.ts hybrid predicate, explicit moderation
 early-exit, estimateRequestTokens bug fix for M2.X.5 array
-content).
+content), ADR-0092 covers M2.X.8 (standalone OpenAI
+Moderations API — `provider.moderate(input)` calls
+`/v1/moderations` for proactive content screening before
+paying for a chat completion).
 
 ## Architecture in 90 seconds
 
@@ -1947,7 +1973,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0091 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0092 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2019,7 +2045,9 @@ flatMap refactor for message-flattening), ADR-0090 covers Phase
 symmetric with M2.X.6.x's moderation helper), ADR-0091 covers
 Phase 2 M6.6 (router uses kernel cross-provider helpers —
 exercises M2.X.6.x + M2.X.7 in real consumer code + fixes
-M2.X.5 array-content estimation bug).
+M2.X.5 array-content estimation bug), ADR-0092 covers Phase 2
+M2.X.8 (standalone OpenAI Moderations API — provider.moderate
+for proactive pre-screening with 11-category classification).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

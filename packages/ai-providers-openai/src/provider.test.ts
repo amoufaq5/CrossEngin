@@ -475,3 +475,166 @@ describe("summarizeResponsesResponse helper", () => {
     expect(summary.usage.inputTokens).toBe(10);
   });
 });
+
+describe("OpenAIProvider.moderate (M2.X.8)", () => {
+  function moderationResponse(opts: { flagged: boolean; model?: string }): string {
+    const cats = Object.fromEntries(
+      [
+        "sexual",
+        "hate",
+        "harassment",
+        "self-harm",
+        "sexual/minors",
+        "hate/threatening",
+        "violence/graphic",
+        "self-harm/intent",
+        "self-harm/instructions",
+        "harassment/threatening",
+        "violence",
+      ].map((k) => [k, false]),
+    );
+    if (opts.flagged) cats["violence"] = true;
+    const scores = Object.fromEntries(Object.keys(cats).map((k) => [k, 0.01]));
+    if (opts.flagged) scores["violence"] = 0.92;
+    return JSON.stringify({
+      id: "modr_1",
+      model: opts.model ?? "omni-moderation-latest",
+      results: [
+        {
+          flagged: opts.flagged,
+          categories: cats,
+          category_scores: scores,
+        },
+      ],
+    });
+  }
+
+  it("calls /v1/moderations with the default omni-moderation model + reports unflagged input", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: moderationResponse({ flagged: false }),
+      }),
+    });
+    const result = await provider.moderate({ input: "is this OK?" });
+    expect(captured[0]!.url).toBe("https://api.openai.com/v1/moderations");
+    expect(captured[0]!.method).toBe("POST");
+    const body = JSON.parse(captured[0]!.body) as {
+      model: string;
+      input: string;
+    };
+    expect(body.model).toBe("omni-moderation-latest");
+    expect(body.input).toBe("is this OK?");
+    expect(result.anyFlagged).toBe(false);
+    expect(result.flaggedCategoriesPerResult[0]).toEqual([]);
+  });
+
+  it("reports flagged input + the flagged category list", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        responseBody: moderationResponse({ flagged: true }),
+      }),
+    });
+    const result = await provider.moderate({ input: "violent content" });
+    expect(result.anyFlagged).toBe(true);
+    expect(result.flaggedCategoriesPerResult[0]).toEqual(["violence"]);
+  });
+
+  it("accepts an explicit model override", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: moderationResponse({
+          flagged: false,
+          model: "text-moderation-latest",
+        }),
+      }),
+    });
+    await provider.moderate({
+      input: "x",
+      model: "text-moderation-latest",
+    });
+    const body = JSON.parse(captured[0]!.body) as { model: string };
+    expect(body.model).toBe("text-moderation-latest");
+  });
+
+  it("accepts an array of inputs", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: moderationResponse({ flagged: false }),
+      }),
+    });
+    await provider.moderate({ input: ["one", "two", "three"] });
+    const body = JSON.parse(captured[0]!.body) as { input: string[] };
+    expect(body.input).toEqual(["one", "two", "three"]);
+  });
+
+  it("uses defaultModerationModel from constructor when none is passed per-call", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      defaultModerationModel: "text-moderation-stable",
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: moderationResponse({
+          flagged: false,
+          model: "text-moderation-stable",
+        }),
+      }),
+    });
+    await provider.moderate({ input: "x" });
+    const body = JSON.parse(captured[0]!.body) as { model: string };
+    expect(body.model).toBe("text-moderation-stable");
+  });
+
+  it("throws on empty string input (caught at request-build time)", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({}),
+    });
+    await expect(provider.moderate({ input: "" })).rejects.toThrow(/empty/);
+  });
+
+  it("constructor rejects unknown defaultModerationModel", () => {
+    expect(
+      () =>
+        new OpenAIProvider({
+          apiKey: API_KEY,
+          defaultModerationModel: "gpt-4o" as never,
+        }),
+    ).toThrow(/unsupported defaultModerationModel/);
+  });
+
+  it("rejects unknown model passed to moderate() call", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({}),
+    });
+    await expect(
+      provider.moderate({ input: "x", model: "gpt-4o" as never }),
+    ).rejects.toThrow(/not a known OpenAI moderation model/);
+  });
+
+  it("surfaces HTTP errors via fromHttpResponse → OpenAIError", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        status: 429,
+        responseBody: JSON.stringify({
+          error: { type: "rate_limit_exceeded", message: "slow down" },
+        }),
+      }),
+    });
+    await expect(provider.moderate({ input: "x" })).rejects.toMatchObject({
+      kind: "rate_limit_error",
+    });
+  });
+});

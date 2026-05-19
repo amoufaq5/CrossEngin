@@ -23,6 +23,15 @@ import {
 } from "./embeddings.js";
 import { OpenAIError, fromHttpResponse, fromNetworkError } from "./errors.js";
 import {
+  OPENAI_DEFAULT_MODERATION_MODEL,
+  buildModerationRequest,
+  isOpenAIModerationModel,
+  normalizeModerationResponse,
+  type NormalizedModerationOutcome,
+  type OpenAIModerationModel,
+  type OpenAIModerationResponse,
+} from "./moderations-api.js";
+import {
   OPENAI_CHAT_PRICING,
   OPENAI_DEFAULT_CHAT_MODEL,
   OPENAI_DEFAULT_EMBEDDING_MODEL,
@@ -67,6 +76,7 @@ export interface OpenAIProviderOptions {
   readonly apiKey: string;
   readonly defaultChatModel?: OpenAIChatModel;
   readonly defaultEmbeddingModel?: OpenAIEmbeddingModel;
+  readonly defaultModerationModel?: OpenAIModerationModel;
   readonly defaultMaxTokens?: number;
   readonly baseUrl?: string;
   readonly organization?: string;
@@ -98,6 +108,7 @@ export class OpenAIProvider implements LlmProvider {
   private readonly apiKey: string;
   private readonly defaultChatModel: OpenAIChatModel;
   private readonly defaultEmbeddingModel: OpenAIEmbeddingModel;
+  private readonly defaultModerationModel: OpenAIModerationModel;
   private readonly defaultMaxTokens: number | undefined;
   private readonly baseUrl: string;
   private readonly organization: string | undefined;
@@ -118,9 +129,17 @@ export class OpenAIProvider implements LlmProvider {
     if (!isOpenAIEmbeddingModel(embedModel)) {
       throw new Error(`OpenAIProvider: unsupported defaultEmbeddingModel ${embedModel}`);
     }
+    const moderationModel =
+      opts.defaultModerationModel ?? OPENAI_DEFAULT_MODERATION_MODEL;
+    if (!isOpenAIModerationModel(moderationModel)) {
+      throw new Error(
+        `OpenAIProvider: unsupported defaultModerationModel ${moderationModel}`,
+      );
+    }
     this.apiKey = opts.apiKey;
     this.defaultChatModel = chatModel;
     this.defaultEmbeddingModel = embedModel;
+    this.defaultModerationModel = moderationModel;
     this.defaultMaxTokens = opts.defaultMaxTokens;
     this.baseUrl = opts.baseUrl ?? OPENAI_API_BASE_URL;
     this.organization = opts.organization;
@@ -302,6 +321,56 @@ export class OpenAIProvider implements LlmProvider {
       });
     }
     return normalizeEmbeddingResponse(model, raw);
+  }
+
+  async moderate(input: {
+    readonly input: string | readonly string[];
+    readonly model?: OpenAIModerationModel;
+  }): Promise<NormalizedModerationOutcome> {
+    const model = this.resolveModerationModel(input.model);
+    const built = buildModerationRequest({
+      input: input.input,
+      model,
+      defaultModel: this.defaultModerationModel,
+    });
+    let response;
+    try {
+      response = await this.fetchImpl(this.url("/v1/moderations"), {
+        method: "POST",
+        headers: this.headers({ stream: false }),
+        body: JSON.stringify(built),
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    let raw: OpenAIModerationResponse;
+    try {
+      raw = JSON.parse(text) as OpenAIModerationResponse;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI moderation response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+    return normalizeModerationResponse(raw);
+  }
+
+  private resolveModerationModel(
+    requested: OpenAIModerationModel | undefined,
+  ): OpenAIModerationModel {
+    if (requested === undefined) return this.defaultModerationModel;
+    if (!isOpenAIModerationModel(requested)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `model '${requested}' is not a known OpenAI moderation model`,
+      });
+    }
+    return requested;
   }
 
   private resolveChatModel(requested: string | undefined): OpenAIChatModel {
