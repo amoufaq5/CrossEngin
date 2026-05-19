@@ -16,14 +16,38 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.6 + M2.X.6.x + M2.X.7 +
-M2.X.8 + M3 +
+M2.X.8 + M2.X.9 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,726 tests**,
-all green, no type errors. M2.X.5.y adds a URL-based image
+**55 packages + 1 app, 119 meta-schema tables, 6,750 tests**,
+all green, no type errors. M2.X.9 adds the third kernel-level
+cross-provider error classifier: `isInputTooLargeError(err)`.
+Follows the same shape as M2.X.6.x (`isModerationError`) and
+M2.X.7 (`isRetryableError`) — duck-types on `.kind` against a
+shared tuple. New `input-too-large.ts` module exports
+`INPUT_TOO_LARGE_ERROR_KINDS = ["request_too_large"]`
+(singleton tuple — all three providers map HTTP 413 to this
+kind via their classifyHttpStatus paths),
+`InputTooLargeErrorKind` type, `isInputTooLargeErrorKind`
+discriminator, `InputTooLargeDiscriminator` interface, and the
+headline predicate. The kernel surface now partitions the
+error space into four buckets: retryable (try again with
+backoff), moderation (terminal; audit), input-too-large
+(terminal; reduce input), other (auth / permission /
+invalid_request / unknown — terminal; surface to user).
+Operators classifying errors across providers use three
+parallel discriminators with no provider-package imports:
+isModerationError + isRetryableError + isInputTooLargeError.
+Mutual exclusivity verified by tests: a request_too_large
+error is NOT retryable + NOT a moderation event.
+Cross-package integration tests in all three providers verify
+the predicate works against their native error classes.
+Pattern continues to scale — adding a fourth classifier (e.g.
+isSafetyFilterError if a provider ships a distinct kind) is an
+additive tuple expansion. M2.X.5.y adds a URL-based image
 variant to the kernel content union, closing ADR-0093 Q1. New
 `ImageUrlContentBlock` type `{type: "image_url", url: string,
 format?: ImageAttachmentFormat}` added to the LlmContentBlock
@@ -1047,7 +1071,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0094 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0095 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1135,7 +1159,10 @@ Responses path), ADR-0094 covers M2.X.5.y (ImageUrlContentBlock
 URL variant — adds `{type: "image_url", url}` block alongside
 the existing bytes-based image variant; OpenAI providers pass
 URLs through, Bedrock + Anthropic throw with explicit
-pre-fetch guidance).
+pre-fetch guidance), ADR-0095 covers M2.X.9 (cross-provider
+input-too-large helper — third kernel-level predicate
+`isInputTooLargeError`; partitions the error space alongside
+isModerationError + isRetryableError).
 
 ## Architecture in 90 seconds
 
@@ -2026,7 +2053,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0094 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0095 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2105,7 +2132,11 @@ ADR-0093 covers Phase 2 M2.8.6 (OpenAI Responses API image
 inputs — closes M2.X.5 vision gap on the Responses path),
 ADR-0094 covers Phase 2 M2.X.5.y (ImageUrlContentBlock — URL-
 based image variant for the kernel content union, with
-OpenAI pass-through and Bedrock/Anthropic throw semantics).
+OpenAI pass-through and Bedrock/Anthropic throw semantics),
+ADR-0095 covers Phase 2 M2.X.9 (cross-provider input-too-
+large helper — third predicate in the kernel error
+classification surface, completing the partition into
+retryable + moderation + input-too-large + other).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

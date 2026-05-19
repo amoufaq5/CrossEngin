@@ -85,6 +85,25 @@ describe("AnthropicError x kernel isRetryableError (M2.X.7)", () => {
   });
 });
 
+describe("AnthropicError x kernel isInputTooLargeError (M2.X.9)", () => {
+  it("kernel isInputTooLargeError recognizes request_too_large", async () => {
+    const { isInputTooLargeError } = await import("@crossengin/ai-providers");
+    const err = new AnthropicError({ kind: "request_too_large", message: "" });
+    expect(isInputTooLargeError(err)).toBe(true);
+    expect(err.isRetryable()).toBe(false);
+  });
+
+  it("kernel isInputTooLargeError returns false for other kinds", async () => {
+    const { isInputTooLargeError } = await import("@crossengin/ai-providers");
+    expect(
+      isInputTooLargeError(new AnthropicError({ kind: "rate_limit_error", message: "" })),
+    ).toBe(false);
+    expect(
+      isInputTooLargeError(new AnthropicError({ kind: "refusal", message: "" })),
+    ).toBe(false);
+  });
+});
+
 describe("fromHttpResponse", () => {
   it("parses Anthropic error envelope when body is JSON", () => {
     const err = fromHttpResponse({

@@ -73,6 +73,25 @@ describe("BedrockError x kernel isRetryableError (M2.X.7)", () => {
   });
 });
 
+describe("BedrockError x kernel isInputTooLargeError (M2.X.9)", () => {
+  it("kernel isInputTooLargeError recognizes request_too_large", async () => {
+    const { isInputTooLargeError } = await import("@crossengin/ai-providers");
+    const err = new BedrockError({ kind: "request_too_large", message: "" });
+    expect(isInputTooLargeError(err)).toBe(true);
+    expect(err.isRetryable()).toBe(false);
+  });
+
+  it("kernel isInputTooLargeError returns false for other kinds", async () => {
+    const { isInputTooLargeError } = await import("@crossengin/ai-providers");
+    expect(
+      isInputTooLargeError(new BedrockError({ kind: "rate_limit_error", message: "" })),
+    ).toBe(false);
+    expect(
+      isInputTooLargeError(new BedrockError({ kind: "invalid_request_error", message: "" })),
+    ).toBe(false);
+  });
+});
+
 describe("RETRYABLE_KINDS", () => {
   it("excludes auth + invalid + not_found + permission", () => {
     expect(RETRYABLE_KINDS.has("authentication_error")).toBe(false);
