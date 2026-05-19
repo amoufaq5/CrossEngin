@@ -520,6 +520,36 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
     ).toThrow(/OpenAI Responses API does not support document_url/);
   });
 
+  it("document block uses format-aware MIME type in data URL (M2.X.5.aa.x)", () => {
+    const formats: Array<["pdf" | "txt" | "md" | "csv", string]> = [
+      ["pdf", "application/pdf"],
+      ["txt", "text/plain"],
+      ["md", "text/markdown"],
+      ["csv", "text/csv"],
+    ];
+    for (const [format, mediaType] of formats) {
+      const built = buildOpenAIResponsesRequest(
+        req([
+          {
+            role: "user",
+            content: [
+              { type: "document", format, bytes: "BYTES", name: `doc.${format}` },
+            ],
+          },
+        ]),
+        { defaultModel: "gpt-4o" },
+      );
+      const block = built.input[0]!.content[0] as {
+        type: string;
+        filename: string;
+        file_data: string;
+      };
+      expect(block.type).toBe("input_file");
+      expect(block.filename).toBe(`doc.${format}`);
+      expect(block.file_data).toBe(`data:${mediaType};base64,BYTES`);
+    }
+  });
+
   it("document block without name defaults to 'document.<format>' filename", () => {
     const built = buildOpenAIResponsesRequest(
       req([

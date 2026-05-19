@@ -94,9 +94,20 @@ export const ImageUrlContentBlockSchema = z.object({
 });
 export type ImageUrlContentBlock = z.infer<typeof ImageUrlContentBlockSchema>;
 
-export const DOCUMENT_FORMATS = ["pdf"] as const;
+export const DOCUMENT_FORMATS = ["pdf", "txt", "md", "csv"] as const;
 export const DocumentFormatSchema = z.enum(DOCUMENT_FORMATS);
 export type DocumentFormat = z.infer<typeof DocumentFormatSchema>;
+
+export function documentMediaType(format: DocumentFormat): string {
+  if (format === "pdf") return "application/pdf";
+  if (format === "txt") return "text/plain";
+  if (format === "md") return "text/markdown";
+  return "text/csv";
+}
+
+export function isTextDocumentFormat(format: DocumentFormat): boolean {
+  return format !== "pdf";
+}
 
 export const DocumentContentBlockSchema = z.object({
   type: z.literal("document"),

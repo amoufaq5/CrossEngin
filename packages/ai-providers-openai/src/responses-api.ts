@@ -234,10 +234,18 @@ function buildUserInputBlocks(
         continue;
       }
       if (b.type === "document") {
+        const mediaType =
+          b.format === "pdf"
+            ? "application/pdf"
+            : b.format === "txt"
+              ? "text/plain"
+              : b.format === "md"
+                ? "text/markdown"
+                : "text/csv";
         out.push({
           type: "input_file",
           filename: b.name ?? `document.${b.format}`,
-          file_data: `data:application/pdf;base64,${b.bytes}`,
+          file_data: `data:${mediaType};base64,${b.bytes}`,
         });
         continue;
       }

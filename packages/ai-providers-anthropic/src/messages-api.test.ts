@@ -619,6 +619,108 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     });
   });
 
+  it("txt document translates to Anthropic text source with decoded UTF-8 (M2.X.5.aa.x)", () => {
+    const text = "Hello, world!\nThis is a plain-text document.";
+    const bytes = Buffer.from(text, "utf8").toString("base64");
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "document", format: "txt", bytes, name: "note.txt" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const block = built.messages[0]!.content[0] as {
+      source: { type: string; media_type: string; data: string };
+    };
+    expect(block.source).toEqual({
+      type: "text",
+      media_type: "text/plain",
+      data: text,
+    });
+  });
+
+  it("md document → text/markdown media type (M2.X.5.aa.x)", () => {
+    const md = "# Heading\n\nBody";
+    const bytes = Buffer.from(md, "utf8").toString("base64");
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "document", format: "md", bytes }],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const block = built.messages[0]!.content[0] as {
+      source: { type: string; media_type: string; data: string };
+    };
+    expect(block.source.media_type).toBe("text/markdown");
+    expect(block.source.data).toBe(md);
+  });
+
+  it("csv document → text/csv media type (M2.X.5.aa.x)", () => {
+    const csv = "col1,col2\n1,2\n3,4";
+    const bytes = Buffer.from(csv, "utf8").toString("base64");
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "document", format: "csv", bytes }],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const block = built.messages[0]!.content[0] as {
+      source: { type: string; media_type: string; data: string };
+    };
+    expect(block.source.media_type).toBe("text/csv");
+    expect(block.source.data).toBe(csv);
+  });
+
+  it("PDF still uses base64 source on Anthropic (unchanged from M2.X.5.aa)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "document", format: "pdf", bytes: "PDF_B64" }],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const block = built.messages[0]!.content[0] as {
+      source: { type: string; media_type: string; data: string };
+    };
+    expect(block.source).toEqual({
+      type: "base64",
+      media_type: "application/pdf",
+      data: "PDF_B64",
+    });
+  });
+
   it("document block without name omits title field on Anthropic", () => {
     const built = buildAnthropicRequest(
       {

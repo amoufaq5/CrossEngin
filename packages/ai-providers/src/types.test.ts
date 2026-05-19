@@ -9,6 +9,8 @@ import {
   ImageContentBlockSchema,
   DocumentContentBlockSchema,
   DocumentUrlContentBlockSchema,
+  documentMediaType,
+  isTextDocumentFormat,
   ImageUrlContentBlockSchema,
   LlmContentBlockSchema,
   LlmContentSchema,
@@ -795,6 +797,18 @@ describe("DocumentContentBlockSchema (M2.X.5.aa)", () => {
     ).not.toThrow();
   });
 
+  it("accepts txt + md + csv formats (M2.X.5.aa.x)", () => {
+    for (const format of ["txt", "md", "csv"] as const) {
+      expect(() =>
+        DocumentContentBlockSchema.parse({
+          type: "document",
+          format,
+          bytes: "ABCD",
+        }),
+      ).not.toThrow();
+    }
+  });
+
   it("accepts optional name", () => {
     expect(() =>
       DocumentContentBlockSchema.parse({
@@ -816,14 +830,16 @@ describe("DocumentContentBlockSchema (M2.X.5.aa)", () => {
     ).toThrow();
   });
 
-  it("rejects unknown format (only pdf supported today)", () => {
-    expect(() =>
-      DocumentContentBlockSchema.parse({
-        type: "document",
-        format: "docx",
-        bytes: "ABCD",
-      }),
-    ).toThrow();
+  it("rejects unknown format (docx / html / doc not in enum today)", () => {
+    for (const badFormat of ["docx", "html", "doc", "xlsx"]) {
+      expect(() =>
+        DocumentContentBlockSchema.parse({
+          type: "document",
+          format: badFormat,
+          bytes: "ABCD",
+        }),
+      ).toThrow();
+    }
   });
 
   it("rejects name > 120 chars", () => {
@@ -870,6 +886,22 @@ describe("DocumentContentBlockSchema (M2.X.5.aa)", () => {
         content: [{ type: "document", format: "pdf", bytes: "ABCD" }],
       }),
     ).not.toThrow();
+  });
+});
+
+describe("documentMediaType / isTextDocumentFormat (M2.X.5.aa.x)", () => {
+  it("documentMediaType returns correct MIME type per format", () => {
+    expect(documentMediaType("pdf")).toBe("application/pdf");
+    expect(documentMediaType("txt")).toBe("text/plain");
+    expect(documentMediaType("md")).toBe("text/markdown");
+    expect(documentMediaType("csv")).toBe("text/csv");
+  });
+
+  it("isTextDocumentFormat returns true for txt/md/csv and false for pdf", () => {
+    expect(isTextDocumentFormat("pdf")).toBe(false);
+    expect(isTextDocumentFormat("txt")).toBe(true);
+    expect(isTextDocumentFormat("md")).toBe(true);
+    expect(isTextDocumentFormat("csv")).toBe(true);
   });
 });
 

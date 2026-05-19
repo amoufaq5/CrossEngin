@@ -16,15 +16,38 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
-M2.X.5.aa.y + M2.X.6 +
+M2.X.5.aa.x + M2.X.5.aa.y + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,777 tests**,
-all green, no type errors. M2.X.5.aa.y adds a URL-based document
+**55 packages + 1 app, 119 meta-schema tables, 6,786 tests**,
+all green, no type errors. M2.X.5.aa.x expands the document
+format enum from `["pdf"]` to `["pdf", "txt", "md", "csv"]`,
+closing ADR-0097 Q1 (partially — office formats deferred).
+New kernel helpers: `documentMediaType(format)` (single source
+of truth for MIME-type mapping: application/pdf, text/plain,
+text/markdown, text/csv); `isTextDocumentFormat(format)`
+(discriminator between PDF and text formats). Per-provider:
+Bedrock translator unchanged — the BedrockDocumentContentBlock.
+format type already accepted the broader Bedrock format set;
+all 4 kernel formats pass through natively. Anthropic
+translator becomes format-aware — PDF uses the existing
+`source: {type: "base64", media_type: "application/pdf"}`
+shape; txt/md/csv use the new `source: {type: "text",
+media_type, data}` shape with bytes decoded from base64 to
+UTF-8 via Node's Buffer. AnthropicContentBlock document
+variant extended with the text source. OpenAI Responses
+translator uses `documentMediaType` for the data URL MIME
+prefix — all 4 formats flow as input_file with correct MIME.
+OpenAI Chat still throws (no document support). Office formats
+(doc/docx/xls/xlsx/html) deferred to future milestone — only
+Bedrock supports them natively; adding now would create
+two-provider throw asymmetry. Document parity post-M2.X.5.aa.x:
+4 formats × 3 providers (Bedrock + Anthropic + OpenAI
+Responses) all native. M2.X.5.aa.y adds a URL-based document
 variant alongside the M2.X.5.aa bytes variant, closing ADR-0097
 Q2. New `DocumentUrlContentBlock` type `{type: "document_url",
 url: string, format?: DocumentFormat, name?: string<120}` added
@@ -1129,7 +1152,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0098 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0099 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1230,7 +1253,11 @@ PDF inputs across Bedrock + Anthropic + OpenAI Responses;
 OpenAI Chat throws with "use Responses API" guidance),
 ADR-0098 covers M2.X.5.aa.y (DocumentUrlContentBlock —
 URL-based document inputs; Anthropic native passthrough,
-Bedrock + OpenAI throw with pre-fetch guidance).
+Bedrock + OpenAI throw with pre-fetch guidance), ADR-0099
+covers M2.X.5.aa.x (document format expansion — txt/md/csv
+added to DOCUMENT_FORMATS enum; Anthropic uses text-source
+variant with UTF-8 decoding, OpenAI Responses uses format-
+aware MIME types, Bedrock passes format through natively).
 
 ## Architecture in 90 seconds
 
@@ -2121,7 +2148,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0098 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0099 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2215,7 +2242,9 @@ via native document/file content blocks; OpenAI Chat throws
 with actionable guidance pointing to the Responses path),
 ADR-0098 covers Phase 2 M2.X.5.aa.y (DocumentUrlContentBlock —
 URL-based PDF inputs; Anthropic native passthrough, three other
-provider paths throw with pre-fetch guidance).
+provider paths throw with pre-fetch guidance), ADR-0099 covers
+Phase 2 M2.X.5.aa.x (document format expansion txt/md/csv —
+4 formats × 3 providers all native).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

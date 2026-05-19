@@ -51,7 +51,12 @@ export type AnthropicContentBlock =
             readonly media_type: "application/pdf";
             readonly data: string;
           }
-        | { readonly type: "url"; readonly url: string };
+        | { readonly type: "url"; readonly url: string }
+        | {
+            readonly type: "text";
+            readonly media_type: "text/plain" | "text/markdown" | "text/csv";
+            readonly data: string;
+          };
       readonly title?: string;
     }
   | {
@@ -237,12 +242,29 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
     };
   }
   if (block.type === "document") {
+    if (block.format === "pdf") {
+      return {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: block.bytes,
+        },
+        ...(block.name !== undefined ? { title: block.name } : {}),
+      };
+    }
+    const mediaType =
+      block.format === "txt"
+        ? "text/plain"
+        : block.format === "md"
+          ? "text/markdown"
+          : "text/csv";
     return {
       type: "document",
       source: {
-        type: "base64",
-        media_type: "application/pdf",
-        data: block.bytes,
+        type: "text",
+        media_type: mediaType,
+        data: decodeBase64Utf8(block.bytes),
       },
       ...(block.name !== undefined ? { title: block.name } : {}),
     };
@@ -314,4 +336,8 @@ export function extractToolCalls(
     }
   }
   return calls;
+}
+
+function decodeBase64Utf8(base64: string): string {
+  return Buffer.from(base64, "base64").toString("utf8");
 }

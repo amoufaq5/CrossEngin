@@ -732,6 +732,30 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     ).toThrow(/Bedrock provider does not support document_url/);
   });
 
+  it("document block format flows through to Bedrock natively for txt/md/csv (M2.X.5.aa.x)", () => {
+    for (const format of ["txt", "md", "csv"] as const) {
+      const built = buildBedrockConverseRequest(
+        baseReq({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "document", format, bytes: "BYTES", name: `doc.${format}` },
+              ],
+            },
+          ],
+        }),
+        {},
+      );
+      const block = built.messages[0]!.content[0] as {
+        document: { format: string; name: string; source: { bytes: string } };
+      };
+      expect(block.document.format).toBe(format);
+      expect(block.document.name).toBe(`doc.${format}`);
+      expect(block.document.source.bytes).toBe("BYTES");
+    }
+  });
+
   it("document block without name defaults to 'document' on Bedrock", () => {
     const built = buildBedrockConverseRequest(
       baseReq({
