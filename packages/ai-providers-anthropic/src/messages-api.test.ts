@@ -589,6 +589,36 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     });
   });
 
+  it("document_url block translates to Anthropic url-source document (M2.X.5.aa.y)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document_url",
+                url: "https://example.com/spec.pdf",
+                name: "spec.pdf",
+              },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      type: "document",
+      source: { type: "url", url: "https://example.com/spec.pdf" },
+      title: "spec.pdf",
+    });
+  });
+
   it("document block without name omits title field on Anthropic", () => {
     const built = buildAnthropicRequest(
       {

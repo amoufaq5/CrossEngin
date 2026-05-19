@@ -504,6 +504,22 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
     });
   });
 
+  it("document_url block throws on Responses API (no native URL support) (M2.X.5.aa.y)", () => {
+    expect(() =>
+      buildOpenAIResponsesRequest(
+        req([
+          {
+            role: "user",
+            content: [
+              { type: "document_url", url: "https://example.com/spec.pdf" },
+            ],
+          },
+        ]),
+        { defaultModel: "gpt-4o" },
+      ),
+    ).toThrow(/OpenAI Responses API does not support document_url/);
+  });
+
   it("document block without name defaults to 'document.<format>' filename", () => {
     const built = buildOpenAIResponsesRequest(
       req([

@@ -619,6 +619,27 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
     ).toThrow(/OpenAI Chat Completions does not support document/);
   });
 
+  it("document_url block throws on Chat Completions path (M2.X.5.aa.y)", () => {
+    expect(() =>
+      buildOpenAIChatRequest(
+        {
+          task: "planner",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "document_url", url: "https://example.com/spec.pdf" },
+              ],
+            },
+          ],
+          tenantId: "ten-1",
+          sessionId: "ses-1",
+        },
+        { defaultModel: "gpt-4o" },
+      ),
+    ).toThrow(/OpenAI Chat Completions does not support document_url/);
+  });
+
   it("tool_use inline content blocks merge with toolUses field for tool_calls (M2.X.5.x)", () => {
     const built = buildOpenAIChatRequest(
       {

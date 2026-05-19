@@ -247,6 +247,13 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
       ...(block.name !== undefined ? { title: block.name } : {}),
     };
   }
+  if (block.type === "document_url") {
+    return {
+      type: "document",
+      source: { type: "url", url: block.url },
+      ...(block.name !== undefined ? { title: block.name } : {}),
+    };
+  }
   if (block.type === "tool_use") {
     return {
       type: "tool_use",

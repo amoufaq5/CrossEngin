@@ -8,6 +8,7 @@ import {
   ImageAttachmentSchema,
   ImageContentBlockSchema,
   DocumentContentBlockSchema,
+  DocumentUrlContentBlockSchema,
   ImageUrlContentBlockSchema,
   LlmContentBlockSchema,
   LlmContentSchema,
@@ -867,6 +868,81 @@ describe("DocumentContentBlockSchema (M2.X.5.aa)", () => {
       LlmMessageSchema.parse({
         role: "assistant",
         content: [{ type: "document", format: "pdf", bytes: "ABCD" }],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("DocumentUrlContentBlockSchema (M2.X.5.aa.y)", () => {
+  it("accepts a URL-based document", () => {
+    expect(() =>
+      DocumentUrlContentBlockSchema.parse({
+        type: "document_url",
+        url: "https://example.com/spec.pdf",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts optional format + name", () => {
+    expect(() =>
+      DocumentUrlContentBlockSchema.parse({
+        type: "document_url",
+        url: "https://example.com/spec.pdf",
+        format: "pdf",
+        name: "spec.pdf",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects invalid URL", () => {
+    expect(() =>
+      DocumentUrlContentBlockSchema.parse({
+        type: "document_url",
+        url: "not-a-url",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects unknown format", () => {
+    expect(() =>
+      DocumentUrlContentBlockSchema.parse({
+        type: "document_url",
+        url: "https://example.com/x.docx",
+        format: "docx",
+      }),
+    ).toThrow();
+  });
+
+  it("LlmContentBlockSchema accepts document_url variant", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "document_url",
+        url: "https://example.com/x.pdf",
+      }),
+    ).not.toThrow();
+  });
+
+  it("REJECTS document_url block on tool message (same rule as document)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "document_url", url: "https://example.com/x.pdf" }],
+      }),
+    ).toThrow(/document content blocks are not allowed on tool/);
+  });
+
+  it("accepts document_url block on user + assistant", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "document_url", url: "https://example.com/x.pdf" }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [{ type: "document_url", url: "https://example.com/x.pdf" }],
       }),
     ).not.toThrow();
   });

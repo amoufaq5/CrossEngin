@@ -241,6 +241,11 @@ function buildUserInputBlocks(
         });
         continue;
       }
+      if (b.type === "document_url") {
+        throw new Error(
+          "OpenAI Responses API does not support document_url content blocks — pre-fetch the URL to base64 bytes and use a document block instead, or upload via the Files API and use a file_id reference",
+        );
+      }
       // tool_use / tool_result blocks aren't user-input shapes for Responses API;
       // tool_result blocks on user role get folded out via the chat-api path. The
       // Responses API uses function_call_output items at the top level instead, so

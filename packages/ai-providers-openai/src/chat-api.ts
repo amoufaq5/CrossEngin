@@ -296,6 +296,11 @@ function translateKernelBlock(block: LlmContentBlock): OpenAIContentPart {
       "OpenAI Chat Completions does not support document content blocks — use the Responses API path (defaultApiPath: 'responses') or upload via the Files API",
     );
   }
+  if (block.type === "document_url") {
+    throw new Error(
+      "OpenAI Chat Completions does not support document_url content blocks — use the Responses API path with a pre-fetched document block, or upload via the Files API",
+    );
+  }
   // tool_use / tool_result blocks are handled at the message-translation layer,
   // not here — they don't map to OpenAI content parts directly.
   throw new Error(

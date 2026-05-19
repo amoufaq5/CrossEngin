@@ -714,6 +714,24 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     });
   });
 
+  it("document_url block throws on Bedrock (no native URL support) (M2.X.5.aa.y)", () => {
+    expect(() =>
+      buildBedrockConverseRequest(
+        baseReq({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "document_url", url: "https://example.com/spec.pdf" },
+              ],
+            },
+          ],
+        }),
+        {},
+      ),
+    ).toThrow(/Bedrock provider does not support document_url/);
+  });
+
   it("document block without name defaults to 'document' on Bedrock", () => {
     const built = buildBedrockConverseRequest(
       baseReq({
