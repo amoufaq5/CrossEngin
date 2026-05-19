@@ -29,6 +29,102 @@ export interface BedrockImportedModelListResponse {
   readonly nextToken?: string;
 }
 
+export interface BedrockImportedModelS3DataSource {
+  readonly s3Uri: string;
+}
+
+export interface BedrockImportedModelDataSource {
+  readonly s3DataSource: BedrockImportedModelS3DataSource;
+}
+
+export interface BedrockImportedModelDetail {
+  readonly modelArn: string;
+  readonly modelName: string;
+  readonly creationTime: string;
+  readonly instructSupported: boolean;
+  readonly modelArchitecture: string;
+  readonly jobName: string;
+  readonly jobArn: string;
+  readonly modelDataSource: BedrockImportedModelDataSource;
+  readonly modelKmsKeyArn?: string;
+}
+
+export function parseImportedModelDetail(
+  raw: unknown,
+): BedrockImportedModelDetail {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getImportedModel: response is not a JSON object",
+    });
+  }
+  const j = raw as Record<string, unknown>;
+  const modelArn = expectStringDetail(j, "modelArn");
+  const modelName = expectStringDetail(j, "modelName");
+  const creationTime = expectStringDetail(j, "creationTime");
+  const modelArchitecture = expectStringDetail(j, "modelArchitecture");
+  const jobName = expectStringDetail(j, "jobName");
+  const jobArn = expectStringDetail(j, "jobArn");
+  const instructSupported = j["instructSupported"];
+  if (typeof instructSupported !== "boolean") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: `getImportedModel: instructSupported must be a boolean on model '${modelArn}'`,
+    });
+  }
+  const modelDataSource = parseModelDataSource(j["modelDataSource"]);
+  const out: {
+    -readonly [K in keyof BedrockImportedModelDetail]: BedrockImportedModelDetail[K];
+  } = {
+    modelArn,
+    modelName,
+    creationTime,
+    instructSupported,
+    modelArchitecture,
+    jobName,
+    jobArn,
+    modelDataSource,
+  };
+  if (
+    typeof j["modelKmsKeyArn"] === "string" &&
+    j["modelKmsKeyArn"].length > 0
+  ) {
+    out.modelKmsKeyArn = j["modelKmsKeyArn"];
+  }
+  return out;
+}
+
+function parseModelDataSource(raw: unknown): BedrockImportedModelDataSource {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getImportedModel: modelDataSource is missing or not an object",
+    });
+  }
+  const o = raw as { s3DataSource?: unknown };
+  if (o.s3DataSource === null || typeof o.s3DataSource !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message:
+        "getImportedModel: modelDataSource.s3DataSource is missing or not an object",
+    });
+  }
+  const inner = o.s3DataSource as Record<string, unknown>;
+  const s3Uri = expectStringDetail(inner, "s3Uri");
+  return { s3DataSource: { s3Uri } };
+}
+
+function expectStringDetail(obj: Record<string, unknown>, key: string): string {
+  const v = obj[key];
+  if (typeof v !== "string" || v.length === 0) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: `getImportedModel: missing required string field '${key}'`,
+    });
+  }
+  return v;
+}
+
 export interface BedrockListImportedModelsOptions {
   readonly creationTimeBefore?: string;
   readonly creationTimeAfter?: string;

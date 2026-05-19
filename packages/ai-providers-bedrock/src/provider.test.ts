@@ -1418,6 +1418,134 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
+  function detailBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      modelArn:
+        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
+      modelName: "tenant-x-llama3-finetune",
+      creationTime: "2026-04-15T12:00:00Z",
+      instructSupported: true,
+      modelArchitecture: "LLAMA3",
+      jobName: "import-tenant-x-2026-04-15",
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/xyz789",
+      modelDataSource: {
+        s3DataSource: { s3Uri: "s3://tenant-x-artifacts/llama3/" },
+      },
+      ...overrides,
+    });
+  }
+
+  it("GETs the control-plane /imported-models/{id} endpoint", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    await provider.getImportedModel("abc123def456");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/imported-models/abc123def456");
+    expect(capture.url).not.toContain("?");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    const arn =
+      "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456";
+    await provider.getImportedModel(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getImportedModel("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("parses a complete detail response", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          modelKmsKeyArn: "arn:aws:kms:us-east-1:123:key/xyz",
+        }),
+      }),
+    });
+    const detail = await provider.getImportedModel("abc123def456");
+    expect(detail.modelName).toBe("tenant-x-llama3-finetune");
+    expect(detail.instructSupported).toBe(true);
+    expect(detail.modelArchitecture).toBe("LLAMA3");
+    expect(detail.jobName).toBe("import-tenant-x-2026-04-15");
+    expect(detail.modelDataSource.s3DataSource.s3Uri).toBe(
+      "s3://tenant-x-artifacts/llama3/",
+    );
+    expect(detail.modelKmsKeyArn).toMatch(/^arn:aws:kms:/);
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such model",
+        }),
+      }),
+    });
+    await expect(
+      provider.getImportedModel("not-a-real-model"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.getImportedModel("abc123def456"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(
+      provider.getImportedModel("abc123def456"),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.getImportedModel("abc123def456"),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 describe("BedrockProvider — listImportedModels (M2.X.5.aa.z.11)", () => {
   function listBody(opts: {
     items?: ReadonlyArray<Record<string, unknown>>;

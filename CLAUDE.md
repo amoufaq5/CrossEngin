@@ -19,15 +19,47 @@ M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
-M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 + M2.X.6 +
+M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
+M2.X.5.aa.z.12 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,081 tests**,
-all green, no type errors. M2.X.5.aa.z.11 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,097 tests**,
+all green, no type errors. M2.X.5.aa.z.12 ships
+`BedrockProvider.getImportedModel(modelIdentifier)` — the
+rich-detail companion to listImportedModels. Unlike
+getInferenceProfile / getBatch (which use the type-alias
+pattern since AWS returns identical shapes for list + get),
+getImportedModel follows the M2.X.5.aa.z.8 getGuardrail
+extended-shape pattern: AWS adds 4 fields the summary lacks
+(`jobName`, `jobArn`, `modelDataSource.s3DataSource.s3Uri`,
+optional `modelKmsKeyArn`). Three operational workflows
+unblocked: provenance audits (compliance teams verifying
+"model X imported from S3 URI Y by job Z"), KMS-key audits
+(per-model encryption-key verification), import-job
+correlation (linking finished models to their ModelImportJob
+records). New types in `imported-models-api.ts`:
+`BedrockImportedModelDetail` (independent type with explicit
+fields — not a type alias because shapes diverge),
+`BedrockImportedModelDataSource` (preserves AWS's 3-level
+nesting `modelDataSource.s3DataSource.s3Uri` verbatim — gives
+AWS room to add non-S3 data sources without breaking the
+kernel), `BedrockImportedModelS3DataSource`,
+`parseImportedModelDetail(raw)` strict parser. Provider
+validates identifier non-empty BEFORE fetch, URI-encodes path,
+reuses signedControlPlaneGet rail. Two get-shape patterns now
+distinct in the Bedrock package: type-alias (batch + inference-
+profile when AWS returns identical shapes) vs extended-type
+(guardrail + imported-model when get returns richer fields).
+The choice follows AWS's response shape, not kernel preference.
+Bedrock control-plane surface now has 10 of N operations
+(listBatches + getBatch + stopBatch + createBatch +
+listGuardrails + getGuardrail + listInferenceProfiles +
+getInferenceProfile + listImportedModels + getImportedModel).
+M2.X.5.aa.z.11 ships
 `BedrockProvider.listImportedModels(options?)` against AWS's
 `ListImportedModels` endpoint — the fourth paginated
 control-plane enumeration after listBatches / listGuardrails /
@@ -1728,7 +1760,10 @@ companion to listInferenceProfiles via type-alias pattern;
 log-driven + webhook-driven lookup workflows unblocked),
 ADR-0113 covers M2.X.5.aa.z.11 (Bedrock listImportedModels —
 fourth paginated control-plane enumeration; custom-imported
-model inventory + architecture-aware routing).
+model inventory + architecture-aware routing), ADR-0114 covers
+M2.X.5.aa.z.12 (Bedrock getImportedModel with data-source
+provenance — extended-shape detail pattern; provenance +
+KMS-key audit workflows unblocked).
 
 ## Architecture in 90 seconds
 
@@ -1943,7 +1978,7 @@ re-exporting everything.
   completeNonStreaming + embed + embedMultimodal + listBatches
   + getBatch + stopBatch + createBatch + listGuardrails +
   getGuardrail + listInferenceProfiles + getInferenceProfile
-  + listImportedModels — embed dispatches on
+  + listImportedModels + getImportedModel — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2810,7 +2845,14 @@ enumeration; custom-imported model artifacts surfaced for
 inventory + architecture-aware routing + instruct-tuned
 discoverability + tenant cleanup; modelArchitecture preserved
 as raw string for forward-compat against AWS architecture
-additions).
+additions), ADR-0114 covers Phase 2 M2.X.5.aa.z.12 (Bedrock
+getImportedModel with data-source provenance — extended-shape
+detail (not type-alias) since AWS adds jobName + jobArn +
+modelDataSource.s3DataSource.s3Uri + optional modelKmsKeyArn;
+two get-shape patterns now distinct in the package: type-alias
+when AWS returns identical shapes, extended-type when get
+returns richer fields; provenance + KMS audit + import-job
+correlation workflows unblocked).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

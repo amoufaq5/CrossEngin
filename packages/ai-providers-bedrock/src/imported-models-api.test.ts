@@ -8,6 +8,7 @@ import {
   BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES,
   BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES,
   buildImportedModelListQuery,
+  parseImportedModelDetail,
   parseImportedModelListResponse,
   parseImportedModelSummary,
 } from "./imported-models-api.js";
@@ -259,5 +260,83 @@ describe("parseImportedModelListResponse", () => {
     expect(() =>
       parseImportedModelListResponse({ modelSummaries: "oops" }),
     ).toThrow(/not an array/);
+  });
+});
+
+describe("parseImportedModelDetail", () => {
+  function minimal(): Record<string, unknown> {
+    return {
+      modelArn:
+        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
+      modelName: "tenant-x-llama3-finetune",
+      creationTime: "2026-04-15T12:00:00Z",
+      instructSupported: true,
+      modelArchitecture: "LLAMA3",
+      jobName: "import-tenant-x-2026-04-15",
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/xyz789",
+      modelDataSource: {
+        s3DataSource: {
+          s3Uri: "s3://tenant-x-artifacts/llama3-finetune/",
+        },
+      },
+    };
+  }
+
+  it("parses minimal required fields", () => {
+    const d = parseImportedModelDetail(minimal());
+    expect(d.modelArn).toMatch(/abc123def456$/);
+    expect(d.jobName).toBe("import-tenant-x-2026-04-15");
+    expect(d.jobArn).toMatch(/^arn:aws:bedrock:/);
+    expect(d.modelDataSource.s3DataSource.s3Uri).toBe(
+      "s3://tenant-x-artifacts/llama3-finetune/",
+    );
+    expect(d.modelKmsKeyArn).toBeUndefined();
+  });
+
+  it("parses modelKmsKeyArn when present", () => {
+    const d = parseImportedModelDetail({
+      ...minimal(),
+      modelKmsKeyArn: "arn:aws:kms:us-east-1:123:key/xyz",
+    });
+    expect(d.modelKmsKeyArn).toMatch(/^arn:aws:kms:/);
+  });
+
+  it("rejects missing required field", () => {
+    const bad = minimal();
+    delete bad["jobArn"];
+    expect(() => parseImportedModelDetail(bad)).toThrow(/jobArn/);
+  });
+
+  it("rejects non-boolean instructSupported", () => {
+    expect(() =>
+      parseImportedModelDetail({ ...minimal(), instructSupported: "yes" }),
+    ).toThrow(/instructSupported/);
+  });
+
+  it("rejects missing modelDataSource", () => {
+    const bad = minimal();
+    delete bad["modelDataSource"];
+    expect(() => parseImportedModelDetail(bad)).toThrow(/modelDataSource/);
+  });
+
+  it("rejects modelDataSource without s3DataSource", () => {
+    expect(() =>
+      parseImportedModelDetail({ ...minimal(), modelDataSource: {} }),
+    ).toThrow(/s3DataSource/);
+  });
+
+  it("rejects s3DataSource without s3Uri", () => {
+    expect(() =>
+      parseImportedModelDetail({
+        ...minimal(),
+        modelDataSource: { s3DataSource: {} },
+      }),
+    ).toThrow(/s3Uri/);
+  });
+
+  it("rejects non-object response", () => {
+    expect(() => parseImportedModelDetail(null)).toThrow(/not a JSON object/);
+    expect(() => parseImportedModelDetail("oops")).toThrow(/not a JSON object/);
   });
 });

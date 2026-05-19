@@ -62,7 +62,9 @@ import {
 } from "./guardrails-api.js";
 import {
   buildImportedModelListQuery,
+  parseImportedModelDetail,
   parseImportedModelListResponse,
+  type BedrockImportedModelDetail,
   type BedrockImportedModelListResponse,
   type BedrockListImportedModelsOptions,
 } from "./imported-models-api.js";
@@ -583,6 +585,29 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async getImportedModel(
+    modelIdentifier: string,
+  ): Promise<BedrockImportedModelDetail> {
+    if (modelIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "getImportedModel: modelIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/imported-models/${encodeURIComponent(modelIdentifier)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getImportedModel: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseImportedModelDetail(raw);
   }
 
   async listImportedModels(
