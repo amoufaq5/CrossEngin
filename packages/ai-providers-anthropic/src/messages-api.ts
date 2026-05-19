@@ -44,6 +44,17 @@ export type AnthropicContentBlock =
         | { readonly type: "url"; readonly url: string };
     }
   | {
+      readonly type: "document";
+      readonly source:
+        | {
+            readonly type: "base64";
+            readonly media_type: "application/pdf";
+            readonly data: string;
+          }
+        | { readonly type: "url"; readonly url: string };
+      readonly title?: string;
+    }
+  | {
       readonly type: "tool_use";
       readonly id: string;
       readonly name: string;
@@ -223,6 +234,17 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
     return {
       type: "image",
       source: { type: "url", url: block.url },
+    };
+  }
+  if (block.type === "document") {
+    return {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: block.bytes,
+      },
+      ...(block.name !== undefined ? { title: block.name } : {}),
     };
   }
   if (block.type === "tool_use") {

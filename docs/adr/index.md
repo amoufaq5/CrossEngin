@@ -99,13 +99,14 @@
 | [0094](0094-image-url-content-block.md) | ImageUrlContentBlock — URL-based image inputs (Phase 2 M2.X.5.y) | 2 | Proposed | 2026-05-19 |
 | [0095](0095-cross-provider-input-too-large-helper.md) | Cross-provider input-too-large helper (Phase 2 M2.X.9) | 2 | Proposed | 2026-05-19 |
 | [0096](0096-anthropic-url-source.md) | Anthropic URL-source image support (Phase 2 M2.X.5.z) | 2 | Proposed | 2026-05-19 |
+| [0097](0097-document-content-block.md) | DocumentContentBlock — PDF inputs (Phase 2 M2.X.5.aa) | 2 | Proposed | 2026-05-19 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024, 0046.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057, 0058, 0059, 0060, 0061, 0062, 0063, 0064, 0065, 0066, 0067, 0068, 0069, 0070, 0071, 0072, 0073, 0074, 0075, 0076, 0077, 0078, 0079, 0080, 0081, 0082, 0083, 0084, 0085, 0086, 0087, 0088, 0089, 0090, 0091, 0092, 0093, 0094, 0095, 0096.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057, 0058, 0059, 0060, 0061, 0062, 0063, 0064, 0065, 0066, 0067, 0068, 0069, 0070, 0071, 0072, 0073, 0074, 0075, 0076, 0077, 0078, 0079, 0080, 0081, 0082, 0083, 0084, 0085, 0086, 0087, 0088, 0089, 0090, 0091, 0092, 0093, 0094, 0095, 0096, 0097.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -191,3 +192,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 68 | 0094 | 2,500 | Drafted alongside ImageUrlContentBlock URL variant (Phase 2 M2.X.5.y) |
 | 69 | 0095 | 2,500 | Drafted alongside cross-provider input-too-large helper (Phase 2 M2.X.9) |
 | 70 | 0096 | 2,000 | Drafted alongside Anthropic URL-source image support (Phase 2 M2.X.5.z) |
+| 71 | 0097 | 2,500 | Drafted alongside DocumentContentBlock PDF inputs (Phase 2 M2.X.5.aa) |

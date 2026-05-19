@@ -23,6 +23,12 @@ export interface OpenAIResponsesContentImageInput {
   readonly image_url: string;
 }
 
+export interface OpenAIResponsesContentFileInput {
+  readonly type: "input_file";
+  readonly filename: string;
+  readonly file_data: string;
+}
+
 export interface OpenAIResponsesContentOutput {
   readonly type: "output_text";
   readonly text: string;
@@ -32,6 +38,7 @@ export interface OpenAIResponsesContentOutput {
 export type OpenAIResponsesContentBlock =
   | OpenAIResponsesContentInput
   | OpenAIResponsesContentImageInput
+  | OpenAIResponsesContentFileInput
   | OpenAIResponsesContentOutput;
 
 export interface OpenAIResponsesMessageItem {
@@ -198,8 +205,16 @@ function splitMessages(messages: readonly LlmMessage[]): {
 function buildUserInputBlocks(
   content: LlmContent,
   attachments: LlmMessage["attachments"],
-): readonly (OpenAIResponsesContentInput | OpenAIResponsesContentImageInput)[] {
-  const out: (OpenAIResponsesContentInput | OpenAIResponsesContentImageInput)[] = [];
+): readonly (
+  | OpenAIResponsesContentInput
+  | OpenAIResponsesContentImageInput
+  | OpenAIResponsesContentFileInput
+)[] {
+  const out: (
+    | OpenAIResponsesContentInput
+    | OpenAIResponsesContentImageInput
+    | OpenAIResponsesContentFileInput
+  )[] = [];
   if (typeof content === "string") {
     if (content.length > 0) {
       out.push({ type: "input_text", text: content });
@@ -216,6 +231,14 @@ function buildUserInputBlocks(
       }
       if (b.type === "image_url") {
         out.push({ type: "input_image", image_url: b.url });
+        continue;
+      }
+      if (b.type === "document") {
+        out.push({
+          type: "input_file",
+          filename: b.name ?? `document.${b.format}`,
+          file_data: `data:application/pdf;base64,${b.bytes}`,
+        });
         continue;
       }
       // tool_use / tool_result blocks aren't user-input shapes for Responses API;

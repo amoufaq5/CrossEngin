@@ -477,6 +477,49 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
     });
   });
 
+  it("document block translates to OpenAI Responses input_file with data URL + filename (M2.X.5.aa)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            {
+              type: "document",
+              format: "pdf",
+              bytes: "PDF_BYTES",
+              name: "spec.pdf",
+            },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content).toHaveLength(2);
+    expect(userMsg.content[1]).toEqual({
+      type: "input_file",
+      filename: "spec.pdf",
+      file_data: "data:application/pdf;base64,PDF_BYTES",
+    });
+  });
+
+  it("document block without name defaults to 'document.<format>' filename", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "document", format: "pdf", bytes: "PDF_BYTES" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<{ filename: string }> };
+    expect(userMsg.content[0]?.filename).toBe("document.pdf");
+  });
+
   it("empty string content emits a single empty input_text block (Responses API rejects empty content array)", () => {
     const built = buildOpenAIResponsesRequest(
       req([{ role: "user", content: "" }]),

@@ -50,11 +50,22 @@ export interface BedrockImageContentBlock {
   };
 }
 
+export interface BedrockDocumentContentBlock {
+  readonly document: {
+    readonly format: "pdf" | "csv" | "doc" | "docx" | "xls" | "xlsx" | "html" | "txt" | "md";
+    readonly name: string;
+    readonly source: {
+      readonly bytes: string;
+    };
+  };
+}
+
 export type BedrockContentBlock =
   | BedrockTextContentBlock
   | BedrockToolUseContentBlock
   | BedrockToolResultContentBlock
   | BedrockImageContentBlock
+  | BedrockDocumentContentBlock
   | BedrockCachePointBlock;
 
 export function isBedrockImageFormat(value: string): value is BedrockImageFormat {
@@ -296,6 +307,15 @@ function translateKernelBlock(block: LlmContentBlock): BedrockContentBlock {
     throw new Error(
       "Bedrock provider does not support image_url content blocks — pre-fetch the URL to base64 bytes and use an image block instead",
     );
+  }
+  if (block.type === "document") {
+    return {
+      document: {
+        format: block.format,
+        name: block.name ?? "document",
+        source: { bytes: block.bytes },
+      },
+    };
   }
   if (block.type === "tool_use") {
     return {

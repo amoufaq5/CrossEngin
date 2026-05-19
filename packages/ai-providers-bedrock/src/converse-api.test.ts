@@ -683,6 +683,57 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     ).toThrow(/Bedrock provider does not support image_url/);
   });
 
+  it("document block translates to Bedrock document content block (M2.X.5.aa)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "summarize" },
+              {
+                type: "document",
+                format: "pdf",
+                bytes: "PDF_BYTES",
+                name: "spec.pdf",
+              },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    const blocks = built.messages[0]!.content;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toEqual({
+      document: {
+        format: "pdf",
+        name: "spec.pdf",
+        source: { bytes: "PDF_BYTES" },
+      },
+    });
+  });
+
+  it("document block without name defaults to 'document' on Bedrock", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "document", format: "pdf", bytes: "PDF_BYTES" },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    const block = built.messages[0]!.content[0] as {
+      document: { name: string };
+    };
+    expect(block.document.name).toBe("document");
+  });
+
   it("user tool_result block translates to Bedrock toolResult (M2.X.5.x)", () => {
     const built = buildBedrockConverseRequest(
       baseReq({

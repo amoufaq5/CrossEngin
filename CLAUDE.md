@@ -15,15 +15,38 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
-M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.6 + M2.X.6.x +
-M2.X.7 + M2.X.8 + M2.X.9 + M3 +
+M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa + M2.X.6 +
+M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,751 tests**,
-all green, no type errors. M2.X.5.z removes the M2.X.5.y throw
+**55 packages + 1 app, 119 meta-schema tables, 6,766 tests**,
+all green, no type errors. M2.X.5.aa adds a `DocumentContentBlock`
+variant to the kernel content union for PDF inputs, closing
+ADR-0096 Q7. New types in `@crossengin/ai-providers/src/types.ts`:
+`DOCUMENT_FORMATS = ["pdf"]` const tuple (singleton; future
+expansion purely additive), `DocumentFormat` type,
+`DocumentContentBlockSchema = {type: "document", format,
+bytes, name?: string<120}`. `LlmContentBlockSchema` discriminated
+union grows from 5 to 6 variants. Same role rule as images
+(rejected on tool messages). Per-provider translation: Bedrock
+emits `{document: {format, name, source: {bytes}}}` (defaults
+name to "document"); Anthropic emits `{type: "document", source:
+{type: "base64", media_type: "application/pdf", data}, title?}`
+(maps kernel `name` → Anthropic `title`); OpenAI Responses API
+emits `{type: "input_file", filename, file_data: "data:
+application/pdf;base64,<bytes>"}` (defaults filename to
+"document.<format>"); OpenAI Chat Completions THROWS with
+actionable error message pointing to the Responses API path.
+Both `BedrockDocumentContentBlock` and `OpenAIResponses
+ContentFileInput` added to their respective provider unions.
+Anthropic's `AnthropicContentBlock` gains the document variant
+with both base64 + url source types (URL variant added for
+future M2.X.5.aa.y). Provider asymmetry: three of four real
+provider paths support PDFs natively; OpenAI Chat throws with
+actionable "use Responses API path" guidance. M2.X.5.z removes the M2.X.5.y throw
 in the Anthropic translator + threads URLs through to
 Anthropic's native URL source variant, closing ADR-0094 Q3.
 Anthropic recently added URL source support; the
@@ -1088,7 +1111,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0096 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0097 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1184,7 +1207,9 @@ isModerationError + isRetryableError), ADR-0096 covers M2.X.5.z
 throw, threads URLs through to Anthropic's native URL source
 variant; provider parity expanded — OpenAI both paths +
 Anthropic now accept URL-based images, Bedrock still requires
-bytes).
+bytes), ADR-0097 covers M2.X.5.aa (DocumentContentBlock —
+PDF inputs across Bedrock + Anthropic + OpenAI Responses;
+OpenAI Chat throws with "use Responses API" guidance).
 
 ## Architecture in 90 seconds
 
@@ -2075,7 +2100,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0096 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0097 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2162,7 +2187,11 @@ retryable + moderation + input-too-large + other), ADR-0096
 covers Phase 2 M2.X.5.z (Anthropic URL-source image support —
 threads ImageUrlContentBlock URLs through to Anthropic's
 native URL source variant; provider parity expanded for
-URL-based images across both OpenAI paths + Anthropic).
+URL-based images across both OpenAI paths + Anthropic),
+ADR-0097 covers Phase 2 M2.X.5.aa (DocumentContentBlock — PDF
+inputs supported on Bedrock + Anthropic + OpenAI Responses
+via native document/file content blocks; OpenAI Chat throws
+with actionable guidance pointing to the Responses path).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

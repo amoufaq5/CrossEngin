@@ -553,6 +553,63 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     });
   });
 
+  it("document block translates to Anthropic document content block (M2.X.5.aa)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "summarize" },
+              {
+                type: "document",
+                format: "pdf",
+                bytes: "PDF_BYTES",
+                name: "spec.pdf",
+              },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toEqual({
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: "PDF_BYTES",
+      },
+      title: "spec.pdf",
+    });
+  });
+
+  it("document block without name omits title field on Anthropic", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "document", format: "pdf", bytes: "PDF_BYTES" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const block = built.messages[0]!.content[0] as Record<string, unknown>;
+    expect("title" in block).toBe(false);
+  });
+
   it("user tool_result block translates to Anthropic tool_result block (M2.X.5.x)", () => {
     const built = buildAnthropicRequest(
       {

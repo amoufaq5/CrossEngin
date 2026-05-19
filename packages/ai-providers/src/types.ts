@@ -94,6 +94,18 @@ export const ImageUrlContentBlockSchema = z.object({
 });
 export type ImageUrlContentBlock = z.infer<typeof ImageUrlContentBlockSchema>;
 
+export const DOCUMENT_FORMATS = ["pdf"] as const;
+export const DocumentFormatSchema = z.enum(DOCUMENT_FORMATS);
+export type DocumentFormat = z.infer<typeof DocumentFormatSchema>;
+
+export const DocumentContentBlockSchema = z.object({
+  type: z.literal("document"),
+  format: DocumentFormatSchema,
+  bytes: z.string().min(1),
+  name: z.string().max(120).optional(),
+});
+export type DocumentContentBlock = z.infer<typeof DocumentContentBlockSchema>;
+
 export const ToolUseContentBlockSchema = z.object({
   type: z.literal("tool_use"),
   id: z.string().min(1),
@@ -118,6 +130,7 @@ export const LlmContentBlockSchema = z.discriminatedUnion("type", [
   TextContentBlockSchema,
   ImageContentBlockSchema,
   ImageUrlContentBlockSchema,
+  DocumentContentBlockSchema,
   ToolUseContentBlockSchema,
   ToolResultContentBlockSchema,
 ]);
@@ -188,6 +201,13 @@ export const LlmMessageSchema = z
             code: z.ZodIssueCode.custom,
             path: ["content", i],
             message: "image content blocks are not allowed on tool messages",
+          });
+        }
+        if (b.type === "document" && m.role === "tool") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["content", i],
+            message: "document content blocks are not allowed on tool messages",
           });
         }
       }

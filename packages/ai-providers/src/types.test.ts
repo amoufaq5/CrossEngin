@@ -7,6 +7,7 @@ import {
   EmbeddingResponseSchema,
   ImageAttachmentSchema,
   ImageContentBlockSchema,
+  DocumentContentBlockSchema,
   ImageUrlContentBlockSchema,
   LlmContentBlockSchema,
   LlmContentSchema,
@@ -777,6 +778,95 @@ describe("ImageUrlContentBlockSchema (M2.X.5.y)", () => {
       LlmMessageSchema.parse({
         role: "assistant",
         content: [{ type: "image_url", url: "https://example.com/x.png" }],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("DocumentContentBlockSchema (M2.X.5.aa)", () => {
+  it("accepts a PDF document with bytes", () => {
+    expect(() =>
+      DocumentContentBlockSchema.parse({
+        type: "document",
+        format: "pdf",
+        bytes: "ABCD",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts optional name", () => {
+    expect(() =>
+      DocumentContentBlockSchema.parse({
+        type: "document",
+        format: "pdf",
+        bytes: "ABCD",
+        name: "spec.pdf",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects empty bytes", () => {
+    expect(() =>
+      DocumentContentBlockSchema.parse({
+        type: "document",
+        format: "pdf",
+        bytes: "",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects unknown format (only pdf supported today)", () => {
+    expect(() =>
+      DocumentContentBlockSchema.parse({
+        type: "document",
+        format: "docx",
+        bytes: "ABCD",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects name > 120 chars", () => {
+    expect(() =>
+      DocumentContentBlockSchema.parse({
+        type: "document",
+        format: "pdf",
+        bytes: "ABCD",
+        name: "x".repeat(121),
+      }),
+    ).toThrow();
+  });
+
+  it("LlmContentBlockSchema accepts document variant in the discriminated union", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "document",
+        format: "pdf",
+        bytes: "ABCD",
+      }),
+    ).not.toThrow();
+  });
+
+  it("REJECTS document block on tool message (text-only by convention)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "document", format: "pdf", bytes: "ABCD" }],
+      }),
+    ).toThrow(/document content blocks are not allowed on tool/);
+  });
+
+  it("accepts document block on user + assistant messages", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "document", format: "pdf", bytes: "ABCD" }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [{ type: "document", format: "pdf", bytes: "ABCD" }],
       }),
     ).not.toThrow();
   });
