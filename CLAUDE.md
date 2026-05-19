@@ -17,15 +17,65 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
-M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.6 +
+M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,854 tests**,
-all green, no type errors. M2.X.5.aa.z.2 adds `listFiles()`
+**55 packages + 1 app, 119 meta-schema tables, 6,891 tests**,
+all green, no type errors. M2.X.5.aa.z.3 ships
+`BedrockProvider.listBatches(options?)` against AWS Bedrock's
+`ListModelInvocationJobs` control-plane endpoint. AWS does
+not ship a Files API; batch inference is the closest
+operational surface, and the same three workflows that
+motivated `listFiles()` (tenant offboarding, storage audits,
+reference reconciliation) all apply here. New `batch-api.ts`
+module in `@crossengin/ai-providers-bedrock` exports
+`BEDROCK_BATCH_JOB_STATUSES` (10-value const tuple matching
+AWS's documented states: Submitted / InProgress / Completed /
+Failed / Stopping / Stopped / PartiallyCompleted / Expired /
+Validating / Scheduled), `BedrockBatchJobStatus` type +
+`isBedrockBatchJobStatus` discriminator,
+`BEDROCK_BATCH_SORT_BY_VALUES = ["CreationTime"]` +
+`BEDROCK_BATCH_SORT_ORDER_VALUES = ["Ascending",
+"Descending"]`, `BedrockBatchJobSummary` type mirroring AWS's
+`InvocationJobSummary` (jobArn / jobName / modelId / roleArn
+/ status / submitTime + s3InputDataConfig / s3OutputDataConfig
++ optional clientRequestToken / message / lastModifiedTime /
+endTime / timeoutDurationInHours / jobExpirationTime /
+vpcConfig), `BedrockBatchJobListResponse` ({invocationJob
+Summaries, nextToken?} — nextToken omitted when absent/empty),
+`buildBatchListQuery(options)` pure validator-builder
+(statusEquals against tuple, maxResults int in [1, 1000],
+nameContains length [1, 63], submitTimeAfter/Before parseable
+via Date.parse, nextToken non-empty, sortBy/sortOrder against
+tuples), and `parseBatchListResponse(raw)` strict parser.
+`BedrockProvider.listBatches(options?)` GETs `/model-
+invocation-jobs/` on the control-plane host with sig v4 +
+sorted query string. Two-host model surfaced explicitly:
+`controlPlaneBaseUrl` defaults to `https://bedrock.{region}.
+amazonaws.com` (distinct from the existing `baseUrl` which
+remains `https://bedrock-runtime.{region}.amazonaws.com`);
+both use the same sig v4 service name (`bedrock`). New
+private `signedControlPlaneGet({path, query})` helper threads
+GET + empty body + URI-encoded query string through
+`signRequest` (the `query` parameter on `signRequest` was
+already supported since M2.9). Validation fast-fails BEFORE
+the fetch — out-of-range maxResults / unknown statusEquals /
+unparseable dates throw `BedrockError` with
+`invalid_request_error` kind without burning a request. Errors
+route through existing `fromHttpResponse` / `fromNetworkError`
+helpers (AccessDeniedException → permission_error,
+ThrottlingException → rate_limit_error, etc.). Bedrock now
+has a read-only operational surface: pre-M2.X.5.aa.z.3 only
+inference + embed methods existed. Three-provider enumeration
+parity achieved (OpenAI listFiles, Anthropic listFiles,
+Bedrock listBatches). Pattern set for future Bedrock control-
+plane methods (getBatch, listGuardrails, listImportedModels,
+listInferenceProfiles, listCustomModels) — same
+signedControlPlaneGet rail. M2.X.5.aa.z.2 added `listFiles()`
 to both OpenAI and Anthropic Files API surfaces, completing
 the CRUD+list pattern. Closes ADR-0102 Q1 + ADR-0103 Q5.
 Response types `OpenAIFileListResponse` and `AnthropicFile
@@ -1381,7 +1431,10 @@ throw in the Anthropic translator; file_id blocks now flow
 natively to both OpenAI Responses + Anthropic), ADR-0104
 covers M2.X.5.aa.z.2 (listFiles() on both Files APIs — provider-
 native pagination shapes preserved; tenant offboarding + audit
-workflows unblocked).
+workflows unblocked), ADR-0105 covers M2.X.5.aa.z.3 (Bedrock
+batch inference listBatches — first control-plane operation on
+Bedrock; two-host model documented; pattern set for future
+control-plane enumeration methods).
 
 ## Architecture in 90 seconds
 
@@ -1567,8 +1620,18 @@ re-exporting everything.
   implementing `LlmProvider`. Zero runtime deps; pure `fetch` +
   `node:crypto` + from-scratch AWS Signature V4. Speaks Bedrock's
   `converse-stream` (binary event-stream framing, NOT SSE),
-  `converse` (non-streaming), and `invoke` (embeddings via Titan
-  or Cohere) endpoints. 7 modules: pricing (8 chat models —
+  `converse` (non-streaming), `invoke` (embeddings via Titan
+  or Cohere), AND the control-plane `ListModelInvocationJobs`
+  endpoint (M2.X.5.aa.z.3). Two-host model: runtime endpoints
+  at `bedrock-runtime.{region}.amazonaws.com`, control-plane
+  endpoints at `bedrock.{region}.amazonaws.com`, same sig v4
+  service. 8 modules: batch-api (BedrockBatchJobStatus +
+  BEDROCK_BATCH_JOB_STATUSES 10-value tuple +
+  buildBatchListQuery validator + parseBatchListResponse
+  strict parser + BedrockBatchJobSummary /
+  BedrockBatchJobListResponse types — for listBatches()
+  enumeration of long-running batch inference jobs), pricing
+  (8 chat models —
   Claude on Bedrock, Llama 3.1 70B/405B, Mistral Large, Titan
   Premier + 4 embedding models — Titan v2/v1, Cohere
   english/multilingual), signing (sig v4 with HMAC chain
@@ -1583,8 +1646,10 @@ re-exporting everything.
   typed kinds including `model_stream_error` for
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
   classes), provider (BedrockProvider with complete +
-  completeNonStreaming + embed — embed dispatches on family,
-  loops over Titan or batches Cohere). Capabilities:
+  completeNonStreaming + embed + embedMultimodal + listBatches —
+  embed dispatches on family, loops over Titan or batches Cohere;
+  listBatches GETs the control-plane host with sig v4 + sorted
+  query string via signedControlPlaneGet helper). Capabilities:
   `{chat: true, streaming: true, toolUse: true, jsonMode: false,
   embedding: true, maxContextTokens: 200_000}`. The router has
   THREE real chat providers to chain — Anthropic + OpenAI + AWS
@@ -2383,7 +2448,12 @@ beta header and document source: {type: "file"} variant; the
 M2.X.5.aa.z Anthropic throw becomes a native passthrough),
 ADR-0104 covers Phase 2 M2.X.5.aa.z.2 (Files API listFiles()
 across OpenAI + Anthropic — provider-native pagination shapes
-preserved; CRUD+list pattern complete on both providers).
+preserved; CRUD+list pattern complete on both providers),
+ADR-0105 covers Phase 2 M2.X.5.aa.z.3 (Bedrock batch inference
+listBatches — first control-plane operation on Bedrock,
+exposed via a separate controlPlaneBaseUrl + signedControlPlaneGet
+helper; three-provider enumeration parity achieved across
+OpenAI listFiles + Anthropic listFiles + Bedrock listBatches).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

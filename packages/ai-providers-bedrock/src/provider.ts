@@ -10,6 +10,12 @@ import type {
 } from "@crossengin/ai-providers";
 
 import {
+  buildBatchListQuery,
+  parseBatchListResponse,
+  type BedrockBatchJobListResponse,
+  type BedrockListBatchesOptions,
+} from "./batch-api.js";
+import {
   buildBedrockConverseRequest,
   extractTextFromConverseResponse,
   extractToolCallsFromConverseResponse,
@@ -88,6 +94,7 @@ export interface BedrockProviderOptions {
   readonly titanConcurrency?: number;
   readonly guardrailConfig?: BedrockGuardrailConfig;
   readonly baseUrl?: string;
+  readonly controlPlaneBaseUrl?: string;
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
   readonly clock?: () => Date;
@@ -129,6 +136,7 @@ export class BedrockProvider implements LlmProvider {
   private readonly titanConcurrency: number;
   private readonly guardrailConfig: BedrockGuardrailConfig | undefined;
   private readonly baseUrl: string;
+  private readonly controlPlaneBaseUrl: string;
   private readonly fetchImpl: FetchLike;
   private readonly clock: () => Date;
 
@@ -176,6 +184,8 @@ export class BedrockProvider implements LlmProvider {
         ? buildBedrockGuardrailConfig(opts.guardrailConfig)
         : undefined;
     this.baseUrl = opts.baseUrl ?? `https://bedrock-runtime.${this.region}.amazonaws.com`;
+    this.controlPlaneBaseUrl =
+      opts.controlPlaneBaseUrl ?? `https://bedrock.${this.region}.amazonaws.com`;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
     this.clock = opts.clock ?? (() => new Date());
     this.residency = opts.residency ?? deriveDefaultResidency(this.region);
@@ -524,6 +534,74 @@ export class BedrockProvider implements LlmProvider {
     }
     return response;
   }
+
+  async listBatches(
+    options: BedrockListBatchesOptions = {},
+  ): Promise<BedrockBatchJobListResponse> {
+    const query = buildBatchListQuery(options);
+    const text = await this.signedControlPlaneGet({
+      path: "/model-invocation-jobs/",
+      query,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listBatches: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseBatchListResponse(raw);
+  }
+
+  private async signedControlPlaneGet(input: {
+    readonly path: string;
+    readonly query: Record<string, string>;
+  }): Promise<string> {
+    const host = new URL(this.controlPlaneBaseUrl).host;
+    const body = new Uint8Array(0);
+    const signed = signRequest({
+      method: "GET",
+      host,
+      path: input.path,
+      query: input.query,
+      headers: {
+        accept: "application/json",
+      },
+      body,
+      region: this.region,
+      service: SERVICE,
+      credentials: this.credentials,
+      now: this.clock(),
+    });
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      host,
+      "x-amz-date": signed.amzDate,
+      "x-amz-content-sha256": signed.contentSha256,
+      authorization: signed.authorization,
+    };
+    if (this.credentials.sessionToken !== undefined) {
+      headers["x-amz-security-token"] = this.credentials.sessionToken;
+    }
+    const qs = encodeQueryString(input.query);
+    const url = `${this.controlPlaneBaseUrl}${input.path}${qs.length > 0 ? `?${qs}` : ""}`;
+    let response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "GET",
+        headers,
+        body,
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    return response.text();
+  }
 }
 
 function deriveDefaultResidency(region: string): readonly Region[] {
@@ -531,6 +609,37 @@ function deriveDefaultResidency(region: string): readonly Region[] {
   if (region.startsWith("ap-") || region.startsWith("me-")) return ["ap"];
   if (region.startsWith("sa-")) return ["sa"];
   return ["us"];
+}
+
+function encodeQueryString(query: Record<string, string>): string {
+  const keys = Object.keys(query).sort();
+  return keys
+    .map((k) => `${awsUriEncode(k)}=${awsUriEncode(query[k] ?? "")}`)
+    .join("&");
+}
+
+function awsUriEncode(value: string): string {
+  const out: string[] = [];
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!;
+    const isUnreserved =
+      (cp >= 0x30 && cp <= 0x39) ||
+      (cp >= 0x41 && cp <= 0x5a) ||
+      (cp >= 0x61 && cp <= 0x7a) ||
+      ch === "-" ||
+      ch === "_" ||
+      ch === "." ||
+      ch === "~";
+    if (isUnreserved) {
+      out.push(ch);
+    } else {
+      const bytes = new TextEncoder().encode(ch);
+      for (const b of bytes) {
+        out.push("%" + b.toString(16).toUpperCase().padStart(2, "0"));
+      }
+    }
+  }
+  return out.join("");
 }
 
 function approximateCohereTokens(texts: readonly string[]): number {

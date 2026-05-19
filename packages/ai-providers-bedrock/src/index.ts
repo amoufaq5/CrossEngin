@@ -1,3 +1,4 @@
+export * from "./batch-api.js";
 export * from "./converse-api.js";
 export * from "./embeddings.js";
 export * from "./errors.js";

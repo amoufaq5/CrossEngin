@@ -1137,6 +1137,157 @@ describe("BedrockProvider — completeNonStreaming", () => {
   });
 });
 
+describe("BedrockProvider — listBatches (M2.X.5.aa.z.3)", () => {
+  function buildListBody(opts: {
+    summaries?: ReadonlyArray<Record<string, unknown>>;
+    nextToken?: string;
+  }): string {
+    const body: Record<string, unknown> = {
+      invocationJobSummaries: opts.summaries ?? [],
+    };
+    if (opts.nextToken !== undefined) body["nextToken"] = opts.nextToken;
+    return JSON.stringify(body);
+  }
+
+  function sampleJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234",
+      jobName: "tenant-x-batch",
+      modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      roleArn: "arn:aws:iam::123456789012:role/BatchRole",
+      status: "Completed",
+      submitTime: "2026-05-19T00:00:00Z",
+      inputDataConfig: { s3InputDataConfig: { s3Uri: "s3://b/in/" } },
+      outputDataConfig: { s3OutputDataConfig: { s3Uri: "s3://b/out/" } },
+      ...overrides,
+    };
+  }
+
+  it("GETs the control-plane host with sig v4 auth headers", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: buildListBody({ summaries: [] }) }),
+    });
+    await provider.listBatches();
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+    expect(capture.url).toContain("/model-invocation-jobs/");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+    expect(capture.init?.headers["x-amz-date"]).toBeTruthy();
+  });
+
+  it("zero-arg call emits no query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: buildListBody({ summaries: [] }) }),
+    });
+    await provider.listBatches();
+    expect(capture.url).not.toContain("?");
+  });
+
+  it("threads query parameters into the URL", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: buildListBody({ summaries: [] }) }),
+    });
+    await provider.listBatches({
+      statusEquals: "InProgress",
+      maxResults: 50,
+      nameContains: "tenant-x",
+      sortBy: "CreationTime",
+      sortOrder: "Descending",
+    });
+    expect(capture.url).toContain("statusEquals=InProgress");
+    expect(capture.url).toContain("maxResults=50");
+    expect(capture.url).toContain("nameContains=tenant-x");
+    expect(capture.url).toContain("sortBy=CreationTime");
+    expect(capture.url).toContain("sortOrder=Descending");
+  });
+
+  it("parses a response with one job + nextToken", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: buildListBody({
+          summaries: [sampleJob()],
+          nextToken: "page-2",
+        }),
+      }),
+    });
+    const out = await provider.listBatches();
+    expect(out.invocationJobSummaries.length).toBe(1);
+    expect(out.invocationJobSummaries[0]!.jobName).toBe("tenant-x-batch");
+    expect(out.nextToken).toBe("page-2");
+  });
+
+  it("validates options BEFORE fetch — never burns a request on bad limit", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listBatches({ maxResults: 9999 }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates http errors via fromHttpResponse classification", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.listBatches()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: "<html>500</html>" }),
+    });
+    await expect(provider.listBatches()).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.listBatches()).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+
+  it("supports a custom controlPlaneBaseUrl override", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      region: "us-east-1",
+      controlPlaneBaseUrl: "https://test.example.com",
+      fetch: buildFetch({ capture, text: buildListBody({ summaries: [] }) }),
+      clock: () => FIXED_DATE,
+    });
+    await provider.listBatches();
+    expect(capture.url).toMatch(/^https:\/\/test\.example\.com\//);
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
