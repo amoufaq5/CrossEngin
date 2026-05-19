@@ -18,15 +18,41 @@ M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
-M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 + M2.X.6 +
+M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
+M2.X.5.aa.z.9 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,003 tests**,
-all green, no type errors. M2.X.5.aa.z.8 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,037 tests**,
+all green, no type errors. M2.X.5.aa.z.9 ships
+`BedrockProvider.listInferenceProfiles(options?)` against
+AWS's `ListInferenceProfiles` endpoint — the third paginated
+control-plane enumeration after listBatches (M2.X.5.aa.z.3)
+and listGuardrails (M2.X.5.aa.z.7). Cross-region inference
+profiles route a single logical model ID (e.g.,
+`us.anthropic.claude-3-5-sonnet-20241022-v2:0`) to ANY of N
+regional model deployments with automatic failover — AWS's
+recommended production-workload invocation path. New module
+`inference-profiles-api.ts` exports
+`BEDROCK_INFERENCE_PROFILE_STATUSES` (1-value tuple: ACTIVE),
+`BEDROCK_INFERENCE_PROFILE_TYPES` (2-value tuple:
+SYSTEM_DEFINED for AWS-managed | APPLICATION for
+operator-created), discriminators, `BedrockInferenceProfileModel`
+({modelArn}), `BedrockInferenceProfileSummary` (8 required
+fields + optional description), `BedrockInferenceProfileListResponse`,
+`buildInferenceProfileListQuery` pure boundary-validator
+(typeEquals against tuple, maxResults integer in [1, 1000],
+nextToken non-empty), and `parseInferenceProfileListResponse`
++ `parseInferenceProfileSummary` strict parsers. Provider
+method reuses the existing `signedControlPlaneGet` rail.
+Pagination pattern now proven THREE times — adding future
+enumerations (listImportedModels, listCustomModels,
+listMarketplaceModelEndpoints) is mechanical. Bedrock module
+count up to 12; control-plane surface up to 7 of N
+operations. M2.X.5.aa.z.8 ships
 `BedrockProvider.getGuardrail(guardrailIdentifier,
 guardrailVersion?)` — the rich-detail companion to
 listGuardrails. While listGuardrails returns shallow summaries
@@ -1636,7 +1662,11 @@ inference-time guardrails.ts; pattern now proven twice for
 paginated control-plane reads), ADR-0110 covers M2.X.5.aa.z.8
 (Bedrock getGuardrail with policy detail — rich companion to
 listGuardrails; five typed policy types; stable enums get
-strict discriminators while growing enums stay as strings).
+strict discriminators while growing enums stay as strings),
+ADR-0111 covers M2.X.5.aa.z.9 (Bedrock listInferenceProfiles
+— third paginated control-plane enumeration; cross-region
+inference profiles; SYSTEM_DEFINED vs APPLICATION type
+distinction; pagination pattern now mechanical).
 
 ## Architecture in 90 seconds
 
@@ -1850,7 +1880,7 @@ re-exporting everything.
   classes), provider (BedrockProvider with complete +
   completeNonStreaming + embed + embedMultimodal + listBatches
   + getBatch + stopBatch + createBatch + listGuardrails +
-  getGuardrail — embed dispatches on
+  getGuardrail + listInferenceProfiles — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2699,7 +2729,14 @@ diffs; five typed nested policy types modeled with stable
 contextual grounding type + PII action; growing enums like
 PII entity type preserved as strings for forward-compat;
 field naming asymmetry preserved (ListGuardrails uses
-{id, arn}; GetGuardrail uses {guardrailId, guardrailArn})).
+{id, arn}; GetGuardrail uses {guardrailId, guardrailArn})),
+ADR-0111 covers Phase 2 M2.X.5.aa.z.9 (Bedrock
+listInferenceProfiles — third paginated control-plane
+enumeration after listBatches + listGuardrails; cross-region
+inference profiles, AWS's recommended production-workload
+invocation path; SYSTEM_DEFINED vs APPLICATION type
+distinction surfaced; per-region modelArn list preserved
+verbatim).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

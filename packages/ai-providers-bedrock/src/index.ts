@@ -5,6 +5,7 @@ export * from "./errors.js";
 export * from "./event-stream.js";
 export * from "./guardrails.js";
 export * from "./guardrails-api.js";
+export * from "./inference-profiles-api.js";
 export * from "./pricing.js";
 export * from "./provider.js";
 export * from "./signing.js";

@@ -61,6 +61,12 @@ import {
   type BedrockListGuardrailsOptions,
 } from "./guardrails-api.js";
 import {
+  buildInferenceProfileListQuery,
+  parseInferenceProfileListResponse,
+  type BedrockInferenceProfileListResponse,
+  type BedrockListInferenceProfilesOptions,
+} from "./inference-profiles-api.js";
+import {
   BEDROCK_CHAT_MODELS,
   BEDROCK_CHAT_PRICING,
   BEDROCK_DEFAULT_EMBEDDING_MODEL,
@@ -569,6 +575,26 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async listInferenceProfiles(
+    options: BedrockListInferenceProfilesOptions = {},
+  ): Promise<BedrockInferenceProfileListResponse> {
+    const query = buildInferenceProfileListQuery(options);
+    const text = await this.signedControlPlaneGet({
+      path: "/inference-profiles",
+      query,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listInferenceProfiles: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseInferenceProfileListResponse(raw);
   }
 
   async getGuardrail(

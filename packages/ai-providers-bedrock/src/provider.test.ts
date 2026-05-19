@@ -1418,6 +1418,143 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — listInferenceProfiles (M2.X.5.aa.z.9)", () => {
+  function listBody(opts: {
+    items?: ReadonlyArray<Record<string, unknown>>;
+    nextToken?: string;
+  }): string {
+    const body: Record<string, unknown> = {
+      inferenceProfileSummaries: opts.items ?? [],
+    };
+    if (opts.nextToken !== undefined) body["nextToken"] = opts.nextToken;
+    return JSON.stringify(body);
+  }
+
+  function sampleProfile(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      inferenceProfileId: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      inferenceProfileName: "Claude 3.5 Sonnet (US)",
+      inferenceProfileArn:
+        "arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      models: [
+        {
+          modelArn:
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        },
+      ],
+      status: "ACTIVE",
+      type: "SYSTEM_DEFINED",
+      createdAt: "2026-04-01T00:00:00Z",
+      updatedAt: "2026-05-01T00:00:00Z",
+      ...overrides,
+    };
+  }
+
+  it("GETs the control-plane /inference-profiles endpoint with sig v4 headers", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listInferenceProfiles();
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+    expect(capture.url).toContain("/inference-profiles");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("zero-arg call emits no query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listInferenceProfiles();
+    expect(capture.url).not.toContain("?");
+  });
+
+  it("threads query parameters into the URL", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listInferenceProfiles({
+      typeEquals: "APPLICATION",
+      maxResults: 50,
+    });
+    expect(capture.url).toContain("typeEquals=APPLICATION");
+    expect(capture.url).toContain("maxResults=50");
+  });
+
+  it("parses a response with one profile + nextToken", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: listBody({ items: [sampleProfile()], nextToken: "page-2" }),
+      }),
+    });
+    const out = await provider.listInferenceProfiles();
+    expect(out.inferenceProfileSummaries.length).toBe(1);
+    expect(out.inferenceProfileSummaries[0]!.type).toBe("SYSTEM_DEFINED");
+    expect(out.inferenceProfileSummaries[0]!.models[0]!.modelArn).toMatch(
+      /claude-3-5-sonnet/,
+    );
+    expect(out.nextToken).toBe("page-2");
+  });
+
+  it("validates options BEFORE fetch — bad typeEquals never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listInferenceProfiles({ typeEquals: "CUSTOM" as never }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.listInferenceProfiles()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: "<html>oops</html>" }),
+    });
+    await expect(provider.listInferenceProfiles()).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.listInferenceProfiles()).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — getGuardrail (M2.X.5.aa.z.8)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
