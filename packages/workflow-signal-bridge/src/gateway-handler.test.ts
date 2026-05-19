@@ -57,6 +57,7 @@ function fixtureRoute(): RouteDefinition {
     idempotencyRequired: false,
     requestSchemaSha256: null,
     responseSchemaSha256: null,
+    sourcePack: null,
   };
 }
 

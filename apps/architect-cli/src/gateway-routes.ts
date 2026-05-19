@@ -546,49 +546,48 @@ async function runRoutesSyncPack(
   const storedIds = new Set(stored.map((r) => r.id));
   const added = records.filter((r) => !storedIds.has(r.route.id));
   const persistent = records.filter((r) => storedIds.has(r.route.id));
-  const external = stored.filter((r) => !generatedIds.has(r.id));
+  const obsolete = stored.filter(
+    (r) => r.sourcePack === slug && !generatedIds.has(r.id),
+  );
+  const external = stored.filter(
+    (r) => r.sourcePack !== slug && !generatedIds.has(r.id),
+  );
 
   const dryRun = getBooleanFlag(command, "dry-run");
+  const pruneObsolete = getBooleanFlag(command, "prune-obsolete");
   if (dryRun) {
     if (command.format === "json") {
       printJson(ctx.io, {
         pack: slug,
         dryRun: true,
+        pruneObsolete,
         total: records.length,
         added: added.length,
         persistent: persistent.length,
+        obsolete: obsolete.length,
+        obsoleteIds: obsolete.map((r) => r.id),
         external: external.length,
         externalIds: external.map((r) => r.id),
       });
     } else {
+      const obsoleteSuffix = pruneObsolete
+        ? `, ${obsolete.length.toString()} obsolete — would be pruned`
+        : `, ${obsolete.length.toString()} obsolete — left alone (use --prune-obsolete to delete)`;
       printSuccess(
         ctx.io,
-        `-- dry-run: pack '${slug}' would sync ${records.length.toString()} route(s) (${added.length.toString()} added, ${persistent.length.toString()} refreshed, ${external.length.toString()} external — left alone).`,
+        `-- dry-run: pack '${slug}' would sync ${records.length.toString()} route(s) (${added.length.toString()} added, ${persistent.length.toString()} refreshed${obsolete.length > 0 ? obsoleteSuffix : ""}, ${external.length.toString()} external — left alone).`,
       );
-      if (added.length > 0) {
-        ctx.io.stdout.write("added:\n");
-        for (const r of added) {
-          ctx.io.stdout.write(
-            `  ${r.route.id}  ${r.route.method.padEnd(6)} ${formatPath(r.route).padEnd(40)} ${r.route.operationId}\n`,
-          );
-        }
-      }
-      if (persistent.length > 0) {
-        ctx.io.stdout.write("refreshed:\n");
-        for (const r of persistent) {
-          ctx.io.stdout.write(
-            `  ${r.route.id}  ${r.route.method.padEnd(6)} ${formatPath(r.route).padEnd(40)} ${r.route.operationId}\n`,
-          );
-        }
-      }
-      if (external.length > 0) {
-        ctx.io.stdout.write("external (not part of this pack, left alone):\n");
-        for (const r of external) {
-          ctx.io.stdout.write(
-            `  ${r.id}  ${r.method.padEnd(6)} ${formatPath(r).padEnd(40)} ${r.operationId}\n`,
-          );
-        }
-      }
+      printPackRouteList(ctx, "added", added.map((r) => r.route));
+      printPackRouteList(ctx, "refreshed", persistent.map((r) => r.route));
+      const obsoleteLabel = pruneObsolete
+        ? "obsolete (will be pruned)"
+        : "obsolete (left alone — use --prune-obsolete to delete)";
+      printStoredRouteList(ctx, obsoleteLabel, obsolete);
+      printStoredRouteList(
+        ctx,
+        "external (not part of this pack, left alone)",
+        external,
+      );
     }
     return 0;
   }
@@ -596,27 +595,76 @@ async function runRoutesSyncPack(
   for (const r of records) {
     await registry.upsert(r.route, createdBy);
   }
+  let pruned = 0;
+  if (pruneObsolete) {
+    for (const r of obsolete) {
+      const removed = await registry.deleteByRouteId(r.id);
+      if (removed) pruned += 1;
+    }
+  }
   if (command.format === "json") {
     printJson(ctx.io, {
       pack: slug,
       dryRun: false,
+      pruneObsolete,
       total: records.length,
       added: added.length,
       persistent: persistent.length,
+      obsolete: obsolete.length,
+      obsoleteIds: obsolete.map((r) => r.id),
+      pruned,
       external: external.length,
       externalIds: external.map((r) => r.id),
     });
   } else {
+    const obsoletePhrase =
+      obsolete.length === 0
+        ? ""
+        : pruneObsolete
+          ? `, ${pruned.toString()} of ${obsolete.length.toString()} obsolete pruned`
+          : `, ${obsolete.length.toString()} obsolete — left alone (use --prune-obsolete to delete)`;
+    const externalPhrase =
+      external.length === 0 ? "" : `, ${external.length.toString()} external — left alone`;
     printSuccess(
       ctx.io,
-      `synced ${records.length.toString()} route(s) for pack '${slug}' (${added.length.toString()} added, ${persistent.length.toString()} refreshed${external.length > 0 ? `, ${external.length.toString()} external — left alone` : ""}).`,
+      `synced ${records.length.toString()} route(s) for pack '${slug}' (${added.length.toString()} added, ${persistent.length.toString()} refreshed${obsoletePhrase}${externalPhrase}).`,
     );
+    if (obsolete.length > 0 && !pruneObsolete) {
+      ctx.io.stdout.write(`obsolete route id(s) (from this pack, no longer generated):\n`);
+      for (const r of obsolete) ctx.io.stdout.write(`  ${r.id}\n`);
+    }
     if (external.length > 0) {
       ctx.io.stdout.write(`external route id(s) (not part of '${slug}'):\n`);
-      for (const r of external) {
-        ctx.io.stdout.write(`  ${r.id}\n`);
-      }
+      for (const r of external) ctx.io.stdout.write(`  ${r.id}\n`);
     }
   }
   return 0;
+}
+
+function printPackRouteList(
+  ctx: RunContext,
+  label: string,
+  routes: readonly RouteDefinition[],
+): void {
+  if (routes.length === 0) return;
+  ctx.io.stdout.write(`${label}:\n`);
+  for (const r of routes) {
+    ctx.io.stdout.write(
+      `  ${r.id}  ${r.method.padEnd(6)} ${formatPath(r).padEnd(40)} ${r.operationId}\n`,
+    );
+  }
+}
+
+function printStoredRouteList(
+  ctx: RunContext,
+  label: string,
+  routes: readonly RouteDefinition[],
+): void {
+  if (routes.length === 0) return;
+  ctx.io.stdout.write(`${label}:\n`);
+  for (const r of routes) {
+    ctx.io.stdout.write(
+      `  ${r.id}  ${r.method.padEnd(6)} ${formatPath(r).padEnd(40)} ${r.operationId}\n`,
+    );
+  }
 }

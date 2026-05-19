@@ -58,6 +58,7 @@ function fixtureRoute(overrides: Partial<RouteDefinition> = {}): RouteDefinition
     idempotencyRequired: false,
     requestSchemaSha256: null,
     responseSchemaSha256: null,
+    sourcePack: null,
     ...overrides,
   };
 }
@@ -77,6 +78,12 @@ function fakeRegistry(rows: RouteDefinition[]): {
           rowCount: stored.length,
         };
       }
+      if (sql.includes("DELETE") && sql.includes("source_pack = $1")) {
+        const slug = params?.[0];
+        const before = stored.length;
+        stored = stored.filter((r) => r.sourcePack !== slug);
+        return { rows: [], rowCount: before - stored.length };
+      }
       if (sql.includes("DELETE")) {
         const routeId = params?.[0];
         const before = stored.length;
@@ -85,9 +92,11 @@ function fakeRegistry(rows: RouteDefinition[]): {
       }
       if (sql.includes("INSERT")) {
         const routeId = params?.[0];
+        const sourcePack = (params?.[15] ?? null) as string | null;
+        const next = fixtureRoute({ id: routeId as string, sourcePack });
         const existing = stored.findIndex((r) => r.id === routeId);
-        if (existing >= 0) stored[existing] = fixtureRoute({ id: routeId as string });
-        else stored.push(fixtureRoute({ id: routeId as string }));
+        if (existing >= 0) stored[existing] = next;
+        else stored.push(next);
         return { rows: [], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
@@ -115,6 +124,7 @@ function routeAsRow(r: RouteDefinition): Record<string, unknown> {
     idempotency_required: r.idempotencyRequired,
     request_schema_sha256: r.requestSchemaSha256,
     response_schema_sha256: r.responseSchemaSha256,
+    source_pack: r.sourcePack,
   };
 }
 
@@ -877,5 +887,203 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const out = outChunks2.join("");
     expect(out).toMatch(/0 added/);
     expect(out).toMatch(/24 refreshed/);
+  });
+});
+
+describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
+  it("classifies stored route with sourcePack === slug AND not generated as obsolete (NOT external)", async () => {
+    const { io, outChunks } = makeIo();
+    const obsoleteRoute = fixtureRoute({
+      id: "rt_obsoleteabc12345",
+      operationId: "old.dropped",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry, capture } = fakeRegistry([obsoleteRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      obsolete: number;
+      obsoleteIds: string[];
+      external: number;
+      externalIds: string[];
+      pruned: number;
+    };
+    expect(parsed.obsolete).toBe(1);
+    expect(parsed.obsoleteIds).toEqual(["rt_obsoleteabc12345"]);
+    expect(parsed.external).toBe(0);
+    expect(parsed.pruned).toBe(0);
+    // Without --prune-obsolete, no DELETE is issued
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(0);
+  });
+
+  it("classifies stored route with sourcePack !== slug AND not generated as external (NOT obsolete)", async () => {
+    const { io, outChunks } = makeIo();
+    const externalFromOtherPack = fixtureRoute({
+      id: "rt_otherpackabc1234",
+      operationId: "other.foo",
+      sourcePack: "operate-erp/payments",
+    });
+    const { registry } = fakeRegistry([externalFromOtherPack]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      obsolete: number;
+      external: number;
+      externalIds: string[];
+    };
+    expect(parsed.obsolete).toBe(0);
+    expect(parsed.external).toBe(1);
+    expect(parsed.externalIds).toEqual(["rt_otherpackabc1234"]);
+  });
+
+  it("classifies stored route with sourcePack === null as external (legacy / operator-curated)", async () => {
+    const { io, outChunks } = makeIo();
+    const legacyRoute = fixtureRoute({
+      id: "rt_legacyabc123456",
+      operationId: "legacy.foo",
+      sourcePack: null,
+    });
+    const { registry } = fakeRegistry([legacyRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      obsolete: number;
+      external: number;
+      externalIds: string[];
+    };
+    expect(parsed.obsolete).toBe(0);
+    expect(parsed.external).toBe(1);
+    expect(parsed.externalIds).toEqual(["rt_legacyabc123456"]);
+  });
+
+  it("--prune-obsolete deletes routes from this pack that are no longer generated", async () => {
+    const { io, outChunks } = makeIo();
+    const obsoleteRoute = fixtureRoute({
+      id: "rt_obsoleteabc12345",
+      sourcePack: "operate-erp/core",
+    });
+    const externalRoute = fixtureRoute({
+      id: "rt_externalabc1234",
+      sourcePack: "operate-erp/payments",
+    });
+    const { registry, capture } = fakeRegistry([obsoleteRoute, externalRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--prune-obsolete"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]?.params?.[0]).toBe("rt_obsoleteabc12345");
+    const out = outChunks.join("");
+    expect(out).toMatch(/1 of 1 obsolete pruned/);
+    expect(out).toMatch(/1 external — left alone/);
+  });
+
+  it("--prune-obsolete JSON shape includes pruned count", async () => {
+    const { io, outChunks } = makeIo();
+    const obsolete1 = fixtureRoute({
+      id: "rt_obsoleteabc11111",
+      sourcePack: "operate-erp/core",
+    });
+    const obsolete2 = fixtureRoute({
+      id: "rt_obsoleteabc22222",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry } = fakeRegistry([obsolete1, obsolete2]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "sync-pack",
+        "operate-erp/core",
+        "--prune-obsolete",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      pruneObsolete: boolean;
+      obsolete: number;
+      obsoleteIds: string[];
+      pruned: number;
+    };
+    expect(parsed.pruneObsolete).toBe(true);
+    expect(parsed.obsolete).toBe(2);
+    expect(parsed.obsoleteIds.sort()).toEqual([
+      "rt_obsoleteabc11111",
+      "rt_obsoleteabc22222",
+    ]);
+    expect(parsed.pruned).toBe(2);
+  });
+
+  it("--prune-obsolete --dry-run still reports without deleting", async () => {
+    const { io, outChunks } = makeIo();
+    const obsoleteRoute = fixtureRoute({
+      id: "rt_obsoleteabc12345",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry, capture } = fakeRegistry([obsoleteRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "sync-pack",
+        "operate-erp/core",
+        "--prune-obsolete",
+        "--dry-run",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(0);
+    const out = outChunks.join("");
+    expect(out).toMatch(/1 obsolete — would be pruned/);
+  });
+
+  it("register-pack writes sourcePack into the INSERT param (index 15)", async () => {
+    const { io } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "operate-erp/core"),
+      ctx,
+    );
+    const inserts = capture.filter((c) => c.sql.includes("INSERT"));
+    expect(inserts.length).toBeGreaterThan(0);
+    for (const insert of inserts) {
+      expect(insert.params?.[15]).toBe("operate-erp/core");
+    }
+  });
+
+  it("sync-pack default human output mentions 'use --prune-obsolete' when obsolete > 0", async () => {
+    const { io, outChunks } = makeIo();
+    const obsoleteRoute = fixtureRoute({
+      id: "rt_obsoleteabc12345",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry } = fakeRegistry([obsoleteRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs("sync-pack", "operate-erp/core"),
+      ctx,
+    );
+    const out = outChunks.join("");
+    expect(out).toMatch(/use --prune-obsolete to delete/);
   });
 });

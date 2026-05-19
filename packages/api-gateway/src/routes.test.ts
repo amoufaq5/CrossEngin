@@ -28,6 +28,7 @@ const route: RouteDefinition = {
   idempotencyRequired: false,
   requestSchemaSha256: null,
   responseSchemaSha256: "a".repeat(64),
+  sourcePack: null,
 };
 
 describe("constants", () => {

@@ -104,6 +104,7 @@ function buildCrudRoute(input: BuildCrudRouteInput): RouteDefinition {
     idempotencyRequired: idempotencyRequiredForMethod(method),
     requestSchemaSha256: null,
     responseSchemaSha256: null,
+    sourcePack: input.packSlug,
   };
 }
 
@@ -142,6 +143,7 @@ function buildTransitionRoute(input: BuildTransitionRouteInput): RouteDefinition
     idempotencyRequired: true,
     requestSchemaSha256: null,
     responseSchemaSha256: null,
+    sourcePack: input.packSlug,
   };
 }
 

@@ -25,6 +25,7 @@ function routeRow(overrides: Record<string, unknown> = {}): Record<string, unkno
     idempotency_required: false,
     request_schema_sha256: null,
     response_schema_sha256: null,
+    source_pack: null,
     ...overrides,
   };
 }
@@ -182,6 +183,7 @@ describe("PostgresRouteRegistry — upsert", () => {
       idempotencyRequired: true,
       requestSchemaSha256: null,
       responseSchemaSha256: null,
+      sourcePack: null,
     };
     await registry.upsert(route, USER);
     const insert = capture.find((c) => c.sql.includes("INSERT"));
@@ -270,6 +272,124 @@ describe("PostgresRouteRegistry — deleteByRouteId", () => {
     await registry.ensureLoaded();
     expect(selectCount).toBe(1);
     await registry.deleteByRouteId("rt_route0001");
+    await registry.ensureLoaded();
+    expect(selectCount).toBe(2);
+  });
+});
+
+describe("PostgresRouteRegistry — source_pack (M4.10)", () => {
+  it("upsert threads sourcePack into the INSERT param ($16)", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection([], capture);
+    const registry = new PostgresRouteRegistry({ conn });
+    const route: RouteDefinition = {
+      id: "rt_route0099",
+      operationId: "tenants.update",
+      method: "PATCH",
+      pathSegments: [
+        { kind: "literal", value: "v1" },
+        { kind: "literal", value: "tenants" },
+        { kind: "parameter", name: "id", pattern: null },
+      ],
+      apiVersion: "v1",
+      isDeprecated: false,
+      deprecatedSince: null,
+      sunsetAt: null,
+      successorOperationId: null,
+      requiredScopes: ["tenants:write"],
+      rateLimitPolicyId: null,
+      idempotencyRequired: true,
+      requestSchemaSha256: null,
+      responseSchemaSha256: null,
+      sourcePack: "operate-erp/core",
+    };
+    await registry.upsert(route, USER);
+    const insert = capture.find((c) => c.sql.includes("INSERT"));
+    expect(insert?.params?.[15]).toBe("operate-erp/core");
+    expect(insert?.sql).toContain("source_pack");
+  });
+
+  it("rowToRoute maps source_pack from the row to sourcePack on the RouteDefinition", async () => {
+    const conn = mockConnection([routeRow({ source_pack: "operate-erp/payments" })]);
+    const registry = new PostgresRouteRegistry({ conn });
+    const all = await registry.listAll();
+    expect(all[0]?.sourcePack).toBe("operate-erp/payments");
+  });
+
+  it("rowToRoute maps null source_pack to null sourcePack", async () => {
+    const conn = mockConnection([routeRow({ source_pack: null })]);
+    const registry = new PostgresRouteRegistry({ conn });
+    const all = await registry.listAll();
+    expect(all[0]?.sourcePack).toBeNull();
+  });
+
+  it("listByPackSlug issues SELECT WHERE source_pack = $1", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection([routeRow({ source_pack: "operate-erp/core" })], capture);
+    const registry = new PostgresRouteRegistry({ conn });
+    const rows = await registry.listByPackSlug("operate-erp/core");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.sourcePack).toBe("operate-erp/core");
+    const select = capture.find((c) => c.sql.includes("WHERE source_pack"));
+    expect(select?.params?.[0]).toBe("operate-erp/core");
+  });
+
+  it("listByPackSlug returns empty array when no rows match", async () => {
+    const conn = mockConnection([]);
+    const registry = new PostgresRouteRegistry({ conn });
+    const rows = await registry.listByPackSlug("operate-erp/nothing");
+    expect(rows).toEqual([]);
+  });
+
+  it("deleteByPackSlug issues DELETE WHERE source_pack = $1 and returns rowCount", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn: PgConnection = {
+      query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        capture.push({ sql, params });
+        if (sql.includes("DELETE")) return { rows: [], rowCount: 24 };
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    const registry = new PostgresRouteRegistry({ conn });
+    const deleted = await registry.deleteByPackSlug("operate-erp/core");
+    expect(deleted).toBe(24);
+    const del = capture.find((c) => c.sql.includes("DELETE"));
+    expect(del?.sql).toContain("WHERE source_pack = $1");
+    expect(del?.params?.[0]).toBe("operate-erp/core");
+  });
+
+  it("deleteByPackSlug returns 0 when no rows match (idempotent)", async () => {
+    const conn: PgConnection = {
+      query: vi.fn(async (): Promise<PgQueryResult> => ({ rows: [], rowCount: 0 })) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    const registry = new PostgresRouteRegistry({ conn });
+    expect(await registry.deleteByPackSlug("operate-erp/nothing")).toBe(0);
+  });
+
+  it("deleteByPackSlug invalidates the cache so subsequent lookups reload from the DB", async () => {
+    let selectCount = 0;
+    const conn: PgConnection = {
+      query: vi.fn(async (sql: string): Promise<PgQueryResult> => {
+        if (sql.includes("SELECT")) {
+          selectCount += 1;
+          return { rows: [routeRow()], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    const registry = new PostgresRouteRegistry({ conn });
+    await registry.ensureLoaded();
+    expect(selectCount).toBe(1);
+    await registry.deleteByPackSlug("operate-erp/core");
     await registry.ensureLoaded();
     expect(selectCount).toBe(2);
   });

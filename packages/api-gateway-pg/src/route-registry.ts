@@ -24,7 +24,14 @@ interface RouteRow {
   readonly idempotency_required: boolean;
   readonly request_schema_sha256: string | null;
   readonly response_schema_sha256: string | null;
+  readonly source_pack: string | null;
 }
+
+const SELECT_COLUMNS =
+  `route_id, operation_id, method, path_segments, api_version,
+   is_deprecated, deprecated_since, sunset_at, successor_operation_id,
+   required_scopes, rate_limit_policy_id, idempotency_required,
+   request_schema_sha256, response_schema_sha256, source_pack`;
 
 function asJsonArray(value: unknown): readonly unknown[] {
   if (Array.isArray(value)) return value;
@@ -57,6 +64,7 @@ function rowToRoute(row: RouteRow): RouteDefinition {
     idempotencyRequired: row.idempotency_required,
     requestSchemaSha256: row.request_schema_sha256,
     responseSchemaSha256: row.response_schema_sha256,
+    sourcePack: row.source_pack,
   };
 }
 
@@ -120,9 +128,9 @@ export class PostgresRouteRegistry implements RouteRegistry {
          route_id, operation_id, method, path_segments, api_version,
          is_deprecated, deprecated_since, sunset_at, successor_operation_id,
          required_scopes, rate_limit_policy_id, idempotency_required,
-         request_schema_sha256, response_schema_sha256, created_by
+         request_schema_sha256, response_schema_sha256, created_by, source_pack
        )
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (route_id) DO UPDATE
          SET operation_id = EXCLUDED.operation_id,
              method = EXCLUDED.method,
@@ -136,7 +144,8 @@ export class PostgresRouteRegistry implements RouteRegistry {
              rate_limit_policy_id = EXCLUDED.rate_limit_policy_id,
              idempotency_required = EXCLUDED.idempotency_required,
              request_schema_sha256 = EXCLUDED.request_schema_sha256,
-             response_schema_sha256 = EXCLUDED.response_schema_sha256`,
+             response_schema_sha256 = EXCLUDED.response_schema_sha256,
+             source_pack = EXCLUDED.source_pack`,
       [
         route.id,
         route.operationId,
@@ -153,6 +162,7 @@ export class PostgresRouteRegistry implements RouteRegistry {
         route.requestSchemaSha256,
         route.responseSchemaSha256,
         createdByUserId,
+        route.sourcePack,
       ],
     );
     this.cache = null;
@@ -196,12 +206,20 @@ export class PostgresRouteRegistry implements RouteRegistry {
 
   async listAll(): Promise<readonly RouteDefinition[]> {
     const result = await this.conn.query<RouteRow>(
-      `SELECT route_id, operation_id, method, path_segments, api_version,
-              is_deprecated, deprecated_since, sunset_at, successor_operation_id,
-              required_scopes, rate_limit_policy_id, idempotency_required,
-              request_schema_sha256, response_schema_sha256
+      `SELECT ${SELECT_COLUMNS}
          FROM ${SCHEMA}.${TABLE}
         ORDER BY api_version, method, route_id`,
+    );
+    return result.rows.map(rowToRoute);
+  }
+
+  async listByPackSlug(packSlug: string): Promise<readonly RouteDefinition[]> {
+    const result = await this.conn.query<RouteRow>(
+      `SELECT ${SELECT_COLUMNS}
+         FROM ${SCHEMA}.${TABLE}
+        WHERE source_pack = $1
+        ORDER BY api_version, method, route_id`,
+      [packSlug],
     );
     return result.rows.map(rowToRoute);
   }
@@ -215,16 +233,22 @@ export class PostgresRouteRegistry implements RouteRegistry {
     return result.rowCount > 0;
   }
 
+  async deleteByPackSlug(packSlug: string): Promise<number> {
+    const result = await this.conn.query(
+      `DELETE FROM ${SCHEMA}.${TABLE} WHERE source_pack = $1`,
+      [packSlug],
+    );
+    this.cache = null;
+    return result.rowCount;
+  }
+
   private async loadCompiled(): Promise<readonly CompiledRoute[]> {
     if (this.pendingLoad !== null) {
       return this.pendingLoad;
     }
     this.pendingLoad = (async () => {
       const result = await this.conn.query<RouteRow>(
-        `SELECT route_id, operation_id, method, path_segments, api_version,
-                is_deprecated, deprecated_since, sunset_at, successor_operation_id,
-                required_scopes, rate_limit_policy_id, idempotency_required,
-                request_schema_sha256, response_schema_sha256
+        `SELECT ${SELECT_COLUMNS}
            FROM ${SCHEMA}.${TABLE}
           ORDER BY api_version, method, route_id`,
       );

@@ -16,10 +16,43 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4
 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y
-+ M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 +
-M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,480 tests**,
-all green, no type errors. M4.8.y completes the three-verb
++ M4.10 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 +
+M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 +
+M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,496 tests**,
+all green, no type errors. M4.10 adds a `source_pack TEXT`
+column (nullable + indexed + slug-pattern CHECK) to
+META_GATEWAY_ROUTES, closing the three open questions across
+ADR-0079/0080/0081 about which pack owns which route. The
+column is set by `generatePackRoutes` to the pack slug on
+every CRUD + transition route; routes registered via
+`gateway routes register <route.json>` default to NULL.
+`RouteDefinitionSchema` gains `sourcePack: z.string().regex
+(/^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)*$/).max(120).nullable
+().default(null)`. `PostgresRouteRegistry` upsert grows to
+16 INSERT params + ON CONFLICT writes `source_pack =
+EXCLUDED.source_pack`; new methods `listByPackSlug(slug)` +
+`deleteByPackSlug(slug): Promise<number>` add bulk
+source-attribution queries; all three SELECT call sites
+(`listAll`, `loadCompiled`, `listByPackSlug`) factor through
+a shared `SELECT_COLUMNS` constant. `runRoutesSyncPack`
+classification expands from three buckets to four: `added`
+(generated − stored), `persistent` (generated ∩ stored),
+`obsolete` (stored with sourcePack === slug, not in current
+generation — SAFE to prune), `external` (stored with
+sourcePack !== slug or NULL — NEVER pruned). New flag
+`--prune-obsolete` opt-in deletes obsolete routes; safely
+no-ops on legacy NULL-attributed routes. JSON shape gains
+{obsolete, obsoleteIds[], pruned, pruneObsolete} alongside
+the existing {added, persistent, external, externalIds[]}.
+Human output names the obsolete bucket separately with
+"use --prune-obsolete to delete" hint. Backwards compatible:
+pre-M4.10 routes survive with NULL source_pack (no
+auto-classification); operators backfill by re-running
+register-pack which now writes the slug via ON CONFLICT.
+Eleven RouteDefinition construction sites across 9 files
+updated to include `sourcePack: null` — TS strict catches
+any missed site at compile time. M4.8.y completes the three-verb
 gateway-routes pack vocabulary: `crossengin gateway routes
 sync-pack <slug> [--api-version v1] [--dry-run] [--created-by
 <uuid>]`. Re-generates the desired route set, calls
@@ -685,7 +718,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0081 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0082 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -728,7 +761,10 @@ closing M4.7 manifest-driven question), ADR-0080 covers
 M4.8.x (gateway routes unregister-pack — symmetric tear-down
 via deterministic ID re-derivation), ADR-0081 covers M4.8.y
 (gateway routes sync-pack — composite diff/upsert command
-that completes the three-verb pack-routes vocabulary).
+that completes the three-verb pack-routes vocabulary),
+ADR-0082 covers M4.10 (routes.source_pack column closing
+the open ownership-attribution question across ADRs
+0079/0080/0081, enabling safe `sync-pack --prune-obsolete`).
 
 ## Architecture in 90 seconds
 
@@ -1619,7 +1655,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0081 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0082 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1664,7 +1700,9 @@ routes from pack manifest — bulk register-pack via the
 M7.6.5 extends resolver), ADR-0080 covers Phase 2 M4.8.x
 (gateway routes unregister-pack — symmetric tear-down),
 ADR-0081 covers Phase 2 M4.8.y (gateway routes sync-pack —
-composite diff/upsert + external-route reporting). When you
+composite diff/upsert + external-route reporting), ADR-0082
+covers Phase 2 M4.10 (routes.source_pack column — pack
+attribution + safe `sync-pack --prune-obsolete`). When you
 ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

@@ -57,6 +57,12 @@ export const RouteDefinitionSchema = z
       .string()
       .regex(/^[0-9a-f]{64}$/)
       .nullable(),
+    sourcePack: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)*$/)
+      .max(120)
+      .nullable()
+      .default(null),
   })
   .superRefine((r, ctx) => {
     if (r.isDeprecated && r.deprecatedSince === null) {

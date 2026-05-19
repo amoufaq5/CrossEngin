@@ -32,6 +32,7 @@ const PING_ROUTE: RouteDefinition = {
   idempotencyRequired: false,
   requestSchemaSha256: null,
   responseSchemaSha256: null,
+  sourcePack: null,
 };
 
 const HEALTH_ROUTE: RouteDefinition = {
@@ -49,6 +50,7 @@ const HEALTH_ROUTE: RouteDefinition = {
   idempotencyRequired: false,
   requestSchemaSha256: null,
   responseSchemaSha256: null,
+  sourcePack: null,
 };
 
 export const BUILTIN_ROUTES: readonly RouteDefinition[] = [PING_ROUTE, HEALTH_ROUTE];

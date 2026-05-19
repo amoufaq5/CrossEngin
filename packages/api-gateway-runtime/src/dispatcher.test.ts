@@ -25,6 +25,7 @@ function fixtureRoute(overrides: Partial<RouteDefinition> = {}): RouteDefinition
     idempotencyRequired: false,
     requestSchemaSha256: null,
     responseSchemaSha256: null,
+    sourcePack: null,
     ...overrides,
   };
 }

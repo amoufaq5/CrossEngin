@@ -8125,6 +8125,12 @@ export const META_GATEWAY_ROUTES: TableDefinition = {
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "source_pack",
+      type: "TEXT",
+      check:
+        "source_pack IS NULL OR source_pack ~ '^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)*$'",
+    },
   ],
   primaryKey: ["id"],
   uniqueConstraints: [
@@ -8145,6 +8151,10 @@ export const META_GATEWAY_ROUTES: TableDefinition = {
     {
       name: "idx_gateway_routes_created_by",
       columns: ["created_by"],
+    },
+    {
+      name: "idx_gateway_routes_source_pack",
+      columns: ["source_pack"],
     },
   ],
 };
