@@ -1418,6 +1418,171 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — createBatch (M2.X.5.aa.z.6)", () => {
+  function minimalCreate() {
+    return {
+      jobName: "tenant-x-batch-0001",
+      modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockBatchRole",
+      inputDataConfig: { s3InputDataConfig: { s3Uri: "s3://bucket/in/" } },
+      outputDataConfig: { s3OutputDataConfig: { s3Uri: "s3://bucket/out/" } },
+    };
+  }
+
+  it("POSTs control-plane /model-invocation-jobs with the JSON body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          jobArn:
+            "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/aaaa1111bbbb",
+        }),
+      }),
+    });
+    const out = await provider.createBatch(minimalCreate());
+    expect(capture.url).toBe(
+      "https://bedrock.us-east-1.amazonaws.com/model-invocation-jobs",
+    );
+    expect(capture.init?.method).toBe("POST");
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+    const sentBody = JSON.parse(
+      new TextDecoder().decode(capture.init?.body),
+    ) as Record<string, unknown>;
+    expect(sentBody["jobName"]).toBe("tenant-x-batch-0001");
+    expect(sentBody["modelId"]).toBe("anthropic.claude-3-5-sonnet-20241022-v2:0");
+    expect(out.jobArn).toMatch(/aaaa1111bbbb$/);
+  });
+
+  it("validates input BEFORE fetch — bad jobName never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createBatch({ ...minimalCreate(), jobName: "bad name" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates input BEFORE fetch — bad roleArn never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createBatch({ ...minimalCreate(), roleArn: "not-an-arn" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("threads optional fields into the body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          jobArn:
+            "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
+        }),
+      }),
+    });
+    await provider.createBatch({
+      ...minimalCreate(),
+      clientRequestToken: "req-001-abc",
+      tags: [{ key: "tenant", value: "x" }],
+      timeoutDurationInHours: 48,
+      vpcConfig: { subnetIds: ["s-1"], securityGroupIds: ["sg-1"] },
+    });
+    const sentBody = JSON.parse(
+      new TextDecoder().decode(capture.init?.body),
+    ) as Record<string, unknown>;
+    expect(sentBody["clientRequestToken"]).toBe("req-001-abc");
+    expect(sentBody["tags"]).toEqual([{ key: "tenant", value: "x" }]);
+    expect(sentBody["timeoutDurationInHours"]).toBe(48);
+  });
+
+  it("propagates 409 ConflictException via .code field (idempotency token reuse)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "jobName already exists",
+        }),
+      }),
+    });
+    await expect(provider.createBatch(minimalCreate())).rejects.toMatchObject({
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 400 ValidationException as invalid_request_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 400,
+        text: JSON.stringify({
+          __type: "ValidationException",
+          message: "role does not have s3:GetObject permission",
+        }),
+      }),
+    });
+    await expect(provider.createBatch(minimalCreate())).rejects.toMatchObject({
+      kind: "invalid_request_error",
+      status: 400,
+    });
+  });
+
+  it("throws api_error when response has no jobArn", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: JSON.stringify({ ok: true }) }),
+    });
+    await expect(provider.createBatch(minimalCreate())).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: "<html>oops</html>" }),
+    });
+    await expect(provider.createBatch(minimalCreate())).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.createBatch(minimalCreate())).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — stopBatch (M2.X.5.aa.z.5)", () => {
   it("POSTs control-plane /model-invocation-jobs/{id}/stop with empty body", async () => {
     const capture: FetchCapture = { url: null, init: null };

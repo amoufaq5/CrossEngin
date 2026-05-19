@@ -2,17 +2,25 @@ import { describe, expect, it } from "vitest";
 
 import {
   BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN,
+  BEDROCK_BATCH_JOB_NAME_MAX_LEN,
   BEDROCK_BATCH_JOB_STATUSES,
   BEDROCK_BATCH_LIST_MAX_RESULTS_MAX,
   BEDROCK_BATCH_LIST_MAX_RESULTS_MIN,
+  BEDROCK_BATCH_MAX_TAGS,
   BEDROCK_BATCH_NAME_CONTAINS_MAX_LEN,
   BEDROCK_BATCH_SORT_BY_VALUES,
   BEDROCK_BATCH_SORT_ORDER_VALUES,
+  BEDROCK_BATCH_TIMEOUT_HOURS_MAX,
+  BEDROCK_BATCH_TIMEOUT_HOURS_MIN,
+  BEDROCK_BATCH_VPC_MAX_ENTRIES,
   buildBatchListQuery,
+  buildCreateBatchBody,
   isBedrockBatchJobIdentifier,
   isBedrockBatchJobStatus,
   parseBatchJobDetail,
   parseBatchListResponse,
+  parseCreateBatchResponse,
+  type BedrockCreateBatchInput,
 } from "./batch-api.js";
 import { BedrockError } from "./errors.js";
 
@@ -431,5 +439,269 @@ describe("parseBatchJobDetail", () => {
   it("rejects unknown status", () => {
     const bad = { ...(sampleDetail() as Record<string, unknown>), status: "Queued" };
     expect(() => parseBatchJobDetail(bad)).toThrow(/unknown job status/);
+  });
+});
+
+describe("buildCreateBatchBody", () => {
+  function minimalInput(
+    overrides: Partial<BedrockCreateBatchInput> = {},
+  ): BedrockCreateBatchInput {
+    return {
+      jobName: "tenant-x-batch-0001",
+      modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockBatchRole",
+      inputDataConfig: { s3InputDataConfig: { s3Uri: "s3://bucket/input/" } },
+      outputDataConfig: { s3OutputDataConfig: { s3Uri: "s3://bucket/output/" } },
+      ...overrides,
+    };
+  }
+
+  it("emits a minimal JSON body without optional fields", () => {
+    const body = JSON.parse(buildCreateBatchBody(minimalInput())) as Record<
+      string,
+      unknown
+    >;
+    expect(body["jobName"]).toBe("tenant-x-batch-0001");
+    expect(body["modelId"]).toBe("anthropic.claude-3-5-sonnet-20241022-v2:0");
+    expect(body["roleArn"]).toMatch(/^arn:aws:iam::/);
+    expect(body["clientRequestToken"]).toBeUndefined();
+    expect(body["tags"]).toBeUndefined();
+    expect(body["timeoutDurationInHours"]).toBeUndefined();
+    expect(body["vpcConfig"]).toBeUndefined();
+  });
+
+  it("emits a full body when all optional fields supplied", () => {
+    const body = JSON.parse(
+      buildCreateBatchBody(
+        minimalInput({
+          clientRequestToken: "req-001-abc",
+          tags: [{ key: "tenant", value: "x" }],
+          timeoutDurationInHours: 48,
+          vpcConfig: {
+            subnetIds: ["subnet-1"],
+            securityGroupIds: ["sg-1"],
+          },
+        }),
+      ),
+    ) as Record<string, unknown>;
+    expect(body["clientRequestToken"]).toBe("req-001-abc");
+    expect(body["tags"]).toEqual([{ key: "tenant", value: "x" }]);
+    expect(body["timeoutDurationInHours"]).toBe(48);
+    expect((body["vpcConfig"] as { subnetIds: string[] }).subnetIds).toEqual([
+      "subnet-1",
+    ]);
+  });
+
+  it("rejects jobName length / pattern violations", () => {
+    expect(() => buildCreateBatchBody(minimalInput({ jobName: "" }))).toThrow(
+      /jobName/,
+    );
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ jobName: "x".repeat(BEDROCK_BATCH_JOB_NAME_MAX_LEN + 1) }),
+      ),
+    ).toThrow(/jobName/);
+    expect(() => buildCreateBatchBody(minimalInput({ jobName: "bad name" }))).toThrow(
+      /jobName/,
+    );
+    expect(() => buildCreateBatchBody(minimalInput({ jobName: "-leading-hyphen" }))).toThrow(
+      /jobName/,
+    );
+  });
+
+  it("rejects empty / over-long modelId", () => {
+    expect(() => buildCreateBatchBody(minimalInput({ modelId: "" }))).toThrow(
+      /modelId/,
+    );
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ modelId: "x".repeat(2049) })),
+    ).toThrow(/modelId/);
+  });
+
+  it("rejects malformed roleArn", () => {
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ roleArn: "not-an-arn" })),
+    ).toThrow(/roleArn/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          roleArn: "arn:aws:s3:::my-bucket",
+        }),
+      ),
+    ).toThrow(/roleArn/);
+  });
+
+  it("accepts aws-us-gov / aws-cn IAM role ARNs", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          roleArn: "arn:aws-us-gov:iam::123456789012:role/BedrockBatchRole",
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          roleArn: "arn:aws-cn:iam::123456789012:role/BedrockBatchRole",
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects non-s3 input/output URIs", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          inputDataConfig: { s3InputDataConfig: { s3Uri: "https://example.com/" } },
+        }),
+      ),
+    ).toThrow(/inputDataConfig/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          outputDataConfig: {
+            s3OutputDataConfig: { s3Uri: "/local/path" },
+          },
+        }),
+      ),
+    ).toThrow(/outputDataConfig/);
+  });
+
+  it("rejects unknown s3InputFormat values", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          inputDataConfig: {
+            s3InputDataConfig: {
+              s3Uri: "s3://b/in/",
+              s3InputFormat: "CSV",
+            },
+          },
+        }),
+      ),
+    ).toThrow(/s3InputFormat/);
+  });
+
+  it("accepts the JSONL s3InputFormat", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          inputDataConfig: {
+            s3InputDataConfig: { s3Uri: "s3://b/in/", s3InputFormat: "JSONL" },
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects clientRequestToken length / pattern violations", () => {
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ clientRequestToken: "" })),
+    ).toThrow(/clientRequestToken/);
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ clientRequestToken: "bad token" })),
+    ).toThrow(/clientRequestToken/);
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ clientRequestToken: "x".repeat(257) })),
+    ).toThrow(/clientRequestToken/);
+  });
+
+  it("rejects timeoutDurationInHours out of [24, 168]", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ timeoutDurationInHours: BEDROCK_BATCH_TIMEOUT_HOURS_MIN - 1 }),
+      ),
+    ).toThrow(/timeoutDurationInHours/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ timeoutDurationInHours: BEDROCK_BATCH_TIMEOUT_HOURS_MAX + 1 }),
+      ),
+    ).toThrow(/timeoutDurationInHours/);
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ timeoutDurationInHours: 24.5 })),
+    ).toThrow(/timeoutDurationInHours/);
+  });
+
+  it("accepts timeoutDurationInHours at min + max", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ timeoutDurationInHours: BEDROCK_BATCH_TIMEOUT_HOURS_MIN }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ timeoutDurationInHours: BEDROCK_BATCH_TIMEOUT_HOURS_MAX }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects too many tags", () => {
+    const tooMany = Array.from({ length: BEDROCK_BATCH_MAX_TAGS + 1 }, (_, i) => ({
+      key: `k${i.toString()}`,
+      value: "v",
+    }));
+    expect(() => buildCreateBatchBody(minimalInput({ tags: tooMany }))).toThrow(
+      /tags/,
+    );
+  });
+
+  it("rejects tag key / value length violations", () => {
+    expect(() =>
+      buildCreateBatchBody(minimalInput({ tags: [{ key: "", value: "v" }] })),
+    ).toThrow(/tag key/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ tags: [{ key: "x".repeat(129), value: "v" }] }),
+      ),
+    ).toThrow(/tag key/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ tags: [{ key: "k", value: "x".repeat(257) }] }),
+      ),
+    ).toThrow(/tag value/);
+  });
+
+  it("rejects vpcConfig with empty / oversized subnet / sg lists", () => {
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ vpcConfig: { subnetIds: [], securityGroupIds: ["sg-1"] } }),
+      ),
+    ).toThrow(/subnetIds/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({
+          vpcConfig: {
+            subnetIds: Array.from({ length: BEDROCK_BATCH_VPC_MAX_ENTRIES + 1 }, (_, i) => `s${i.toString()}`),
+            securityGroupIds: ["sg-1"],
+          },
+        }),
+      ),
+    ).toThrow(/subnetIds/);
+    expect(() =>
+      buildCreateBatchBody(
+        minimalInput({ vpcConfig: { subnetIds: ["s-1"], securityGroupIds: [] } }),
+      ),
+    ).toThrow(/securityGroupIds/);
+  });
+});
+
+describe("parseCreateBatchResponse", () => {
+  it("parses a {jobArn} response", () => {
+    const out = parseCreateBatchResponse({
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
+    });
+    expect(out.jobArn).toMatch(/abcd1234efgh$/);
+  });
+
+  it("rejects missing or non-string jobArn", () => {
+    expect(() => parseCreateBatchResponse({})).toThrow(/jobArn/);
+    expect(() => parseCreateBatchResponse({ jobArn: 42 })).toThrow(/jobArn/);
+    expect(() => parseCreateBatchResponse({ jobArn: "" })).toThrow(/jobArn/);
+  });
+
+  it("rejects non-object response", () => {
+    expect(() => parseCreateBatchResponse(null)).toThrow(/not a JSON object/);
+    expect(() => parseCreateBatchResponse("oops")).toThrow(/not a JSON object/);
   });
 });

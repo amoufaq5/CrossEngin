@@ -18,15 +18,56 @@ M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
-M2.X.5.aa.z.5 + M2.X.6 +
+M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,920 tests**,
-all green, no type errors. M2.X.5.aa.z.5 ships
+**55 packages + 1 app, 119 meta-schema tables, 6,947 tests**,
+all green, no type errors. M2.X.5.aa.z.6 closes the Bedrock
+batch CRUD with `BedrockProvider.createBatch(input)` against
+AWS's `CreateModelInvocationJob` endpoint. All four documented
+batch operations (list + get + stop + create) now have
+provider methods. Operators can detect runaway jobs, stop
+them, fix inputs, and relaunch — all through the kernel.
+`buildCreateBatchBody(input)` is a pure exported boundary-
+validator enforcing 14 documented AWS constraints BEFORE any
+fetch: jobName pattern [a-zA-Z0-9](-*[a-zA-Z0-9])* length
+1-63, modelId length 1-2048 (no pattern — AWS accepts base
+IDs / ARNs / inference profile IDs / custom model ARNs / etc.),
+roleArn AWS-partition-aware IAM-role pattern, s3Uri scheme
+^s3://[a-z0-9.\-_]{1,255}/.* on both input + output,
+s3InputFormat whitelist (only "JSONL"), clientRequestToken
+shape + length 1-256, timeoutDurationInHours integer in
+[24, 168], tags count ≤ 200 + key length 1-128 + value
+length 0-256, vpcConfig.subnetIds + securityGroupIds counts
+in [1, 16]. All ARN patterns AWS-partition-aware (aws,
+aws-us-gov, aws-cn). `parseCreateBatchResponse(raw)` is
+strict — `{jobArn}` only; missing / empty / non-string
+throws api_error. AWS's create response really is just the
+ARN — operators wanting fuller state call getBatch
+immediately after. `signedControlPlanePost` widened from
+M2.X.5.aa.z.5: now accepts `{path, body?}` with default empty
+body; stopBatch's call unchanged (backwards-compatible).
+Error mapping: 200 + {jobArn} → resolve, 400
+ValidationException → invalid_request_error (e.g., role
+lacks s3:GetObject), 403 → permission_error, 429 →
+rate_limit_error, 409 ConflictException (jobName already
+exists OR clientRequestToken reused with different payload)
+→ kind: "unknown_error" + code: "ConflictException" (same as
+M2.X.5.aa.z.5; dedicated conflict_error kernel kind now
+justified by TWO 409-emitting endpoints — proposed as
+M2.X.12). Operators get idempotency via clientRequestToken
+(re-submitting same payload + same token returns same job
+ARN), cost attribution via tags (threading tenant / purpose
+/ cost-center to AWS Cost Explorer), and VPC-scoped batch
+jobs (subnets + security groups). Boundary-validation pattern
+set for future POST-with-body control-plane writes
+(createGuardrail, createInferenceProfile, etc.) — pure body-
+builder + exported response parser + provider thin wrapper.
+M2.X.5.aa.z.5 ships
 `BedrockProvider.stopBatch(jobIdentifier)` against AWS's
 `StopModelInvocationJob` endpoint, completing the read/write
 split on the batch surface (3 of 4 batch operations now
@@ -1503,7 +1544,12 @@ failure-diagnostic workflows unblocked), ADR-0107 covers
 M2.X.5.aa.z.5 (Bedrock batch inference stopBatch — completes
 the batch read/write split; new signedControlPlanePost helper;
 cost-runaway + tenant-offboarding + compliance-kill-switch
-workflows unblocked).
+workflows unblocked), ADR-0108 covers M2.X.5.aa.z.6 (Bedrock
+batch inference createBatch — closes the four-endpoint batch
+CRUD surface; pure boundary validator buildCreateBatchBody
+enforces 14 documented AWS constraints; idempotency via
+clientRequestToken; cost attribution via tags; VPC-scoped
+batch jobs supported).
 
 ## Architecture in 90 seconds
 
@@ -1716,14 +1762,17 @@ re-exporting everything.
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
   classes), provider (BedrockProvider with complete +
   completeNonStreaming + embed + embedMultimodal + listBatches
-  + getBatch + stopBatch — embed dispatches on family, loops
-  over Titan or batches Cohere; listBatches GETs the control-
-  plane host with sig v4 + sorted query string via
+  + getBatch + stopBatch + createBatch — embed dispatches on
+  family, loops over Titan or batches Cohere; listBatches GETs
+  the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
   via regex BEFORE the fetch then GETs /model-invocation-jobs/
   {encoded}; stopBatch POSTs an empty body to
-  /model-invocation-jobs/{encoded}/stop via the new
-  signedControlPlanePost helper). Capabilities:
+  /model-invocation-jobs/{encoded}/stop via
+  signedControlPlanePost; createBatch validates the full input
+  body via buildCreateBatchBody (14 documented AWS constraints)
+  BEFORE the fetch then POSTs to /model-invocation-jobs).
+  Capabilities:
   `{chat: true, streaming: true, toolUse: true, jsonMode: false,
   embedding: true, maxContextTokens: 200_000}`. The router has
   THREE real chat providers to chain — Anthropic + OpenAI + AWS
@@ -2540,7 +2589,14 @@ batch operation, completing read/write split; new
 signedControlPlanePost transport rail for empty-body POSTs;
 409 ConflictException surfaces via `.code` field — dedicated
 conflict_error kernel kind deferred until a second 409-emitting
-endpoint lands).
+endpoint lands), ADR-0108 covers Phase 2 M2.X.5.aa.z.6
+(Bedrock batch inference createBatch — fourth batch operation
+closing the CRUD surface; pure boundary-validator
+buildCreateBatchBody enforces 14 documented AWS constraints
+fast-fail at the boundary; signedControlPlanePost widened to
+accept an optional body; second 409-emitting endpoint now
+justifies a dedicated conflict_error kernel kind, proposed
+as M2.X.12).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

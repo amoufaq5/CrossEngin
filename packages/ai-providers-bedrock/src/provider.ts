@@ -11,11 +11,15 @@ import type {
 
 import {
   buildBatchListQuery,
+  buildCreateBatchBody,
   isBedrockBatchJobIdentifier,
   parseBatchJobDetail,
   parseBatchListResponse,
+  parseCreateBatchResponse,
   type BedrockBatchJobDetail,
   type BedrockBatchJobListResponse,
+  type BedrockCreateBatchInput,
+  type BedrockCreateBatchResponse,
   type BedrockListBatchesOptions,
 } from "./batch-api.js";
 import {
@@ -559,6 +563,27 @@ export class BedrockProvider implements LlmProvider {
     return parseBatchJobDetail(raw);
   }
 
+  async createBatch(
+    input: BedrockCreateBatchInput,
+  ): Promise<BedrockCreateBatchResponse> {
+    const bodyStr = buildCreateBatchBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const text = await this.signedControlPlanePost({
+      path: "/model-invocation-jobs",
+      body,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `createBatch: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseCreateBatchResponse(raw);
+  }
+
   async stopBatch(jobIdentifier: string): Promise<void> {
     if (!isBedrockBatchJobIdentifier(jobIdentifier)) {
       throw new BedrockError({
@@ -640,9 +665,10 @@ export class BedrockProvider implements LlmProvider {
 
   private async signedControlPlanePost(input: {
     readonly path: string;
+    readonly body?: Uint8Array;
   }): Promise<string> {
     const host = new URL(this.controlPlaneBaseUrl).host;
-    const body = new Uint8Array(0);
+    const body = input.body ?? new Uint8Array(0);
     const signed = signRequest({
       method: "POST",
       host,

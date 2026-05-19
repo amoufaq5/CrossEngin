@@ -225,6 +225,194 @@ export function parseBatchJobDetail(raw: unknown): BedrockBatchJobDetail {
   return parseBatchJobSummary(raw);
 }
 
+export const BEDROCK_BATCH_JOB_NAME_PATTERN = /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_BATCH_JOB_NAME_MAX_LEN = 63;
+export const BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_PATTERN =
+  /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_MAX_LEN = 256;
+export const BEDROCK_BATCH_ROLE_ARN_PATTERN =
+  /^arn:aws(?:-[^:]+)?:iam::[0-9]{12}:role\/.+$/;
+export const BEDROCK_BATCH_S3_URI_PATTERN = /^s3:\/\/[a-z0-9.\-_]{1,255}\/.*$/;
+export const BEDROCK_BATCH_S3_INPUT_FORMAT_VALUES = ["JSONL"] as const;
+export type BedrockBatchS3InputFormat =
+  (typeof BEDROCK_BATCH_S3_INPUT_FORMAT_VALUES)[number];
+export const BEDROCK_BATCH_TIMEOUT_HOURS_MIN = 24;
+export const BEDROCK_BATCH_TIMEOUT_HOURS_MAX = 168;
+export const BEDROCK_BATCH_MODEL_ID_MAX_LEN = 2048;
+export const BEDROCK_BATCH_MAX_TAGS = 200;
+export const BEDROCK_BATCH_TAG_KEY_MAX_LEN = 128;
+export const BEDROCK_BATCH_TAG_VALUE_MAX_LEN = 256;
+export const BEDROCK_BATCH_VPC_MAX_ENTRIES = 16;
+
+export interface BedrockBatchTag {
+  readonly key: string;
+  readonly value: string;
+}
+
+export interface BedrockCreateBatchInput {
+  readonly jobName: string;
+  readonly modelId: string;
+  readonly roleArn: string;
+  readonly inputDataConfig: BedrockBatchS3InputDataConfig;
+  readonly outputDataConfig: BedrockBatchS3OutputDataConfig;
+  readonly clientRequestToken?: string;
+  readonly tags?: ReadonlyArray<BedrockBatchTag>;
+  readonly timeoutDurationInHours?: number;
+  readonly vpcConfig?: BedrockBatchVpcConfig;
+}
+
+export interface BedrockCreateBatchResponse {
+  readonly jobArn: string;
+}
+
+export function buildCreateBatchBody(input: BedrockCreateBatchInput): string {
+  if (
+    input.jobName.length < 1 ||
+    input.jobName.length > BEDROCK_BATCH_JOB_NAME_MAX_LEN ||
+    !BEDROCK_BATCH_JOB_NAME_PATTERN.test(input.jobName)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createBatch: invalid jobName '${input.jobName}'`,
+    });
+  }
+  if (input.modelId.length < 1 || input.modelId.length > BEDROCK_BATCH_MODEL_ID_MAX_LEN) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createBatch: modelId length must be in [1, ${BEDROCK_BATCH_MODEL_ID_MAX_LEN.toString()}], got ${input.modelId.length.toString()}`,
+    });
+  }
+  if (!BEDROCK_BATCH_ROLE_ARN_PATTERN.test(input.roleArn)) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createBatch: invalid roleArn '${input.roleArn}'`,
+    });
+  }
+  const inputUri = input.inputDataConfig.s3InputDataConfig.s3Uri;
+  if (!BEDROCK_BATCH_S3_URI_PATTERN.test(inputUri)) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createBatch: invalid inputDataConfig.s3InputDataConfig.s3Uri '${inputUri}'`,
+    });
+  }
+  const inputFormat = input.inputDataConfig.s3InputDataConfig.s3InputFormat;
+  if (
+    inputFormat !== undefined &&
+    !(BEDROCK_BATCH_S3_INPUT_FORMAT_VALUES as readonly string[]).includes(inputFormat)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createBatch: invalid s3InputFormat '${inputFormat}'`,
+    });
+  }
+  const outputUri = input.outputDataConfig.s3OutputDataConfig.s3Uri;
+  if (!BEDROCK_BATCH_S3_URI_PATTERN.test(outputUri)) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createBatch: invalid outputDataConfig.s3OutputDataConfig.s3Uri '${outputUri}'`,
+    });
+  }
+  if (input.clientRequestToken !== undefined) {
+    if (
+      input.clientRequestToken.length < 1 ||
+      input.clientRequestToken.length > BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_MAX_LEN ||
+      !BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_PATTERN.test(input.clientRequestToken)
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createBatch: invalid clientRequestToken`,
+      });
+    }
+  }
+  if (input.timeoutDurationInHours !== undefined) {
+    if (
+      !Number.isInteger(input.timeoutDurationInHours) ||
+      input.timeoutDurationInHours < BEDROCK_BATCH_TIMEOUT_HOURS_MIN ||
+      input.timeoutDurationInHours > BEDROCK_BATCH_TIMEOUT_HOURS_MAX
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createBatch: timeoutDurationInHours must be an integer in [${BEDROCK_BATCH_TIMEOUT_HOURS_MIN.toString()}, ${BEDROCK_BATCH_TIMEOUT_HOURS_MAX.toString()}], got ${input.timeoutDurationInHours.toString()}`,
+      });
+    }
+  }
+  if (input.tags !== undefined) {
+    if (input.tags.length > BEDROCK_BATCH_MAX_TAGS) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createBatch: tags count must be ≤ ${BEDROCK_BATCH_MAX_TAGS.toString()}, got ${input.tags.length.toString()}`,
+      });
+    }
+    for (const tag of input.tags) {
+      if (tag.key.length < 1 || tag.key.length > BEDROCK_BATCH_TAG_KEY_MAX_LEN) {
+        throw new BedrockError({
+          kind: "invalid_request_error",
+          message: `createBatch: tag key length must be in [1, ${BEDROCK_BATCH_TAG_KEY_MAX_LEN.toString()}]`,
+        });
+      }
+      if (tag.value.length > BEDROCK_BATCH_TAG_VALUE_MAX_LEN) {
+        throw new BedrockError({
+          kind: "invalid_request_error",
+          message: `createBatch: tag value length must be ≤ ${BEDROCK_BATCH_TAG_VALUE_MAX_LEN.toString()}`,
+        });
+      }
+    }
+  }
+  if (input.vpcConfig !== undefined) {
+    if (
+      input.vpcConfig.subnetIds.length === 0 ||
+      input.vpcConfig.subnetIds.length > BEDROCK_BATCH_VPC_MAX_ENTRIES
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createBatch: vpcConfig.subnetIds count must be in [1, ${BEDROCK_BATCH_VPC_MAX_ENTRIES.toString()}]`,
+      });
+    }
+    if (
+      input.vpcConfig.securityGroupIds.length === 0 ||
+      input.vpcConfig.securityGroupIds.length > BEDROCK_BATCH_VPC_MAX_ENTRIES
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createBatch: vpcConfig.securityGroupIds count must be in [1, ${BEDROCK_BATCH_VPC_MAX_ENTRIES.toString()}]`,
+      });
+    }
+  }
+  const body: Record<string, unknown> = {
+    jobName: input.jobName,
+    modelId: input.modelId,
+    roleArn: input.roleArn,
+    inputDataConfig: input.inputDataConfig,
+    outputDataConfig: input.outputDataConfig,
+  };
+  if (input.clientRequestToken !== undefined) {
+    body["clientRequestToken"] = input.clientRequestToken;
+  }
+  if (input.tags !== undefined) body["tags"] = input.tags;
+  if (input.timeoutDurationInHours !== undefined) {
+    body["timeoutDurationInHours"] = input.timeoutDurationInHours;
+  }
+  if (input.vpcConfig !== undefined) body["vpcConfig"] = input.vpcConfig;
+  return JSON.stringify(body);
+}
+
+export function parseCreateBatchResponse(raw: unknown): BedrockCreateBatchResponse {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "createBatch: response is not a JSON object",
+    });
+  }
+  const obj = raw as { jobArn?: unknown };
+  if (typeof obj.jobArn !== "string" || obj.jobArn.length === 0) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "createBatch: response missing jobArn",
+    });
+  }
+  return { jobArn: obj.jobArn };
+}
+
 export function parseBatchJobSummary(raw: unknown): BedrockBatchJobSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
