@@ -1418,6 +1418,134 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — listImportedModels (M2.X.5.aa.z.11)", () => {
+  function listBody(opts: {
+    items?: ReadonlyArray<Record<string, unknown>>;
+    nextToken?: string;
+  }): string {
+    const body: Record<string, unknown> = { modelSummaries: opts.items ?? [] };
+    if (opts.nextToken !== undefined) body["nextToken"] = opts.nextToken;
+    return JSON.stringify(body);
+  }
+
+  function sampleImportedModel(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      modelArn:
+        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
+      modelName: "tenant-x-llama3-finetune",
+      creationTime: "2026-04-15T12:00:00Z",
+      instructSupported: true,
+      modelArchitecture: "LLAMA3",
+      ...overrides,
+    };
+  }
+
+  it("GETs the control-plane /imported-models endpoint with sig v4 headers", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listImportedModels();
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+    expect(capture.url).toContain("/imported-models");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("zero-arg call emits no query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listImportedModels();
+    expect(capture.url).not.toContain("?");
+  });
+
+  it("threads query parameters into the URL", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listImportedModels({
+      nameContains: "tenant-x",
+      maxResults: 50,
+      sortBy: "CreationTime",
+      sortOrder: "Descending",
+    });
+    expect(capture.url).toContain("nameContains=tenant-x");
+    expect(capture.url).toContain("maxResults=50");
+    expect(capture.url).toContain("sortBy=CreationTime");
+    expect(capture.url).toContain("sortOrder=Descending");
+  });
+
+  it("parses a response with one model + nextToken", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: listBody({ items: [sampleImportedModel()], nextToken: "page-2" }),
+      }),
+    });
+    const out = await provider.listImportedModels();
+    expect(out.modelSummaries.length).toBe(1);
+    expect(out.modelSummaries[0]!.modelName).toBe("tenant-x-llama3-finetune");
+    expect(out.modelSummaries[0]!.instructSupported).toBe(true);
+    expect(out.modelSummaries[0]!.modelArchitecture).toBe("LLAMA3");
+    expect(out.nextToken).toBe("page-2");
+  });
+
+  it("validates options BEFORE fetch — bad nameContains never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listImportedModels({ nameContains: "" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.listImportedModels()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(provider.listImportedModels()).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.listImportedModels()).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — getInferenceProfile (M2.X.5.aa.z.10)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({

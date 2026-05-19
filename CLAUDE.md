@@ -19,15 +19,44 @@ M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
-M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.6 +
+M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,048 tests**,
-all green, no type errors. M2.X.5.aa.z.10 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,081 tests**,
+all green, no type errors. M2.X.5.aa.z.11 ships
+`BedrockProvider.listImportedModels(options?)` against AWS's
+`ListImportedModels` endpoint — the fourth paginated
+control-plane enumeration after listBatches / listGuardrails /
+listInferenceProfiles. Custom Model Import lets customers
+upload model artifacts (weights, tokenizer, config) from S3
+and serve them through Bedrock alongside foundation models;
+listImportedModels enumerates them for inventory + architecture-
+aware routing + instruct-tuned discoverability + tenant cleanup
+workflows. New module `imported-models-api.ts` exports 7
+boundary-validation constants (maxResults bounds, nameContains
+length bounds, sortBy + sortOrder tuples),
+`BedrockImportedModelSummary` (5 required fields — modelArn,
+modelName, creationTime, instructSupported,
+modelArchitecture), `BedrockImportedModelListResponse`,
+`buildImportedModelListQuery` pure boundary-validator
+(creationTimeBefore/After ISO 8601 parseable, nameContains
+length [1, 63], maxResults integer in [1, 1000], nextToken
+non-empty, sortBy/sortOrder against tuples), and
+`parseImportedModelListResponse` + `parseImportedModelSummary`
+strict parsers. Validation discipline: modelArchitecture
+preserved as raw string (AWS adds new architectures —
+LLAMA2/LLAMA3/MISTRAL/FLAN/... — quarterly; strict enum
+would be perpetually stale), instructSupported strict boolean
+(catches API drift early). Provider reuses the existing
+signedControlPlaneGet rail. Pattern stable across 4 paginated
+enumerations now; adding listCustomModels /
+listMarketplaceModelEndpoints is mechanical. Bedrock module
+count up to 13; control-plane surface up to 9 of N
+operations. M2.X.5.aa.z.10 ships
 `BedrockProvider.getInferenceProfile(profileIdentifier)` — the
 single-resource lookup companion to listInferenceProfiles.
 AWS returns the SAME wire shape for GetInferenceProfile as a
@@ -1696,7 +1725,10 @@ inference profiles; SYSTEM_DEFINED vs APPLICATION type
 distinction; pagination pattern now mechanical), ADR-0112
 covers M2.X.5.aa.z.10 (Bedrock getInferenceProfile — detail
 companion to listInferenceProfiles via type-alias pattern;
-log-driven + webhook-driven lookup workflows unblocked).
+log-driven + webhook-driven lookup workflows unblocked),
+ADR-0113 covers M2.X.5.aa.z.11 (Bedrock listImportedModels —
+fourth paginated control-plane enumeration; custom-imported
+model inventory + architecture-aware routing).
 
 ## Architecture in 90 seconds
 
@@ -1910,8 +1942,8 @@ re-exporting everything.
   classes), provider (BedrockProvider with complete +
   completeNonStreaming + embed + embedMultimodal + listBatches
   + getBatch + stopBatch + createBatch + listGuardrails +
-  getGuardrail + listInferenceProfiles + getInferenceProfile —
-  embed dispatches on
+  getGuardrail + listInferenceProfiles + getInferenceProfile
+  + listImportedModels — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2772,7 +2804,13 @@ getInferenceProfile — detail companion mirroring the
 M2.X.5.aa.z.4 getBatch type-alias pattern;
 BedrockInferenceProfileDetail = BedrockInferenceProfileSummary
 since AWS returns identical shapes; both ID and ARN forms
-accepted as identifier).
+accepted as identifier), ADR-0113 covers Phase 2 M2.X.5.aa.z.11
+(Bedrock listImportedModels — fourth paginated control-plane
+enumeration; custom-imported model artifacts surfaced for
+inventory + architecture-aware routing + instruct-tuned
+discoverability + tenant cleanup; modelArchitecture preserved
+as raw string for forward-compat against AWS architecture
+additions).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
