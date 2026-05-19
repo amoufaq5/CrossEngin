@@ -20,15 +20,41 @@ M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
-M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 + M2.X.6 +
+M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
+M2.X.5.aa.z.15 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,157 tests**,
-all green, no type errors. M2.X.5.aa.z.14 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,192 tests**,
+all green, no type errors. M2.X.5.aa.z.15 ships
+`BedrockProvider.listModelImportJobs(options?)` against AWS's
+`ListModelImportJobs` endpoint — the sixth paginated control-
+plane enumeration. BedrockImportedModelDetail (M2.X.5.aa.z.12)
+surfaces a `jobArn` field; M2.X.5.aa.z.15 closes the gap by
+making those jobs enumerable. Pipeline-health monitoring
+("how many imports are InProgress / Completed / Failed?"),
+failure triage (statusEquals=Failed enumerates broken
+imports), and throughput analysis (time-range filters) now
+viable. New module `model-import-jobs-api.ts` exports
+`BEDROCK_MODEL_IMPORT_JOB_STATUSES` 3-value tuple (InProgress
+/ Completed / Failed — mixed case preserved verbatim;
+case-sensitive discriminator), boundary-validation constants,
+`BedrockModelImportJobSummary` (4 required + 4 optional
+fields where `importedModelArn` + `importedModelName` only
+populated post-success — AWS asymmetry mirrored verbatim),
+`BedrockModelImportJobListResponse`,
+`buildModelImportJobListQuery` pure boundary-validator (8
+optional parameters including the same time-range +
+nameContains + statusEquals + sortBy/sortOrder pattern as
+sibling enumerations), strict parsers. Provider reuses
+signedControlPlaneGet rail. Bedrock control-plane surface
+now has 13 of N operations; module count up to 15. Sixth
+paginated enumeration with the boundary-validator + strict-
+parser pattern — extremely stable across this many instances.
+M2.X.5.aa.z.14 ships
 `BedrockProvider.getCustomModel(modelIdentifier)` — the
 rich-detail companion to listCustomModels. Compliance teams +
 ML-ops engineers need 8 things the summary lacks: training-
@@ -1849,7 +1875,10 @@ distillation inventory; 8-parameter filter set is the largest
 yet), ADR-0116 covers M2.X.5.aa.z.14 (Bedrock getCustomModel
 with training/validation detail — third extended-shape detail
 instance; training/validation/output provenance + metrics +
-hyperparameters + distillation lineage all surfaced).
+hyperparameters + distillation lineage all surfaced),
+ADR-0117 covers M2.X.5.aa.z.15 (Bedrock listModelImportJobs —
+sixth paginated enumeration; pipeline-health monitoring +
+failure triage + throughput analysis unblocked).
 
 ## Architecture in 90 seconds
 
@@ -2065,7 +2094,7 @@ re-exporting everything.
   + getBatch + stopBatch + createBatch + listGuardrails +
   getGuardrail + listInferenceProfiles + getInferenceProfile
   + listImportedModels + getImportedModel + listCustomModels +
-  getCustomModel — embed dispatches on
+  getCustomModel + listModelImportJobs — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2956,7 +2985,13 @@ ValidationDataConfig / TrainingMetrics / ValidationMetric /
 TeacherModelConfig / DistillationConfig /
 CustomizationConfig; hyperParameters as Record<string, string>
 matching AWS's wire contract; strict finite-number validation
-on losses).
+on losses), ADR-0117 covers Phase 2 M2.X.5.aa.z.15 (Bedrock
+listModelImportJobs — sixth paginated control-plane
+enumeration; pairs with M2.X.5.aa.z.12's BedrockImportedModelDetail
+jobArn field; mixed-case 3-value status tuple
+InProgress|Completed|Failed; importedModelArn +
+importedModelName conditionally populated post-success per AWS
+documented behavior).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

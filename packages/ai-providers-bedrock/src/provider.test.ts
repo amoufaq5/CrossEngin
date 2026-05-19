@@ -1418,6 +1418,143 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — listModelImportJobs (M2.X.5.aa.z.15)", () => {
+  function listBody(opts: {
+    items?: ReadonlyArray<Record<string, unknown>>;
+    nextToken?: string;
+  }): string {
+    const body: Record<string, unknown> = {
+      modelImportJobSummaries: opts.items ?? [],
+    };
+    if (opts.nextToken !== undefined) body["nextToken"] = opts.nextToken;
+    return JSON.stringify(body);
+  }
+
+  function sampleJob(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobName: "import-tenant-x-2026-04-15",
+      status: "Completed",
+      creationTime: "2026-04-15T12:00:00Z",
+      lastModifiedTime: "2026-04-15T13:00:00Z",
+      endTime: "2026-04-15T13:00:00Z",
+      importedModelArn:
+        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc",
+      importedModelName: "tenant-x-llama3-finetune",
+      ...overrides,
+    };
+  }
+
+  it("GETs the control-plane /model-import-jobs endpoint with sig v4 headers", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listModelImportJobs();
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+    expect(capture.url).toContain("/model-import-jobs");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("zero-arg call emits no query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listModelImportJobs();
+    expect(capture.url).not.toContain("?");
+  });
+
+  it("threads query parameters into the URL", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listModelImportJobs({
+      nameContains: "tenant-x",
+      statusEquals: "Failed",
+      maxResults: 50,
+      sortBy: "CreationTime",
+      sortOrder: "Descending",
+    });
+    expect(capture.url).toContain("nameContains=tenant-x");
+    expect(capture.url).toContain("statusEquals=Failed");
+    expect(capture.url).toContain("maxResults=50");
+    expect(capture.url).toContain("sortBy=CreationTime");
+    expect(capture.url).toContain("sortOrder=Descending");
+  });
+
+  it("parses a response with one completed job + nextToken", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: listBody({ items: [sampleJob()], nextToken: "page-2" }),
+      }),
+    });
+    const out = await provider.listModelImportJobs();
+    expect(out.modelImportJobSummaries.length).toBe(1);
+    expect(out.modelImportJobSummaries[0]!.status).toBe("Completed");
+    expect(out.modelImportJobSummaries[0]!.importedModelName).toBe(
+      "tenant-x-llama3-finetune",
+    );
+    expect(out.nextToken).toBe("page-2");
+  });
+
+  it("validates options BEFORE fetch — bad statusEquals never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listModelImportJobs({ statusEquals: "RUNNING" as never }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.listModelImportJobs()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(provider.listModelImportJobs()).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.listModelImportJobs()).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — getCustomModel (M2.X.5.aa.z.14)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
