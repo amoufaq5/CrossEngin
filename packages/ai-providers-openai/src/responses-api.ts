@@ -1,4 +1,5 @@
 import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import { contentToText } from "@crossengin/ai-providers";
 
 import { computeChatUsageCost, type OpenAIChatModel } from "./pricing.js";
 
@@ -139,13 +140,13 @@ function splitMessages(messages: readonly LlmMessage[]): {
   const items: OpenAIResponsesInputItem[] = [];
   for (const m of messages) {
     if (m.role === "system") {
-      systemTexts.push(m.content);
+      systemTexts.push(contentToText(m.content));
       continue;
     }
     if (m.role === "user") {
       items.push({
         role: "user",
-        content: [{ type: "input_text", text: m.content }],
+        content: [{ type: "input_text", text: contentToText(m.content) }],
       });
       continue;
     }
@@ -154,12 +155,12 @@ function splitMessages(messages: readonly LlmMessage[]): {
       items.push({
         type: "function_call_output",
         call_id: m.toolCallId,
-        output: m.content,
+        output: contentToText(m.content),
       });
       continue;
     }
     // assistant
-    const text = m.content;
+    const text = contentToText(m.content);
     if (text.length > 0) {
       items.push({
         role: "assistant",

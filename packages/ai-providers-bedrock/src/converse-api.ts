@@ -1,10 +1,13 @@
 import type {
   CacheControl,
   CompletionRequest,
+  LlmContent,
+  LlmContentBlock,
   LlmMessage,
   LlmTool,
   Usage,
 } from "@crossengin/ai-providers";
+import { contentToText } from "@crossengin/ai-providers";
 
 import type { BedrockGuardrailConfig } from "./guardrails.js";
 import { buildBedrockUsage, type BedrockChatModel } from "./pricing.js";
@@ -161,7 +164,8 @@ export function buildBedrockConverseRequest(
   const messages: BedrockMessage[] = [];
   for (const m of req.messages) {
     if (m.role === "system") {
-      if (m.content.length > 0) systemBlocks.push({ text: m.content });
+      const text = contentToText(m.content);
+      if (text.length > 0) systemBlocks.push({ text });
       continue;
     }
     if (m.role === "tool") {
@@ -171,7 +175,7 @@ export function buildBedrockConverseRequest(
           {
             toolResult: {
               toolUseId: m.toolCallId ?? "",
-              content: [{ text: m.content }],
+              content: [{ text: contentToText(m.content) }],
               status: "success",
             },
           },
@@ -181,9 +185,7 @@ export function buildBedrockConverseRequest(
     }
     if (m.role === "user") {
       const userBlocks: BedrockContentBlock[] = [];
-      if (m.content.length > 0) {
-        userBlocks.push({ text: m.content });
-      }
+      appendKernelBlocks(userBlocks, m.content);
       for (const a of m.attachments ?? []) {
         if (a.kind === "image") {
           userBlocks.push({
@@ -195,7 +197,7 @@ export function buildBedrockConverseRequest(
         }
       }
       if (userBlocks.length === 0) {
-        userBlocks.push({ text: m.content });
+        userBlocks.push({ text: "" });
       }
       messages.push({ role: "user", content: userBlocks });
       continue;
@@ -255,7 +257,7 @@ function appendCachePoint(m: BedrockMessage): BedrockMessage {
 
 function translateAssistantMessage(m: LlmMessage): BedrockMessage {
   const content: BedrockContentBlock[] = [];
-  if (m.content.length > 0) content.push({ text: m.content });
+  appendKernelBlocks(content, m.content);
   if (m.toolUses !== undefined) {
     for (const u of m.toolUses) {
       content.push({
@@ -263,7 +265,31 @@ function translateAssistantMessage(m: LlmMessage): BedrockMessage {
       });
     }
   }
+  if (content.length === 0) content.push({ text: "" });
   return { role: "assistant", content };
+}
+
+function appendKernelBlocks(
+  out: BedrockContentBlock[],
+  content: LlmContent,
+): void {
+  if (typeof content === "string") {
+    if (content.length > 0) out.push({ text: content });
+    return;
+  }
+  for (const b of content) {
+    out.push(translateKernelBlock(b));
+  }
+}
+
+function translateKernelBlock(block: LlmContentBlock): BedrockContentBlock {
+  if (block.type === "text") return { text: block.text };
+  return {
+    image: {
+      format: block.format,
+      source: { bytes: block.bytes },
+    },
+  };
 }
 
 function translateTool(tool: LlmTool): BedrockToolSpec {

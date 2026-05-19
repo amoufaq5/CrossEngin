@@ -1,4 +1,12 @@
-import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import type {
+  CompletionRequest,
+  LlmContent,
+  LlmContentBlock,
+  LlmMessage,
+  LlmTool,
+  Usage,
+} from "@crossengin/ai-providers";
+import { contentToText } from "@crossengin/ai-providers";
 
 import { computeUsageCost, type AnthropicModel } from "./pricing.js";
 
@@ -110,7 +118,7 @@ function splitSystem(
     if (m.role === "system") {
       const block: AnthropicSystemBlock = {
         type: "text",
-        text: m.content,
+        text: contentToText(m.content),
         ...(systemCacheKey !== undefined ? { cache_control: { type: "ephemeral" } } : {}),
       };
       systemBlocks.push(block);
@@ -118,14 +126,12 @@ function splitSystem(
     }
     if (m.role === "user") {
       const attachments = m.attachments ?? [];
-      if (attachments.length === 0) {
+      if (attachments.length === 0 && typeof m.content === "string") {
         conversation.push({ role: "user", content: m.content });
         continue;
       }
       const blocks: AnthropicContentBlock[] = [];
-      if (m.content.length > 0) {
-        blocks.push({ type: "text", text: m.content });
-      }
+      appendKernelBlocks(blocks, m.content);
       for (const a of attachments) {
         if (a.kind === "image") {
           blocks.push({
@@ -143,14 +149,12 @@ function splitSystem(
     }
     if (m.role === "assistant") {
       const toolUses = m.toolUses ?? [];
-      if (toolUses.length === 0) {
+      if (toolUses.length === 0 && typeof m.content === "string") {
         conversation.push({ role: "assistant", content: m.content });
         continue;
       }
       const blocks: AnthropicContentBlock[] = [];
-      if (m.content.length > 0) {
-        blocks.push({ type: "text", text: m.content });
-      }
+      appendKernelBlocks(blocks, m.content);
       for (const u of toolUses) {
         blocks.push({ type: "tool_use", id: u.id, name: u.name, input: u.input });
       }
@@ -164,7 +168,7 @@ function splitSystem(
           {
             type: "tool_result",
             tool_use_id: m.toolCallId,
-            content: m.content,
+            content: contentToText(m.content),
           },
         ],
       });
@@ -179,6 +183,37 @@ function buildTool(tool: LlmTool): AnthropicTool {
     name: tool.name,
     description: tool.description,
     input_schema: tool.inputSchema,
+  };
+}
+
+function appendKernelBlocks(
+  out: AnthropicContentBlock[],
+  content: LlmContent,
+): void {
+  if (typeof content === "string") {
+    if (content.length > 0) out.push({ type: "text", text: content });
+    return;
+  }
+  for (const b of content) {
+    out.push(translateKernelBlock(b));
+  }
+}
+
+function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
+  if (block.type === "text") {
+    return { type: "text", text: block.text };
+  }
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: `image/${block.format}` as
+        | "image/png"
+        | "image/jpeg"
+        | "image/gif"
+        | "image/webp",
+      data: block.bytes,
+    },
   };
 }
 

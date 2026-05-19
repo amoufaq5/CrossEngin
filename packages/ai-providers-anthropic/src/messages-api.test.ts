@@ -388,3 +388,78 @@ describe("buildAnthropicRequest — image attachments (M2.X)", () => {
     }
   });
 });
+
+describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
+  it("translates assistant message with content blocks to Anthropic content array", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "describe" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Here is the result:" },
+              { type: "image", format: "png", bytes: "ABCD" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const asst = built.messages[1]!;
+    expect(asst.role).toBe("assistant");
+    expect(Array.isArray(asst.content)).toBe(true);
+    const blocks = asst.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ type: "text", text: "Here is the result:" });
+    expect(blocks[1]).toMatchObject({
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: "ABCD" },
+    });
+  });
+
+  it("string content for assistant continues to map to plain string (backwards compat)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello back" },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    expect(built.messages[1]!.content).toBe("hello back");
+  });
+
+  it("user message with content blocks emits Anthropic image blocks", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image", format: "jpeg", bytes: "XYZ" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toMatchObject({
+      type: "image",
+      source: { media_type: "image/jpeg", data: "XYZ" },
+    });
+  });
+});

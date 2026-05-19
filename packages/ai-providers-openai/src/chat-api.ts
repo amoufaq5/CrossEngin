@@ -1,4 +1,12 @@
-import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import type {
+  CompletionRequest,
+  LlmContent,
+  LlmContentBlock,
+  LlmMessage,
+  LlmTool,
+  Usage,
+} from "@crossengin/ai-providers";
+import { contentToText } from "@crossengin/ai-providers";
 
 import { computeChatUsageCost, type OpenAIChatModel } from "./pricing.js";
 
@@ -96,16 +104,14 @@ export function buildOpenAIChatRequest(
 }
 
 function translateMessage(m: LlmMessage): OpenAIChatMessage {
-  if (m.role === "system") return { role: "system", content: m.content };
+  if (m.role === "system") return { role: "system", content: contentToText(m.content) };
   if (m.role === "user") {
     const attachments = m.attachments ?? [];
-    if (attachments.length === 0) {
+    if (attachments.length === 0 && typeof m.content === "string") {
       return { role: "user", content: m.content };
     }
     const parts: OpenAIContentPart[] = [];
-    if (m.content.length > 0) {
-      parts.push({ type: "text", text: m.content });
-    }
+    appendKernelBlocks(parts, m.content);
     for (const a of attachments) {
       if (a.kind === "image") {
         parts.push({
@@ -119,18 +125,23 @@ function translateMessage(m: LlmMessage): OpenAIChatMessage {
   if (m.role === "tool") {
     return {
       role: "tool",
-      content: m.content,
+      content: contentToText(m.content),
       tool_call_id: m.toolCallId ?? "",
       ...(m.name !== undefined ? { name: m.name } : {}),
     };
   }
   // assistant
   if (m.toolUses === undefined || m.toolUses.length === 0) {
-    return { role: "assistant", content: m.content };
+    if (typeof m.content === "string") {
+      return { role: "assistant", content: m.content };
+    }
+    const parts: OpenAIContentPart[] = [];
+    appendKernelBlocks(parts, m.content);
+    return { role: "assistant", content: parts.length > 0 ? parts : null };
   }
   return {
     role: "assistant",
-    content: m.content.length > 0 ? m.content : null,
+    content: assistantTextContent(m.content),
     tool_calls: m.toolUses.map((u) => ({
       id: u.id,
       type: "function" as const,
@@ -203,4 +214,27 @@ function parseArgsOrRaw(args: string): unknown {
   } catch {
     return { __raw: args };
   }
+}
+
+function appendKernelBlocks(out: OpenAIContentPart[], content: LlmContent): void {
+  if (typeof content === "string") {
+    if (content.length > 0) out.push({ type: "text", text: content });
+    return;
+  }
+  for (const b of content) {
+    out.push(translateKernelBlock(b));
+  }
+}
+
+function translateKernelBlock(block: LlmContentBlock): OpenAIContentPart {
+  if (block.type === "text") return { type: "text", text: block.text };
+  return {
+    type: "image_url",
+    image_url: { url: `data:image/${block.format};base64,${block.bytes}` },
+  };
+}
+
+function assistantTextContent(content: LlmContent): string | null {
+  const text = contentToText(content);
+  return text.length > 0 ? text : null;
 }

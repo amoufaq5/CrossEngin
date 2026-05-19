@@ -74,10 +74,35 @@ export const MessageAttachmentSchema = z.discriminatedUnion("kind", [
 ]);
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 
+export const TextContentBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+});
+export type TextContentBlock = z.infer<typeof TextContentBlockSchema>;
+
+export const ImageContentBlockSchema = z.object({
+  type: z.literal("image"),
+  format: ImageAttachmentFormatSchema,
+  bytes: z.string().min(1),
+});
+export type ImageContentBlock = z.infer<typeof ImageContentBlockSchema>;
+
+export const LlmContentBlockSchema = z.discriminatedUnion("type", [
+  TextContentBlockSchema,
+  ImageContentBlockSchema,
+]);
+export type LlmContentBlock = z.infer<typeof LlmContentBlockSchema>;
+
+export const LlmContentSchema = z.union([
+  z.string(),
+  z.array(LlmContentBlockSchema).min(1),
+]);
+export type LlmContent = z.infer<typeof LlmContentSchema>;
+
 export const LlmMessageSchema = z
   .object({
     role: z.enum(["system", "user", "assistant", "tool"]),
-    content: z.string(),
+    content: LlmContentSchema,
     name: z.string().optional(),
     toolCallId: z.string().optional(),
     toolUses: z
@@ -99,11 +124,48 @@ export const LlmMessageSchema = z
         message: `attachments only allowed on user messages (got role '${m.role}')`,
       });
     }
+    if (
+      Array.isArray(m.content) &&
+      m.attachments !== undefined &&
+      m.attachments.length > 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["attachments"],
+        message:
+          "attachments and array content blocks are mutually exclusive — use content blocks for new code",
+      });
+    }
   });
 export type LlmMessage = z.infer<typeof LlmMessageSchema>;
 
 export function imageMediaType(format: ImageAttachmentFormat): string {
   return `image/${format}`;
+}
+
+export function isStringContent(content: LlmContent): content is string {
+  return typeof content === "string";
+}
+
+export function isBlockContent(
+  content: LlmContent,
+): content is LlmContentBlock[] {
+  return Array.isArray(content);
+}
+
+export function normalizeContent(content: LlmContent): readonly LlmContentBlock[] {
+  if (typeof content === "string") {
+    return [{ type: "text", text: content }];
+  }
+  return content;
+}
+
+export function contentToText(content: LlmContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((b): b is TextContentBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("");
 }
 
 export const LlmToolSchema = z.object({

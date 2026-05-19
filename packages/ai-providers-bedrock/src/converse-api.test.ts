@@ -579,4 +579,60 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     const built = buildBedrockConverseRequest(baseReq(), {});
     expect("guardrailConfig" in built).toBe(false);
   });
+
+  it("translates assistant message with kernel content blocks (M2.X.5)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "user", content: "describe" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Here is a generated image:" },
+              { type: "image", format: "png", bytes: "ABCD" },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    const assistantMsg = built.messages[1]!;
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.content).toHaveLength(2);
+    expect(assistantMsg.content[0]).toEqual({ text: "Here is a generated image:" });
+    const imgBlock = assistantMsg.content[1] as { image: { format: string; source: { bytes: string } } };
+    expect(imgBlock.image.format).toBe("png");
+    expect(imgBlock.image.source.bytes).toBe("ABCD");
+  });
+
+  it("string content for assistant continues to work (backwards compat with M2.X)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello back" },
+        ],
+      }),
+      {},
+    );
+    expect(built.messages[1]!.content).toEqual([{ text: "hello back" }]);
+  });
+
+  it("user message with kernel content blocks (M2.X.5)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image", format: "jpeg", bytes: "XYZ" },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    expect(built.messages[0]!.content).toHaveLength(2);
+  });
 });

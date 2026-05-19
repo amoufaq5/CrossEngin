@@ -14,14 +14,47 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.6 +
-M2.X.6.x + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 +
-M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 + M4.10.x + M5
-+ M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 +
-M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9
-landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,588 tests**,
-all green, no type errors. M2.X.6.x adds a kernel-level
+M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 +
+M2.X.6 + M2.X.6.x + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6
++ M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 +
+M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 +
+M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 +
+M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,621 tests**,
+all green, no type errors. M2.X.5 lifts the kernel
+`LlmMessage.content` from `string` to a discriminated union
+`string | LlmContentBlock[]`, closing the M2.X asymmetry where
+user messages could carry images (via `attachments`) but
+assistant messages could only emit text. New types in
+`@crossengin/ai-providers/src/types.ts`: `TextContentBlock` +
+`ImageContentBlock` (flat shape `{type, format, bytes}`
+matching ImageAttachment for symmetry), `LlmContentBlock`
+discriminated union, `LlmContent` union, and four helpers —
+`isStringContent`, `isBlockContent`, `normalizeContent`
+(string → `[{type: "text", text}]`), `contentToText` (extracts
+text from blocks, joins, ignores images). LlmMessageSchema's
+superRefine gains validation: array content + attachments
+together is REJECTED (mutually exclusive); string content +
+attachments still valid (M2.X backwards compat). Empty arrays
+rejected via `.min(1)`. All three provider message-builders
+gained a private `appendKernelBlocks(out, content)` helper
+that branches on `typeof content` — Bedrock pushes
+`{text}` / `{image: {format, source: {bytes}}}`, Anthropic
+pushes `{type: "text", text}` / `{type: "image", source:
+{type: "base64", media_type: "image/<format>", data}}`,
+OpenAI pushes `{type: "text", text}` / `{type: "image_url",
+image_url: {url: "data:image/<format>;base64,<bytes>"}}`.
+Assistant messages with array content now emit provider-
+native content arrays instead of strings — unblocks image-
+generation responses and any future multimodal assistant
+output. Backwards compat: 90+ existing string-content call
+sites pass unchanged; verified by full pre-M2.X.5 test suite
+running at 6,588. The OpenAI Responses API path uses
+`contentToText` throughout (its top-level shape doesn't
+support inline image parts the same way; image content is
+silently dropped — future M2.8.6). Pattern set for future
+content variants (audio / video / document) — append to the
+discriminated union + update each provider's translator. M2.X.6.x adds a kernel-level
 cross-provider moderation helper to `@crossengin/ai-providers`,
 closing ADR-0084 Q7 + ADR-0086 Q3. New `moderation.ts` module
 exports `MODERATION_ERROR_KINDS` const tuple ([
@@ -866,7 +899,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0087 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0088 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -930,7 +963,11 @@ and `AnthropicRefusalError` for `stop_reason: "refusal"`,
 matching the M2.9.8 post-usage_final-throw pattern), ADR-0087
 covers M2.X.6.x (cross-provider moderation helper — kernel-level
 `isModerationError(err)` predicate + `MODERATION_ERROR_KINDS`
-shared tuple, duck-typing against `err.kind`).
+shared tuple, duck-typing against `err.kind`), ADR-0088 covers
+M2.X.5 (kernel LlmMessage.content as discriminated union —
+lifted `content: string` to `string | LlmContentBlock[]` to
+unblock multimodal assistant outputs across all three
+providers).
 
 ## Architecture in 90 seconds
 
@@ -1821,7 +1858,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0087 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0088 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1882,7 +1919,9 @@ admin-escape-hatch use cases), ADR-0086 covers Phase 2 M2.X.6
 matching the M2.9.8 post-usage_final-throw pattern), ADR-0087
 covers Phase 2 M2.X.6.x (cross-provider moderation helper —
 kernel-level `isModerationError(err)` predicate + shared
-`MODERATION_ERROR_KINDS` tuple). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+`MODERATION_ERROR_KINDS` tuple), ADR-0088 covers Phase 2 M2.X.5
+(kernel LlmMessage.content discriminated union — unblocked
+multimodal assistant outputs across Anthropic / OpenAI / Bedrock).
+When you ship a new package, write the matching ADR in the same
+session, following `0000-template.md` and the style of the
+existing 0026-0037 batch.

@@ -6,6 +6,9 @@ import {
   EmbeddingRequestSchema,
   EmbeddingResponseSchema,
   ImageAttachmentSchema,
+  ImageContentBlockSchema,
+  LlmContentBlockSchema,
+  LlmContentSchema,
   LlmMessageSchema,
   MessageAttachmentSchema,
   NormalizedCompletionSchema,
@@ -15,7 +18,12 @@ import {
   TaskKindSchema,
   TaskPolicySchema,
   TenantResidencySchema,
+  TextContentBlockSchema,
+  contentToText,
   imageMediaType,
+  isBlockContent,
+  isStringContent,
+  normalizeContent,
 } from "./types.js";
 
 describe("RegionSchema", () => {
@@ -440,5 +448,192 @@ describe("imageMediaType", () => {
     expect(imageMediaType("jpeg")).toBe("image/jpeg");
     expect(imageMediaType("gif")).toBe("image/gif");
     expect(imageMediaType("webp")).toBe("image/webp");
+  });
+});
+
+describe("TextContentBlockSchema", () => {
+  it("accepts text blocks with arbitrary text including empty string", () => {
+    expect(() =>
+      TextContentBlockSchema.parse({ type: "text", text: "hello" }),
+    ).not.toThrow();
+    expect(() => TextContentBlockSchema.parse({ type: "text", text: "" })).not.toThrow();
+  });
+
+  it("rejects wrong type discriminator", () => {
+    expect(() =>
+      TextContentBlockSchema.parse({ type: "image", text: "x" }),
+    ).toThrow();
+  });
+});
+
+describe("ImageContentBlockSchema", () => {
+  it("accepts image block with format + non-empty bytes", () => {
+    expect(() =>
+      ImageContentBlockSchema.parse({
+        type: "image",
+        format: "png",
+        bytes: "AAAA",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects empty bytes", () => {
+    expect(() =>
+      ImageContentBlockSchema.parse({ type: "image", format: "png", bytes: "" }),
+    ).toThrow();
+  });
+
+  it("rejects unknown format", () => {
+    expect(() =>
+      ImageContentBlockSchema.parse({ type: "image", format: "bmp", bytes: "x" }),
+    ).toThrow();
+  });
+});
+
+describe("LlmContentBlockSchema (discriminated union)", () => {
+  it("discriminates on 'type'", () => {
+    expect(() => LlmContentBlockSchema.parse({ type: "text", text: "hi" })).not.toThrow();
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "image", format: "png", bytes: "x" }),
+    ).not.toThrow();
+  });
+
+  it("rejects unknown type discriminator", () => {
+    expect(() => LlmContentBlockSchema.parse({ type: "audio", url: "x" })).toThrow();
+  });
+});
+
+describe("LlmContentSchema", () => {
+  it("accepts a plain string", () => {
+    expect(() => LlmContentSchema.parse("hello")).not.toThrow();
+    expect(() => LlmContentSchema.parse("")).not.toThrow();
+  });
+
+  it("accepts an array with at least one block", () => {
+    expect(() =>
+      LlmContentSchema.parse([{ type: "text", text: "hi" }]),
+    ).not.toThrow();
+  });
+
+  it("rejects an empty array (min(1))", () => {
+    expect(() => LlmContentSchema.parse([])).toThrow();
+  });
+
+  it("rejects non-string non-array values", () => {
+    expect(() => LlmContentSchema.parse(null)).toThrow();
+    expect(() => LlmContentSchema.parse(42)).toThrow();
+    expect(() => LlmContentSchema.parse({})).toThrow();
+  });
+});
+
+describe("LlmMessageSchema with block content (M2.X.5)", () => {
+  it("accepts user message with array content", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "text", text: "look" }, { type: "image", format: "png", bytes: "x" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts assistant message with array content (M2.X.5 unblocks multimodal output)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [{ type: "text", text: "here is the image" }, { type: "image", format: "png", bytes: "y" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts system + tool messages with array content", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "system",
+        content: [{ type: "text", text: "you are" }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "text", text: "ok" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects empty-array content", () => {
+    expect(() =>
+      LlmMessageSchema.parse({ role: "user", content: [] }),
+    ).toThrow();
+  });
+
+  it("rejects array content + attachments simultaneously (mutually exclusive)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "text", text: "hi" }],
+        attachments: [{ kind: "image", format: "png", bytes: "x" }],
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("still accepts string content + attachments (M2.X backwards compat)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: "see this",
+        attachments: [{ kind: "image", format: "png", bytes: "x" }],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("isStringContent / isBlockContent", () => {
+  it("isStringContent narrows correctly", () => {
+    expect(isStringContent("hi")).toBe(true);
+    expect(isStringContent("")).toBe(true);
+    expect(isStringContent([{ type: "text", text: "x" }])).toBe(false);
+  });
+
+  it("isBlockContent narrows correctly", () => {
+    expect(isBlockContent("hi")).toBe(false);
+    expect(isBlockContent([{ type: "text", text: "x" }])).toBe(true);
+  });
+});
+
+describe("normalizeContent", () => {
+  it("wraps a string in a single text block", () => {
+    expect(normalizeContent("hello")).toEqual([{ type: "text", text: "hello" }]);
+  });
+
+  it("passes block arrays through unchanged", () => {
+    const blocks = [
+      { type: "text" as const, text: "hi" },
+      { type: "image" as const, format: "png" as const, bytes: "x" },
+    ];
+    expect(normalizeContent(blocks)).toBe(blocks);
+  });
+});
+
+describe("contentToText", () => {
+  it("returns string content unchanged", () => {
+    expect(contentToText("hi")).toBe("hi");
+    expect(contentToText("")).toBe("");
+  });
+
+  it("concatenates text blocks from an array, ignoring image blocks", () => {
+    expect(
+      contentToText([
+        { type: "text", text: "hello " },
+        { type: "image", format: "png", bytes: "x" },
+        { type: "text", text: "world" },
+      ]),
+    ).toBe("hello world");
+  });
+
+  it("returns empty string when array has only image blocks", () => {
+    expect(
+      contentToText([{ type: "image", format: "png", bytes: "x" }]),
+    ).toBe("");
   });
 });

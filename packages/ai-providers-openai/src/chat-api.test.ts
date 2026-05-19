@@ -393,3 +393,78 @@ describe("extractTextFromResponse — content-part arrays (M2.X)", () => {
     expect(out).toBe("I see a cat");
   });
 });
+
+describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
+  it("translates assistant message with kernel content blocks to OpenAI content parts", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "describe" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Here it is:" },
+              { type: "image", format: "png", bytes: "ABCD" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    const asst = built.messages[1]!;
+    expect(asst.role).toBe("assistant");
+    expect(Array.isArray(asst.content)).toBe(true);
+    const parts = asst.content as ReadonlyArray<Record<string, unknown>>;
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({ type: "text", text: "Here it is:" });
+    expect(parts[1]).toEqual({
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,ABCD" },
+    });
+  });
+
+  it("string content for assistant continues to map to plain string (backwards compat)", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello back" },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    expect(built.messages[1]!.content).toBe("hello back");
+  });
+
+  it("user message with content blocks emits OpenAI image_url part", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what's this?" },
+              { type: "image", format: "jpeg", bytes: "XYZ" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    const parts = built.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
+    expect(parts).toHaveLength(2);
+    expect(parts[1]).toMatchObject({
+      type: "image_url",
+      image_url: { url: "data:image/jpeg;base64,XYZ" },
+    });
+  });
+});
