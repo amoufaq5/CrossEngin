@@ -14,13 +14,36 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.X + M3 + M3.5 + M3.6 +
-M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x
-+ M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
-M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 +
-M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,537 tests**,
-all green, no type errors. M2.9.8 wires AWS Bedrock Guardrails
+M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M3 + M3.5
++ M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8
++ M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
+M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5
++ M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,544 tests**,
+all green, no type errors. M2.9.8.x adds two new public methods
+to BedrockProvider for per-request guardrail override:
+`completeWithGuardrail(req, guardrailOverride?)` (streaming) +
+`completeNonStreamingWithGuardrail(req, guardrailOverride?)`
+(non-streaming). Three-state override semantics:
+`BedrockGuardrailConfig` → use this config (validated at call
+time via buildBedrockGuardrailConfig); `null` → explicitly
+DISABLE the provider's default guardrail for this request;
+`undefined` (or omitted) → fall back to provider default.
+Closes ADR-0084 Q3. Internal refactor: `complete()` and
+`completeNonStreaming()` now delegate to private
+`completeInternal` / `completeNonStreamingInternal` taking the
+effective resolved guardrail explicitly; the duplicated
+`guardrailConfig` spread sites are unified. Validation timing
+preserved: bad override identifier/version/trace throws BEFORE
+the fetch (rejected promise for non-streaming). The kernel
+`LlmProvider.complete(req)` interface is untouched — operators
+wanting per-request overrides use the Bedrock-specific
+sibling methods directly, bypassing the router. Operationally
+unblocks: per-tenant guardrail tiers (Bronze/Gold compliance
+packs), A/B testing content policies, admin escape hatches
+(`null` override skips filtering for security-ops inspection),
+mixed-sensitivity workloads (trial users get stricter PII
+redaction than enterprise customers). M2.9.8 wires AWS Bedrock Guardrails
 into `@crossengin/ai-providers-bedrock` as an opt-in safety
 surface. New `guardrails.ts` module exports
 `BedrockGuardrailConfig` ({guardrailIdentifier, guardrailVersion,
@@ -781,7 +804,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0084 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0085 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -835,7 +858,10 @@ Guardrails integration — opt-in content moderation via
 guardrailConfig threaded through converse + converse-stream,
 with `BedrockGuardrailViolationError` thrown after `usage_final`
 for streaming consumers and `isGuardrailInterventionResponse`
-helper for non-streaming).
+helper for non-streaming), ADR-0085 covers M2.9.8.x
+(per-request guardrail override via `completeWithGuardrail` +
+`completeNonStreamingWithGuardrail` sibling methods, with
+three-state semantics: BedrockGuardrailConfig / null / undefined).
 
 ## Architecture in 90 seconds
 
@@ -1726,7 +1752,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0084 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0085 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1778,7 +1804,10 @@ covers Phase 2 M4.10.x (`unregister-pack --by-source-pack` —
 manifest-free tear-down via the source_pack column), ADR-0084
 covers Phase 2 M2.9.8 (Bedrock Guardrails integration — opt-in
 content moderation with thrown errors for streaming + typed
-stopReason for non-streaming). When you ship a new package,
+stopReason for non-streaming), ADR-0085 covers Phase 2 M2.9.8.x
+(Bedrock per-request guardrail override — sibling methods with
+three-state semantics for tenant-specific / A-B-cohort /
+admin-escape-hatch use cases). When you ship a new package,
 write the matching ADR in the same session, following
 `0000-template.md` and the style of the existing 0026-0037
 batch.

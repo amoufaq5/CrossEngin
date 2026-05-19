@@ -249,6 +249,173 @@ describe("BedrockProvider — guardrailConfig threading (M2.9.8)", () => {
   });
 });
 
+describe("BedrockProvider — completeNonStreamingWithGuardrail per-request override (M2.9.8.x)", () => {
+  function plainOkFetch(): { fetch: FetchLike; captures: FetchCapture[] } {
+    const captures: FetchCapture[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      captures.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            output: { message: { role: "assistant", content: [{ text: "ok" }] } },
+            stopReason: "end_turn",
+            usage: { inputTokens: 5, outputTokens: 2 },
+          }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    return { fetch: fetchImpl, captures };
+  }
+
+  function baseReq() {
+    return {
+      task: "planner" as const,
+      messages: [{ role: "user" as const, content: "hi" }],
+      tenantId: "ten-1",
+      sessionId: "ses-1",
+    };
+  }
+
+  it("BedrockGuardrailConfig override takes precedence over provider default", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      guardrailConfig: {
+        guardrailIdentifier: "default01",
+        guardrailVersion: "DRAFT",
+      },
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreamingWithGuardrail(baseReq(), {
+      guardrailIdentifier: "override01",
+      guardrailVersion: "2",
+    });
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as { guardrailConfig?: { guardrailIdentifier: string; guardrailVersion: string } };
+    expect(body.guardrailConfig).toEqual({
+      guardrailIdentifier: "override01",
+      guardrailVersion: "2",
+    });
+  });
+
+  it("null override disables the provider's default guardrail for this request", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      guardrailConfig: {
+        guardrailIdentifier: "default01",
+        guardrailVersion: "DRAFT",
+      },
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreamingWithGuardrail(baseReq(), null);
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as Record<string, unknown>;
+    expect("guardrailConfig" in body).toBe(false);
+  });
+
+  it("undefined override falls back to provider default", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      guardrailConfig: {
+        guardrailIdentifier: "default01",
+        guardrailVersion: "DRAFT",
+      },
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreamingWithGuardrail(baseReq(), undefined);
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    expect(body.guardrailConfig?.guardrailIdentifier).toBe("default01");
+  });
+
+  it("no-arg override falls back to provider default (omitted arg = undefined)", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      guardrailConfig: {
+        guardrailIdentifier: "default01",
+        guardrailVersion: "DRAFT",
+      },
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreamingWithGuardrail(baseReq());
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    expect(body.guardrailConfig?.guardrailIdentifier).toBe("default01");
+  });
+
+  it("override validates at call time — bad identifier throws BEFORE the request", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await expect(
+      provider.completeNonStreamingWithGuardrail(baseReq(), {
+        guardrailIdentifier: "BAD-ID",
+        guardrailVersion: "DRAFT",
+      }),
+    ).rejects.toThrow(/invalid guardrailIdentifier/);
+    expect(captures).toHaveLength(0);
+  });
+
+  it("works when provider has NO default + override provides the config", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreamingWithGuardrail(baseReq(), {
+      guardrailIdentifier: "perreq01",
+      guardrailVersion: "DRAFT",
+    });
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    expect(body.guardrailConfig?.guardrailIdentifier).toBe("perreq01");
+  });
+
+  it("complete() (kernel API) is unaffected — still uses provider default", async () => {
+    const { fetch, captures } = plainOkFetch();
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      guardrailConfig: {
+        guardrailIdentifier: "default01",
+        guardrailVersion: "DRAFT",
+      },
+      fetch,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreaming(baseReq());
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    expect(body.guardrailConfig?.guardrailIdentifier).toBe("default01");
+  });
+});
+
 describe("BedrockProvider — embed (Titan path)", () => {
   function buildTitanFetch(
     responses: ReadonlyArray<{ embedding: number[]; inputTextTokenCount: number }>,

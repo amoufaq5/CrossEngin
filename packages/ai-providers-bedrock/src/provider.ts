@@ -190,11 +190,25 @@ export class BedrockProvider implements LlmProvider {
   }
 
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    yield* this.completeInternal(req, this.guardrailConfig);
+  }
+
+  async *completeWithGuardrail(
+    req: CompletionRequest,
+    guardrailOverride?: BedrockGuardrailConfig | null,
+  ): AsyncIterable<CompletionChunk> {
+    yield* this.completeInternal(req, this.resolveGuardrailOverride(guardrailOverride));
+  }
+
+  private async *completeInternal(
+    req: CompletionRequest,
+    effectiveGuardrail: BedrockGuardrailConfig | undefined,
+  ): AsyncIterable<CompletionChunk> {
     const model = this.resolveModel(req.model);
     const built = buildBedrockConverseRequest(req, {
       defaultMaxTokens: this.defaultMaxTokens,
-      ...(this.guardrailConfig !== undefined
-        ? { guardrailConfig: this.guardrailConfig }
+      ...(effectiveGuardrail !== undefined
+        ? { guardrailConfig: effectiveGuardrail }
         : {}),
     });
     const body = new TextEncoder().encode(JSON.stringify(built));
@@ -215,11 +229,28 @@ export class BedrockProvider implements LlmProvider {
   }
 
   async completeNonStreaming(req: CompletionRequest): Promise<BedrockConverseResponse> {
+    return this.completeNonStreamingInternal(req, this.guardrailConfig);
+  }
+
+  async completeNonStreamingWithGuardrail(
+    req: CompletionRequest,
+    guardrailOverride?: BedrockGuardrailConfig | null,
+  ): Promise<BedrockConverseResponse> {
+    return this.completeNonStreamingInternal(
+      req,
+      this.resolveGuardrailOverride(guardrailOverride),
+    );
+  }
+
+  private async completeNonStreamingInternal(
+    req: CompletionRequest,
+    effectiveGuardrail: BedrockGuardrailConfig | undefined,
+  ): Promise<BedrockConverseResponse> {
     const model = this.resolveModel(req.model);
     const built = buildBedrockConverseRequest(req, {
       defaultMaxTokens: this.defaultMaxTokens,
-      ...(this.guardrailConfig !== undefined
-        ? { guardrailConfig: this.guardrailConfig }
+      ...(effectiveGuardrail !== undefined
+        ? { guardrailConfig: effectiveGuardrail }
         : {}),
     });
     const body = new TextEncoder().encode(JSON.stringify(built));
@@ -239,6 +270,14 @@ export class BedrockProvider implements LlmProvider {
         message: `failed to parse bedrock converse response: ${err instanceof Error ? err.message : "unknown"}`,
       });
     }
+  }
+
+  private resolveGuardrailOverride(
+    override: BedrockGuardrailConfig | null | undefined,
+  ): BedrockGuardrailConfig | undefined {
+    if (override === null) return undefined;
+    if (override !== undefined) return buildBedrockGuardrailConfig(override);
+    return this.guardrailConfig;
   }
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
