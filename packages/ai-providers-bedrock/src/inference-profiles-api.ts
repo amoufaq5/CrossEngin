@@ -53,6 +53,14 @@ export interface BedrockInferenceProfileListResponse {
   readonly nextToken?: string;
 }
 
+export type BedrockInferenceProfileDetail = BedrockInferenceProfileSummary;
+
+export function parseInferenceProfileDetail(
+  raw: unknown,
+): BedrockInferenceProfileDetail {
+  return parseInferenceProfileSummary(raw);
+}
+
 export interface BedrockListInferenceProfilesOptions {
   readonly typeEquals?: BedrockInferenceProfileType;
   readonly maxResults?: number;

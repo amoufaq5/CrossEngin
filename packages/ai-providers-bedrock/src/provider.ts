@@ -62,7 +62,9 @@ import {
 } from "./guardrails-api.js";
 import {
   buildInferenceProfileListQuery,
+  parseInferenceProfileDetail,
   parseInferenceProfileListResponse,
+  type BedrockInferenceProfileDetail,
   type BedrockInferenceProfileListResponse,
   type BedrockListInferenceProfilesOptions,
 } from "./inference-profiles-api.js";
@@ -575,6 +577,29 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async getInferenceProfile(
+    profileIdentifier: string,
+  ): Promise<BedrockInferenceProfileDetail> {
+    if (profileIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "getInferenceProfile: profileIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/inference-profiles/${encodeURIComponent(profileIdentifier)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getInferenceProfile: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseInferenceProfileDetail(raw);
   }
 
   async listInferenceProfiles(

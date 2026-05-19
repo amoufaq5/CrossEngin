@@ -9,6 +9,7 @@ import {
   buildInferenceProfileListQuery,
   isBedrockInferenceProfileStatus,
   isBedrockInferenceProfileType,
+  parseInferenceProfileDetail,
   parseInferenceProfileListResponse,
   parseInferenceProfileSummary,
 } from "./inference-profiles-api.js";
@@ -270,5 +271,48 @@ describe("parseInferenceProfileListResponse", () => {
     expect(() =>
       parseInferenceProfileListResponse({ inferenceProfileSummaries: "oops" }),
     ).toThrow(/not an array/);
+  });
+});
+
+describe("parseInferenceProfileDetail", () => {
+  function sample(): unknown {
+    return {
+      inferenceProfileId: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      inferenceProfileName: "Claude 3.5 Sonnet (US)",
+      inferenceProfileArn:
+        "arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      models: [
+        {
+          modelArn:
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        },
+      ],
+      status: "ACTIVE",
+      type: "SYSTEM_DEFINED",
+      createdAt: "2026-04-01T00:00:00Z",
+      updatedAt: "2026-05-01T00:00:00Z",
+      description: "Cross-region failover",
+    };
+  }
+
+  it("parses a complete detail (same shape as summary)", () => {
+    const d = parseInferenceProfileDetail(sample());
+    expect(d.inferenceProfileId).toBe(
+      "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    );
+    expect(d.type).toBe("SYSTEM_DEFINED");
+    expect(d.models.length).toBe(1);
+    expect(d.description).toMatch(/Cross-region/);
+  });
+
+  it("rejects unknown status", () => {
+    const bad = { ...(sample() as Record<string, unknown>), status: "INACTIVE" };
+    expect(() => parseInferenceProfileDetail(bad)).toThrow(
+      /unknown profile status/,
+    );
+  });
+
+  it("rejects non-object input", () => {
+    expect(() => parseInferenceProfileDetail(null)).toThrow(/not an object/);
   });
 });

@@ -1418,6 +1418,144 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — getInferenceProfile (M2.X.5.aa.z.10)", () => {
+  function detailBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      inferenceProfileId: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      inferenceProfileName: "Claude 3.5 Sonnet (US)",
+      inferenceProfileArn:
+        "arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+      models: [
+        {
+          modelArn:
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        },
+      ],
+      status: "ACTIVE",
+      type: "SYSTEM_DEFINED",
+      createdAt: "2026-04-01T00:00:00Z",
+      updatedAt: "2026-05-01T00:00:00Z",
+      ...overrides,
+    });
+  }
+
+  it("GETs the control-plane /inference-profiles/{id} endpoint", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    await provider.getInferenceProfile("us.anthropic.claude-3-5-sonnet-20241022-v2:0");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/inference-profiles/");
+    expect(capture.url).not.toContain("?");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    const arn =
+      "arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0";
+    await provider.getInferenceProfile(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getInferenceProfile("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("parses a complete detail response", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          description: "Cross-region failover",
+          models: [
+            {
+              modelArn:
+                "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            },
+            {
+              modelArn:
+                "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            },
+          ],
+        }),
+      }),
+    });
+    const detail = await provider.getInferenceProfile(
+      "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    );
+    expect(detail.status).toBe("ACTIVE");
+    expect(detail.type).toBe("SYSTEM_DEFINED");
+    expect(detail.models.length).toBe(2);
+    expect(detail.description).toBe("Cross-region failover");
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such profile",
+        }),
+      }),
+    });
+    await expect(
+      provider.getInferenceProfile("not.a.real.profile"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.getInferenceProfile("us.anthropic.claude-3-5-sonnet-20241022-v2:0"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(
+      provider.getInferenceProfile("us.anthropic.claude-3-5-sonnet-20241022-v2:0"),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.getInferenceProfile("us.anthropic.claude-3-5-sonnet-20241022-v2:0"),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 describe("BedrockProvider — listInferenceProfiles (M2.X.5.aa.z.9)", () => {
   function listBody(opts: {
     items?: ReadonlyArray<Record<string, unknown>>;
