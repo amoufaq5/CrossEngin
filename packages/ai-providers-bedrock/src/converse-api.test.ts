@@ -665,6 +665,24 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     });
   });
 
+  it("throws on image_url content block (Bedrock requires base64 bytes) (M2.X.5.y)", () => {
+    expect(() =>
+      buildBedrockConverseRequest(
+        baseReq({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image_url", url: "https://example.com/cat.png" },
+              ],
+            },
+          ],
+        }),
+        {},
+      ),
+    ).toThrow(/Bedrock provider does not support image_url/);
+  });
+
   it("user tool_result block translates to Bedrock toolResult (M2.X.5.x)", () => {
     const built = buildBedrockConverseRequest(
       baseReq({

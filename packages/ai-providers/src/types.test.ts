@@ -7,6 +7,7 @@ import {
   EmbeddingResponseSchema,
   ImageAttachmentSchema,
   ImageContentBlockSchema,
+  ImageUrlContentBlockSchema,
   LlmContentBlockSchema,
   LlmContentSchema,
   LlmMessageSchema,
@@ -695,6 +696,89 @@ describe("ToolUseContentBlock / ToolResultContentBlock (M2.X.5.x)", () => {
         status: "partial",
       }),
     ).toThrow();
+  });
+});
+
+describe("ImageUrlContentBlockSchema (M2.X.5.y)", () => {
+  it("accepts a valid http URL", () => {
+    expect(() =>
+      ImageUrlContentBlockSchema.parse({
+        type: "image_url",
+        url: "https://example.com/cat.png",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts a data: URL too (operator passing a pre-encoded image)", () => {
+    expect(() =>
+      ImageUrlContentBlockSchema.parse({
+        type: "image_url",
+        url: "https://images.example.com/photo.jpg",
+        format: "jpeg",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects an invalid URL", () => {
+    expect(() =>
+      ImageUrlContentBlockSchema.parse({
+        type: "image_url",
+        url: "not-a-url",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects wrong type discriminator", () => {
+    expect(() =>
+      ImageUrlContentBlockSchema.parse({
+        type: "image",
+        url: "https://example.com/x.png",
+      }),
+    ).toThrow();
+  });
+
+  it("LlmContentBlockSchema accepts image_url variant", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "image_url",
+        url: "https://example.com/x.png",
+      }),
+    ).not.toThrow();
+  });
+
+  it("LlmContentBlockSchema still accepts bytes-based image variant (backwards compat)", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "image",
+        format: "png",
+        bytes: "ABCD",
+      }),
+    ).not.toThrow();
+  });
+
+  it("REJECTS image_url block on tool message (same rule as image)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "image_url", url: "https://example.com/x.png" }],
+      }),
+    ).toThrow(/image content blocks are not allowed on tool/);
+  });
+
+  it("accepts image_url block on user + assistant messages", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "image_url", url: "https://example.com/x.png" }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [{ type: "image_url", url: "https://example.com/x.png" }],
+      }),
+    ).not.toThrow();
   });
 });
 

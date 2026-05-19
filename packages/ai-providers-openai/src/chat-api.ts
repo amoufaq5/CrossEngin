@@ -285,6 +285,12 @@ function translateKernelBlock(block: LlmContentBlock): OpenAIContentPart {
       image_url: { url: `data:image/${block.format};base64,${block.bytes}` },
     };
   }
+  if (block.type === "image_url") {
+    return {
+      type: "image_url",
+      image_url: { url: block.url },
+    };
+  }
   // tool_use / tool_result blocks are handled at the message-translation layer,
   // not here — they don't map to OpenAI content parts directly.
   throw new Error(

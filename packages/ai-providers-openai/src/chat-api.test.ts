@@ -546,6 +546,58 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
     expect(userParts).toEqual([{ type: "text", text: "what's the third?" }]);
   });
 
+  it("image_url content block translates to OpenAI image_url part with URL passthrough (M2.X.5.y)", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what's at this URL?" },
+              { type: "image_url", url: "https://example.com/cat.png" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    const parts = built.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
+    expect(parts).toHaveLength(2);
+    expect(parts[1]).toEqual({
+      type: "image_url",
+      image_url: { url: "https://example.com/cat.png" },
+    });
+  });
+
+  it("image_url and bytes-based image variants both work in the same message (M2.X.5.y)", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", format: "png", bytes: "ABCD" },
+              { type: "image_url", url: "https://example.com/y.jpg" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    const parts = built.messages[0]!.content as ReadonlyArray<{
+      type: string;
+      image_url: { url: string };
+    }>;
+    expect(parts[0]?.image_url.url).toBe("data:image/png;base64,ABCD");
+    expect(parts[1]?.image_url.url).toBe("https://example.com/y.jpg");
+  });
+
   it("tool_use inline content blocks merge with toolUses field for tool_calls (M2.X.5.x)", () => {
     const built = buildOpenAIChatRequest(
       {

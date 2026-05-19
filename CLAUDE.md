@@ -15,14 +15,37 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
-M2.X.5 + M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M2.X.8 + M3 +
+M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.6 + M2.X.6.x + M2.X.7 +
+M2.X.8 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,713 tests**,
-all green, no type errors. M2.8.6 threads `ImageContentBlock`
+**55 packages + 1 app, 119 meta-schema tables, 6,726 tests**,
+all green, no type errors. M2.X.5.y adds a URL-based image
+variant to the kernel content union, closing ADR-0093 Q1. New
+`ImageUrlContentBlock` type `{type: "image_url", url: string,
+format?: ImageAttachmentFormat}` added to the LlmContentBlock
+discriminated union (grows from 4 to 5 variants: text, image,
+image_url, tool_use, tool_result). URL validated via
+`z.string().url()` at parse time; `format` optional (URL
+responses' Content-Type tells the provider). Same role rule as
+image (rejected on tool messages). Per-provider translation:
+OpenAI Chat Completions passes the URL through to `image_url:
+{url}` (URL passthrough, OpenAI fetches server-side); OpenAI
+Responses API passes through to `input_image: {image_url: url}`;
+Bedrock + Anthropic THROW with explicit error message ("pre-
+fetch the URL to base64 bytes and use an image block
+instead") — both providers require base64 inline. Auto-
+fetching deferred (operator code owns timeout / retry / cache /
+SSRF policy). Payload size + latency win for OpenAI users: a
+5 MB image URL is 100 bytes in the request vs ~6.7 MB inline
+base64. Pattern set for future URL-only variants (audio_url,
+video_url). All 6,713 pre-M2.X.5.y tests pass unchanged; 13
+new tests verify URL validation, role rules, OpenAI Chat /
+Responses pass-through, Bedrock + Anthropic throw semantics.
+M2.8.6 threads `ImageContentBlock`
 through the OpenAI Responses API path, closing ADR-0088 Q6.
 Pre-M2.8.6 the Responses-API translator used `contentToText`
 throughout — array content was flattened to text only, silently
@@ -1024,7 +1047,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0093 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0094 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1108,7 +1131,11 @@ Moderations API — `provider.moderate(input)` calls
 paying for a chat completion), ADR-0093 covers M2.8.6 (OpenAI
 Responses API image inputs — threads ImageContentBlock through
 to input_image blocks, closing the M2.X.5 vision gap on the
-Responses path).
+Responses path), ADR-0094 covers M2.X.5.y (ImageUrlContentBlock
+URL variant — adds `{type: "image_url", url}` block alongside
+the existing bytes-based image variant; OpenAI providers pass
+URLs through, Bedrock + Anthropic throw with explicit
+pre-fetch guidance).
 
 ## Architecture in 90 seconds
 
@@ -1999,7 +2026,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0093 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0094 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2075,7 +2102,10 @@ M2.X.5 array-content estimation bug), ADR-0092 covers Phase 2
 M2.X.8 (standalone OpenAI Moderations API — provider.moderate
 for proactive pre-screening with 11-category classification),
 ADR-0093 covers Phase 2 M2.8.6 (OpenAI Responses API image
-inputs — closes M2.X.5 vision gap on the Responses path).
+inputs — closes M2.X.5 vision gap on the Responses path),
+ADR-0094 covers Phase 2 M2.X.5.y (ImageUrlContentBlock — URL-
+based image variant for the kernel content union, with
+OpenAI pass-through and Bedrock/Anthropic throw semantics).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

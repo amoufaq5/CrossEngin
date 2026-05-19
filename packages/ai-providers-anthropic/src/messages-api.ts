@@ -217,6 +217,11 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
       },
     };
   }
+  if (block.type === "image_url") {
+    throw new Error(
+      "Anthropic provider does not support image_url content blocks via the base64 image variant — pre-fetch the URL to base64 bytes and use an image block instead",
+    );
+  }
   if (block.type === "tool_use") {
     return {
       type: "tool_use",

@@ -87,6 +87,13 @@ export const ImageContentBlockSchema = z.object({
 });
 export type ImageContentBlock = z.infer<typeof ImageContentBlockSchema>;
 
+export const ImageUrlContentBlockSchema = z.object({
+  type: z.literal("image_url"),
+  url: z.string().url(),
+  format: ImageAttachmentFormatSchema.optional(),
+});
+export type ImageUrlContentBlock = z.infer<typeof ImageUrlContentBlockSchema>;
+
 export const ToolUseContentBlockSchema = z.object({
   type: z.literal("tool_use"),
   id: z.string().min(1),
@@ -110,6 +117,7 @@ export type ToolResultContentBlock = z.infer<typeof ToolResultContentBlockSchema
 export const LlmContentBlockSchema = z.discriminatedUnion("type", [
   TextContentBlockSchema,
   ImageContentBlockSchema,
+  ImageUrlContentBlockSchema,
   ToolUseContentBlockSchema,
   ToolResultContentBlockSchema,
 ]);
@@ -175,7 +183,7 @@ export const LlmMessageSchema = z
             message: `tool_result content blocks only allowed on user or tool messages (got role '${m.role}')`,
           });
         }
-        if (b.type === "image" && m.role === "tool") {
+        if ((b.type === "image" || b.type === "image_url") && m.role === "tool") {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["content", i],

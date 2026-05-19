@@ -214,6 +214,10 @@ function buildUserInputBlocks(
         out.push(translateImageBlock(b));
         continue;
       }
+      if (b.type === "image_url") {
+        out.push({ type: "input_image", image_url: b.url });
+        continue;
+      }
       // tool_use / tool_result blocks aren't user-input shapes for Responses API;
       // tool_result blocks on user role get folded out via the chat-api path. The
       // Responses API uses function_call_output items at the top level instead, so

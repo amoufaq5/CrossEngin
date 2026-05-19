@@ -292,6 +292,11 @@ function translateKernelBlock(block: LlmContentBlock): BedrockContentBlock {
       },
     };
   }
+  if (block.type === "image_url") {
+    throw new Error(
+      "Bedrock provider does not support image_url content blocks — pre-fetch the URL to base64 bytes and use an image block instead",
+    );
+  }
   if (block.type === "tool_use") {
     return {
       toolUse: {

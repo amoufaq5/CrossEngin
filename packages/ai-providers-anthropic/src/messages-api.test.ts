@@ -497,6 +497,27 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     });
   });
 
+  it("throws on image_url content block (Anthropic requires base64 bytes via image variant) (M2.X.5.y)", () => {
+    expect(() =>
+      buildAnthropicRequest(
+        {
+          task: "planner",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image_url", url: "https://example.com/cat.png" },
+              ],
+            },
+          ],
+          tenantId: "ten-1",
+          sessionId: "ses-1",
+        },
+        { defaultModel: "claude-sonnet-4-6" },
+      ),
+    ).toThrow(/Anthropic provider does not support image_url/);
+  });
+
   it("user tool_result block translates to Anthropic tool_result block (M2.X.5.x)", () => {
     const built = buildAnthropicRequest(
       {

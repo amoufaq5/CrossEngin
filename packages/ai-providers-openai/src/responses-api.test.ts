@@ -456,6 +456,27 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
     expect(userMsg.content[0]?.type).toBe("input_image");
   });
 
+  it("image_url content block passes URL through unchanged (M2.X.5.y)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what's at this URL?" },
+            { type: "image_url", url: "https://example.com/photo.jpg" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content).toHaveLength(2);
+    expect(userMsg.content[1]).toEqual({
+      type: "input_image",
+      image_url: "https://example.com/photo.jpg",
+    });
+  });
+
   it("empty string content emits a single empty input_text block (Responses API rejects empty content array)", () => {
     const built = buildOpenAIResponsesRequest(
       req([{ role: "user", content: "" }]),
