@@ -21,15 +21,74 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.6 + M2.X.12 + M5.10.5 +
+M2.X.5.aa.z.15 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,252 tests**,
-all green, no type errors. M5.10.5 closes the M2.X.5 loop —
+**55 packages + 1 app, 120 meta-schema tables, 7,283 tests**,
+all green, no type errors. M8 closes the workflow runtime
+depth gap — the first production-grade observability surface
+for workflows. New `WorkflowInstrumentation` interface in
+`@crossengin/workflow-runtime/src/instrumentation.ts` with 11
+documented event kinds (instance_started / instance_completed
+/ instance_failed / instance_cancelled / state_transitioned /
+signal_received / signal_consumed / timer_fired /
+activity_scheduled / action_applied / engine_error),
+`WorkflowInstrumentationEvent` shape (kind, tenantId,
+instanceId, definitionId, correlationId, occurredAt,
+durationMs, attributes JSONB), NoopInstrumentation default,
+captureInstrumentation() in-memory buffer for testing,
+combineInstrumentations(...children) fan-out helper (returns
+noop for empty input, single child unchanged, sequential await
+for multiple), isWorkflowInstrumentationKind discriminator.
+Engine wired at 8 key paths: startInstance emits
+instance_started; submitSignal emits signal_received then
+signal_consumed; tickTimers emits timer_fired per fired
+timer; cancelInstance emits instance_cancelled; applyTransition
+emits state_transitioned; applyScheduleActivity emits
+activity_scheduled; emitTerminalForStateKind emits
+instance_completed / instance_failed / instance_cancelled
+based on terminal kind (guarded by Set against
+double-emission when runStepLoop re-enters). Internal state
+widened: instanceDefinition: Map<instanceId, definitionId>
+tracks definition IDs for instrumentation event correlation;
+registerInstance() gains optional definitionId parameter.
+`emitInstrumentation(kind, fields)` private helper builds
+the typed event with occurredAt from engine clock, routes
+through this.instrumentation.onEvent, and SWALLOWS exceptions
+— instrumentation failures must NEVER crash the engine
+(errors land in the noop sink as engine_error events for
+operator-side observability). New kernel meta-schema table
+META_WORKFLOW_TRACES (120th table) — observability-only,
+distinct from the source-of-truth META_WORKFLOW_EVENTS:
+id UUID PK, tenant_id (RLS-isolated), instance_id (FK CASCADE
+to workflow_instances), definition_id (FK SET NULL to
+workflow_definitions), kind (11-value CHECK constraint),
+occurred_at, duration_ms, correlation_id, attributes JSONB,
+created_at. Three indexes optimized for time-series queries:
+(instance_id, occurred_at), (tenant_id, kind, occurred_at),
+(tenant_id, correlation_id). RLS tenant_isolation policy
+applied. New `PostgresWorkflowInstrumentation` in
+`@crossengin/workflow-runtime-pg/src/instrumentation.ts`
+implements WorkflowInstrumentation.onEvent by writing to
+meta.workflow_traces via WorkflowInstanceIdResolver +
+WorkflowDefinitionIdResolver — tolerates unresolved instance/
+definition IDs (writes null UUIDs so engine_error events that
+happen mid-startup don't break). `buildPersistentEngine`
+gains two new optional inputs: `instrumentation?:
+WorkflowInstrumentation` (direct hook, overrides
+persistTraces) and `persistTraces?: boolean` (when true,
+auto-constructs PostgresWorkflowInstrumentation against the
+same connection + resolvers). resolveInstrumentation
+precedence: explicit instrumentation > persistTraces auto >
+NoopInstrumentation fallback. OTel-ready — event shape is a
+subset of OTel SpanEvent; operators write thin adapter in
+~20 lines. Backwards compat preserved — all pre-M8 engine
+tests pass without modification. M5.10.5 closes the M2.X.5
+loop —
 the `crossengin chat` REPL in `apps/architect-cli` now accepts
 inline content-block attachments. Before this milestone the
 kernel `LlmMessage.content` supported `string | readonly
@@ -1961,7 +2020,12 @@ two Bedrock 409 endpoints + OpenAI 409s justify the lift),
 ADR-0119 covers M5.10.5 (chat REPL widens user input to
 LlmContentBlock[] — closes the M2.X.5 investment;
 `/attach image_url|document_url|file_id|text` slash commands;
-per-turn attachment reset; transcript flattens to placeholders).
+per-turn attachment reset; transcript flattens to placeholders),
+ADR-0120 covers M8 (workflow runtime instrumentation hooks +
+META_WORKFLOW_TRACES — first production-grade observability
+surface for workflows; 11 documented event kinds; PG sink
+opt-in via persistTraces; combineInstrumentations fan-out;
+OTel-ready event shape; closes the workflow runtime depth gap).
 
 ## Architecture in 90 seconds
 
@@ -2002,7 +2066,7 @@ re-exporting everything.
   CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
   `version` commands.
 - **`workflow-runtime-pg`** — Postgres-backed adapters for the
-  workflow runtime. 9 modules: id-mapping
+  workflow runtime. 10 modules: id-mapping
   (WorkflowInstanceIdResolver + WorkflowDefinitionIdResolver,
   cached wfi_*/wfd_* → UUID lookups against workflow_instances /
   workflow_definitions), event-log (PostgresEventLog implements
@@ -2029,7 +2093,12 @@ re-exporting everything.
   verifyInstance returns a per-field DriftReport comparing
   expected projection vs stored rows; bulkResync iterates with
   pagination + maxInstances cap for periodic CI / observability
-  guards).
+  guards), **instrumentation** (M8 — PostgresWorkflowInstrumentation
+  implements WorkflowInstrumentation.onEvent by writing to
+  META_WORKFLOW_TRACES with resolved instance/definition UUIDs;
+  tolerates unresolved IDs by writing null UUIDs;
+  buildPersistentEngine gains persistTraces + instrumentation
+  options with explicit > auto > Noop precedence).
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces + a replayer. 5 modules:
   idempotency-store (INSERT … ON CONFLICT DO UPDATE on tenant+
@@ -2073,7 +2142,7 @@ re-exporting everything.
   → emit_audit; halts on terminating outcomes; merges
   DEFAULT_SECURITY_HEADERS on pass).
 - **`workflow-runtime`** — in-process event-sourced workflow
-  executor (third impure package). 7 modules: clock (Clock +
+  executor (third impure package). 8 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
   RandomIdGenerator + CountingIdGenerator), event-log (append-
   only `EventLog` interface + InMemoryEventLog with monotonic-
@@ -2094,7 +2163,12 @@ re-exporting everything.
   idempotency dedup), saga (pure `planCompensation` /
   `listCompensatableActivities` / `hasOutstandingCompensation`
   handling immediate_reverse_order / parallel / manual_review /
-  no_compensation strategies).
+  no_compensation strategies), **instrumentation** (M8 —
+  `WorkflowInstrumentation` interface with 11 documented event
+  kinds, NoopInstrumentation default, captureInstrumentation()
+  in-memory buffer, combineInstrumentations() fan-out helper;
+  engine wires events at 8 paths; observability failures
+  swallowed so they never crash the engine).
 - **`crypto`** — real cryptography over `node:crypto`. 7 modules:
   algorithms (`HashAlgorithm`/`MacAlgorithm`/`SignatureAlgorithm`
   + `KeyPurpose` allow-list), hashing (SHA-256, BLAKE2b-512, hash
@@ -3087,7 +3161,17 @@ closes the M2.X.5/.x/.y/.z/.aa investment loop;
 parseUserLine slash-command parser; composeUserContent helper;
 per-turn attachment reset semantics; transcript schema
 unchanged via userContentToTranscriptText flattening; pattern
-set for future kernel multimodal additions).
+set for future kernel multimodal additions), ADR-0120 covers
+Phase 2 M8 (workflow runtime instrumentation hooks +
+META_WORKFLOW_TRACES — first production-grade observability
+surface for workflows; WorkflowInstrumentation interface with
+11 event kinds wired at 8 engine paths; NEW 120th meta-schema
+table META_WORKFLOW_TRACES distinct from source-of-truth
+META_WORKFLOW_EVENTS; PostgresWorkflowInstrumentation
+implementation; buildPersistentEngine gains persistTraces +
+instrumentation options; observability failures NEVER crash
+the engine; OTel-ready event shape; combineInstrumentations
+fan-out helper).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

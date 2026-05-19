@@ -6845,6 +6845,80 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
   },
 };
 
+export const META_WORKFLOW_TRACES: TableDefinition = {
+  schema: "meta",
+  name: "workflow_traces",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "instance_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "workflow_instances",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "definition_id",
+      type: "UUID",
+      references: {
+        schema: "meta",
+        table: "workflow_definitions",
+        column: "id",
+        onDelete: "SET NULL",
+      },
+    },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'state_transitioned', 'signal_received', 'signal_consumed', 'timer_fired', 'activity_scheduled', 'action_applied', 'engine_error')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "duration_ms",
+      type: "INTEGER",
+      check: "duration_ms IS NULL OR duration_ms >= 0",
+    },
+    { name: "correlation_id", type: "TEXT" },
+    { name: "attributes", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    {
+      name: "created_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_workflow_traces_instance_occurred",
+      columns: ["instance_id", "occurred_at"],
+    },
+    {
+      name: "idx_workflow_traces_tenant_kind_occurred",
+      columns: ["tenant_id", "kind", "occurred_at"],
+    },
+    {
+      name: "idx_workflow_traces_correlation",
+      columns: ["tenant_id", "correlation_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "workflow_traces_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_LINEAGE_NODES: TableDefinition = {
   schema: "meta",
   name: "lineage_nodes",
@@ -9237,6 +9311,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_WORKFLOW_SIGNALS,
   META_WORKFLOW_TIMERS,
   META_WORKFLOW_EVENTS,
+  META_WORKFLOW_TRACES,
   META_LINEAGE_NODES,
   META_LINEAGE_EDGES,
   META_PROVENANCE_RECORDS,

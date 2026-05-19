@@ -117,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 119 tables", () => {
-    expect(META_TABLES).toHaveLength(119);
+  it("contains 120 tables", () => {
+    expect(META_TABLES).toHaveLength(120);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -251,6 +251,7 @@ describe("META_TABLES", () => {
       "workflow_instances",
       "workflow_signals",
       "workflow_timers",
+      "workflow_traces",
     ]);
   });
 

@@ -218,4 +218,73 @@ describe("buildPersistentEngine", () => {
     );
     expect(updates.length).toBeGreaterThan(0);
   });
+
+  it("persistTraces=true wires PostgresWorkflowInstrumentation that writes meta.workflow_traces (M8)", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
+    const definitions = new Map([[fixtureDefinition().id, fixtureDefinition()]]);
+    const { engine } = buildPersistentEngine({
+      conn,
+      definitions,
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+      persistTraces: true,
+    });
+    await engine.startInstance({
+      definitionId: "wfd_def00001",
+      tenantId: TENANT,
+      correlationKey: "po-traces",
+    });
+    const traceInserts = capture.filter((c) =>
+      c.sql.includes("INSERT INTO meta.workflow_traces"),
+    );
+    expect(traceInserts.length).toBeGreaterThan(0);
+    const kinds = traceInserts.map((c) => c.params?.[3]);
+    expect(kinds).toContain("instance_started");
+  });
+
+  it("persistTraces=false (default) emits no traces (M8)", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
+    const definitions = new Map([[fixtureDefinition().id, fixtureDefinition()]]);
+    const { engine } = buildPersistentEngine({
+      conn,
+      definitions,
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+    });
+    await engine.startInstance({
+      definitionId: "wfd_def00001",
+      tenantId: TENANT,
+      correlationKey: "po-no-traces",
+    });
+    const traceInserts = capture.filter((c) =>
+      c.sql.includes("INSERT INTO meta.workflow_traces"),
+    );
+    expect(traceInserts.length).toBe(0);
+  });
+
+  it("custom instrumentation overrides persistTraces (M8)", async () => {
+    const events: string[] = [];
+    const conn = mockConnection();
+    const definitions = new Map([[fixtureDefinition().id, fixtureDefinition()]]);
+    const { engine } = buildPersistentEngine({
+      conn,
+      definitions,
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+      persistTraces: true,
+      instrumentation: {
+        onEvent(e) {
+          events.push(e.kind);
+        },
+      },
+    });
+    await engine.startInstance({
+      definitionId: "wfd_def00001",
+      tenantId: TENANT,
+      correlationKey: "po-custom-instr",
+    });
+    expect(events).toContain("instance_started");
+  });
 });

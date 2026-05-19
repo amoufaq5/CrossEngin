@@ -9,6 +9,10 @@ import {
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
 import { WorkflowEngine } from "./engine.js";
+import {
+  captureInstrumentation,
+  type WorkflowInstrumentation,
+} from "./instrumentation.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
@@ -89,6 +93,7 @@ function makeEngine(opts: {
   readonly definition?: WorkflowDefinition;
   readonly registry?: ActivityRegistry;
   readonly clock?: FixedClock;
+  readonly instrumentation?: WorkflowInstrumentation;
 } = {}) {
   const definition = opts.definition ?? definitionFixture();
   const log = new InMemoryEventLog();
@@ -101,6 +106,9 @@ function makeEngine(opts: {
     activityRegistry: registry,
     clock,
     idGenerator: ids,
+    ...(opts.instrumentation !== undefined
+      ? { instrumentation: opts.instrumentation }
+      : {}),
   });
   return { engine, log, clock, definition, ids };
 }
@@ -603,5 +611,235 @@ describe("event sequence numbers", () => {
     for (let i = 0; i < events.length; i++) {
       expect(events[i]?.sequenceNumber).toBe(i);
     }
+  });
+});
+
+describe("WorkflowEngine — instrumentation (M8)", () => {
+  it("emits instance_started + state_transitioned + instance_failed during a full reject flow", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({ instrumentation: cap.instrumentation });
+    const { instanceId } = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-1",
+    });
+    await engine.submitSignal({
+      signalName: "reject",
+      correlationKey: "po-1",
+      tenantId: TENANT,
+    });
+    const kinds = cap.events.map((e) => e.kind);
+    expect(kinds).toContain("instance_started");
+    expect(kinds).toContain("state_transitioned");
+    expect(kinds).toContain("signal_received");
+    expect(kinds).toContain("signal_consumed");
+    expect(kinds).toContain("instance_failed");
+    const started = cap.events.find((e) => e.kind === "instance_started")!;
+    expect(started.instanceId).toBe(instanceId);
+    expect(started.definitionId).toBe("wfd_def00001");
+    expect(started.correlationId).toBe("po-1");
+    expect(started.attributes["definitionKey"]).toBe("purchase.approval");
+  });
+
+  it("emits instance_completed on terminal_success", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({ instrumentation: cap.instrumentation });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-2",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-2",
+      tenantId: TENANT,
+    });
+    const completed = cap.events.find((e) => e.kind === "instance_completed");
+    expect(completed).toBeDefined();
+    expect(completed!.attributes["terminalState"]).toBe("approved");
+    expect(completed!.attributes["terminalKind"]).toBe("terminal_success");
+  });
+
+  it("emits instance_cancelled on explicit cancellation", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({ instrumentation: cap.instrumentation });
+    const { instanceId } = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-3",
+    });
+    cap.clear();
+    await engine.cancelInstance({
+      instanceId,
+      reason: "operator-stopped",
+      cancelledByUserId: USER,
+    });
+    const cancelled = cap.events.find((e) => e.kind === "instance_cancelled")!;
+    expect(cancelled.instanceId).toBe(instanceId);
+    expect(cancelled.attributes["reason"]).toBe("operator-stopped");
+    expect(cancelled.attributes["cancelledByUserId"]).toBe(USER);
+  });
+
+  it("emits signal_received before signal_consumed in submitSignal", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({ instrumentation: cap.instrumentation });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-4",
+    });
+    cap.clear();
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-4",
+      tenantId: TENANT,
+    });
+    const receivedIdx = cap.events.findIndex((e) => e.kind === "signal_received");
+    const consumedIdx = cap.events.findIndex((e) => e.kind === "signal_consumed");
+    expect(receivedIdx).toBeGreaterThanOrEqual(0);
+    expect(consumedIdx).toBeGreaterThan(receivedIdx);
+  });
+
+  it("does not double-emit terminal instrumentation when projection re-evaluates", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({ instrumentation: cap.instrumentation });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-5",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-5",
+      tenantId: TENANT,
+    });
+    const completedCount = cap.events.filter(
+      (e) => e.kind === "instance_completed",
+    ).length;
+    expect(completedCount).toBe(1);
+  });
+
+  it("emits timer_fired when scheduled timers tick past their deadline", async () => {
+    const def = definitionFixture({
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: {
+                timerName: "deadline",
+                fireAfterSeconds: 60,
+              },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "awaiting_approval",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "rejected",
+          kind: "terminal_failure",
+          label: "Rejected",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "submit",
+          fromState: "draft",
+          toState: "awaiting_approval",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "timeout",
+          fromState: "awaiting_approval",
+          toState: "rejected",
+          trigger: { kind: "timer_fired", timerName: "deadline" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "timeout-1",
+    });
+    cap.clear();
+    await engine.tickTimers(new Date("2026-05-16T12:05:00.000Z").getTime());
+    const fired = cap.events.find((e) => e.kind === "timer_fired");
+    expect(fired).toBeDefined();
+    expect(fired!.attributes["timerName"]).toBe("deadline");
+  });
+
+  it("populates occurredAt from the engine clock", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({ clock, instrumentation: cap.instrumentation });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-time",
+    });
+    for (const e of cap.events) {
+      expect(e.occurredAt).toBe("2026-05-16T12:00:00.000Z");
+    }
+  });
+
+  it("swallows instrumentation errors without breaking the engine", async () => {
+    const failing: WorkflowInstrumentation = {
+      onEvent() {
+        throw new Error("instrumentation backend down");
+      },
+    };
+    const { engine } = makeEngine({ instrumentation: failing });
+    const result = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-noisy",
+    });
+    expect(result.instanceId).toMatch(/^wfi_/);
+    // submitSignal also exercises a different instrumentation path.
+    await expect(
+      engine.submitSignal({
+        signalName: "approve",
+        correlationKey: "po-noisy",
+        tenantId: TENANT,
+      }),
+    ).resolves.toMatchObject({ deduplicated: false });
+  });
+
+  it("default engine without instrumentation continues to work (NoopInstrumentation fallback)", async () => {
+    const { engine } = makeEngine();
+    const result = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: "wfd_def00001",
+      correlationKey: "po-no-instr",
+    });
+    expect(result.currentState).toBe("awaiting_approval");
+    expect(result.status).toBe("waiting_for_signal");
   });
 });

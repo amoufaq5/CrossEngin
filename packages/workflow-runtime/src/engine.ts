@@ -13,6 +13,12 @@ import {
 } from "./activity-handlers.js";
 import { type Clock, type IdGenerator, SystemClock, RandomIdGenerator } from "./clock.js";
 import { type EventLog } from "./event-log.js";
+import {
+  NoopInstrumentation,
+  type WorkflowInstrumentation,
+  type WorkflowInstrumentationEvent,
+  type WorkflowInstrumentationKind,
+} from "./instrumentation.js";
 import { type ProjectedInstance, projectInstance } from "./projection.js";
 import {
   type GuardEvaluator,
@@ -30,6 +36,7 @@ export interface EngineOptions {
   readonly idGenerator?: IdGenerator;
   readonly guardEvaluator?: GuardEvaluator;
   readonly systemActorId?: string;
+  readonly instrumentation?: WorkflowInstrumentation;
 }
 
 export interface StartInstanceInput {
@@ -73,6 +80,9 @@ export class WorkflowEngine {
   private readonly seenSignalIdempotency: Set<string> = new Set();
   private readonly instanceTenant: Map<string, string> = new Map();
   private readonly instanceCorrelation: Map<string, string> = new Map();
+  private readonly instanceDefinition: Map<string, string> = new Map();
+  private readonly emittedTerminals: Set<string> = new Set();
+  private readonly instrumentation: WorkflowInstrumentation;
 
   constructor(opts: EngineOptions) {
     this.eventLog = opts.eventLog;
@@ -82,6 +92,57 @@ export class WorkflowEngine {
     this.ids = opts.idGenerator ?? new RandomIdGenerator();
     this.guardEvaluator = opts.guardEvaluator ?? defaultGuardEvaluator;
     this.systemActorId = opts.systemActorId ?? "workflow-engine";
+    this.instrumentation = opts.instrumentation ?? NoopInstrumentation;
+  }
+
+  private async emitInstrumentation(
+    kind: WorkflowInstrumentationKind,
+    fields: {
+      tenantId: string;
+      instanceId: string | null;
+      definitionId: string | null;
+      correlationId?: string | null;
+      durationMs?: number | null;
+      attributes?: Readonly<Record<string, unknown>>;
+    },
+  ): Promise<void> {
+    const event: WorkflowInstrumentationEvent = {
+      kind,
+      tenantId: fields.tenantId,
+      instanceId: fields.instanceId,
+      definitionId: fields.definitionId,
+      correlationId: fields.correlationId ?? null,
+      occurredAt: this.clock.nowIso(),
+      durationMs: fields.durationMs ?? null,
+      attributes: fields.attributes ?? {},
+    };
+    try {
+      await this.instrumentation.onEvent(event);
+    } catch (err) {
+      // Instrumentation must never crash the engine. Swallow + emit
+      // engine_error via the noop fallback so observability failures
+      // are visible in subsequent traces but don't propagate.
+      if (this.instrumentation !== NoopInstrumentation) {
+        try {
+          await NoopInstrumentation.onEvent({
+            kind: "engine_error",
+            tenantId: fields.tenantId,
+            instanceId: fields.instanceId,
+            definitionId: fields.definitionId,
+            correlationId: fields.correlationId ?? null,
+            occurredAt: this.clock.nowIso(),
+            durationMs: null,
+            attributes: {
+              source: "instrumentation",
+              originalKind: kind,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          });
+        } catch {
+          // Truly inert.
+        }
+      }
+    }
   }
 
   async startInstance(input: StartInstanceInput): Promise<ProjectedInstance> {
@@ -107,9 +168,24 @@ export class WorkflowEngine {
     ).toISOString();
 
     this.instanceTenant.set(instanceId, input.tenantId);
+    this.instanceDefinition.set(instanceId, definition.id);
     if (input.correlationKey !== undefined) {
       this.instanceCorrelation.set(instanceId, input.correlationKey);
     }
+
+    await this.emitInstrumentation("instance_started", {
+      tenantId: input.tenantId,
+      instanceId,
+      definitionId: definition.id,
+      correlationId: input.correlationKey ?? null,
+      attributes: {
+        definitionKey: definition.definitionKey,
+        definitionVersion: definition.version,
+        initialState: definition.initialState,
+        startedByUserId: input.startedByUserId ?? null,
+        startedBySystem: input.startedBySystem ?? null,
+      },
+    });
 
     await this.appendEvent({
       instanceId,
@@ -178,6 +254,17 @@ export class WorkflowEngine {
 
       const nextSeq = (await this.eventLog.latestSequence(instanceId)) ?? -1;
       const occurredAt = this.clock.nowIso();
+      await this.emitInstrumentation("signal_received", {
+        tenantId: input.tenantId,
+        instanceId,
+        definitionId: this.instanceDefinition.get(instanceId) ?? null,
+        correlationId: input.correlationKey,
+        attributes: {
+          signalName: input.signalName,
+          signalId,
+          sourceSystem: input.sourceSystem ?? null,
+        },
+      });
       await this.appendEvent({
         instanceId,
         tenantId: input.tenantId,
@@ -213,6 +300,13 @@ export class WorkflowEngine {
         await this.applyTransition(instanceId, definition, transition, state, signalId, null);
       }
       const nextSeq2 = (await this.eventLog.latestSequence(instanceId))!;
+      await this.emitInstrumentation("signal_consumed", {
+        tenantId: input.tenantId,
+        instanceId,
+        definitionId: this.instanceDefinition.get(instanceId) ?? null,
+        correlationId: input.correlationKey,
+        attributes: { signalName: input.signalName, signalId },
+      });
       await this.appendEvent({
         instanceId,
         tenantId: input.tenantId,
@@ -262,6 +356,17 @@ export class WorkflowEngine {
       }
       for (const timer of scheduled.values()) {
         if (timer.fireAt > nowMs) continue;
+        await this.emitInstrumentation("timer_fired", {
+          tenantId: state.tenantId,
+          instanceId,
+          definitionId: this.instanceDefinition.get(instanceId) ?? null,
+          correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+          attributes: {
+            timerId: timer.id,
+            timerName: timer.name,
+            fireAt: timer.fireAt,
+          },
+        });
         const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
         await this.appendEvent({
           instanceId,
@@ -313,6 +418,16 @@ export class WorkflowEngine {
       throw new Error(`cannot cancel instance in terminal status ${state.status}`);
     }
     const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
+    await this.emitInstrumentation("instance_cancelled", {
+      tenantId: state.tenantId,
+      instanceId: input.instanceId,
+      definitionId: this.instanceDefinition.get(input.instanceId) ?? state.definitionId,
+      correlationId: this.instanceCorrelation.get(input.instanceId) ?? null,
+      attributes: {
+        reason: input.reason,
+        cancelledByUserId: input.cancelledByUserId ?? null,
+      },
+    });
     await this.appendEvent({
       instanceId: input.instanceId,
       tenantId: state.tenantId,
@@ -416,6 +531,19 @@ export class WorkflowEngine {
     }
 
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.emitInstrumentation("state_transitioned", {
+      tenantId: fromState.tenantId,
+      instanceId,
+      definitionId: definition.id,
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+      attributes: {
+        previousState: transition.fromState,
+        newState: transition.toState,
+        transitionName: transition.name,
+        signalId,
+        timerId,
+      },
+    });
     await this.appendEvent({
       instanceId,
       tenantId: fromState.tenantId,
@@ -524,6 +652,13 @@ export class WorkflowEngine {
         : "transformation";
     const activityId = this.ids.generate("wfa");
     const inputData = (action.parameters["input"] as Record<string, unknown>) ?? {};
+    await this.emitInstrumentation("activity_scheduled", {
+      tenantId,
+      instanceId,
+      definitionId: definition.id,
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+      attributes: { activityId, activityKey, activityKind: kind },
+    });
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -734,6 +869,24 @@ export class WorkflowEngine {
     state: ProjectedInstance,
     kind: "terminal_success" | "terminal_failure" | "terminal_cancelled",
   ): Promise<void> {
+    if (this.emittedTerminals.has(instanceId)) return;
+    this.emittedTerminals.add(instanceId);
+    const instrumentationKind: WorkflowInstrumentationKind =
+      kind === "terminal_success"
+        ? "instance_completed"
+        : kind === "terminal_failure"
+          ? "instance_failed"
+          : "instance_cancelled";
+    await this.emitInstrumentation(instrumentationKind, {
+      tenantId: state.tenantId,
+      instanceId,
+      definitionId: state.definitionId,
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+      attributes: {
+        terminalState: state.currentState,
+        terminalKind: kind,
+      },
+    });
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     if (kind === "terminal_success") {
       await this.appendEvent({
@@ -801,10 +954,18 @@ export class WorkflowEngine {
     }
   }
 
-  registerInstance(instanceId: string, tenantId: string, correlationKey?: string): void {
+  registerInstance(
+    instanceId: string,
+    tenantId: string,
+    correlationKey?: string,
+    definitionId?: string,
+  ): void {
     this.instanceTenant.set(instanceId, tenantId);
     if (correlationKey !== undefined) {
       this.instanceCorrelation.set(instanceId, correlationKey);
+    }
+    if (definitionId !== undefined) {
+      this.instanceDefinition.set(instanceId, definitionId);
     }
   }
 }
