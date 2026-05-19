@@ -1,9 +1,9 @@
 import type {
   CompletionRequest,
-  LlmContent,
   LlmContentBlock,
   LlmMessage,
   LlmTool,
+  ToolUseContentBlock,
   Usage,
 } from "@crossengin/ai-providers";
 import { contentToText } from "@crossengin/ai-providers";
@@ -87,7 +87,7 @@ export function buildOpenAIChatRequest(
   opts: BuildChatRequestOptions,
 ): OpenAIChatRequest {
   const model = req.model ?? opts.defaultModel;
-  const messages = req.messages.map(translateMessage);
+  const messages = req.messages.flatMap(translateMessage);
   const tools = req.tools?.map(translateTool);
   const request: Record<string, unknown> = {
     model,
@@ -103,54 +103,115 @@ export function buildOpenAIChatRequest(
   return request as unknown as OpenAIChatRequest;
 }
 
-function translateMessage(m: LlmMessage): OpenAIChatMessage {
-  if (m.role === "system") return { role: "system", content: contentToText(m.content) };
+function translateMessage(m: LlmMessage): OpenAIChatMessage[] {
+  if (m.role === "system") {
+    return [{ role: "system", content: contentToText(m.content) }];
+  }
   if (m.role === "user") {
-    const attachments = m.attachments ?? [];
-    if (attachments.length === 0 && typeof m.content === "string") {
-      return { role: "user", content: m.content };
-    }
-    const parts: OpenAIContentPart[] = [];
-    appendKernelBlocks(parts, m.content);
-    for (const a of attachments) {
-      if (a.kind === "image") {
-        parts.push({
-          type: "image_url",
-          image_url: { url: `data:image/${a.format};base64,${a.bytes}` },
-        });
-      }
-    }
-    return { role: "user", content: parts };
+    return translateUserMessage(m);
   }
   if (m.role === "tool") {
-    return {
-      role: "tool",
-      content: contentToText(m.content),
-      tool_call_id: m.toolCallId ?? "",
-      ...(m.name !== undefined ? { name: m.name } : {}),
-    };
+    return [
+      {
+        role: "tool",
+        content: contentToText(m.content),
+        tool_call_id: m.toolCallId ?? "",
+        ...(m.name !== undefined ? { name: m.name } : {}),
+      },
+    ];
   }
-  // assistant
-  if (m.toolUses === undefined || m.toolUses.length === 0) {
-    if (typeof m.content === "string") {
-      return { role: "assistant", content: m.content };
+  return [translateAssistantMessage(m)];
+}
+
+function translateUserMessage(m: LlmMessage): OpenAIChatMessage[] {
+  const attachments = m.attachments ?? [];
+  if (
+    attachments.length === 0 &&
+    typeof m.content === "string"
+  ) {
+    return [{ role: "user", content: m.content }];
+  }
+  const out: OpenAIChatMessage[] = [];
+  const userParts: OpenAIContentPart[] = [];
+  if (typeof m.content === "string") {
+    if (m.content.length > 0) {
+      userParts.push({ type: "text", text: m.content });
     }
-    const parts: OpenAIContentPart[] = [];
-    appendKernelBlocks(parts, m.content);
-    return { role: "assistant", content: parts.length > 0 ? parts : null };
+  } else {
+    for (const b of m.content) {
+      if (b.type === "tool_result") {
+        out.push({
+          role: "tool",
+          content: b.content,
+          tool_call_id: b.toolUseId,
+        });
+        continue;
+      }
+      userParts.push(translateKernelBlock(b));
+    }
+  }
+  for (const a of attachments) {
+    if (a.kind === "image") {
+      userParts.push({
+        type: "image_url",
+        image_url: { url: `data:image/${a.format};base64,${a.bytes}` },
+      });
+    }
+  }
+  if (userParts.length > 0) {
+    out.push({ role: "user", content: userParts });
+  }
+  return out;
+}
+
+function translateAssistantMessage(m: LlmMessage): OpenAIChatMessage {
+  const inlineToolUses: ToolUseContentBlock[] = [];
+  const otherParts: OpenAIContentPart[] = [];
+  if (typeof m.content === "string") {
+    if (m.content.length > 0) {
+      otherParts.push({ type: "text", text: m.content });
+    }
+  } else {
+    for (const b of m.content) {
+      if (b.type === "tool_use") {
+        inlineToolUses.push(b);
+        continue;
+      }
+      if (b.type === "tool_result") continue; // not legal on assistant; filtered at parse
+      otherParts.push(translateKernelBlock(b));
+    }
+  }
+  const fieldToolUses = m.toolUses ?? [];
+  const allToolCalls = [...fieldToolUses, ...inlineToolUses].map((u) => ({
+    id: u.id,
+    type: "function" as const,
+    function: {
+      name: u.name,
+      arguments: JSON.stringify(u.input ?? {}),
+    },
+  }));
+  if (allToolCalls.length === 0) {
+    if (otherParts.length === 0) {
+      return { role: "assistant", content: typeof m.content === "string" ? m.content : null };
+    }
+    if (otherParts.length === 1 && otherParts[0]!.type === "text") {
+      return { role: "assistant", content: otherParts[0]!.text };
+    }
+    return { role: "assistant", content: otherParts };
   }
   return {
     role: "assistant",
-    content: assistantTextContent(m.content),
-    tool_calls: m.toolUses.map((u) => ({
-      id: u.id,
-      type: "function" as const,
-      function: {
-        name: u.name,
-        arguments: JSON.stringify(u.input ?? {}),
-      },
-    })),
+    content: contentForAssistantWithTools(otherParts),
+    tool_calls: allToolCalls,
   };
+}
+
+function contentForAssistantWithTools(
+  parts: readonly OpenAIContentPart[],
+): string | readonly OpenAIContentPart[] | null {
+  if (parts.length === 0) return null;
+  if (parts.length === 1 && parts[0]!.type === "text") return parts[0]!.text;
+  return parts;
 }
 
 function translateTool(tool: LlmTool): OpenAIToolDeclaration {
@@ -216,25 +277,17 @@ function parseArgsOrRaw(args: string): unknown {
   }
 }
 
-function appendKernelBlocks(out: OpenAIContentPart[], content: LlmContent): void {
-  if (typeof content === "string") {
-    if (content.length > 0) out.push({ type: "text", text: content });
-    return;
-  }
-  for (const b of content) {
-    out.push(translateKernelBlock(b));
-  }
-}
-
 function translateKernelBlock(block: LlmContentBlock): OpenAIContentPart {
   if (block.type === "text") return { type: "text", text: block.text };
-  return {
-    type: "image_url",
-    image_url: { url: `data:image/${block.format};base64,${block.bytes}` },
-  };
-}
-
-function assistantTextContent(content: LlmContent): string | null {
-  const text = contentToText(content);
-  return text.length > 0 ? text : null;
+  if (block.type === "image") {
+    return {
+      type: "image_url",
+      image_url: { url: `data:image/${block.format};base64,${block.bytes}` },
+    };
+  }
+  // tool_use / tool_result blocks are handled at the message-translation layer,
+  // not here — they don't map to OpenAI content parts directly.
+  throw new Error(
+    `translateKernelBlock: '${block.type}' should have been handled at the message level`,
+  );
 }

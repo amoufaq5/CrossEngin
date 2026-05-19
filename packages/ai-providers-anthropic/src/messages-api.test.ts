@@ -462,4 +462,68 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
       source: { media_type: "image/jpeg", data: "XYZ" },
     });
   });
+
+  it("assistant tool_use block translates to Anthropic tool_use block (M2.X.5.x)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "search the docs" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Searching..." },
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "search",
+                input: { q: "docs" },
+              },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[1]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toEqual({
+      type: "tool_use",
+      id: "tu_1",
+      name: "search",
+      input: { q: "docs" },
+    });
+  });
+
+  it("user tool_result block translates to Anthropic tool_result block (M2.X.5.x)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "tu_1",
+                content: "found 3 results",
+              },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      type: "tool_result",
+      tool_use_id: "tu_1",
+      content: "found 3 results",
+    });
+  });
 });

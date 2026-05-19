@@ -284,10 +284,28 @@ function appendKernelBlocks(
 
 function translateKernelBlock(block: LlmContentBlock): BedrockContentBlock {
   if (block.type === "text") return { text: block.text };
+  if (block.type === "image") {
+    return {
+      image: {
+        format: block.format,
+        source: { bytes: block.bytes },
+      },
+    };
+  }
+  if (block.type === "tool_use") {
+    return {
+      toolUse: {
+        toolUseId: block.id,
+        name: block.name,
+        input: block.input ?? {},
+      },
+    };
+  }
   return {
-    image: {
-      format: block.format,
-      source: { bytes: block.bytes },
+    toolResult: {
+      toolUseId: block.toolUseId,
+      content: [{ text: block.content }],
+      ...(block.status !== undefined ? { status: block.status } : {}),
     },
   };
 }

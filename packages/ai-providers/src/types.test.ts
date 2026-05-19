@@ -637,3 +637,124 @@ describe("contentToText", () => {
     ).toBe("");
   });
 });
+
+describe("ToolUseContentBlock / ToolResultContentBlock (M2.X.5.x)", () => {
+  it("LlmContentBlockSchema accepts a tool_use block", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "tool_use",
+        id: "tu_1",
+        name: "search",
+        input: { q: "x" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("LlmContentBlockSchema accepts a tool_result block (status optional)", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "tool_result",
+        toolUseId: "tu_1",
+        content: "result text",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "tool_result",
+        toolUseId: "tu_1",
+        content: "err",
+        status: "error",
+      }),
+    ).not.toThrow();
+  });
+
+  it("tool_use requires non-empty id + name", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "tool_use", id: "", name: "x", input: {} }),
+    ).toThrow();
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "tool_use", id: "tu_1", name: "", input: {} }),
+    ).toThrow();
+  });
+
+  it("tool_result requires non-empty toolUseId; content can be empty string", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "tool_result", toolUseId: "", content: "x" }),
+    ).toThrow();
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "tool_result", toolUseId: "tu_1", content: "" }),
+    ).not.toThrow();
+  });
+
+  it("tool_result status only accepts 'success' or 'error'", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "tool_result",
+        toolUseId: "tu_1",
+        content: "ok",
+        status: "partial",
+      }),
+    ).toThrow();
+  });
+});
+
+describe("LlmMessageSchema role-validation for tool blocks (M2.X.5.x)", () => {
+  it("accepts tool_use block on assistant message", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me search" },
+          { type: "tool_use", id: "tu_1", name: "search", input: { q: "x" } },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it("REJECTS tool_use block on user message", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "tool_use", id: "tu_1", name: "search", input: {} }],
+      }),
+    ).toThrow(/tool_use content blocks only allowed on assistant/);
+  });
+
+  it("accepts tool_result block on user message", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "tu_1", content: "result" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts tool_result block on tool message", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "tool_result", toolUseId: "tu_1", content: "result" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("REJECTS tool_result block on assistant message", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [{ type: "tool_result", toolUseId: "tu_1", content: "x" }],
+      }),
+    ).toThrow(/tool_result content blocks only allowed on user or tool/);
+  });
+
+  it("REJECTS image block on tool message", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "image", format: "png", bytes: "x" }],
+      }),
+    ).toThrow(/image content blocks are not allowed on tool/);
+  });
+});

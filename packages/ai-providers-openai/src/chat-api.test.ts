@@ -467,4 +467,108 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
       image_url: { url: "data:image/jpeg;base64,XYZ" },
     });
   });
+
+  it("assistant tool_use block hoists to OpenAI tool_calls (M2.X.5.x)", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "search the docs" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Searching..." },
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "search",
+                input: { q: "docs" },
+              },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    const asst = built.messages[1]!;
+    expect(asst.role).toBe("assistant");
+    expect(asst.content).toBe("Searching...");
+    expect(asst.tool_calls).toHaveLength(1);
+    expect(asst.tool_calls?.[0]).toEqual({
+      id: "tu_1",
+      type: "function",
+      function: { name: "search", arguments: '{"q":"docs"}' },
+    });
+  });
+
+  it("user tool_result block SPLITS into a separate tool-role message (M2.X.5.x)", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "search the docs" },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu_1", name: "search", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "tu_1",
+                content: "found 3 results",
+              },
+              { type: "text", text: "what's the third?" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    // user msg with tool_result + text → emits 2 OpenAI messages:
+    //   1. tool-role msg with tool_call_id
+    //   2. user-role msg with remaining text
+    expect(built.messages).toHaveLength(4);
+    expect(built.messages[2]).toEqual({
+      role: "tool",
+      content: "found 3 results",
+      tool_call_id: "tu_1",
+    });
+    expect(built.messages[3]!.role).toBe("user");
+    const userParts = built.messages[3]!.content as ReadonlyArray<{ type: string; text?: string }>;
+    expect(userParts).toEqual([{ type: "text", text: "what's the third?" }]);
+  });
+
+  it("tool_use inline content blocks merge with toolUses field for tool_calls (M2.X.5.x)", () => {
+    const built = buildOpenAIChatRequest(
+      {
+        task: "planner",
+        messages: [
+          { role: "user", content: "do both" },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu_a", name: "search", input: { q: "x" } },
+            ],
+            toolUses: [{ id: "tu_b", name: "fetch", input: { url: "y" } }],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+    const asst = built.messages[1]!;
+    expect(asst.tool_calls).toHaveLength(2);
+    const ids = asst.tool_calls!.map((tc) => tc.id);
+    expect(ids).toContain("tu_a");
+    expect(ids).toContain("tu_b");
+  });
 });

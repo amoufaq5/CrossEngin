@@ -635,4 +635,63 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     );
     expect(built.messages[0]!.content).toHaveLength(2);
   });
+
+  it("assistant tool_use block translates to Bedrock toolUse (M2.X.5.x)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          { role: "user", content: "search the docs" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Searching..." },
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "search",
+                input: { q: "docs" },
+              },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    const blocks = built.messages[1]!.content;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ text: "Searching..." });
+    expect(blocks[1]).toEqual({
+      toolUse: { toolUseId: "tu_1", name: "search", input: { q: "docs" } },
+    });
+  });
+
+  it("user tool_result block translates to Bedrock toolResult (M2.X.5.x)", () => {
+    const built = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "tu_1",
+                content: "found 3 results",
+                status: "success",
+              },
+            ],
+          },
+        ],
+      }),
+      {},
+    );
+    const blocks = built.messages[0]!.content;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      toolResult: {
+        toolUseId: "tu_1",
+        content: [{ text: "found 3 results" }],
+        status: "success",
+      },
+    });
+  });
 });

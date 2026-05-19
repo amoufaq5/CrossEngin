@@ -87,9 +87,31 @@ export const ImageContentBlockSchema = z.object({
 });
 export type ImageContentBlock = z.infer<typeof ImageContentBlockSchema>;
 
+export const ToolUseContentBlockSchema = z.object({
+  type: z.literal("tool_use"),
+  id: z.string().min(1),
+  name: z.string().min(1),
+  input: z.unknown(),
+});
+export type ToolUseContentBlock = z.infer<typeof ToolUseContentBlockSchema>;
+
+export const TOOL_RESULT_STATUSES = ["success", "error"] as const;
+export const ToolResultStatusSchema = z.enum(TOOL_RESULT_STATUSES);
+export type ToolResultStatus = z.infer<typeof ToolResultStatusSchema>;
+
+export const ToolResultContentBlockSchema = z.object({
+  type: z.literal("tool_result"),
+  toolUseId: z.string().min(1),
+  content: z.string(),
+  status: ToolResultStatusSchema.optional(),
+});
+export type ToolResultContentBlock = z.infer<typeof ToolResultContentBlockSchema>;
+
 export const LlmContentBlockSchema = z.discriminatedUnion("type", [
   TextContentBlockSchema,
   ImageContentBlockSchema,
+  ToolUseContentBlockSchema,
+  ToolResultContentBlockSchema,
 ]);
 export type LlmContentBlock = z.infer<typeof LlmContentBlockSchema>;
 
@@ -135,6 +157,32 @@ export const LlmMessageSchema = z
         message:
           "attachments and array content blocks are mutually exclusive — use content blocks for new code",
       });
+    }
+    if (Array.isArray(m.content)) {
+      for (let i = 0; i < m.content.length; i++) {
+        const b = m.content[i]!;
+        if (b.type === "tool_use" && m.role !== "assistant") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["content", i],
+            message: `tool_use content blocks only allowed on assistant messages (got role '${m.role}')`,
+          });
+        }
+        if (b.type === "tool_result" && m.role !== "user" && m.role !== "tool") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["content", i],
+            message: `tool_result content blocks only allowed on user or tool messages (got role '${m.role}')`,
+          });
+        }
+        if (b.type === "image" && m.role === "tool") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["content", i],
+            message: "image content blocks are not allowed on tool messages",
+          });
+        }
+      }
     }
   });
 export type LlmMessage = z.infer<typeof LlmMessageSchema>;

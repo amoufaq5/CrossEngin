@@ -203,17 +203,32 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
   if (block.type === "text") {
     return { type: "text", text: block.text };
   }
+  if (block.type === "image") {
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: `image/${block.format}` as
+          | "image/png"
+          | "image/jpeg"
+          | "image/gif"
+          | "image/webp",
+        data: block.bytes,
+      },
+    };
+  }
+  if (block.type === "tool_use") {
+    return {
+      type: "tool_use",
+      id: block.id,
+      name: block.name,
+      input: block.input,
+    };
+  }
   return {
-    type: "image",
-    source: {
-      type: "base64",
-      media_type: `image/${block.format}` as
-        | "image/png"
-        | "image/jpeg"
-        | "image/gif"
-        | "image/webp",
-      data: block.bytes,
-    },
+    type: "tool_result",
+    tool_use_id: block.toolUseId,
+    content: block.content,
   };
 }
 

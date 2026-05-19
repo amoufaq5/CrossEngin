@@ -15,13 +15,41 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 +
-M2.X.6 + M2.X.6.x + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6
-+ M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 +
-M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 +
-M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 +
-M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,621 tests**,
-all green, no type errors. M2.X.5 lifts the kernel
+M2.X.5.x + M2.X.6 + M2.X.6.x + M3 + M3.5 + M3.6 + M3.7 + M4 +
+M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y +
+M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 +
+M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 +
+M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,639 tests**,
+all green, no type errors. M2.X.5.x adds `tool_use` +
+`tool_result` content block variants to the kernel
+`LlmContentBlock` discriminated union, consolidating the
+tool-call surface. New types in `@crossengin/ai-providers/src/
+types.ts`: `ToolUseContentBlock` (`{type: "tool_use", id, name,
+input}`), `ToolResultContentBlock` (`{type: "tool_result",
+toolUseId, content, status?: "success" | "error"}`), and the
+`TOOL_RESULT_STATUSES` const tuple. LlmMessageSchema's
+superRefine validates role-bound semantics: tool_use only on
+assistant role, tool_result only on user or tool role, image
+NOT allowed on tool messages (text-only by convention). All
+three provider translators handle the new blocks: Bedrock
+emits `{toolUse: {toolUseId, name, input}}` and `{toolResult:
+{toolUseId, content: [{text}], status?}}`; Anthropic emits
+`{type: "tool_use", id, name, input}` and `{type: "tool_result",
+tool_use_id, content}`. OpenAI required a flatMap refactor —
+`translateMessage` now returns `OpenAIChatMessage[]` because a
+single kernel user message with tool_result blocks splits into
+multiple OpenAI messages (tool-role per result + user-role with
+remaining text). buildOpenAIChatRequest switched from `.map` to
+`.flatMap`. Hybrid support: a single assistant LlmMessage can
+mix the legacy `toolUses` field with inline `tool_use` content
+blocks; OpenAI merges both into one `tool_calls` envelope array.
+Bidirectional field compat: the legacy `LlmMessage.toolUses`
+field + `role: "tool"` messages continue working unchanged;
+operators can mix legacy + canonical patterns. Unblocks
+parallel tool calls in a single assistant turn, bundled tool
+results in a single user turn, and arbitrary text/tool
+interleaving without losing order. M2.X.5 lifts the kernel
 `LlmMessage.content` from `string` to a discriminated union
 `string | LlmContentBlock[]`, closing the M2.X asymmetry where
 user messages could carry images (via `attachments`) but
@@ -899,7 +927,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0088 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0089 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -967,7 +995,10 @@ shared tuple, duck-typing against `err.kind`), ADR-0088 covers
 M2.X.5 (kernel LlmMessage.content as discriminated union —
 lifted `content: string` to `string | LlmContentBlock[]` to
 unblock multimodal assistant outputs across all three
-providers).
+providers), ADR-0089 covers M2.X.5.x (tool_use + tool_result
+content block variants — consolidates tool-call surface with
+provider translators handling Bedrock + Anthropic natively
+and OpenAI via message-flattening flatMap).
 
 ## Architecture in 90 seconds
 
@@ -1858,7 +1889,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0088 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0089 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1921,7 +1952,10 @@ covers Phase 2 M2.X.6.x (cross-provider moderation helper —
 kernel-level `isModerationError(err)` predicate + shared
 `MODERATION_ERROR_KINDS` tuple), ADR-0088 covers Phase 2 M2.X.5
 (kernel LlmMessage.content discriminated union — unblocked
-multimodal assistant outputs across Anthropic / OpenAI / Bedrock).
+multimodal assistant outputs across Anthropic / OpenAI / Bedrock),
+ADR-0089 covers Phase 2 M2.X.5.x (tool_use + tool_result content
+block variants — consolidates tool-call surface with OpenAI
+flatMap refactor for message-flattening).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
