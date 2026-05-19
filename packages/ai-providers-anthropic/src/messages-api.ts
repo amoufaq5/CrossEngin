@@ -287,6 +287,11 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
       ...(block.name !== undefined ? { title: block.name } : {}),
     };
   }
+  if (block.type === "file_id") {
+    throw new Error(
+      "Anthropic provider does not support file_id content blocks — OpenAI Files API is OpenAI-specific. Use a document block with inline bytes, or document_url with a publicly-accessible URL instead.",
+    );
+  }
   if (block.type === "tool_use") {
     return {
       type: "tool_use",

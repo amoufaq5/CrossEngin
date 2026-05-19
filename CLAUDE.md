@@ -16,15 +16,44 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
-M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.6 +
+M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
+M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,807 tests**,
-all green, no type errors. M2.X.10 enforces OpenAI's name
+**55 packages + 1 app, 119 meta-schema tables, 6,833 tests**,
+all green, no type errors. M2.X.5.aa.z adds full OpenAI Files
+API integration: kernel `FileReferenceContentBlock` (8th
+variant in LlmContentBlock discriminated union) +
+`OpenAIProvider.uploadFile / .retrieveFile / .deleteFile`
+methods. Closes ADR-0097 Q3. New types: `FileReferenceContent
+BlockSchema = {type: "file_id", fileId: string.min(1).max(120)}`
+(opaque text — kernel doesn't enforce the file-<24hex> shape).
+Role validation: file_id rejected on tool messages (same rule
+as documents/images). New OpenAI module `files-api.ts`
+exports `OPENAI_FILES_PURPOSES = ["assistants", "batch",
+"fine-tune", "vision", "user_data"]`, `OpenAIFile` /
+`OpenAIFileDeleteResponse` types, `isOpenAIFilesPurpose`
+discriminator, and `buildMultipartUpload(input)` —
+manually-constructed multipart/form-data encoder producing
+Uint8Array body + boundary-aware Content-Type. Random
+per-call boundary (`----CrossEnginFormBoundary<rand>`); RFC
+7578 quote escaping in filenames; binary content preserved
+byte-for-byte. `OpenAIProvider` gained 3 methods:
+`uploadFile({bytes, filename, purpose, contentType?})` POSTs
+to `/v1/files` with multipart body; `retrieveFile(fileId)`
+GETs `/v1/files/{id}`; `deleteFile(fileId)` DELETEs same
+path. `FetchLike.body` widened from `string` to `string |
+Uint8Array` (backwards-compatible). Per-provider translation:
+OpenAI Responses API natively passes through to `{type:
+"input_file", file_id}` (`OpenAIResponsesContentFileInput`
+becomes a union of file_data + file_id variants); OpenAI Chat
+Completions + Anthropic + Bedrock all THROW with actionable
+"use Responses API path" / "use document block with inline
+bytes" guidance. M2.X.10 enforces OpenAI's name
 regex at the kernel layer + threads `LlmMessage.name` through
 OpenAI Chat Completions on all four message roles (system,
 user, assistant, tool). Pre-M2.X.10 only the tool-role
@@ -1187,7 +1216,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0101 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0102 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1298,7 +1327,11 @@ expansion — doc/docx/xls/xlsx/html added; Bedrock native,
 Anthropic + OpenAI Responses throw with conversion guidance),
 ADR-0101 covers M2.X.10 (kernel LlmMessage.name regex
 enforcement + OpenAI Chat threading across all four roles;
-Anthropic + Bedrock + OpenAI Responses silently drop).
+Anthropic + Bedrock + OpenAI Responses silently drop),
+ADR-0102 covers M2.X.5.aa.z (OpenAI Files API integration —
+upload/retrieve/delete CRUD + kernel FileReferenceContentBlock
+threaded through Responses API; other providers throw with
+actionable guidance).
 
 ## Architecture in 90 seconds
 
@@ -2189,7 +2222,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0101 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0102 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2290,7 +2323,10 @@ M2.X.5.aa.x.1 (office document format expansion — doc/docx/xls/
 xlsx/html added; Bedrock native, two-provider throw with
 conversion guidance), ADR-0101 covers Phase 2 M2.X.10 (kernel
 LlmMessage.name enforcement + OpenAI Chat threading across all
-four message roles).
+four message roles), ADR-0102 covers Phase 2 M2.X.5.aa.z
+(OpenAI Files API integration — upload/retrieve/delete CRUD +
+FileReferenceContentBlock kernel variant; OpenAI Responses
+native passthrough, three other provider paths throw).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

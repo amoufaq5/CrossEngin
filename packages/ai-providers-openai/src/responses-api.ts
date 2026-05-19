@@ -27,11 +27,20 @@ export interface OpenAIResponsesContentImageInput {
   readonly image_url: string;
 }
 
-export interface OpenAIResponsesContentFileInput {
+export interface OpenAIResponsesContentFileDataInput {
   readonly type: "input_file";
   readonly filename: string;
   readonly file_data: string;
 }
+
+export interface OpenAIResponsesContentFileIdInput {
+  readonly type: "input_file";
+  readonly file_id: string;
+}
+
+export type OpenAIResponsesContentFileInput =
+  | OpenAIResponsesContentFileDataInput
+  | OpenAIResponsesContentFileIdInput;
 
 export interface OpenAIResponsesContentOutput {
   readonly type: "output_text";
@@ -254,6 +263,10 @@ function buildUserInputBlocks(
         throw new Error(
           "OpenAI Responses API does not support document_url content blocks — pre-fetch the URL to base64 bytes and use a document block instead, or upload via the Files API and use a file_id reference",
         );
+      }
+      if (b.type === "file_id") {
+        out.push({ type: "input_file", file_id: b.fileId });
+        continue;
       }
       // tool_use / tool_result blocks aren't user-input shapes for Responses API;
       // tool_result blocks on user role get folded out via the chat-api path. The

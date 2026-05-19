@@ -619,6 +619,25 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
     ).toThrow(/OpenAI Chat Completions does not support document/);
   });
 
+  it("file_id block throws on Chat Completions path with Responses-API guidance (M2.X.5.aa.z)", () => {
+    expect(() =>
+      buildOpenAIChatRequest(
+        {
+          task: "planner",
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "file_id", fileId: "file-abc123" }],
+            },
+          ],
+          tenantId: "ten-1",
+          sessionId: "ses-1",
+        },
+        { defaultModel: "gpt-4o" },
+      ),
+    ).toThrow(/OpenAI Chat Completions does not support file_id/);
+  });
+
   it("document_url block throws on Chat Completions path (M2.X.5.aa.y)", () => {
     expect(() =>
       buildOpenAIChatRequest(

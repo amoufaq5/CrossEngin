@@ -714,6 +714,22 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     });
   });
 
+  it("file_id block throws on Bedrock (OpenAI Files API is OpenAI-specific) (M2.X.5.aa.z)", () => {
+    expect(() =>
+      buildBedrockConverseRequest(
+        baseReq({
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "file_id", fileId: "file-abc123" }],
+            },
+          ],
+        }),
+        {},
+      ),
+    ).toThrow(/Bedrock provider does not support file_id/);
+  });
+
   it("document_url block throws on Bedrock (no native URL support) (M2.X.5.aa.y)", () => {
     expect(() =>
       buildBedrockConverseRequest(

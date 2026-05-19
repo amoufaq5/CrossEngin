@@ -504,6 +504,27 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
     });
   });
 
+  it("file_id block translates to input_file with file_id field (M2.X.5.aa.z)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "summarize" },
+            { type: "file_id", fileId: "file-abc123" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, unknown>> };
+    expect(userMsg.content).toHaveLength(2);
+    expect(userMsg.content[1]).toEqual({
+      type: "input_file",
+      file_id: "file-abc123",
+    });
+  });
+
   it("document_url block throws on Responses API (no native URL support) (M2.X.5.aa.y)", () => {
     expect(() =>
       buildOpenAIResponsesRequest(

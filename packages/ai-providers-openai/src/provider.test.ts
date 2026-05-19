@@ -30,7 +30,7 @@ interface CapturedCall {
   url: string;
   method: string;
   headers: Record<string, string>;
-  body: string;
+  body: string | Uint8Array;
 }
 
 function buildFetch(opts: {
@@ -473,6 +473,108 @@ describe("summarizeResponsesResponse helper", () => {
     expect(summary.reasoningSummary).toBe("thinking");
     expect(summary.status).toBe("completed");
     expect(summary.usage.inputTokens).toBe(10);
+  });
+});
+
+describe("OpenAIProvider Files API (M2.X.5.aa.z)", () => {
+  function fileResponse(): string {
+    return JSON.stringify({
+      id: "file-abc123",
+      object: "file",
+      bytes: 1024,
+      created_at: 1700000000,
+      filename: "spec.pdf",
+      purpose: "user_data",
+    });
+  }
+
+  it("uploadFile POSTs multipart/form-data to /v1/files and returns OpenAIFile", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ capture: captured, responseBody: fileResponse() }),
+    });
+    const file = await provider.uploadFile({
+      bytes: new TextEncoder().encode("PDF_BYTES"),
+      filename: "spec.pdf",
+      purpose: "user_data",
+      contentType: "application/pdf",
+    });
+    expect(file.id).toBe("file-abc123");
+    expect(file.purpose).toBe("user_data");
+    expect(captured[0]!.url).toBe("https://api.openai.com/v1/files");
+    expect(captured[0]!.method).toBe("POST");
+    expect(captured[0]!.headers["content-type"]).toMatch(
+      /^multipart\/form-data; boundary=/,
+    );
+  });
+
+  it("uploadFile rejects invalid purpose at the provider boundary", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({}),
+    });
+    await expect(
+      provider.uploadFile({
+        bytes: new TextEncoder().encode("X"),
+        filename: "x.pdf",
+        purpose: "training" as never,
+      }),
+    ).rejects.toThrow(/invalid purpose/);
+  });
+
+  it("retrieveFile GETs /v1/files/{file_id}", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({ capture: captured, responseBody: fileResponse() }),
+    });
+    const file = await provider.retrieveFile("file-abc123");
+    expect(file.id).toBe("file-abc123");
+    expect(captured[0]!.url).toBe("https://api.openai.com/v1/files/file-abc123");
+    expect(captured[0]!.method).toBe("GET");
+  });
+
+  it("retrieveFile rejects empty fileId", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({}),
+    });
+    await expect(provider.retrieveFile("")).rejects.toThrow(/fileId is required/);
+  });
+
+  it("deleteFile DELETEs /v1/files/{file_id} + returns deleted: true", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: JSON.stringify({
+          id: "file-abc123",
+          object: "file",
+          deleted: true,
+        }),
+      }),
+    });
+    const result = await provider.deleteFile("file-abc123");
+    expect(result.deleted).toBe(true);
+    expect(captured[0]!.url).toBe("https://api.openai.com/v1/files/file-abc123");
+    expect(captured[0]!.method).toBe("DELETE");
+  });
+
+  it("deleteFile surfaces HTTP errors as OpenAIError", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        status: 404,
+        responseBody: JSON.stringify({
+          error: { type: "not_found_error", message: "file not found" },
+        }),
+      }),
+    });
+    await expect(provider.deleteFile("file-bogus")).rejects.toMatchObject({
+      kind: "not_found_error",
+    });
   });
 });
 

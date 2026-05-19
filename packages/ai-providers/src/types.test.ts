@@ -1016,6 +1016,54 @@ describe("OFFICE_DOCUMENT_FORMATS / isOfficeDocumentFormat (M2.X.5.aa.x.1)", () 
   });
 });
 
+describe("FileReferenceContentBlockSchema (M2.X.5.aa.z)", () => {
+  it("accepts a non-empty fileId", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "file_id",
+        fileId: "file-abc123",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects empty fileId", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "file_id", fileId: "" }),
+    ).toThrow();
+  });
+
+  it("rejects fileId > 120 chars", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({ type: "file_id", fileId: "f".repeat(121) }),
+    ).toThrow();
+  });
+
+  it("REJECTS file_id block on tool message (same rule as document)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "tool",
+        toolCallId: "tu_1",
+        content: [{ type: "file_id", fileId: "file-abc" }],
+      }),
+    ).toThrow(/file_id content blocks are not allowed on tool/);
+  });
+
+  it("accepts file_id block on user + assistant", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: [{ type: "file_id", fileId: "file-abc" }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "assistant",
+        content: [{ type: "file_id", fileId: "file-abc" }],
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe("DocumentUrlContentBlockSchema (M2.X.5.aa.y)", () => {
   it("accepts a URL-based document", () => {
     expect(() =>

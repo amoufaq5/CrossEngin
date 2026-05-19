@@ -153,6 +153,12 @@ export const DocumentUrlContentBlockSchema = z.object({
 });
 export type DocumentUrlContentBlock = z.infer<typeof DocumentUrlContentBlockSchema>;
 
+export const FileReferenceContentBlockSchema = z.object({
+  type: z.literal("file_id"),
+  fileId: z.string().min(1).max(120),
+});
+export type FileReferenceContentBlock = z.infer<typeof FileReferenceContentBlockSchema>;
+
 export const ToolUseContentBlockSchema = z.object({
   type: z.literal("tool_use"),
   id: z.string().min(1),
@@ -179,6 +185,7 @@ export const LlmContentBlockSchema = z.discriminatedUnion("type", [
   ImageUrlContentBlockSchema,
   DocumentContentBlockSchema,
   DocumentUrlContentBlockSchema,
+  FileReferenceContentBlockSchema,
   ToolUseContentBlockSchema,
   ToolResultContentBlockSchema,
 ]);
@@ -259,6 +266,13 @@ export const LlmMessageSchema = z
             code: z.ZodIssueCode.custom,
             path: ["content", i],
             message: "document content blocks are not allowed on tool messages",
+          });
+        }
+        if (b.type === "file_id" && m.role === "tool") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["content", i],
+            message: "file_id content blocks are not allowed on tool messages",
           });
         }
       }

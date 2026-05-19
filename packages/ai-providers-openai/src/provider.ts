@@ -23,6 +23,13 @@ import {
 } from "./embeddings.js";
 import { OpenAIError, fromHttpResponse, fromNetworkError } from "./errors.js";
 import {
+  buildMultipartUpload,
+  isOpenAIFilesPurpose,
+  type OpenAIFile,
+  type OpenAIFileDeleteResponse,
+  type OpenAIFilesPurpose,
+} from "./files-api.js";
+import {
   OPENAI_DEFAULT_MODERATION_MODEL,
   buildModerationRequest,
   isOpenAIModerationModel,
@@ -60,7 +67,7 @@ export type FetchLike = (
   init: {
     method: string;
     headers: Record<string, string>;
-    body: string;
+    body: string | Uint8Array;
     signal?: AbortSignal;
   },
 ) => Promise<{
@@ -371,6 +378,125 @@ export class OpenAIProvider implements LlmProvider {
       });
     }
     return requested;
+  }
+
+  async uploadFile(input: {
+    readonly bytes: Uint8Array;
+    readonly filename: string;
+    readonly purpose: OpenAIFilesPurpose;
+    readonly contentType?: string;
+  }): Promise<OpenAIFile> {
+    if (!isOpenAIFilesPurpose(input.purpose)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `uploadFile: invalid purpose '${input.purpose}'`,
+      });
+    }
+    const multipart = buildMultipartUpload({
+      bytes: input.bytes,
+      filename: input.filename,
+      purpose: input.purpose,
+      ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
+    });
+    let response;
+    try {
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${this.apiKey}`,
+        "content-type": multipart.contentType,
+      };
+      if (this.organization !== undefined) headers["openai-organization"] = this.organization;
+      if (this.project !== undefined) headers["openai-project"] = this.project;
+      response = await this.fetchImpl(this.url("/v1/files"), {
+        method: "POST",
+        headers,
+        body: multipart.body,
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as OpenAIFile;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI file upload response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async retrieveFile(fileId: string): Promise<OpenAIFile> {
+    if (fileId.length === 0) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: "retrieveFile: fileId is required",
+      });
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(
+        this.url(`/v1/files/${encodeURIComponent(fileId)}`),
+        {
+          method: "GET",
+          headers: this.headers({ stream: false }),
+          body: "",
+        },
+      );
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as OpenAIFile;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI file retrieve response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async deleteFile(fileId: string): Promise<OpenAIFileDeleteResponse> {
+    if (fileId.length === 0) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: "deleteFile: fileId is required",
+      });
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(
+        this.url(`/v1/files/${encodeURIComponent(fileId)}`),
+        {
+          method: "DELETE",
+          headers: this.headers({ stream: false }),
+          body: "",
+        },
+      );
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as OpenAIFileDeleteResponse;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI file delete response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
   }
 
   private resolveChatModel(requested: string | undefined): OpenAIChatModel {
