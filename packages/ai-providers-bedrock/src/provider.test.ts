@@ -2765,7 +2765,7 @@ describe("BedrockProvider — createBatch (M2.X.5.aa.z.6)", () => {
     expect(sentBody["timeoutDurationInHours"]).toBe(48);
   });
 
-  it("propagates 409 ConflictException via .code field (idempotency token reuse)", async () => {
+  it("propagates 409 ConflictException as conflict_error (M2.X.12 — idempotency token reuse)", async () => {
     const provider = build({
       fetch: buildFetch({
         ok: false,
@@ -2777,6 +2777,7 @@ describe("BedrockProvider — createBatch (M2.X.5.aa.z.6)", () => {
       }),
     });
     await expect(provider.createBatch(minimalCreate())).rejects.toMatchObject({
+      kind: "conflict_error",
       status: 409,
       code: "ConflictException",
     });
@@ -2932,7 +2933,7 @@ describe("BedrockProvider — stopBatch (M2.X.5.aa.z.5)", () => {
     });
   });
 
-  it("surfaces 409 ConflictException with the code field for terminal-state stops", async () => {
+  it("classifies 409 ConflictException as conflict_error (M2.X.12 — terminal-state stops)", async () => {
     const provider = build({
       fetch: buildFetch({
         ok: false,
@@ -2944,6 +2945,7 @@ describe("BedrockProvider — stopBatch (M2.X.5.aa.z.5)", () => {
       }),
     });
     await expect(provider.stopBatch("abcd1234efgh")).rejects.toMatchObject({
+      kind: "conflict_error",
       status: 409,
       code: "ConflictException",
     });

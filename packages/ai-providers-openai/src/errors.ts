@@ -3,6 +3,7 @@ export const OPENAI_ERROR_KINDS = [
   "authentication_error",
   "permission_error",
   "not_found_error",
+  "conflict_error",
   "rate_limit_error",
   "overloaded_error",
   "api_error",
@@ -51,6 +52,7 @@ export function classifyHttpStatus(status: number): OpenAIErrorKind {
   if (status === 403) return "permission_error";
   if (status === 404) return "not_found_error";
   if (status === 408) return "timeout_error";
+  if (status === 409) return "conflict_error";
   if (status === 413) return "request_too_large";
   if (status === 429) return "rate_limit_error";
   if (status === 529) return "overloaded_error";

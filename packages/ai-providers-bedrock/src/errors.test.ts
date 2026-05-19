@@ -206,3 +206,40 @@ describe("fromNetworkError", () => {
     expect(err.kind).toBe("network_error");
   });
 });
+
+describe("BedrockError — conflict_error (M2.X.12)", () => {
+  it("classifyHttpStatus(409) returns conflict_error", () => {
+    expect(classifyHttpStatus(409)).toBe("conflict_error");
+  });
+
+  it("fromHttpResponse maps ConflictException → conflict_error", () => {
+    const err = fromHttpResponse({
+      status: 409,
+      body: JSON.stringify({
+        __type: "ConflictException",
+        message: "already exists",
+      }),
+    });
+    expect(err.kind).toBe("conflict_error");
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("ConflictException");
+  });
+
+  it("fromHttpResponse maps 409 with unknown __type to conflict_error", () => {
+    const err = fromHttpResponse({
+      status: 409,
+      body: JSON.stringify({ __type: "SomeOtherException", message: "x" }),
+    });
+    expect(err.kind).toBe("conflict_error");
+  });
+
+  it("conflict_error is NOT in RETRYABLE_KINDS", () => {
+    expect(RETRYABLE_KINDS.has("conflict_error")).toBe(false);
+  });
+
+  it("isRetryable returns false for conflict_error", () => {
+    expect(
+      new BedrockError({ kind: "conflict_error", message: "" }).isRetryable(),
+    ).toBe(false);
+  });
+});

@@ -3,6 +3,7 @@ export const BEDROCK_ERROR_KINDS = [
   "authentication_error",
   "permission_error",
   "not_found_error",
+  "conflict_error",
   "rate_limit_error",
   "overloaded_error",
   "api_error",
@@ -53,6 +54,7 @@ export function classifyHttpStatus(status: number): BedrockErrorKind {
   if (status === 401 || status === 403) return "authentication_error";
   if (status === 404) return "not_found_error";
   if (status === 408) return "timeout_error";
+  if (status === 409) return "conflict_error";
   if (status === 413) return "request_too_large";
   if (status === 424) return "model_stream_error";
   if (status === 429) return "rate_limit_error";
@@ -68,6 +70,7 @@ const CODE_TO_KIND: Readonly<Record<string, BedrockErrorKind>> = {
   MissingAuthenticationTokenException: "authentication_error",
   UnrecognizedClientException: "authentication_error",
   ResourceNotFoundException: "not_found_error",
+  ConflictException: "conflict_error",
   ValidationException: "invalid_request_error",
   ThrottlingException: "rate_limit_error",
   TooManyRequestsException: "rate_limit_error",

@@ -21,15 +21,42 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.6 +
+M2.X.5.aa.z.15 + M2.X.6 + M2.X.12 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,192 tests**,
-all green, no type errors. M2.X.5.aa.z.15 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,218 tests**,
+all green, no type errors. M2.X.12 ships the fourth
+cross-provider kernel error classifier — `isConflictError(err)`
+in `@crossengin/ai-providers/conflict.ts`. Two Bedrock 409-
+emitting endpoints (stopBatch from M2.X.5.aa.z.5 + createBatch
+from M2.X.5.aa.z.6) plus OpenAI's documented 409 surfaces (run
+state conflicts, file uniqueness) plus Anthropic forward-compat
+now justify lifting the classifier to the kernel. Structurally
+identical to the three prior classifiers (`isModerationError`
+M2.X.6.x, `isRetryableError` M2.X.7, `isInputTooLargeError`
+M2.X.9): `CONFLICT_ERROR_KINDS` tuple + `isConflictErrorKind`
+predicate + `isConflictError(err)` duck-typed discriminator on
+`.kind`. Single-kind tuple (`conflict_error`) for now;
+future-compats additional sub-types. Three provider error
+tables extended: Bedrock adds conflict_error to
+BEDROCK_ERROR_KINDS, classifyHttpStatus(409) →
+conflict_error, CODE_TO_KIND["ConflictException"] →
+conflict_error; OpenAI + Anthropic add conflict_error to their
+KINDS + classifyHttpStatus(409) → conflict_error. conflict_error
+is NOT in any provider's RETRYABLE_KINDS — state conflicts are
+terminal, operator must reconcile state. Two existing
+M2.X.5.aa.z.5 / M2.X.5.aa.z.6 tests upgraded to assert the new
+classified kind (they previously asserted only `.code` since
+`.kind` was a placeholder `unknown_error`). Pattern: when ≥2
+providers emit semantically-equivalent error class, lift
+classifier to kernel. Trigger from M2.X.5.aa.z.5 and
+M2.X.5.aa.z.6 ADRs ("dedicated conflict_error kernel kind
+deferred until a second 409-emitting endpoint lands") is met.
+M2.X.5.aa.z.15 ships
 `BedrockProvider.listModelImportJobs(options?)` against AWS's
 `ListModelImportJobs` endpoint — the sixth paginated control-
 plane enumeration. BedrockImportedModelDetail (M2.X.5.aa.z.12)
@@ -675,13 +702,15 @@ kind via their classifyHttpStatus paths),
 `InputTooLargeErrorKind` type, `isInputTooLargeErrorKind`
 discriminator, `InputTooLargeDiscriminator` interface, and the
 headline predicate. The kernel surface now partitions the
-error space into four buckets: retryable (try again with
+error space into five buckets: retryable (try again with
 backoff), moderation (terminal; audit), input-too-large
-(terminal; reduce input), other (auth / permission /
+(terminal; reduce input), conflict (terminal; reconcile
+state — M2.X.12), other (auth / permission /
 invalid_request / unknown — terminal; surface to user).
-Operators classifying errors across providers use three
+Operators classifying errors across providers use four
 parallel discriminators with no provider-package imports:
-isModerationError + isRetryableError + isInputTooLargeError.
+isModerationError + isRetryableError + isInputTooLargeError +
+isConflictError.
 Mutual exclusivity verified by tests: a request_too_large
 error is NOT retryable + NOT a moderation event.
 Cross-package integration tests in all three providers verify
@@ -1878,7 +1907,11 @@ instance; training/validation/output provenance + metrics +
 hyperparameters + distillation lineage all surfaced),
 ADR-0117 covers M2.X.5.aa.z.15 (Bedrock listModelImportJobs —
 sixth paginated enumeration; pipeline-health monitoring +
-failure triage + throughput analysis unblocked).
+failure triage + throughput analysis unblocked), ADR-0118
+covers M2.X.12 (conflict_error kernel kind + isConflictError
+cross-provider classifier — fourth in the family after
+isModerationError + isRetryableError + isInputTooLargeError;
+two Bedrock 409 endpoints + OpenAI 409s justify the lift).
 
 ## Architecture in 90 seconds
 
@@ -2991,7 +3024,14 @@ enumeration; pairs with M2.X.5.aa.z.12's BedrockImportedModelDetail
 jobArn field; mixed-case 3-value status tuple
 InProgress|Completed|Failed; importedModelArn +
 importedModelName conditionally populated post-success per AWS
-documented behavior).
+documented behavior), ADR-0118 covers Phase 2 M2.X.12
+(conflict_error kernel kind + isConflictError cross-provider
+classifier — fourth kernel classifier following the
+established M2.X.6.x / M2.X.7 / M2.X.9 pattern; triggered by
+two Bedrock 409-emitting endpoints (stopBatch + createBatch)
+plus OpenAI 409 surfaces; three provider error tables extended;
+conflict_error is NOT retryable; two existing tests upgraded
+to assert the new classified kind).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
