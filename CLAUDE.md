@@ -16,11 +16,40 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4
 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y
-+ M4.10 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 +
-M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 +
-M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,496 tests**,
-all green, no type errors. M4.10 adds a `source_pack TEXT`
++ M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 +
+M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 +
+M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,505 tests**,
+all green, no type errors. M4.10.x adds a `--by-source-pack`
+flag to `gateway routes unregister-pack`, exposing M4.10's
+`deleteByPackSlug` API at the CLI. When set, the entire
+manifest pipeline (resolvePack → resolveManifest →
+tryValidateManifest → generatePackRoutes) is skipped; the
+handler issues a single `DELETE WHERE source_pack = $1`
+(or `listByPackSlug` + table render under --dry-run).
+Operationally unblocks three real scenarios: decommissioned
+packs (slug no longer in the registry → resolvePack would
+throw UnknownPackError), broken manifests (resolveManifest
+fails on ExtendsCycle / UnknownParent), and forgotten old
+versions (manifest changed; M4.8.x's default path would only
+delete the CURRENT generation, leaving old routes orphaned).
+Slug validation is enforced at the CLI boundary via the same
+regex as the DB CHECK + zod schema (`^[a-z][a-z0-9-]*
+(\/[a-z][a-z0-9-]*)*$`); invalid slug → exit 2. Dispatcher
+short-circuit updated: `--by-source-pack` always needs PG (the
+--dry-run path reads via listByPackSlug), so the
+register-pack/unregister-pack PG-free short-circuit excludes
+`unregister-pack --by-source-pack`. Output shapes: human
+"deleted N route(s) where source_pack = 'X'" (live) or
+"-- dry-run: N route(s) would be deleted (by source_pack =
+'X')" (preview); JSON {pack, bySourcePack: true, deleted,
+dryRun} (live) or {pack, bySourcePack: true, count, dryRun:
+true, routes[{id, method, operationId}]} (preview). The
+`bySourcePack: true` field is the schema discriminator for
+consumers parsing M4.8.x vs M4.10.x output. Existing M4.8.x
+default path unchanged — verified by test: `unregister-pack
+<slug>` without the flag still issues N per-id DELETEs from
+the manifest-derived ID set. M4.10 adds a `source_pack TEXT`
 column (nullable + indexed + slug-pattern CHECK) to
 META_GATEWAY_ROUTES, closing the three open questions across
 ADR-0079/0080/0081 about which pack owns which route. The
@@ -718,7 +747,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0082 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0083 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -764,7 +793,10 @@ via deterministic ID re-derivation), ADR-0081 covers M4.8.y
 that completes the three-verb pack-routes vocabulary),
 ADR-0082 covers M4.10 (routes.source_pack column closing
 the open ownership-attribution question across ADRs
-0079/0080/0081, enabling safe `sync-pack --prune-obsolete`).
+0079/0080/0081, enabling safe `sync-pack --prune-obsolete`),
+ADR-0083 covers M4.10.x (`unregister-pack --by-source-pack` —
+manifest-free tear-down via M4.10's `deleteByPackSlug` API,
+closing ADR-0082 Q3).
 
 ## Architecture in 90 seconds
 
@@ -1655,7 +1687,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0082 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0083 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1702,7 +1734,9 @@ M7.6.5 extends resolver), ADR-0080 covers Phase 2 M4.8.x
 ADR-0081 covers Phase 2 M4.8.y (gateway routes sync-pack —
 composite diff/upsert + external-route reporting), ADR-0082
 covers Phase 2 M4.10 (routes.source_pack column — pack
-attribution + safe `sync-pack --prune-obsolete`). When you
+attribution + safe `sync-pack --prune-obsolete`), ADR-0083
+covers Phase 2 M4.10.x (`unregister-pack --by-source-pack` —
+manifest-free tear-down via the source_pack column). When you
 ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

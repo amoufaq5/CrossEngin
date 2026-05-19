@@ -674,6 +674,225 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
   });
 });
 
+describe("runGatewayRoutes unregister-pack --by-source-pack (M4.10.x)", () => {
+  it("issues DELETE WHERE source_pack = $1 instead of per-id deletes", async () => {
+    const { io, outChunks } = makeIo();
+    const obsoleteFromCore = fixtureRoute({
+      id: "rt_coreroute1aaaaa",
+      sourcePack: "operate-erp/core",
+    });
+    const obsoleteFromCore2 = fixtureRoute({
+      id: "rt_coreroute2bbbbb",
+      sourcePack: "operate-erp/core",
+    });
+    const fromOtherPack = fixtureRoute({
+      id: "rt_otherrouteccccc",
+      sourcePack: "operate-erp/payments",
+    });
+    const { registry, capture } = fakeRegistry([
+      obsoleteFromCore,
+      obsoleteFromCore2,
+      fromOtherPack,
+    ]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "operate-erp/core", "--by-source-pack"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]?.sql).toContain("WHERE source_pack = $1");
+    expect(deletes[0]?.params?.[0]).toBe("operate-erp/core");
+    expect(outChunks.join("")).toMatch(
+      /deleted 2 route\(s\) where source_pack = 'operate-erp\/core'/,
+    );
+  });
+
+  it("works for slugs NOT in the pack registry (decommissioned packs)", async () => {
+    const { io, outChunks } = makeIo();
+    const oldRoute = fixtureRoute({
+      id: "rt_orphanedabc1234",
+      sourcePack: "operate-erp/deprecated-thing",
+    });
+    const { registry, capture } = fakeRegistry([oldRoute]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/deprecated-thing",
+        "--by-source-pack",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).toMatch(
+      /deleted 1 route\(s\) where source_pack = 'operate-erp\/deprecated-thing'/,
+    );
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(1);
+  });
+
+  it("--dry-run lists matching routes WITHOUT issuing DELETE", async () => {
+    const { io, outChunks } = makeIo();
+    const matching = fixtureRoute({
+      id: "rt_coreroute1aaaaa",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry, capture } = fakeRegistry([matching]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/core",
+        "--by-source-pack",
+        "--dry-run",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(0);
+    const out = outChunks.join("");
+    expect(out).toMatch(/dry-run: 1 route\(s\) would be deleted/);
+    expect(out).toMatch(/rt_coreroute1aaaaa/);
+  });
+
+  it("--dry-run with no matching rows reports 0 without DELETE", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/empty",
+        "--by-source-pack",
+        "--dry-run",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(0);
+    expect(outChunks.join("")).toMatch(/dry-run: 0 route\(s\) would be deleted/);
+  });
+
+  it("--format=json (live) emits {pack, bySourcePack, deleted, dryRun}", async () => {
+    const { io, outChunks } = makeIo();
+    const r = fixtureRoute({
+      id: "rt_coreroute1aaaaa",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry } = fakeRegistry([r]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/core",
+        "--by-source-pack",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      pack: string;
+      bySourcePack: boolean;
+      deleted: number;
+      dryRun: boolean;
+    };
+    expect(parsed.pack).toBe("operate-erp/core");
+    expect(parsed.bySourcePack).toBe(true);
+    expect(parsed.deleted).toBe(1);
+    expect(parsed.dryRun).toBe(false);
+  });
+
+  it("--format=json --dry-run emits {pack, bySourcePack, count, dryRun, routes[]}", async () => {
+    const { io, outChunks } = makeIo();
+    const r = fixtureRoute({
+      id: "rt_coreroute1aaaaa",
+      operationId: "account.list",
+      sourcePack: "operate-erp/core",
+    });
+    const { registry } = fakeRegistry([r]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/core",
+        "--by-source-pack",
+        "--dry-run",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      bySourcePack: boolean;
+      count: number;
+      dryRun: boolean;
+      routes: Array<{ id: string; operationId: string }>;
+    };
+    expect(parsed.bySourcePack).toBe(true);
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.count).toBe(1);
+    expect(parsed.routes[0]?.id).toBe("rt_coreroute1aaaaa");
+    expect(parsed.routes[0]?.operationId).toBe("account.list");
+  });
+
+  it("does NOT call resolvePack — works for slugs the registry doesn't know about", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs(
+        "unregister-pack",
+        "operate-erp/never-existed",
+        "--by-source-pack",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(errChunks.join("")).not.toMatch(/unknown pack/);
+  });
+
+  it("rejects invalid slug format with exit 2", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "Not-A-Valid_Slug", "--by-source-pack"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/invalid slug format/);
+  });
+
+  it("WITHOUT --by-source-pack, behavior is unchanged from M4.8.x (uses manifest-derived IDs)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry, capture } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    await runGatewayRoutes(
+      parseRoutesArgs("register-pack", "operate-erp/core"),
+      ctx,
+    );
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("unregister-pack", "operate-erp/core"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // The manifest-driven path issues 24 DELETEs (one per ID), not one bulk DELETE
+    const deletes = capture.filter((c) => c.sql.includes("DELETE"));
+    expect(deletes).toHaveLength(24);
+    for (const del of deletes) {
+      expect(del.sql).toContain("WHERE route_id = $1");
+    }
+    expect(outChunks.join("")).toMatch(/unregistered 24 of 24/);
+  });
+});
+
 describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
   it("exits 2 when slug is missing", async () => {
     const { io, errChunks } = makeIo();

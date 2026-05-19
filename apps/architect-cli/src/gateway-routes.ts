@@ -53,8 +53,11 @@ export async function runGatewayRoutes(
   // {register|unregister}-pack --dry-run preview paths don't need PG. Short-circuit
   // before resolving the registry so operators can preview routes without a DB.
   // sync-pack ALWAYS needs PG (even --dry-run reads the stored set for the diff).
+  // unregister-pack --by-source-pack ALWAYS needs PG (even --dry-run reads the stored
+  // set via listByPackSlug — there's no manifest pipeline to short-circuit through).
   if (
-    (action === "register-pack" || action === "unregister-pack") &&
+    (action === "register-pack" ||
+      (action === "unregister-pack" && !getBooleanFlag(command, "by-source-pack"))) &&
     getBooleanFlag(command, "dry-run")
   ) {
     if (action === "register-pack") return runRoutesRegisterPack(command, ctx, null);
@@ -373,6 +376,8 @@ export function listAvailablePackSlugs(): readonly string[] {
   return listAvailablePacks();
 }
 
+const PACK_SLUG_REGEX = /^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)*$/;
+
 async function runRoutesUnregisterPack(
   command: ParsedCommand,
   ctx: RunContext,
@@ -382,9 +387,27 @@ async function runRoutesUnregisterPack(
   if (slug === undefined) {
     printError(
       ctx.io,
-      "gateway routes unregister-pack: missing slug. usage: crossengin gateway routes unregister-pack <slug> [--api-version v1] [--dry-run]",
+      "gateway routes unregister-pack: missing slug. usage: crossengin gateway routes unregister-pack <slug> [--api-version v1] [--dry-run] [--by-source-pack]",
     );
     return 2;
+  }
+  const bySourcePack = getBooleanFlag(command, "by-source-pack");
+  if (bySourcePack) {
+    if (!PACK_SLUG_REGEX.test(slug)) {
+      printError(
+        ctx.io,
+        `gateway routes unregister-pack: invalid slug format '${slug}' — expected '<family>/<name>' (lowercase + dashes, segments separated by '/')`,
+      );
+      return 2;
+    }
+    if (registry === null) {
+      printError(
+        ctx.io,
+        "gateway routes unregister-pack: --by-source-pack always requires PG (cannot short-circuit via --dry-run)",
+      );
+      return 1;
+    }
+    return runUnregisterPackBySourcePack(command, ctx, registry, slug);
   }
   let resolved;
   try {
@@ -478,6 +501,57 @@ async function runRoutesUnregisterPack(
     printSuccess(
       ctx.io,
       `unregistered ${deleted.toString()} of ${records.length.toString()} route(s) for pack '${slug}'.${notFound.length > 0 ? ` (${notFound.length.toString()} route id(s) not found — already removed)` : ""}`,
+    );
+  }
+  return 0;
+}
+
+async function runUnregisterPackBySourcePack(
+  command: ParsedCommand,
+  ctx: RunContext,
+  registry: PostgresRouteRegistry,
+  slug: string,
+): Promise<number> {
+  const dryRun = getBooleanFlag(command, "dry-run");
+  if (dryRun) {
+    const matching = await registry.listByPackSlug(slug);
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        pack: slug,
+        bySourcePack: true,
+        count: matching.length,
+        dryRun: true,
+        routes: matching.map((r) => ({
+          id: r.id,
+          method: r.method,
+          operationId: r.operationId,
+        })),
+      });
+    } else {
+      printSuccess(
+        ctx.io,
+        `-- dry-run: ${matching.length.toString()} route(s) would be deleted (by source_pack = '${slug}'):`,
+      );
+      for (const r of matching) {
+        ctx.io.stdout.write(
+          `  ${r.id}  ${r.method.padEnd(6)} ${formatPath(r).padEnd(40)} ${r.operationId}\n`,
+        );
+      }
+    }
+    return 0;
+  }
+  const deleted = await registry.deleteByPackSlug(slug);
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      pack: slug,
+      bySourcePack: true,
+      deleted,
+      dryRun: false,
+    });
+  } else {
+    printSuccess(
+      ctx.io,
+      `deleted ${deleted.toString()} route(s) where source_pack = '${slug}'.`,
     );
   }
   return 0;
