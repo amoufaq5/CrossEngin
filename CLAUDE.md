@@ -18,10 +18,38 @@ M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 +
 M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M3 + M3.5 + M3.6 + M3.7
 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x +
 M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
-M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 +
+M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire + M7.5 +
 M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,668 tests**,
-all green, no type errors. M2.X.7 adds a kernel-level
+**55 packages + 1 app, 119 meta-schema tables, 6,677 tests**,
+all green, no type errors. M6.6 migrates `@crossengin/ai-router`
+to use the kernel cross-provider helpers, validating M2.X.6.x
++ M2.X.7 with a real non-test consumer + closing a latent bug
+exposed by M2.X.5. Three coordinated changes in retry.ts +
+router.ts: (1) retry.ts's local `isRetryableError` becomes a
+hybrid predicate — checks kernel's kind-based `isRetryableError`
+first (the M2.X.7 path); falls back to the legacy `isRetryable()`
+method-based duck-typing for compat with custom error classes.
+(2) router.ts's `isRouterRetryable` gains an explicit
+`isModerationError(err) → false` early-exit BEFORE delegating
+to `isRetryableError`. Documents intent: moderation events
+never trigger fallback to alternate providers (the input
+itself triggered the policy violation; switching providers
+won't help). Pre-M6.6 the correct behavior was accidental
+(moderation errors return false from each provider's
+`isRetryable()`); post-M6.6 it's explicit + tested. (3)
+`estimateRequestTokens` bug fixed — was using
+`m.content.length` which broke after M2.X.5 (returned block
+count for array content, not char count); now uses
+`contentToText(m.content).length` which handles both string +
+LlmContentBlock[] shapes correctly. Three new router tests
+verify: refusal from primary does NOT trigger fallback;
+guardrail_intervened same; rate_limit_error DOES trigger
+fallback. Six new retry tests verify the kernel-kind shape
+works: errors with `.kind: "rate_limit_error" |
+"network_error" | "model_stream_error"` are classified
+retryable; moderation kinds + auth_error are not. All 51
+existing router tests + 14 existing retry tests pass
+unchanged. M2.X.7 adds a kernel-level
 cross-provider retryability helper to `@crossengin/ai-providers`,
 mirroring M2.X.6.x for the second cross-cutting error concern.
 Closes ADR-0087 Q3. New `retryable.ts` module exports
@@ -950,7 +978,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0090 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0091 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1024,7 +1052,11 @@ provider translators handling Bedrock + Anthropic natively
 and OpenAI via message-flattening flatMap), ADR-0090 covers
 M2.X.7 (cross-provider retryable helper — kernel-level
 `isRetryableError(err)` predicate + `RETRYABLE_ERROR_KINDS`
-shared tuple, symmetric with M2.X.6.x's moderation helper).
+shared tuple, symmetric with M2.X.6.x's moderation helper),
+ADR-0091 covers M6.6 (router uses kernel cross-provider
+helpers — retry.ts hybrid predicate, explicit moderation
+early-exit, estimateRequestTokens bug fix for M2.X.5 array
+content).
 
 ## Architecture in 90 seconds
 
@@ -1915,7 +1947,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0090 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0091 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1984,7 +2016,10 @@ block variants — consolidates tool-call surface with OpenAI
 flatMap refactor for message-flattening), ADR-0090 covers Phase
 2 M2.X.7 (cross-provider retryable helper — kernel-level
 `isRetryableError(err)` + shared `RETRYABLE_ERROR_KINDS` tuple,
-symmetric with M2.X.6.x's moderation helper).
+symmetric with M2.X.6.x's moderation helper), ADR-0091 covers
+Phase 2 M6.6 (router uses kernel cross-provider helpers —
+exercises M2.X.6.x + M2.X.7 in real consumer code + fixes
+M2.X.5 array-content estimation bug).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

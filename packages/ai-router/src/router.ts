@@ -12,6 +12,7 @@ import type {
   TaskPolicyMap,
   TenantResidency,
 } from "@crossengin/ai-providers";
+import { contentToText, isModerationError } from "@crossengin/ai-providers";
 
 import {
   CostCeilingExceededError,
@@ -280,7 +281,7 @@ export class DefaultLlmRouter implements LlmRouter {
 
 function estimateRequestTokens(req: CompletionRequest): number {
   let chars = 0;
-  for (const m of req.messages) chars += m.content.length;
+  for (const m of req.messages) chars += contentToText(m.content).length;
   return Math.max(1, Math.ceil(chars / 4));
 }
 
@@ -306,6 +307,10 @@ function isRouterRetryable(err: unknown): boolean {
   if (err instanceof CostCeilingExceededError) return false;
   if (err instanceof ProviderResolutionError) return false;
   if (err instanceof AllProvidersExhaustedError) return false;
+  // Moderation events are terminal — never retry, never fall over to fallback
+  // providers (the input itself triggered the moderation; switching providers
+  // won't help).
+  if (isModerationError(err)) return false;
   return isRetryableError(err);
 }
 

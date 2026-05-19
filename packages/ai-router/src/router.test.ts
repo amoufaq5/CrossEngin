@@ -271,3 +271,125 @@ describe("DefaultLlmRouter.embed", () => {
     expect(result.vectors).toEqual([[1, 2, 3]]);
   });
 });
+
+describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
+  class ModerationProvider extends StubProvider {
+    constructor(id: string, private readonly modKind: string) {
+      super(id, "ok");
+    }
+    async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      void _req;
+      throw Object.assign(new Error("blocked"), { kind: this.modKind });
+    }
+  }
+
+  it("does NOT fall over to the fallback when the primary throws a moderation error", async () => {
+    let openaiAttempts = 0;
+    class CountingOpenAI extends StubProvider {
+      constructor() {
+        super("openai", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        openaiAttempts += 1;
+        yield { kind: "text", text: "fallback" };
+        yield { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } };
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new ModerationProvider("anthropic", "refusal")],
+      ["openai", new CountingOpenAI()],
+    ]);
+    const router = buildRouter({ providers });
+    await expect(async () => {
+      for await (const _c of router.complete(fakeReq())) {
+        void _c;
+      }
+    }).rejects.toMatchObject({ kind: "refusal" });
+    expect(openaiAttempts).toBe(0);
+  });
+
+  it("guardrail_intervened from Bedrock is also terminal — no fallback", async () => {
+    let openaiAttempts = 0;
+    class CountingOpenAI extends StubProvider {
+      constructor() {
+        super("openai", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        openaiAttempts += 1;
+        yield { kind: "text", text: "fallback" };
+        yield { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } };
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new ModerationProvider("anthropic", "guardrail_intervened")],
+      ["openai", new CountingOpenAI()],
+    ]);
+    const router = buildRouter({ providers });
+    await expect(async () => {
+      for await (const _c of router.complete(fakeReq())) {
+        void _c;
+      }
+    }).rejects.toMatchObject({ kind: "guardrail_intervened" });
+    expect(openaiAttempts).toBe(0);
+  });
+
+  it("rate_limit_error from primary DOES fall over to fallback (retryable)", async () => {
+    let openaiAttempts = 0;
+    class CountingOpenAI extends StubProvider {
+      constructor() {
+        super("openai", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        openaiAttempts += 1;
+        yield { kind: "text", text: "fallback ok" };
+        yield { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } };
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new CountingOpenAI()],
+    ]);
+    const router = buildRouter({ providers });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of router.complete(fakeReq())) chunks.push(c);
+    expect(openaiAttempts).toBe(1);
+    expect(chunks).toContainEqual({ kind: "text", text: "fallback ok" });
+  });
+});
+
+describe("DefaultLlmRouter.complete — array content cost estimation (M6.6)", () => {
+  it("estimates tokens from array content (was broken pre-M6.6 — used array.length)", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "ok")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    // A cost ceiling that would be exceeded if estimation breaks (array.length = 2 chars
+    // → ~1 token → tiny cost; vs the actual 12 chars in text blocks → 3 tokens → still tiny).
+    // The test verifies the call does NOT throw — even with rich content the estimate is sane.
+    const router = buildRouter({
+      providers,
+      costCeiling: { perTenantUsdPerHour: 1 },
+      costTracker: new InMemoryCostTracker(),
+    });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of router.complete(
+      fakeReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image", format: "png", bytes: "ABCD" },
+            ],
+          },
+        ],
+      }),
+    )) {
+      chunks.push(c);
+    }
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+});

@@ -20,7 +20,7 @@ class NonRetryableErr extends Error {
 }
 
 describe("isRetryableError", () => {
-  it("returns true for errors with isRetryable() === true", () => {
+  it("returns true for errors with isRetryable() === true (legacy method-based shape)", () => {
     expect(isRetryableError(new RetryableErr("x"))).toBe(true);
   });
 
@@ -36,6 +36,42 @@ describe("isRetryableError", () => {
     expect(isRetryableError("x")).toBe(false);
     expect(isRetryableError(null)).toBe(false);
     expect(isRetryableError(undefined)).toBe(false);
+  });
+
+  it("returns true for errors with .kind in kernel RETRYABLE_ERROR_KINDS (M6.6)", () => {
+    const err = Object.assign(new Error("rate limited"), { kind: "rate_limit_error" });
+    expect(isRetryableError(err)).toBe(true);
+  });
+
+  it("returns true for .kind='network_error' (kernel shape)", () => {
+    const err = Object.assign(new Error("net"), { kind: "network_error" });
+    expect(isRetryableError(err)).toBe(true);
+  });
+
+  it("returns true for .kind='model_stream_error' (Bedrock-specific, kernel-recognized)", () => {
+    const err = Object.assign(new Error("mid-stream"), { kind: "model_stream_error" });
+    expect(isRetryableError(err)).toBe(true);
+  });
+
+  it("returns false for moderation .kind values (terminal)", () => {
+    expect(
+      isRetryableError(Object.assign(new Error(), { kind: "guardrail_intervened" })),
+    ).toBe(false);
+    expect(
+      isRetryableError(Object.assign(new Error(), { kind: "content_filtered" })),
+    ).toBe(false);
+    expect(
+      isRetryableError(Object.assign(new Error(), { kind: "refusal" })),
+    ).toBe(false);
+  });
+
+  it("returns false for auth / invalid_request .kind values", () => {
+    expect(
+      isRetryableError(Object.assign(new Error(), { kind: "authentication_error" })),
+    ).toBe(false);
+    expect(
+      isRetryableError(Object.assign(new Error(), { kind: "invalid_request_error" })),
+    ).toBe(false);
   });
 });
 

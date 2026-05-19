@@ -1,3 +1,5 @@
+import { isRetryableError as isKernelRetryableError } from "@crossengin/ai-providers";
+
 export interface RetryPolicy {
   readonly maxAttempts: number;
   readonly initialDelayMs: number;
@@ -12,17 +14,23 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   jitter: true,
 };
 
-export interface RetryableError {
+export interface RetryableErrorMethod {
   isRetryable(): boolean;
 }
 
-export function isRetryableError(err: unknown): err is RetryableError {
-  return (
+// Accepts both the kernel kind-based shape (Error & { kind: RetryableErrorKind })
+// and the legacy method-based shape (objects with isRetryable(): boolean).
+// Provider errors satisfy both today; custom callers using either shape work.
+export function isRetryableError(err: unknown): boolean {
+  if (isKernelRetryableError(err)) return true;
+  if (
     err !== null &&
     typeof err === "object" &&
-    typeof (err as { isRetryable?: unknown }).isRetryable === "function" &&
-    (err as RetryableError).isRetryable()
-  );
+    typeof (err as { isRetryable?: unknown }).isRetryable === "function"
+  ) {
+    return (err as RetryableErrorMethod).isRetryable();
+  }
+  return false;
 }
 
 export interface BackoffOptions {
