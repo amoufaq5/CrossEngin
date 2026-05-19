@@ -20,15 +20,53 @@ M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
-M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.6 +
+M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,135 tests**,
-all green, no type errors. M2.X.5.aa.z.13 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,157 tests**,
+all green, no type errors. M2.X.5.aa.z.14 ships
+`BedrockProvider.getCustomModel(modelIdentifier)` — the
+rich-detail companion to listCustomModels. Compliance teams +
+ML-ops engineers need 8 things the summary lacks: training-
+data provenance (`trainingDataConfig.s3Uri`), validation-data
+provenance (`validationDataConfig.validators[].s3Uri`),
+output-artifact location (`outputDataConfig.s3Uri`), quality
+metrics (`trainingMetrics.trainingLoss`,
+`validationMetrics[].validationLoss`), hyperparameter
+reproducibility (`hyperParameters` map),
+distillation lineage (`customizationConfig.distillationConfig.
+teacherModelConfig`), KMS-key audit (`modelKmsKeyArn`),
+customization-job correlation (`jobArn`). Follows the
+extended-shape pattern (third instance after Guardrail +
+ImportedModel) since AWS returns substantively richer fields
+than the summary — 15 detail fields vs 8 summary fields. Eight
+new typed sub-shapes in `custom-models-api.ts`:
+BedrockCustomModelS3Config (shared by training + output
+configs), BedrockCustomModelValidator,
+BedrockCustomModelValidationDataConfig (wraps validators[] —
+operators can validate against multiple datasets),
+BedrockCustomModelTrainingMetrics (currently
+{trainingLoss?: finite-number}; AWS may add fields),
+BedrockCustomModelValidationMetric (one per validator),
+BedrockCustomModelTeacherModelConfig (only present for
+DISTILLATION — {teacherModelIdentifier,
+maxResponseLengthForInference?}),
+BedrockCustomModelDistillationConfig,
+BedrockCustomModelCustomizationConfig (wraps distillation —
+gives AWS room to add adapter / RLHF / future configs without
+breaking the kernel). hyperParameters parsed as
+Record<string, string> matching AWS's wire contract (AWS
+serializes numeric hyperparams as strings; operators parse at
+the app layer). Strict finite-number validation on
+trainingLoss + validationLoss — NaN / Infinity throw api_error.
+Provider validates identifier non-empty BEFORE fetch,
+URI-encodes path (handles ARN colons), reuses
+signedControlPlaneGet rail. Bedrock control-plane surface now
+has 12 of N operations. M2.X.5.aa.z.13 ships
 `BedrockProvider.listCustomModels(options?)` against AWS's
 `ListCustomModels` endpoint — the fifth paginated control-plane
 enumeration after listBatches / listGuardrails /
@@ -1808,7 +1846,10 @@ KMS-key audit workflows unblocked), ADR-0115 covers
 M2.X.5.aa.z.13 (Bedrock listCustomModels — fifth paginated
 control-plane enumeration; fine-tune / continued-pretrain /
 distillation inventory; 8-parameter filter set is the largest
-yet).
+yet), ADR-0116 covers M2.X.5.aa.z.14 (Bedrock getCustomModel
+with training/validation detail — third extended-shape detail
+instance; training/validation/output provenance + metrics +
+hyperparameters + distillation lineage all surfaced).
 
 ## Architecture in 90 seconds
 
@@ -2023,8 +2064,8 @@ re-exporting everything.
   completeNonStreaming + embed + embedMultimodal + listBatches
   + getBatch + stopBatch + createBatch + listGuardrails +
   getGuardrail + listInferenceProfiles + getInferenceProfile
-  + listImportedModels + getImportedModel + listCustomModels —
-  embed dispatches on
+  + listImportedModels + getImportedModel + listCustomModels +
+  getCustomModel — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2906,7 +2947,16 @@ models; 8-parameter filter set including
 baseModelArnEquals / foundationModelArnEquals / isOwned;
 mixed-case status tuple Active|Creating|Failed preserved
 verbatim from AWS; modelStatus optional since AWS omits it
-for legacy entries).
+for legacy entries), ADR-0116 covers Phase 2 M2.X.5.aa.z.14
+(Bedrock getCustomModel with training/validation detail —
+third extended-shape detail instance after Guardrail +
+ImportedModel; 8 new typed sub-shapes modeling AWS's contract
+verbatim including S3Config / Validator /
+ValidationDataConfig / TrainingMetrics / ValidationMetric /
+TeacherModelConfig / DistillationConfig /
+CustomizationConfig; hyperParameters as Record<string, string>
+matching AWS's wire contract; strict finite-number validation
+on losses).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

@@ -1418,6 +1418,168 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — getCustomModel (M2.X.5.aa.z.14)", () => {
+  function detailBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      modelArn:
+        "arn:aws:bedrock:us-east-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc",
+      modelName: "tenant-x-claude-finetune",
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/xyz",
+      baseModelArn:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
+      creationTime: "2026-04-15T12:00:00Z",
+      trainingDataConfig: { s3Uri: "s3://tenant-x-data/train/" },
+      outputDataConfig: { s3Uri: "s3://tenant-x-data/output/" },
+      ...overrides,
+    });
+  }
+
+  it("GETs the control-plane /custom-models/{id} endpoint", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    await provider.getCustomModel("abc");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/custom-models/abc");
+    expect(capture.url).not.toContain("?");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    const arn =
+      "arn:aws:bedrock:us-east-1:123:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc";
+    await provider.getCustomModel(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getCustomModel("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("parses a fine-tune detail with hyperParameters + metrics", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          jobName: "ft-001",
+          customizationType: "FINE_TUNING",
+          hyperParameters: { epochCount: "10", learningRate: "0.0001" },
+          validationDataConfig: {
+            validators: [{ s3Uri: "s3://tenant-x-data/val/" }],
+          },
+          trainingMetrics: { trainingLoss: 0.42 },
+          validationMetrics: [{ validationLoss: 0.51 }],
+        }),
+      }),
+    });
+    const detail = await provider.getCustomModel("abc");
+    expect(detail.jobName).toBe("ft-001");
+    expect(detail.customizationType).toBe("FINE_TUNING");
+    expect(detail.hyperParameters?.["epochCount"]).toBe("10");
+    expect(detail.validationDataConfig?.validators[0]!.s3Uri).toBe(
+      "s3://tenant-x-data/val/",
+    );
+    expect(detail.trainingMetrics?.trainingLoss).toBe(0.42);
+    expect(detail.validationMetrics?.[0]!.validationLoss).toBe(0.51);
+  });
+
+  it("parses a distillation detail with teacherModelConfig", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          customizationType: "DISTILLATION",
+          customizationConfig: {
+            distillationConfig: {
+              teacherModelConfig: {
+                teacherModelIdentifier:
+                  "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+                maxResponseLengthForInference: 4096,
+              },
+            },
+          },
+        }),
+      }),
+    });
+    const detail = await provider.getCustomModel("abc");
+    expect(
+      detail.customizationConfig?.distillationConfig?.teacherModelConfig
+        .teacherModelIdentifier,
+    ).toMatch(/claude-3-5-sonnet/);
+    expect(
+      detail.customizationConfig?.distillationConfig?.teacherModelConfig
+        .maxResponseLengthForInference,
+    ).toBe(4096);
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such custom model",
+        }),
+      }),
+    });
+    await expect(
+      provider.getCustomModel("not-a-real-model"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.getCustomModel("abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(provider.getCustomModel("abc")).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.getCustomModel("abc")).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — listCustomModels (M2.X.5.aa.z.13)", () => {
   function listBody(opts: {
     items?: ReadonlyArray<Record<string, unknown>>;
