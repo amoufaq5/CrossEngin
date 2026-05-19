@@ -1418,6 +1418,142 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — listCustomModels (M2.X.5.aa.z.13)", () => {
+  function listBody(opts: {
+    items?: ReadonlyArray<Record<string, unknown>>;
+    nextToken?: string;
+  }): string {
+    const body: Record<string, unknown> = { modelSummaries: opts.items ?? [] };
+    if (opts.nextToken !== undefined) body["nextToken"] = opts.nextToken;
+    return JSON.stringify(body);
+  }
+
+  function sampleCustom(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      modelArn:
+        "arn:aws:bedrock:us-east-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc",
+      modelName: "tenant-x-claude-finetune",
+      creationTime: "2026-04-15T12:00:00Z",
+      baseModelArn:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
+      baseModelName: "Claude 3 Haiku",
+      customizationType: "FINE_TUNING",
+      ownerAccountId: "123456789012",
+      modelStatus: "Active",
+      ...overrides,
+    };
+  }
+
+  it("GETs the control-plane /custom-models endpoint with sig v4 headers", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listCustomModels();
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+    expect(capture.url).toContain("/custom-models");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("zero-arg call emits no query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listCustomModels();
+    expect(capture.url).not.toContain("?");
+  });
+
+  it("threads query parameters into the URL", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: listBody({ items: [] }) }),
+    });
+    await provider.listCustomModels({
+      nameContains: "tenant-x",
+      isOwned: true,
+      modelStatus: "Active",
+      maxResults: 50,
+      sortBy: "CreationTime",
+      sortOrder: "Descending",
+    });
+    expect(capture.url).toContain("nameContains=tenant-x");
+    expect(capture.url).toContain("isOwned=true");
+    expect(capture.url).toContain("modelStatus=Active");
+    expect(capture.url).toContain("maxResults=50");
+    expect(capture.url).toContain("sortBy=CreationTime");
+    expect(capture.url).toContain("sortOrder=Descending");
+  });
+
+  it("parses a response with one custom model + nextToken", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: listBody({ items: [sampleCustom()], nextToken: "page-2" }),
+      }),
+    });
+    const out = await provider.listCustomModels();
+    expect(out.modelSummaries.length).toBe(1);
+    expect(out.modelSummaries[0]!.modelName).toBe("tenant-x-claude-finetune");
+    expect(out.modelSummaries[0]!.customizationType).toBe("FINE_TUNING");
+    expect(out.modelSummaries[0]!.modelStatus).toBe("Active");
+    expect(out.nextToken).toBe("page-2");
+  });
+
+  it("validates options BEFORE fetch — bad modelStatus never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listCustomModels({ modelStatus: "Inactive" as never }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.listCustomModels()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(provider.listCustomModels()).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.listCustomModels()).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({

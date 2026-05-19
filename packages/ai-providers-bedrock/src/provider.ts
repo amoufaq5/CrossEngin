@@ -30,6 +30,12 @@ import {
   type BedrockConverseResponse,
 } from "./converse-api.js";
 import {
+  buildCustomModelListQuery,
+  parseCustomModelListResponse,
+  type BedrockCustomModelListResponse,
+  type BedrockListCustomModelsOptions,
+} from "./custom-models-api.js";
+import {
   bedrockEmbeddingFamily,
   buildCohereEmbedRequest,
   buildEmbeddingResponse,
@@ -585,6 +591,26 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async listCustomModels(
+    options: BedrockListCustomModelsOptions = {},
+  ): Promise<BedrockCustomModelListResponse> {
+    const query = buildCustomModelListQuery(options);
+    const text = await this.signedControlPlaneGet({
+      path: "/custom-models",
+      query,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listCustomModels: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseCustomModelListResponse(raw);
   }
 
   async getImportedModel(

@@ -20,15 +20,56 @@ M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
-M2.X.5.aa.z.12 + M2.X.6 +
+M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,097 tests**,
-all green, no type errors. M2.X.5.aa.z.12 ships
+**55 packages + 1 app, 119 meta-schema tables, 7,135 tests**,
+all green, no type errors. M2.X.5.aa.z.13 ships
+`BedrockProvider.listCustomModels(options?)` against AWS's
+`ListCustomModels` endpoint — the fifth paginated control-plane
+enumeration after listBatches / listGuardrails /
+listInferenceProfiles / listImportedModels. Bedrock has two
+distinct surfaces for non-foundation models: imported models
+(externally-trained, uploaded from S3 via
+CreateModelImportJob — M2.X.5.aa.z.11/.12) and custom models
+(fine-tunes / continued-pretrains / distillations of an
+AWS-supported foundation model via
+CreateModelCustomizationJob — this milestone). AWS exposes
+them through separate endpoints (/imported-models vs
+/custom-models) with different filter parameters; the kernel
+matches the surface 1:1 rather than unifying. New module
+`custom-models-api.ts` exports `BEDROCK_CUSTOM_MODEL_STATUSES`
+3-value tuple (Active / Creating / Failed — mixed case
+preserved verbatim from AWS, NOT uppercased like guardrails;
+case-sensitive discriminator), boundary-validation constants,
+`BedrockCustomModelSummary` (4 required fields: modelArn,
+modelName, creationTime, baseModelArn + 4 optional:
+baseModelName, customizationType as string for forward-compat
+against AWS additions like DISTILLATION,
+ownerAccountId, modelStatus validated against tuple when
+present), and `buildCustomModelListQuery` pure boundary-
+validator with the LARGEST filter set yet — 8 distinct
+optional parameters (creationTimeBefore/After,
+baseModelArnEquals, foundationModelArnEquals, nameContains,
+isOwned boolean, modelStatus, maxResults [1, 1000], nextToken,
+sortBy, sortOrder). isOwned boolean serialized as "true" /
+"false" in the query string per AWS convention. modelStatus
+optional in summaries (AWS omits it for some legacy entries —
+strict parsing of optional fields when present, omit when
+absent). customizationType preserved as raw string (same
+forward-compat stance as modelArchitecture for imported
+models). Provider reuses signedControlPlaneGet rail. Bedrock
+control-plane surface now has 11 of N operations; module
+count up to 14. Four operational workflows unblocked:
+customization-job inventory ("show every fine-tune"),
+base-model audit (filter by baseModelArnEquals for compliance),
+cross-account discovery (isOwned=false surfaces shared-in
+models), status-aware cleanup (modelStatus=Failed enumerates
+broken customizations). M2.X.5.aa.z.12 ships
 `BedrockProvider.getImportedModel(modelIdentifier)` — the
 rich-detail companion to listImportedModels. Unlike
 getInferenceProfile / getBatch (which use the type-alias
@@ -1763,7 +1804,11 @@ fourth paginated control-plane enumeration; custom-imported
 model inventory + architecture-aware routing), ADR-0114 covers
 M2.X.5.aa.z.12 (Bedrock getImportedModel with data-source
 provenance — extended-shape detail pattern; provenance +
-KMS-key audit workflows unblocked).
+KMS-key audit workflows unblocked), ADR-0115 covers
+M2.X.5.aa.z.13 (Bedrock listCustomModels — fifth paginated
+control-plane enumeration; fine-tune / continued-pretrain /
+distillation inventory; 8-parameter filter set is the largest
+yet).
 
 ## Architecture in 90 seconds
 
@@ -1978,7 +2023,8 @@ re-exporting everything.
   completeNonStreaming + embed + embedMultimodal + listBatches
   + getBatch + stopBatch + createBatch + listGuardrails +
   getGuardrail + listInferenceProfiles + getInferenceProfile
-  + listImportedModels + getImportedModel — embed dispatches on
+  + listImportedModels + getImportedModel + listCustomModels —
+  embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2852,7 +2898,15 @@ modelDataSource.s3DataSource.s3Uri + optional modelKmsKeyArn;
 two get-shape patterns now distinct in the package: type-alias
 when AWS returns identical shapes, extended-type when get
 returns richer fields; provenance + KMS audit + import-job
-correlation workflows unblocked).
+correlation workflows unblocked), ADR-0115 covers Phase 2
+M2.X.5.aa.z.13 (Bedrock listCustomModels — fifth paginated
+control-plane enumeration; custom models = fine-tunes /
+continued-pretrains / distillations distinct from imported
+models; 8-parameter filter set including
+baseModelArnEquals / foundationModelArnEquals / isOwned;
+mixed-case status tuple Active|Creating|Failed preserved
+verbatim from AWS; modelStatus optional since AWS omits it
+for legacy entries).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
