@@ -94,19 +94,47 @@ export const ImageUrlContentBlockSchema = z.object({
 });
 export type ImageUrlContentBlock = z.infer<typeof ImageUrlContentBlockSchema>;
 
-export const DOCUMENT_FORMATS = ["pdf", "txt", "md", "csv"] as const;
+export const DOCUMENT_FORMATS = [
+  "pdf",
+  "txt",
+  "md",
+  "csv",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "html",
+] as const;
 export const DocumentFormatSchema = z.enum(DOCUMENT_FORMATS);
 export type DocumentFormat = z.infer<typeof DocumentFormatSchema>;
+
+export const OFFICE_DOCUMENT_FORMATS = ["doc", "docx", "xls", "xlsx", "html"] as const;
+export type OfficeDocumentFormat = (typeof OFFICE_DOCUMENT_FORMATS)[number];
+
+export function isOfficeDocumentFormat(
+  format: DocumentFormat,
+): format is OfficeDocumentFormat {
+  return (OFFICE_DOCUMENT_FORMATS as readonly string[]).includes(format);
+}
 
 export function documentMediaType(format: DocumentFormat): string {
   if (format === "pdf") return "application/pdf";
   if (format === "txt") return "text/plain";
   if (format === "md") return "text/markdown";
-  return "text/csv";
+  if (format === "csv") return "text/csv";
+  if (format === "doc") return "application/msword";
+  if (format === "docx") {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (format === "xls") return "application/vnd.ms-excel";
+  if (format === "xlsx") {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  return "text/html";
 }
 
 export function isTextDocumentFormat(format: DocumentFormat): boolean {
-  return format !== "pdf";
+  return format === "txt" || format === "md" || format === "csv";
 }
 
 export const DocumentContentBlockSchema = z.object({

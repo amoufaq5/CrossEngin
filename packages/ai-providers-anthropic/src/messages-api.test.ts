@@ -696,6 +696,27 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     expect(block.source.data).toBe(csv);
   });
 
+  it("office format documents THROW on Anthropic with conversion guidance (M2.X.5.aa.x.1)", () => {
+    for (const format of ["doc", "docx", "xls", "xlsx", "html"] as const) {
+      expect(() =>
+        buildAnthropicRequest(
+          {
+            task: "planner",
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "document", format, bytes: "BYTES" }],
+              },
+            ],
+            tenantId: "ten-1",
+            sessionId: "ses-1",
+          },
+          { defaultModel: "claude-sonnet-4-6" },
+        ),
+      ).toThrow(/Anthropic provider does not support document format/);
+    }
+  });
+
   it("PDF still uses base64 source on Anthropic (unchanged from M2.X.5.aa)", () => {
     const built = buildAnthropicRequest(
       {

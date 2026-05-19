@@ -253,6 +253,17 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
         ...(block.name !== undefined ? { title: block.name } : {}),
       };
     }
+    if (
+      block.format === "doc" ||
+      block.format === "docx" ||
+      block.format === "xls" ||
+      block.format === "xlsx" ||
+      block.format === "html"
+    ) {
+      throw new Error(
+        `Anthropic provider does not support document format '${block.format}' — convert to PDF (use the 'pdf' format), or use a different provider (Bedrock supports office formats natively)`,
+      );
+    }
     const mediaType =
       block.format === "txt"
         ? "text/plain"

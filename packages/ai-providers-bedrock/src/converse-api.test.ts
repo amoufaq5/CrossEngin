@@ -756,6 +756,29 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     }
   });
 
+  it("document block office formats flow through to Bedrock natively (M2.X.5.aa.x.1)", () => {
+    for (const format of ["doc", "docx", "xls", "xlsx", "html"] as const) {
+      const built = buildBedrockConverseRequest(
+        baseReq({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "document", format, bytes: "BYTES", name: `report.${format}` },
+              ],
+            },
+          ],
+        }),
+        {},
+      );
+      const block = built.messages[0]!.content[0] as {
+        document: { format: string; name: string; source: { bytes: string } };
+      };
+      expect(block.document.format).toBe(format);
+      expect(block.document.name).toBe(`report.${format}`);
+    }
+  });
+
   it("document block without name defaults to 'document' on Bedrock", () => {
     const built = buildBedrockConverseRequest(
       baseReq({

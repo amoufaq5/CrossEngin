@@ -6,7 +6,11 @@ import type {
   LlmTool,
   Usage,
 } from "@crossengin/ai-providers";
-import { contentToText } from "@crossengin/ai-providers";
+import {
+  contentToText,
+  documentMediaType,
+  isOfficeDocumentFormat,
+} from "@crossengin/ai-providers";
 
 import { computeChatUsageCost, type OpenAIChatModel } from "./pricing.js";
 
@@ -234,18 +238,15 @@ function buildUserInputBlocks(
         continue;
       }
       if (b.type === "document") {
-        const mediaType =
-          b.format === "pdf"
-            ? "application/pdf"
-            : b.format === "txt"
-              ? "text/plain"
-              : b.format === "md"
-                ? "text/markdown"
-                : "text/csv";
+        if (isOfficeDocumentFormat(b.format)) {
+          throw new Error(
+            `OpenAI Responses API does not support document format '${b.format}' — convert to PDF (use the 'pdf' format), or use a different provider (Bedrock supports office formats natively)`,
+          );
+        }
         out.push({
           type: "input_file",
           filename: b.name ?? `document.${b.format}`,
-          file_data: `data:${mediaType};base64,${b.bytes}`,
+          file_data: `data:${documentMediaType(b.format)};base64,${b.bytes}`,
         });
         continue;
       }

@@ -550,6 +550,22 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
     }
   });
 
+  it("office format documents THROW on Responses API (M2.X.5.aa.x.1)", () => {
+    for (const format of ["doc", "docx", "xls", "xlsx", "html"] as const) {
+      expect(() =>
+        buildOpenAIResponsesRequest(
+          req([
+            {
+              role: "user",
+              content: [{ type: "document", format, bytes: "BYTES" }],
+            },
+          ]),
+          { defaultModel: "gpt-4o" },
+        ),
+      ).toThrow(/OpenAI Responses API does not support document format/);
+    }
+  });
+
   it("document block without name defaults to 'document.<format>' filename", () => {
     const built = buildOpenAIResponsesRequest(
       req([

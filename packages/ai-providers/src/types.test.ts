@@ -9,7 +9,9 @@ import {
   ImageContentBlockSchema,
   DocumentContentBlockSchema,
   DocumentUrlContentBlockSchema,
+  OFFICE_DOCUMENT_FORMATS,
   documentMediaType,
+  isOfficeDocumentFormat,
   isTextDocumentFormat,
   ImageUrlContentBlockSchema,
   LlmContentBlockSchema,
@@ -830,8 +832,20 @@ describe("DocumentContentBlockSchema (M2.X.5.aa)", () => {
     ).toThrow();
   });
 
-  it("rejects unknown format (docx / html / doc not in enum today)", () => {
-    for (const badFormat of ["docx", "html", "doc", "xlsx"]) {
+  it("accepts office formats doc/docx/xls/xlsx/html (M2.X.5.aa.x.1)", () => {
+    for (const format of ["doc", "docx", "xls", "xlsx", "html"] as const) {
+      expect(() =>
+        DocumentContentBlockSchema.parse({
+          type: "document",
+          format,
+          bytes: "ABCD",
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects truly unknown formats", () => {
+    for (const badFormat of ["rtf", "json", "yaml", "xml", "audio"]) {
       expect(() =>
         DocumentContentBlockSchema.parse({
           type: "document",
@@ -897,11 +911,44 @@ describe("documentMediaType / isTextDocumentFormat (M2.X.5.aa.x)", () => {
     expect(documentMediaType("csv")).toBe("text/csv");
   });
 
-  it("isTextDocumentFormat returns true for txt/md/csv and false for pdf", () => {
+  it("documentMediaType returns correct office MIME types (M2.X.5.aa.x.1)", () => {
+    expect(documentMediaType("doc")).toBe("application/msword");
+    expect(documentMediaType("docx")).toBe(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+    expect(documentMediaType("xls")).toBe("application/vnd.ms-excel");
+    expect(documentMediaType("xlsx")).toBe(
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    expect(documentMediaType("html")).toBe("text/html");
+  });
+
+  it("isTextDocumentFormat returns true only for txt/md/csv", () => {
     expect(isTextDocumentFormat("pdf")).toBe(false);
     expect(isTextDocumentFormat("txt")).toBe(true);
     expect(isTextDocumentFormat("md")).toBe(true);
     expect(isTextDocumentFormat("csv")).toBe(true);
+    expect(isTextDocumentFormat("doc")).toBe(false);
+    expect(isTextDocumentFormat("docx")).toBe(false);
+    expect(isTextDocumentFormat("html")).toBe(false);
+  });
+});
+
+describe("OFFICE_DOCUMENT_FORMATS / isOfficeDocumentFormat (M2.X.5.aa.x.1)", () => {
+  it("OFFICE_DOCUMENT_FORMATS contains the 5 office formats", () => {
+    expect(OFFICE_DOCUMENT_FORMATS).toEqual(["doc", "docx", "xls", "xlsx", "html"]);
+  });
+
+  it("isOfficeDocumentFormat narrows correctly", () => {
+    expect(isOfficeDocumentFormat("doc")).toBe(true);
+    expect(isOfficeDocumentFormat("docx")).toBe(true);
+    expect(isOfficeDocumentFormat("xls")).toBe(true);
+    expect(isOfficeDocumentFormat("xlsx")).toBe(true);
+    expect(isOfficeDocumentFormat("html")).toBe(true);
+    expect(isOfficeDocumentFormat("pdf")).toBe(false);
+    expect(isOfficeDocumentFormat("txt")).toBe(false);
+    expect(isOfficeDocumentFormat("md")).toBe(false);
+    expect(isOfficeDocumentFormat("csv")).toBe(false);
   });
 });
 
@@ -935,12 +982,24 @@ describe("DocumentUrlContentBlockSchema (M2.X.5.aa.y)", () => {
     ).toThrow();
   });
 
-  it("rejects unknown format", () => {
+  it("accepts office formats on URL variant (Bedrock-only path but kernel schema permits)", () => {
+    for (const format of ["docx", "xlsx", "html"] as const) {
+      expect(() =>
+        DocumentUrlContentBlockSchema.parse({
+          type: "document_url",
+          url: `https://example.com/x.${format}`,
+          format,
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects truly unknown formats", () => {
     expect(() =>
       DocumentUrlContentBlockSchema.parse({
         type: "document_url",
-        url: "https://example.com/x.docx",
-        format: "docx",
+        url: "https://example.com/x.rtf",
+        format: "rtf",
       }),
     ).toThrow();
   });
