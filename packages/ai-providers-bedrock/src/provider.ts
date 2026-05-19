@@ -559,6 +559,17 @@ export class BedrockProvider implements LlmProvider {
     return parseBatchJobDetail(raw);
   }
 
+  async stopBatch(jobIdentifier: string): Promise<void> {
+    if (!isBedrockBatchJobIdentifier(jobIdentifier)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `stopBatch: invalid jobIdentifier '${jobIdentifier}'`,
+      });
+    }
+    const path = `/model-invocation-jobs/${encodeURIComponent(jobIdentifier)}/stop`;
+    await this.signedControlPlanePost({ path });
+  }
+
   async listBatches(
     options: BedrockListBatchesOptions = {},
   ): Promise<BedrockBatchJobListResponse> {
@@ -615,6 +626,53 @@ export class BedrockProvider implements LlmProvider {
     try {
       response = await this.fetchImpl(url, {
         method: "GET",
+        headers,
+        body,
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    return response.text();
+  }
+
+  private async signedControlPlanePost(input: {
+    readonly path: string;
+  }): Promise<string> {
+    const host = new URL(this.controlPlaneBaseUrl).host;
+    const body = new Uint8Array(0);
+    const signed = signRequest({
+      method: "POST",
+      host,
+      path: input.path,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body,
+      region: this.region,
+      service: SERVICE,
+      credentials: this.credentials,
+      now: this.clock(),
+    });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+      host,
+      "x-amz-date": signed.amzDate,
+      "x-amz-content-sha256": signed.contentSha256,
+      authorization: signed.authorization,
+    };
+    if (this.credentials.sessionToken !== undefined) {
+      headers["x-amz-security-token"] = this.credentials.sessionToken;
+    }
+    const url = `${this.controlPlaneBaseUrl}${input.path}`;
+    let response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
         headers,
         body,
       });

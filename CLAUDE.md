@@ -17,15 +17,45 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
-M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 + M2.X.6 +
+M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
+M2.X.5.aa.z.5 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,909 tests**,
-all green, no type errors. M2.X.5.aa.z.4 adds
+**55 packages + 1 app, 119 meta-schema tables, 6,920 tests**,
+all green, no type errors. M2.X.5.aa.z.5 ships
+`BedrockProvider.stopBatch(jobIdentifier)` against AWS's
+`StopModelInvocationJob` endpoint, completing the read/write
+split on the batch surface (3 of 4 batch operations now
+covered: list + get + stop; only createBatch deferred).
+Method validates the identifier via the M2.X.5.aa.z.4
+`isBedrockBatchJobIdentifier` regex BEFORE the fetch, URI-
+encodes into `/model-invocation-jobs/{encoded}/stop`, POSTs
+an empty body via a new private `signedControlPlanePost`
+helper (sibling to M2.X.5.aa.z.3's `signedControlPlaneGet`
+with method POST + content-type header + no query param),
+returns `void` on success. AWS sig v4 handles empty bodies
+correctly via SHA-256 of empty string. Error mapping:
+404 ResourceNotFoundException → not_found_error, 403
+AccessDeniedException → permission_error, 429
+ThrottlingException → rate_limit_error, 400 ValidationException
+→ invalid_request_error, network → network_error. 409
+ConflictException (job already in terminal state, e.g., race
+between poll + stop) surfaces with `kind: "unknown_error"` +
+`code: "ConflictException"` — operators discriminating on
+`.code` get clean detection; a dedicated `conflict_error` kind
+deferred to when a second 409-emitting endpoint lands. Three
+operational workflows unblocked: cost-runaway kill switches
+(detect long-running job → stop), tenant-offboarding
+cancellation sweeps (paired with listBatches({nameContains}) +
+status filter), compliance kill switches (new policy lands →
+stop in-flight jobs). POST rail established —
+signedControlPlanePost is reusable for future control-plane
+POSTs with empty bodies (state mutations on guardrails /
+inference profiles / custom models). M2.X.5.aa.z.4 adds
 `BedrockProvider.getBatch(jobIdentifier)` — single-job
 lookup against AWS's `GetModelInvocationJob` control-plane
 endpoint, pairing with M2.X.5.aa.z.3's `listBatches` for
@@ -1469,7 +1499,11 @@ Bedrock; two-host model documented; pattern set for future
 control-plane enumeration methods), ADR-0106 covers M2.X.5.aa.z.4
 (Bedrock batch inference getBatch — single-job lookup with
 identifier regex validation BEFORE fetch; polling-loop +
-failure-diagnostic workflows unblocked).
+failure-diagnostic workflows unblocked), ADR-0107 covers
+M2.X.5.aa.z.5 (Bedrock batch inference stopBatch — completes
+the batch read/write split; new signedControlPlanePost helper;
+cost-runaway + tenant-offboarding + compliance-kill-switch
+workflows unblocked).
 
 ## Architecture in 90 seconds
 
@@ -1682,11 +1716,14 @@ re-exporting everything.
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
   classes), provider (BedrockProvider with complete +
   completeNonStreaming + embed + embedMultimodal + listBatches
-  + getBatch — embed dispatches on family, loops over Titan or
-  batches Cohere; listBatches GETs the control-plane host with
-  sig v4 + sorted query string via signedControlPlaneGet helper;
-  getBatch validates jobIdentifier via regex BEFORE the fetch
-  then GETs /model-invocation-jobs/{encoded}). Capabilities:
+  + getBatch + stopBatch — embed dispatches on family, loops
+  over Titan or batches Cohere; listBatches GETs the control-
+  plane host with sig v4 + sorted query string via
+  signedControlPlaneGet helper; getBatch validates jobIdentifier
+  via regex BEFORE the fetch then GETs /model-invocation-jobs/
+  {encoded}; stopBatch POSTs an empty body to
+  /model-invocation-jobs/{encoded}/stop via the new
+  signedControlPlanePost helper). Capabilities:
   `{chat: true, streaming: true, toolUse: true, jsonMode: false,
   embedding: true, maxContextTokens: 200_000}`. The router has
   THREE real chat providers to chain — Anthropic + OpenAI + AWS
@@ -2497,7 +2534,13 @@ identifier validated against an AWS-partition-aware regex
 BEFORE the fetch; BedrockBatchJobDetail = BedrockBatchJobSummary
 alias since AWS returns identical wire shapes for both
 endpoints; parseBatchJobSummary promoted from private to
-exported for operator reuse).
+exported for operator reuse), ADR-0107 covers Phase 2
+M2.X.5.aa.z.5 (Bedrock batch inference stopBatch — third
+batch operation, completing read/write split; new
+signedControlPlanePost transport rail for empty-body POSTs;
+409 ConflictException surfaces via `.code` field — dedicated
+conflict_error kernel kind deferred until a second 409-emitting
+endpoint lands).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
