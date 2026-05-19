@@ -13,15 +13,38 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 +
-M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M2.X.8 + M3 + M3.5 +
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
+M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
+M2.X.5 + M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M2.X.8 + M3 +
+M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,706 tests**,
-all green, no type errors. M2.X.8 ships standalone OpenAI
+**55 packages + 1 app, 119 meta-schema tables, 6,713 tests**,
+all green, no type errors. M2.8.6 threads `ImageContentBlock`
+through the OpenAI Responses API path, closing ADR-0088 Q6.
+Pre-M2.8.6 the Responses-API translator used `contentToText`
+throughout — array content was flattened to text only, silently
+dropping any image blocks. New `OpenAIResponsesContentImage
+Input` type `{type: "input_image", image_url: string}` added
+to the `OpenAIResponsesContentBlock` discriminated union
+(grows from 2 to 3 variants: input_text, input_image,
+output_text). New private `buildUserInputBlocks` helper walks
+user content: string → single input_text; array content
+walks each block (text → input_text, image → input_image
+with `data:image/<format>;base64,<bytes>` URL matching
+Chat Completions format; tool_use/tool_result skipped — they
+flow via top-level function_call_output items or are kernel-
+schema rejected on user role). Attachments field flows into
+input_image blocks for M2.X backwards compat. Block order
+preserved. Empty text blocks filtered. Empty result emits a
+single empty input_text block (Responses API rejects empty
+content arrays). All 19 pre-M2.8.6 Responses-API tests pass
+unchanged; 7 new tests verify image-input threading,
+backwards compat, attachment paths, 4 image formats, mixed
+text/image ordering, empty filtering. OpenAI provider now has
+full multimodal parity across both API paths. M2.X.8 ships standalone OpenAI
 Moderations API support in `@crossengin/ai-providers-openai`,
 closing ADR-0086 Q1. New `moderations-api.ts` module exports
 `OPENAI_MODERATION_MODELS` (4 models: omni-moderation-latest as
@@ -1001,7 +1024,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0092 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0093 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1082,7 +1105,10 @@ early-exit, estimateRequestTokens bug fix for M2.X.5 array
 content), ADR-0092 covers M2.X.8 (standalone OpenAI
 Moderations API — `provider.moderate(input)` calls
 `/v1/moderations` for proactive content screening before
-paying for a chat completion).
+paying for a chat completion), ADR-0093 covers M2.8.6 (OpenAI
+Responses API image inputs — threads ImageContentBlock through
+to input_image blocks, closing the M2.X.5 vision gap on the
+Responses path).
 
 ## Architecture in 90 seconds
 
@@ -1973,7 +1999,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0092 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0093 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2047,7 +2073,9 @@ Phase 2 M6.6 (router uses kernel cross-provider helpers —
 exercises M2.X.6.x + M2.X.7 in real consumer code + fixes
 M2.X.5 array-content estimation bug), ADR-0092 covers Phase 2
 M2.X.8 (standalone OpenAI Moderations API — provider.moderate
-for proactive pre-screening with 11-category classification).
+for proactive pre-screening with 11-category classification),
+ADR-0093 covers Phase 2 M2.8.6 (OpenAI Responses API image
+inputs — closes M2.X.5 vision gap on the Responses path).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

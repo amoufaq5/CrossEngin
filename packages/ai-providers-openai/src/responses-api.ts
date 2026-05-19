@@ -1,4 +1,11 @@
-import type { CompletionRequest, LlmMessage, LlmTool, Usage } from "@crossengin/ai-providers";
+import type {
+  CompletionRequest,
+  ImageContentBlock,
+  LlmContent,
+  LlmMessage,
+  LlmTool,
+  Usage,
+} from "@crossengin/ai-providers";
 import { contentToText } from "@crossengin/ai-providers";
 
 import { computeChatUsageCost, type OpenAIChatModel } from "./pricing.js";
@@ -11,6 +18,11 @@ export interface OpenAIResponsesContentInput {
   readonly text: string;
 }
 
+export interface OpenAIResponsesContentImageInput {
+  readonly type: "input_image";
+  readonly image_url: string;
+}
+
 export interface OpenAIResponsesContentOutput {
   readonly type: "output_text";
   readonly text: string;
@@ -19,6 +31,7 @@ export interface OpenAIResponsesContentOutput {
 
 export type OpenAIResponsesContentBlock =
   | OpenAIResponsesContentInput
+  | OpenAIResponsesContentImageInput
   | OpenAIResponsesContentOutput;
 
 export interface OpenAIResponsesMessageItem {
@@ -144,10 +157,8 @@ function splitMessages(messages: readonly LlmMessage[]): {
       continue;
     }
     if (m.role === "user") {
-      items.push({
-        role: "user",
-        content: [{ type: "input_text", text: contentToText(m.content) }],
-      });
+      const blocks = buildUserInputBlocks(m.content, m.attachments);
+      items.push({ role: "user", content: blocks });
       continue;
     }
     if (m.role === "tool") {
@@ -181,6 +192,53 @@ function splitMessages(messages: readonly LlmMessage[]): {
   return {
     instructions: systemTexts.length > 0 ? systemTexts.join("\n\n") : undefined,
     input: items,
+  };
+}
+
+function buildUserInputBlocks(
+  content: LlmContent,
+  attachments: LlmMessage["attachments"],
+): readonly (OpenAIResponsesContentInput | OpenAIResponsesContentImageInput)[] {
+  const out: (OpenAIResponsesContentInput | OpenAIResponsesContentImageInput)[] = [];
+  if (typeof content === "string") {
+    if (content.length > 0) {
+      out.push({ type: "input_text", text: content });
+    }
+  } else {
+    for (const b of content) {
+      if (b.type === "text") {
+        if (b.text.length > 0) out.push({ type: "input_text", text: b.text });
+        continue;
+      }
+      if (b.type === "image") {
+        out.push(translateImageBlock(b));
+        continue;
+      }
+      // tool_use / tool_result blocks aren't user-input shapes for Responses API;
+      // tool_result blocks on user role get folded out via the chat-api path. The
+      // Responses API uses function_call_output items at the top level instead, so
+      // we skip them here (they shouldn't reach this point on user role anyway).
+    }
+  }
+  for (const a of attachments ?? []) {
+    if (a.kind === "image") {
+      out.push({
+        type: "input_image",
+        image_url: `data:image/${a.format};base64,${a.bytes}`,
+      });
+    }
+  }
+  if (out.length === 0) {
+    // Responses API rejects empty content arrays — emit an empty input_text block.
+    out.push({ type: "input_text", text: "" });
+  }
+  return out;
+}
+
+function translateImageBlock(block: ImageContentBlock): OpenAIResponsesContentImageInput {
+  return {
+    type: "input_image",
+    image_url: `data:image/${block.format};base64,${block.bytes}`,
   };
 }
 

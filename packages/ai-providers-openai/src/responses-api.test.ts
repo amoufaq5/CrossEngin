@@ -1,4 +1,4 @@
-import type { CompletionRequest } from "@crossengin/ai-providers";
+import type { CompletionRequest, LlmMessage } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -326,5 +326,142 @@ describe("extractReasoningSummary", () => {
       usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
     };
     expect(extractReasoningSummary(response)).toBe("");
+  });
+});
+
+describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
+  function req(messages: LlmMessage[]): CompletionRequest {
+    return {
+      task: "executor",
+      messages,
+      tenantId: "ten-1",
+      sessionId: "ses-1",
+    };
+  }
+
+  it("translates user kernel content blocks (text + image) into input_text + input_image", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what's in this?" },
+            { type: "image", format: "png", bytes: "ABCD" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content).toHaveLength(2);
+    expect(userMsg.content[0]).toEqual({ type: "input_text", text: "what's in this?" });
+    expect(userMsg.content[1]).toEqual({
+      type: "input_image",
+      image_url: "data:image/png;base64,ABCD",
+    });
+  });
+
+  it("string user content still maps to a single input_text block (M2.X.5 backwards compat)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([{ role: "user", content: "hello" }]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content).toEqual([{ type: "input_text", text: "hello" }]);
+  });
+
+  it("attachments field flows into input_image blocks (M2.X user-image path preserved)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: "describe",
+          attachments: [
+            { kind: "image", format: "jpeg", bytes: "XYZ" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content).toHaveLength(2);
+    expect(userMsg.content[0]).toEqual({ type: "input_text", text: "describe" });
+    expect(userMsg.content[1]).toEqual({
+      type: "input_image",
+      image_url: "data:image/jpeg;base64,XYZ",
+    });
+  });
+
+  it("multiple image formats translate to correct data URLs", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "image", format: "png", bytes: "P" },
+            { type: "image", format: "jpeg", bytes: "J" },
+            { type: "image", format: "gif", bytes: "G" },
+            { type: "image", format: "webp", bytes: "W" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<{ image_url: string }> };
+    expect(userMsg.content[0]?.image_url).toBe("data:image/png;base64,P");
+    expect(userMsg.content[1]?.image_url).toBe("data:image/jpeg;base64,J");
+    expect(userMsg.content[2]?.image_url).toBe("data:image/gif;base64,G");
+    expect(userMsg.content[3]?.image_url).toBe("data:image/webp;base64,W");
+  });
+
+  it("preserves block order (text first, image second)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "first" },
+            { type: "image", format: "png", bytes: "P" },
+            { type: "text", text: "second" },
+            { type: "image", format: "jpeg", bytes: "J" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content.map((b) => b.type)).toEqual([
+      "input_text",
+      "input_image",
+      "input_text",
+      "input_image",
+    ]);
+  });
+
+  it("empty text blocks are filtered out (avoid empty input_text strings)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "" },
+            { type: "image", format: "png", bytes: "P" },
+          ],
+        },
+      ]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<{ type: string }> };
+    expect(userMsg.content).toHaveLength(1);
+    expect(userMsg.content[0]?.type).toBe("input_image");
+  });
+
+  it("empty string content emits a single empty input_text block (Responses API rejects empty content array)", () => {
+    const built = buildOpenAIResponsesRequest(
+      req([{ role: "user", content: "" }]),
+      { defaultModel: "gpt-4o" },
+    );
+    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    expect(userMsg.content).toEqual([{ type: "input_text", text: "" }]);
   });
 });
