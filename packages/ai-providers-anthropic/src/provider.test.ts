@@ -388,6 +388,53 @@ describe("AnthropicProvider Files API (M2.X.5.aa.z.1)", () => {
     });
   });
 
+  it("listFiles GETs /v1/files without query when called with no options (M2.X.5.aa.z.2)", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = buildProvider({
+      capture: captured,
+      responseBody: JSON.stringify({
+        data: [
+          { id: "file_a", type: "file", filename: "a.pdf", mime_type: "application/pdf", size_bytes: 100, created_at: "2026-01-01T00:00:00Z" },
+          { id: "file_b", type: "file", filename: "b.pdf", mime_type: "application/pdf", size_bytes: 200, created_at: "2026-01-02T00:00:00Z" },
+        ],
+        has_more: false,
+        first_id: "file_a",
+        last_id: "file_b",
+      }),
+    });
+    const result = await provider.listFiles();
+    expect(result.data).toHaveLength(2);
+    expect(result.has_more).toBe(false);
+    expect(captured[0]!.url).toBe("https://api.anthropic.com/v1/files");
+    expect(captured[0]!.method).toBe("GET");
+    expect(captured[0]!.headers["anthropic-beta"]).toContain("files-api-2025-04-14");
+  });
+
+  it("listFiles passes limit / before_id / after_id / order as query params", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = buildProvider({
+      capture: captured,
+      responseBody: JSON.stringify({ data: [], has_more: false, first_id: null, last_id: null }),
+    });
+    await provider.listFiles({
+      limit: 25,
+      beforeId: "file_x",
+      afterId: "file_y",
+      order: "desc",
+    });
+    const url = new URL(captured[0]!.url);
+    expect(url.searchParams.get("limit")).toBe("25");
+    expect(url.searchParams.get("before_id")).toBe("file_x");
+    expect(url.searchParams.get("after_id")).toBe("file_y");
+    expect(url.searchParams.get("order")).toBe("desc");
+  });
+
+  it("listFiles rejects limit < 1 or > 1000 (Anthropic's documented max)", async () => {
+    const provider = buildProvider({});
+    await expect(provider.listFiles({ limit: 0 })).rejects.toThrow(/limit must be/);
+    await expect(provider.listFiles({ limit: 1001 })).rejects.toThrow(/limit must be/);
+  });
+
   it("merges files-api beta with existing anthropicBeta headers (deduplicates)", async () => {
     const captured: CapturedCall[] = [];
     const provider = new AnthropicProvider({

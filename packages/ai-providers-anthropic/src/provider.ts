@@ -15,6 +15,7 @@ import {
   buildAnthropicMultipartUpload,
   type AnthropicFile,
   type AnthropicFileDeleteResponse,
+  type AnthropicFileListResponse,
 } from "./files-api.js";
 import {
   buildAnthropicRequest,
@@ -278,6 +279,53 @@ export class AnthropicProvider implements LlmProvider {
       throw new AnthropicError({
         kind: "api_error",
         message: `failed to parse Anthropic file delete response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async listFiles(options: {
+    readonly limit?: number;
+    readonly beforeId?: string;
+    readonly afterId?: string;
+    readonly order?: "asc" | "desc";
+  } = {}): Promise<AnthropicFileListResponse> {
+    if (
+      options.limit !== undefined &&
+      (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000)
+    ) {
+      throw new AnthropicError({
+        kind: "invalid_request_error",
+        message: "listFiles: limit must be an integer in [1, 1000]",
+      });
+    }
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", options.limit.toString());
+    if (options.beforeId !== undefined) params.set("before_id", options.beforeId);
+    if (options.afterId !== undefined) params.set("after_id", options.afterId);
+    if (options.order !== undefined) params.set("order", options.order);
+    const query = params.toString();
+    const path = query.length > 0 ? `/v1/files?${query}` : "/v1/files";
+    let response;
+    try {
+      response = await this.fetchImpl(this.url(path), {
+        method: "GET",
+        headers: this.filesApiHeaders(),
+        body: "",
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as AnthropicFileListResponse;
+    } catch (err) {
+      throw new AnthropicError({
+        kind: "api_error",
+        message: `failed to parse Anthropic file list response: ${err instanceof Error ? err.message : String(err)}`,
         status: response.status,
       });
     }

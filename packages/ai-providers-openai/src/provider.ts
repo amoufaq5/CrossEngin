@@ -27,6 +27,7 @@ import {
   isOpenAIFilesPurpose,
   type OpenAIFile,
   type OpenAIFileDeleteResponse,
+  type OpenAIFileListResponse,
   type OpenAIFilesPurpose,
 } from "./files-api.js";
 import {
@@ -494,6 +495,59 @@ export class OpenAIProvider implements LlmProvider {
       throw new OpenAIError({
         kind: "api_error",
         message: `failed to parse OpenAI file delete response: ${err instanceof Error ? err.message : String(err)}`,
+        status: response.status,
+      });
+    }
+  }
+
+  async listFiles(options: {
+    readonly purpose?: OpenAIFilesPurpose;
+    readonly limit?: number;
+    readonly order?: "asc" | "desc";
+    readonly after?: string;
+  } = {}): Promise<OpenAIFileListResponse> {
+    if (options.purpose !== undefined && !isOpenAIFilesPurpose(options.purpose)) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: `listFiles: invalid purpose '${options.purpose}'`,
+      });
+    }
+    if (
+      options.limit !== undefined &&
+      (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 10_000)
+    ) {
+      throw new OpenAIError({
+        kind: "invalid_request_error",
+        message: "listFiles: limit must be an integer in [1, 10000]",
+      });
+    }
+    const params = new URLSearchParams();
+    if (options.purpose !== undefined) params.set("purpose", options.purpose);
+    if (options.limit !== undefined) params.set("limit", options.limit.toString());
+    if (options.order !== undefined) params.set("order", options.order);
+    if (options.after !== undefined) params.set("after", options.after);
+    const query = params.toString();
+    const path = query.length > 0 ? `/v1/files?${query}` : "/v1/files";
+    let response;
+    try {
+      response = await this.fetchImpl(this.url(path), {
+        method: "GET",
+        headers: this.headers({ stream: false }),
+        body: "",
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as OpenAIFileListResponse;
+    } catch (err) {
+      throw new OpenAIError({
+        kind: "api_error",
+        message: `failed to parse OpenAI file list response: ${err instanceof Error ? err.message : String(err)}`,
         status: response.status,
       });
     }

@@ -576,6 +576,69 @@ describe("OpenAIProvider Files API (M2.X.5.aa.z)", () => {
       kind: "not_found_error",
     });
   });
+
+  it("listFiles GETs /v1/files without query when called with no options (M2.X.5.aa.z.2)", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: JSON.stringify({
+          object: "list",
+          data: [
+            { id: "file-1", object: "file", bytes: 100, created_at: 1, filename: "a.pdf", purpose: "user_data" },
+            { id: "file-2", object: "file", bytes: 200, created_at: 2, filename: "b.pdf", purpose: "user_data" },
+          ],
+        }),
+      }),
+    });
+    const result = await provider.listFiles();
+    expect(result.data).toHaveLength(2);
+    expect(result.data[0]!.id).toBe("file-1");
+    expect(captured[0]!.url).toBe("https://api.openai.com/v1/files");
+    expect(captured[0]!.method).toBe("GET");
+  });
+
+  it("listFiles passes purpose / limit / order / after as query params", async () => {
+    const captured: CapturedCall[] = [];
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({
+        capture: captured,
+        responseBody: JSON.stringify({ object: "list", data: [] }),
+      }),
+    });
+    await provider.listFiles({
+      purpose: "user_data",
+      limit: 50,
+      order: "desc",
+      after: "file-abc",
+    });
+    const url = new URL(captured[0]!.url);
+    expect(url.searchParams.get("purpose")).toBe("user_data");
+    expect(url.searchParams.get("limit")).toBe("50");
+    expect(url.searchParams.get("order")).toBe("desc");
+    expect(url.searchParams.get("after")).toBe("file-abc");
+  });
+
+  it("listFiles rejects invalid purpose", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({}),
+    });
+    await expect(
+      provider.listFiles({ purpose: "training" as never }),
+    ).rejects.toThrow(/invalid purpose/);
+  });
+
+  it("listFiles rejects limit < 1 or > 10000", async () => {
+    const provider = new OpenAIProvider({
+      apiKey: API_KEY,
+      fetch: buildFetch({}),
+    });
+    await expect(provider.listFiles({ limit: 0 })).rejects.toThrow(/limit must be/);
+    await expect(provider.listFiles({ limit: 10_001 })).rejects.toThrow(/limit must be/);
+  });
 });
 
 describe("OpenAIProvider.moderate (M2.X.8)", () => {
