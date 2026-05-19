@@ -35,11 +35,13 @@ export type AnthropicContentBlock =
   | { readonly type: "text"; readonly text: string }
   | {
       readonly type: "image";
-      readonly source: {
-        readonly type: "base64";
-        readonly media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-        readonly data: string;
-      };
+      readonly source:
+        | {
+            readonly type: "base64";
+            readonly media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+            readonly data: string;
+          }
+        | { readonly type: "url"; readonly url: string };
     }
   | {
       readonly type: "tool_use";
@@ -218,9 +220,10 @@ function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
     };
   }
   if (block.type === "image_url") {
-    throw new Error(
-      "Anthropic provider does not support image_url content blocks via the base64 image variant — pre-fetch the URL to base64 bytes and use an image block instead",
-    );
+    return {
+      type: "image",
+      source: { type: "url", url: block.url },
+    };
   }
   if (block.type === "tool_use") {
     return {

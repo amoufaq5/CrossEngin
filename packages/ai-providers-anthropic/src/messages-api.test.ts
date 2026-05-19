@@ -497,25 +497,60 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     });
   });
 
-  it("throws on image_url content block (Anthropic requires base64 bytes via image variant) (M2.X.5.y)", () => {
-    expect(() =>
-      buildAnthropicRequest(
-        {
-          task: "planner",
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "image_url", url: "https://example.com/cat.png" },
-              ],
-            },
-          ],
-          tenantId: "ten-1",
-          sessionId: "ses-1",
-        },
-        { defaultModel: "claude-sonnet-4-6" },
-      ),
-    ).toThrow(/Anthropic provider does not support image_url/);
+  it("image_url content block translates to Anthropic url-source image block (M2.X.5.z)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", url: "https://example.com/cat.png" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly Record<string, unknown>[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      type: "image",
+      source: { type: "url", url: "https://example.com/cat.png" },
+    });
+  });
+
+  it("image_url + image (bytes) both work in the same message (M2.X.5.z)", () => {
+    const built = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", format: "png", bytes: "ABCD" },
+              { type: "image_url", url: "https://example.com/y.jpg" },
+            ],
+          },
+        ],
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
+    const blocks = built.messages[0]!.content as readonly { source: Record<string, string> }[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]!.source).toEqual({
+      type: "base64",
+      media_type: "image/png",
+      data: "ABCD",
+    });
+    expect(blocks[1]!.source).toEqual({
+      type: "url",
+      url: "https://example.com/y.jpg",
+    });
   });
 
   it("user tool_result block translates to Anthropic tool_result block (M2.X.5.x)", () => {

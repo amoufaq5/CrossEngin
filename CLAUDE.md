@@ -15,15 +15,32 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
-M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.6 + M2.X.6.x + M2.X.7 +
-M2.X.8 + M2.X.9 + M3 +
+M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.6 + M2.X.6.x +
+M2.X.7 + M2.X.8 + M2.X.9 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,750 tests**,
-all green, no type errors. M2.X.9 adds the third kernel-level
+**55 packages + 1 app, 119 meta-schema tables, 6,751 tests**,
+all green, no type errors. M2.X.5.z removes the M2.X.5.y throw
+in the Anthropic translator + threads URLs through to
+Anthropic's native URL source variant, closing ADR-0094 Q3.
+Anthropic recently added URL source support; the
+`AnthropicContentBlock` image source becomes a discriminated
+union on `source.type`: existing `{type: "base64", media_type,
+data}` variant unchanged + new `{type: "url", url}` variant
+added. `translateKernelBlock` for `image_url` now returns
+`{type: "image", source: {type: "url", url: block.url}}`
+instead of throwing. Provider parity for URL-based images is
+now: OpenAI Chat Completions ✓, OpenAI Responses ✓, Anthropic
+✓. Bedrock ✗ (still throws — Bedrock's image source format
+has no URL variant; operators with cross-provider URL workflows
+pre-fetch bytes when targeting Bedrock). Format hint dropped on
+URL path (Anthropic infers from response Content-Type). The
+existing M2.X.5.y throw test was replaced with two passthrough
+tests: pure URL translation + mixed bytes + URL in same
+message. M2.X.9 adds the third kernel-level
 cross-provider error classifier: `isInputTooLargeError(err)`.
 Follows the same shape as M2.X.6.x (`isModerationError`) and
 M2.X.7 (`isRetryableError`) — duck-types on `.kind` against a
@@ -1071,7 +1088,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0095 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0096 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1162,7 +1179,12 @@ URLs through, Bedrock + Anthropic throw with explicit
 pre-fetch guidance), ADR-0095 covers M2.X.9 (cross-provider
 input-too-large helper — third kernel-level predicate
 `isInputTooLargeError`; partitions the error space alongside
-isModerationError + isRetryableError).
+isModerationError + isRetryableError), ADR-0096 covers M2.X.5.z
+(Anthropic URL-source image support — removes the M2.X.5.y
+throw, threads URLs through to Anthropic's native URL source
+variant; provider parity expanded — OpenAI both paths +
+Anthropic now accept URL-based images, Bedrock still requires
+bytes).
 
 ## Architecture in 90 seconds
 
@@ -2053,7 +2075,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0095 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0096 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2136,7 +2158,11 @@ OpenAI pass-through and Bedrock/Anthropic throw semantics),
 ADR-0095 covers Phase 2 M2.X.9 (cross-provider input-too-
 large helper — third predicate in the kernel error
 classification surface, completing the partition into
-retryable + moderation + input-too-large + other).
+retryable + moderation + input-too-large + other), ADR-0096
+covers Phase 2 M2.X.5.z (Anthropic URL-source image support —
+threads ImageUrlContentBlock URLs through to Anthropic's
+native URL source variant; provider parity expanded for
+URL-based images across both OpenAI paths + Anthropic).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
