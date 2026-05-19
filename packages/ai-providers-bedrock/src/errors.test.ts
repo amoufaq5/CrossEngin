@@ -45,6 +45,34 @@ describe("BedrockError", () => {
   });
 });
 
+describe("BedrockError x kernel isRetryableError (M2.X.7)", () => {
+  it("kernel isRetryableError matches Bedrock.isRetryable() for retryable kinds", async () => {
+    const { isRetryableError } = await import("@crossengin/ai-providers");
+    for (const kind of [
+      "rate_limit_error",
+      "overloaded_error",
+      "network_error",
+      "timeout_error",
+      "api_error",
+      "model_stream_error",
+    ] as const) {
+      const err = new BedrockError({ kind, message: "x" });
+      expect(isRetryableError(err)).toBe(true);
+      expect(err.isRetryable()).toBe(true);
+    }
+  });
+
+  it("kernel isRetryableError returns false for moderation + auth kinds", async () => {
+    const { isRetryableError } = await import("@crossengin/ai-providers");
+    expect(
+      isRetryableError(new BedrockError({ kind: "guardrail_intervened", message: "" })),
+    ).toBe(false);
+    expect(
+      isRetryableError(new BedrockError({ kind: "authentication_error", message: "" })),
+    ).toBe(false);
+  });
+});
+
 describe("RETRYABLE_KINDS", () => {
   it("excludes auth + invalid + not_found + permission", () => {
     expect(RETRYABLE_KINDS.has("authentication_error")).toBe(false);

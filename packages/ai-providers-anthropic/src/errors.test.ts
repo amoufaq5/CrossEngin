@@ -58,6 +58,33 @@ describe("AnthropicError.isRetryable", () => {
   });
 });
 
+describe("AnthropicError x kernel isRetryableError (M2.X.7)", () => {
+  it("kernel isRetryableError matches Anthropic.isRetryable() for the shared retryable kinds", async () => {
+    const { isRetryableError } = await import("@crossengin/ai-providers");
+    for (const kind of [
+      "rate_limit_error",
+      "overloaded_error",
+      "network_error",
+      "timeout_error",
+      "api_error",
+    ] as const) {
+      const err = new AnthropicError({ kind, message: "x" });
+      expect(isRetryableError(err)).toBe(true);
+      expect(err.isRetryable()).toBe(true);
+    }
+  });
+
+  it("kernel isRetryableError returns false for refusal + authentication_error", async () => {
+    const { isRetryableError } = await import("@crossengin/ai-providers");
+    expect(
+      isRetryableError(new AnthropicError({ kind: "refusal", message: "" })),
+    ).toBe(false);
+    expect(
+      isRetryableError(new AnthropicError({ kind: "authentication_error", message: "" })),
+    ).toBe(false);
+  });
+});
+
 describe("fromHttpResponse", () => {
   it("parses Anthropic error envelope when body is JSON", () => {
     const err = fromHttpResponse({

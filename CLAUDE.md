@@ -15,13 +15,36 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 +
-M2.X.5.x + M2.X.6 + M2.X.6.x + M3 + M3.5 + M3.6 + M3.7 + M4 +
-M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y +
-M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 +
-M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 +
-M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,639 tests**,
-all green, no type errors. M2.X.5.x adds `tool_use` +
+M2.X.5.x + M2.X.6 + M2.X.6.x + M2.X.7 + M3 + M3.5 + M3.6 + M3.7
++ M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x +
+M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
+M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 +
+M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,668 tests**,
+all green, no type errors. M2.X.7 adds a kernel-level
+cross-provider retryability helper to `@crossengin/ai-providers`,
+mirroring M2.X.6.x for the second cross-cutting error concern.
+Closes ADR-0087 Q3. New `retryable.ts` module exports
+`RETRYABLE_ERROR_KINDS` const tuple ([rate_limit_error,
+overloaded_error, network_error, timeout_error, api_error,
+model_stream_error] — the UNION of all three providers'
+retryable sets; Bedrock-specific model_stream_error included so
+kernel agrees with Bedrock's local classification),
+`RetryableErrorKind` type, `RetryableDiscriminator` interface,
+`isRetryableErrorKind(value)` string discriminator, and the
+headline predicate `isRetryableError(err): err is Error &
+{kind: RetryableErrorKind}`. Same duck-typing approach as
+`isModerationError`: inspects `err.kind` against the shared
+tuple. No changes to provider error classes; their existing
+local `RETRYABLE_KINDS` sets + `isRetryable()` methods continue
+to work. Cross-package integration tests in all three real
+providers verify the kernel helper agrees with the provider's
+local isRetryable() method for each shared kind; moderation +
+auth kinds correctly return false. Symmetric API surface:
+operators have parallel discriminators `isModerationError` +
+`isRetryableError`, both narrow `.kind`, both work across
+providers, neither requires provider-package imports. Pattern
+set for future third cross-provider concern. M2.X.5.x adds `tool_use` +
 `tool_result` content block variants to the kernel
 `LlmContentBlock` discriminated union, consolidating the
 tool-call surface. New types in `@crossengin/ai-providers/src/
@@ -927,7 +950,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0089 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0090 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -998,7 +1021,10 @@ unblock multimodal assistant outputs across all three
 providers), ADR-0089 covers M2.X.5.x (tool_use + tool_result
 content block variants — consolidates tool-call surface with
 provider translators handling Bedrock + Anthropic natively
-and OpenAI via message-flattening flatMap).
+and OpenAI via message-flattening flatMap), ADR-0090 covers
+M2.X.7 (cross-provider retryable helper — kernel-level
+`isRetryableError(err)` predicate + `RETRYABLE_ERROR_KINDS`
+shared tuple, symmetric with M2.X.6.x's moderation helper).
 
 ## Architecture in 90 seconds
 
@@ -1889,7 +1915,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0089 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0090 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1955,7 +1981,10 @@ kernel-level `isModerationError(err)` predicate + shared
 multimodal assistant outputs across Anthropic / OpenAI / Bedrock),
 ADR-0089 covers Phase 2 M2.X.5.x (tool_use + tool_result content
 block variants — consolidates tool-call surface with OpenAI
-flatMap refactor for message-flattening).
+flatMap refactor for message-flattening), ADR-0090 covers Phase
+2 M2.X.7 (cross-provider retryable helper — kernel-level
+`isRetryableError(err)` + shared `RETRYABLE_ERROR_KINDS` tuple,
+symmetric with M2.X.6.x's moderation helper).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
