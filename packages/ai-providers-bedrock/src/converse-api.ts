@@ -6,6 +6,7 @@ import type {
   Usage,
 } from "@crossengin/ai-providers";
 
+import type { BedrockGuardrailConfig } from "./guardrails.js";
 import { buildBedrockUsage, type BedrockChatModel } from "./pricing.js";
 
 export interface BedrockTextContentBlock {
@@ -117,6 +118,7 @@ export interface BedrockConverseRequest {
   readonly system?: readonly BedrockSystemBlock[];
   readonly inferenceConfig?: BedrockInferenceConfig;
   readonly toolConfig?: BedrockToolConfig;
+  readonly guardrailConfig?: BedrockGuardrailConfig;
 }
 
 export interface BedrockConverseUsage {
@@ -148,6 +150,7 @@ export const DEFAULT_MAX_TOKENS = 4_096;
 
 export interface BuildConverseRequestOptions {
   readonly defaultMaxTokens?: number;
+  readonly guardrailConfig?: BedrockGuardrailConfig;
 }
 
 export function buildBedrockConverseRequest(
@@ -213,6 +216,9 @@ export function buildBedrockConverseRequest(
     inferenceConfig: inference,
     ...(req.tools !== undefined && req.tools.length > 0
       ? { toolConfig: { tools: req.tools.map(translateTool) } }
+      : {}),
+    ...(opts.guardrailConfig !== undefined
+      ? { guardrailConfig: opts.guardrailConfig }
       : {}),
   };
   return request;

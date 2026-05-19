@@ -38,6 +38,11 @@ describe("BedrockError", () => {
     expect(new BedrockError({ kind: "not_found_error", message: "" }).isRetryable()).toBe(false);
     expect(new BedrockError({ kind: "permission_error", message: "" }).isRetryable()).toBe(false);
   });
+
+  it("isRetryable returns false for guardrail_intervened + content_filtered (M2.9.8)", () => {
+    expect(new BedrockError({ kind: "guardrail_intervened", message: "" }).isRetryable()).toBe(false);
+    expect(new BedrockError({ kind: "content_filtered", message: "" }).isRetryable()).toBe(false);
+  });
 });
 
 describe("RETRYABLE_KINDS", () => {

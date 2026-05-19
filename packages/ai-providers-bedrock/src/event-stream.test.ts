@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import { BedrockError } from "./errors.js";
 import {
   mapEventToChunks,
+  newConverseStreamState,
   parseEventStreamMessage,
   readConverseEventStream,
+  type ConverseStreamState,
 } from "./event-stream.js";
+import { BedrockGuardrailViolationError } from "./guardrails.js";
 
 const PRELUDE_LENGTH = 12;
 const MESSAGE_CRC_LENGTH = 4;
@@ -102,11 +105,21 @@ describe("parseEventStreamMessage", () => {
 describe("mapEventToChunks", () => {
   const MODEL = "anthropic.claude-3-5-sonnet-20241022-v2:0";
 
-  function dispatch(eventType: string, payload: unknown, toolBlocks = new Map<number, string>()) {
+  function stateWithToolBlocks(blocks: ReadonlyArray<readonly [number, string]> = []): ConverseStreamState {
+    const s = newConverseStreamState();
+    for (const [i, id] of blocks) s.toolBlocks.set(i, id);
+    return s;
+  }
+
+  function dispatch(
+    eventType: string,
+    payload: unknown,
+    state: ConverseStreamState = newConverseStreamState(),
+  ) {
     const frame = encodeEvent(eventType, payload);
     const parsed = parseEventStreamMessage(frame)!;
     return Array.from(
-      mapEventToChunks(parsed.message, toolBlocks, { model: MODEL }),
+      mapEventToChunks(parsed.message, state, { model: MODEL }),
     );
   }
 
@@ -115,19 +128,19 @@ describe("mapEventToChunks", () => {
   });
 
   it("contentBlockStart with toolUse emits tool_call_start + records the block id", () => {
-    const toolBlocks = new Map<number, string>();
+    const state = newConverseStreamState();
     const chunks = dispatch(
       "contentBlockStart",
       {
         contentBlockIndex: 0,
         start: { toolUse: { toolUseId: "tu_1", name: "search" } },
       },
-      toolBlocks,
+      state,
     );
     expect(chunks).toEqual([
       { kind: "tool_call_start", id: "tu_1", name: "search" },
     ]);
-    expect(toolBlocks.get(0)).toBe("tu_1");
+    expect(state.toolBlocks.get(0)).toBe("tu_1");
   });
 
   it("contentBlockStart with text emits no chunks", () => {
@@ -158,7 +171,6 @@ describe("mapEventToChunks", () => {
   });
 
   it("contentBlockDelta with toolUse.input emits tool_call_arg_delta", () => {
-    const toolBlocks = new Map<number, string>([[0, "tu_42"]]);
     expect(
       dispatch(
         "contentBlockDelta",
@@ -166,30 +178,26 @@ describe("mapEventToChunks", () => {
           contentBlockIndex: 0,
           delta: { toolUse: { input: '{"q":"' } },
         },
-        toolBlocks,
+        stateWithToolBlocks([[0, "tu_42"]]),
       ),
     ).toEqual([{ kind: "tool_call_arg_delta", id: "tu_42", delta: '{"q":"' }]);
   });
 
   it("contentBlockDelta with toolUse.input on unknown index throws BedrockError", () => {
     expect(() =>
-      dispatch(
-        "contentBlockDelta",
-        {
-          contentBlockIndex: 7,
-          delta: { toolUse: { input: "fragment" } },
-        },
-        new Map(),
-      ),
+      dispatch("contentBlockDelta", {
+        contentBlockIndex: 7,
+        delta: { toolUse: { input: "fragment" } },
+      }),
     ).toThrow(BedrockError);
   });
 
   it("contentBlockStop on a tool block emits tool_call_end + clears the block id", () => {
-    const toolBlocks = new Map<number, string>([[0, "tu_1"]]);
-    expect(
-      dispatch("contentBlockStop", { contentBlockIndex: 0 }, toolBlocks),
-    ).toEqual([{ kind: "tool_call_end", id: "tu_1" }]);
-    expect(toolBlocks.has(0)).toBe(false);
+    const state = stateWithToolBlocks([[0, "tu_1"]]);
+    expect(dispatch("contentBlockStop", { contentBlockIndex: 0 }, state)).toEqual([
+      { kind: "tool_call_end", id: "tu_1" },
+    ]);
+    expect(state.toolBlocks.has(0)).toBe(false);
   });
 
   it("contentBlockStop on a text block emits nothing", () => {
@@ -236,9 +244,11 @@ describe("mapEventToChunks", () => {
       new TextEncoder().encode('{"message":"upstream died"}'),
     );
     const parsed = parseEventStreamMessage(frame)!;
-    expect(() => Array.from(mapEventToChunks(parsed.message, new Map(), { model: MODEL }))).toThrow(
-      BedrockError,
-    );
+    expect(() =>
+      Array.from(
+        mapEventToChunks(parsed.message, newConverseStreamState(), { model: MODEL }),
+      ),
+    ).toThrow(BedrockError);
   });
 
   it("unknown event-type is silently ignored", () => {
@@ -340,5 +350,123 @@ describe("readConverseEventStream — integration", () => {
       },
     });
     await expect(collect(body)).rejects.toThrow(BedrockError);
+  });
+
+  function concatFrames(frames: readonly Uint8Array[]): Uint8Array {
+    const total = frames.reduce((n, f) => n + f.byteLength, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const f of frames) {
+      out.set(f, off);
+      off += f.byteLength;
+    }
+    return out;
+  }
+
+  it("guardrail intervention: throws BedrockGuardrailViolationError AFTER usage_final", async () => {
+    const frames = [
+      encodeEvent("messageStart", { role: "assistant" }),
+      encodeEvent("contentBlockDelta", {
+        contentBlockIndex: 0,
+        delta: { text: "before block" },
+      }),
+      encodeEvent("contentBlockStop", { contentBlockIndex: 0 }),
+      encodeEvent("messageStop", { stopReason: "guardrail_intervened" }),
+      encodeEvent("metadata", {
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    ];
+    const body = streamFromBuffer(concatFrames(frames));
+    const chunks: unknown[] = [];
+    let caught: unknown;
+    try {
+      for await (const chunk of readConverseEventStream(body, { model: MODEL })) {
+        chunks.push(chunk);
+      }
+    } catch (err) {
+      caught = err;
+    }
+    expect(chunks).toEqual([
+      { kind: "text", text: "before block" },
+      expect.objectContaining({ kind: "usage_final" }),
+    ]);
+    expect(caught).toBeInstanceOf(BedrockGuardrailViolationError);
+    const e = caught as BedrockGuardrailViolationError;
+    expect(e.stopReason).toBe("guardrail_intervened");
+    expect(e.kind).toBe("guardrail_intervened");
+    expect(e.isRetryable()).toBe(false);
+  });
+
+  it("guardrail intervention: content_filtered stopReason maps to same error class", async () => {
+    const frames = [
+      encodeEvent("messageStart", { role: "assistant" }),
+      encodeEvent("messageStop", { stopReason: "content_filtered" }),
+      encodeEvent("metadata", {
+        usage: { inputTokens: 4, outputTokens: 0 },
+      }),
+    ];
+    const body = streamFromBuffer(concatFrames(frames));
+    let caught: unknown;
+    try {
+      for await (const _chunk of readConverseEventStream(body, { model: MODEL })) {
+        // drain
+      }
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BedrockGuardrailViolationError);
+    expect((caught as BedrockGuardrailViolationError).stopReason).toBe(
+      "content_filtered",
+    );
+  });
+
+  it("guardrail trace from metadata flows into the thrown error", async () => {
+    const trace = {
+      inputAssessment: {
+        guardrailId123: {
+          contentPolicy: { filters: [{ type: "HATE", action: "BLOCKED" }] },
+        },
+      },
+    };
+    const frames = [
+      encodeEvent("messageStart", { role: "assistant" }),
+      encodeEvent("messageStop", { stopReason: "guardrail_intervened" }),
+      encodeEvent("metadata", {
+        usage: { inputTokens: 10, outputTokens: 0 },
+        trace: { guardrail: trace },
+      }),
+    ];
+    const body = streamFromBuffer(concatFrames(frames));
+    let caught: unknown;
+    try {
+      for await (const _chunk of readConverseEventStream(body, { model: MODEL })) {
+        // drain
+      }
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BedrockGuardrailViolationError);
+    expect((caught as BedrockGuardrailViolationError).trace).toEqual(trace);
+  });
+
+  it("non-intervention stopReason does NOT throw", async () => {
+    const frames = [
+      encodeEvent("messageStart", { role: "assistant" }),
+      encodeEvent("contentBlockDelta", {
+        contentBlockIndex: 0,
+        delta: { text: "ok" },
+      }),
+      encodeEvent("contentBlockStop", { contentBlockIndex: 0 }),
+      encodeEvent("messageStop", { stopReason: "end_turn" }),
+      encodeEvent("metadata", {
+        usage: { inputTokens: 8, outputTokens: 1 },
+      }),
+    ];
+    const body = streamFromBuffer(concatFrames(frames));
+    const chunks: unknown[] = [];
+    for await (const chunk of readConverseEventStream(body, { model: MODEL })) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toContainEqual({ kind: "text", text: "ok" });
   });
 });

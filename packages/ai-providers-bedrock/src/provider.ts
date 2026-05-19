@@ -36,6 +36,10 @@ import {
 } from "./errors.js";
 import { readConverseEventStream } from "./event-stream.js";
 import {
+  buildBedrockGuardrailConfig,
+  type BedrockGuardrailConfig,
+} from "./guardrails.js";
+import {
   BEDROCK_CHAT_MODELS,
   BEDROCK_CHAT_PRICING,
   BEDROCK_DEFAULT_EMBEDDING_MODEL,
@@ -82,6 +86,7 @@ export interface BedrockProviderOptions {
   readonly defaultEmbeddingDimensions?: number;
   readonly defaultCohereInputType?: CohereEmbedInputType;
   readonly titanConcurrency?: number;
+  readonly guardrailConfig?: BedrockGuardrailConfig;
   readonly baseUrl?: string;
   readonly residency?: readonly Region[];
   readonly fetch?: FetchLike;
@@ -122,6 +127,7 @@ export class BedrockProvider implements LlmProvider {
   private readonly defaultEmbeddingDimensions: number | undefined;
   private readonly defaultCohereInputType: CohereEmbedInputType | undefined;
   private readonly titanConcurrency: number;
+  private readonly guardrailConfig: BedrockGuardrailConfig | undefined;
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
   private readonly clock: () => Date;
@@ -165,6 +171,10 @@ export class BedrockProvider implements LlmProvider {
       );
     }
     this.titanConcurrency = concurrency;
+    this.guardrailConfig =
+      opts.guardrailConfig !== undefined
+        ? buildBedrockGuardrailConfig(opts.guardrailConfig)
+        : undefined;
     this.baseUrl = opts.baseUrl ?? `https://bedrock-runtime.${this.region}.amazonaws.com`;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
     this.clock = opts.clock ?? (() => new Date());
@@ -183,6 +193,9 @@ export class BedrockProvider implements LlmProvider {
     const model = this.resolveModel(req.model);
     const built = buildBedrockConverseRequest(req, {
       defaultMaxTokens: this.defaultMaxTokens,
+      ...(this.guardrailConfig !== undefined
+        ? { guardrailConfig: this.guardrailConfig }
+        : {}),
     });
     const body = new TextEncoder().encode(JSON.stringify(built));
     const url = `${this.baseUrl}/model/${encodeURIComponent(model)}/converse-stream`;
@@ -205,6 +218,9 @@ export class BedrockProvider implements LlmProvider {
     const model = this.resolveModel(req.model);
     const built = buildBedrockConverseRequest(req, {
       defaultMaxTokens: this.defaultMaxTokens,
+      ...(this.guardrailConfig !== undefined
+        ? { guardrailConfig: this.guardrailConfig }
+        : {}),
     });
     const body = new TextEncoder().encode(JSON.stringify(built));
     const url = `${this.baseUrl}/model/${encodeURIComponent(model)}/converse`;

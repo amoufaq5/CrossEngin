@@ -559,4 +559,24 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     );
     expect(built.messages[0]!.content).toEqual([{ text: "" }]);
   });
+
+  it("threads guardrailConfig from BuildConverseRequestOptions into the request body (M2.9.8)", () => {
+    const built = buildBedrockConverseRequest(baseReq(), {
+      guardrailConfig: {
+        guardrailIdentifier: "gr12345",
+        guardrailVersion: "DRAFT",
+        trace: "enabled",
+      },
+    });
+    expect(built.guardrailConfig).toEqual({
+      guardrailIdentifier: "gr12345",
+      guardrailVersion: "DRAFT",
+      trace: "enabled",
+    });
+  });
+
+  it("omits guardrailConfig from the body when not provided", () => {
+    const built = buildBedrockConverseRequest(baseReq(), {});
+    expect("guardrailConfig" in built).toBe(false);
+  });
 });

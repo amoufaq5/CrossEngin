@@ -143,6 +143,110 @@ describe("BedrockProvider — constructor", () => {
     });
     expect(ap.residency).toEqual(["ap"]);
   });
+
+  it("validates guardrailConfig at construction time (M2.9.8)", () => {
+    expect(
+      () =>
+        new BedrockProvider({
+          accessKeyId: "x",
+          secretAccessKey: "y",
+          guardrailConfig: {
+            guardrailIdentifier: "BAD-ID",
+            guardrailVersion: "DRAFT",
+          },
+          fetch: buildFetch({}),
+        }),
+    ).toThrow(/invalid guardrailIdentifier/);
+  });
+
+  it("accepts a valid guardrailConfig at construction time", () => {
+    const p = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      guardrailConfig: {
+        guardrailIdentifier: "gr12345",
+        guardrailVersion: "1",
+        trace: "enabled",
+      },
+      fetch: buildFetch({}),
+    });
+    expect(p.id).toBe("bedrock");
+  });
+});
+
+describe("BedrockProvider — guardrailConfig threading (M2.9.8)", () => {
+  it("non-streaming: passes guardrailConfig into the request body", async () => {
+    const captures: FetchCapture[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      captures.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            output: { message: { role: "assistant", content: [{ text: "ok" }] } },
+            stopReason: "end_turn",
+            usage: { inputTokens: 5, outputTokens: 2 },
+          }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    const provider = new BedrockProvider({
+      accessKeyId: "x",
+      secretAccessKey: "y",
+      region: "us-east-1",
+      guardrailConfig: {
+        guardrailIdentifier: "gr12345",
+        guardrailVersion: "DRAFT",
+      },
+      fetch: fetchImpl,
+      clock: () => FIXED_DATE,
+    });
+    await provider.completeNonStreaming({
+      task: "planner",
+      messages: [{ role: "user", content: "hi" }],
+      tenantId: "ten-1",
+      sessionId: "ses-1",
+    });
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    expect(body.guardrailConfig).toEqual({
+      guardrailIdentifier: "gr12345",
+      guardrailVersion: "DRAFT",
+    });
+  });
+
+  it("no guardrailConfig in constructor → request body has no guardrailConfig field", async () => {
+    const captures: FetchCapture[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      captures.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            output: { message: { role: "assistant", content: [{ text: "ok" }] } },
+            stopReason: "end_turn",
+            usage: { inputTokens: 5, outputTokens: 2 },
+          }),
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+    const provider = build({ fetch: fetchImpl });
+    await provider.completeNonStreaming({
+      task: "planner",
+      messages: [{ role: "user", content: "hi" }],
+      tenantId: "ten-1",
+      sessionId: "ses-1",
+    });
+    const body = JSON.parse(
+      new TextDecoder().decode(captures[0]!.init!.body),
+    ) as Record<string, unknown>;
+    expect("guardrailConfig" in body).toBe(false);
+  });
 });
 
 describe("BedrockProvider — embed (Titan path)", () => {

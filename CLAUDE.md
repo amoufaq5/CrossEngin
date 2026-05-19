@@ -14,13 +14,47 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M2.X + M3 + M3.5 + M3.6 + M3.7 + M4
-+ M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y
-+ M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 +
-M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 +
-M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,505 tests**,
-all green, no type errors. M4.10.x adds a `--by-source-pack`
+M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.X + M3 + M3.5 + M3.6 +
+M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x
++ M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 + M5.8 +
+M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5 +
+M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,537 tests**,
+all green, no type errors. M2.9.8 wires AWS Bedrock Guardrails
+into `@crossengin/ai-providers-bedrock` as an opt-in safety
+surface. New `guardrails.ts` module exports
+`BedrockGuardrailConfig` ({guardrailIdentifier, guardrailVersion,
+trace?: "enabled"|"disabled"}), `buildBedrockGuardrailConfig`
+(slug-regex validator: identifier `^[a-z0-9]{6,16}$`, version
+`^(DRAFT|[1-9][0-9]{0,4})$`), `BedrockGuardrailViolationError
+extends BedrockError` (carries `stopReason` ∈
+{guardrail_intervened, content_filtered} + optional `trace`),
+plus discriminators `isBedrockGuardrailInterventionStopReason`
++ `isGuardrailInterventionResponse`. `BEDROCK_ERROR_KINDS`
+grows by two — both non-retryable. `BedrockConverseRequest`
+gains optional `guardrailConfig` field; `buildBedrockConverse
+Request` threads it from `BuildConverseRequestOptions`; OMITTED
+from request body when undefined (byte-identical to pre-M2.9.8
+for unguarded providers). `BedrockProviderOptions.guardrailConfig?`
+validates at construction time (fast-fail on bad config); stored
+on the instance; passed to both `complete()` (streaming) and
+`completeNonStreaming()`. The event-stream parser now tracks a
+`ConverseStreamState` ({toolBlocks, pendingIntervention,
+guardrailTrace}) instead of just a Map. At `messageStop` with an
+intervention `stopReason`, the parser SETS the pending flag but
+does NOT throw — `metadata` event still fires + yields
+`usage_final` for cost accounting; the parser also pulls
+`trace.guardrail` if present. AFTER the stream loop ends with
+pendingIntervention set, throws `BedrockGuardrailViolationError`
+{stopReason, trace}. Consumer ordering: text/tool chunks →
+usage_final → throw. Non-streaming asymmetry: returns the raw
+`BedrockConverseResponse` with `stopReason` already typed to
+include the intervention values; callers inspect via
+`isGuardrailInterventionResponse(response)` rather than catching
+an error. `BedrockGuardrailViolationError extends BedrockError`
+so `instanceof BedrockError` keeps working; the `kind` field
+discriminates. Router automatically treats guardrail violations
+as terminal (no retry burn). M4.10.x adds a `--by-source-pack`
 flag to `gateway routes unregister-pack`, exposing M4.10's
 `deleteByPackSlug` API at the CLI. When set, the entire
 manifest pipeline (resolvePack → resolveManifest →
@@ -747,7 +781,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0083 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0084 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -796,7 +830,12 @@ the open ownership-attribution question across ADRs
 0079/0080/0081, enabling safe `sync-pack --prune-obsolete`),
 ADR-0083 covers M4.10.x (`unregister-pack --by-source-pack` —
 manifest-free tear-down via M4.10's `deleteByPackSlug` API,
-closing ADR-0082 Q3).
+closing ADR-0082 Q3), ADR-0084 covers M2.9.8 (Bedrock
+Guardrails integration — opt-in content moderation via
+guardrailConfig threaded through converse + converse-stream,
+with `BedrockGuardrailViolationError` thrown after `usage_final`
+for streaming consumers and `isGuardrailInterventionResponse`
+helper for non-streaming).
 
 ## Architecture in 90 seconds
 
@@ -1687,7 +1726,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0083 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0084 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1736,7 +1775,10 @@ composite diff/upsert + external-route reporting), ADR-0082
 covers Phase 2 M4.10 (routes.source_pack column — pack
 attribution + safe `sync-pack --prune-obsolete`), ADR-0083
 covers Phase 2 M4.10.x (`unregister-pack --by-source-pack` —
-manifest-free tear-down via the source_pack column). When you
-ship a new package, write the matching ADR in the same
-session, following `0000-template.md` and the style of the
-existing 0026-0037 batch.
+manifest-free tear-down via the source_pack column), ADR-0084
+covers Phase 2 M2.9.8 (Bedrock Guardrails integration — opt-in
+content moderation with thrown errors for streaming + typed
+stopReason for non-streaming). When you ship a new package,
+write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.

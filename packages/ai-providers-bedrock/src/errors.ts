@@ -10,6 +10,8 @@ export const BEDROCK_ERROR_KINDS = [
   "model_stream_error",
   "network_error",
   "timeout_error",
+  "guardrail_intervened",
+  "content_filtered",
   "unknown_error",
 ] as const;
 export type BedrockErrorKind = (typeof BEDROCK_ERROR_KINDS)[number];

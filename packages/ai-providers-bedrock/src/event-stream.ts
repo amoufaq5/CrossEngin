@@ -1,6 +1,12 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import { BedrockError } from "./errors.js";
+import {
+  BedrockGuardrailViolationError,
+  isBedrockGuardrailInterventionStopReason,
+  type BedrockGuardrailInterventionStopReason,
+  type BedrockGuardrailTrace,
+} from "./guardrails.js";
 import { buildBedrockUsage, type BedrockChatModel } from "./pricing.js";
 
 export interface ParsedEventStreamMessage {
@@ -121,13 +127,31 @@ export interface ConverseMessageStopPayload {
   readonly additionalModelResponseFields?: unknown;
 }
 
+export interface ConverseMetadataTracePayload {
+  readonly trace?: { readonly guardrail?: BedrockGuardrailTrace };
+}
+
 export interface BuildChunksOptions {
   readonly model: BedrockChatModel;
 }
 
+export interface ConverseStreamState {
+  readonly toolBlocks: Map<number, string>;
+  pendingIntervention: BedrockGuardrailInterventionStopReason | null;
+  guardrailTrace: BedrockGuardrailTrace | null;
+}
+
+export function newConverseStreamState(): ConverseStreamState {
+  return {
+    toolBlocks: new Map(),
+    pendingIntervention: null,
+    guardrailTrace: null,
+  };
+}
+
 export function* mapEventToChunks(
   message: ParsedEventStreamMessage,
-  toolBlocks: Map<number, string>,
+  state: ConverseStreamState,
   opts: BuildChunksOptions,
 ): Generator<CompletionChunk> {
   const messageType = message.headers[":message-type"];
@@ -149,7 +173,7 @@ export function* mapEventToChunks(
       const body = payload as ConverseContentBlockStartPayload;
       const toolUse = body.start?.toolUse;
       if (toolUse !== undefined) {
-        toolBlocks.set(body.contentBlockIndex, toolUse.toolUseId);
+        state.toolBlocks.set(body.contentBlockIndex, toolUse.toolUseId);
         yield { kind: "tool_call_start", id: toolUse.toolUseId, name: toolUse.name };
       }
       return;
@@ -163,7 +187,7 @@ export function* mapEventToChunks(
       }
       const toolDelta = body.delta.toolUse?.input;
       if (typeof toolDelta === "string" && toolDelta.length > 0) {
-        const id = toolBlocks.get(body.contentBlockIndex);
+        const id = state.toolBlocks.get(body.contentBlockIndex);
         if (id === undefined) {
           throw new BedrockError({
             kind: "api_error",
@@ -176,18 +200,27 @@ export function* mapEventToChunks(
     }
     case "contentBlockStop": {
       const body = payload as ConverseContentBlockStopPayload;
-      const id = toolBlocks.get(body.contentBlockIndex);
+      const id = state.toolBlocks.get(body.contentBlockIndex);
       if (id !== undefined) {
-        toolBlocks.delete(body.contentBlockIndex);
+        state.toolBlocks.delete(body.contentBlockIndex);
         yield { kind: "tool_call_end", id };
       }
       return;
     }
-    case "messageStop":
+    case "messageStop": {
+      const body = payload as ConverseMessageStopPayload;
+      if (isBedrockGuardrailInterventionStopReason(body.stopReason)) {
+        state.pendingIntervention = body.stopReason;
+      }
       return;
+    }
     case "metadata": {
-      const body = payload as ConverseMetadataPayload;
+      const body = payload as ConverseMetadataPayload &
+        ConverseMetadataTracePayload;
       const cached = body.usage.cacheReadInputTokens ?? 0;
+      if (body.trace?.guardrail !== undefined) {
+        state.guardrailTrace = body.trace.guardrail;
+      }
       yield {
         kind: "usage_final",
         usage: buildBedrockUsage(opts.model, {
@@ -221,7 +254,7 @@ export async function* readConverseEventStream(
 ): AsyncGenerator<CompletionChunk> {
   const reader = body.getReader();
   let buffer: Uint8Array = new Uint8Array(0);
-  const toolBlocks = new Map<number, string>();
+  const state = newConverseStreamState();
   while (true) {
     const { done, value } = await reader.read();
     if (value !== undefined && value.byteLength > 0) {
@@ -231,13 +264,19 @@ export async function* readConverseEventStream(
       const parsed = parseEventStreamMessage(buffer);
       if (parsed === null) break;
       buffer = buffer.subarray(parsed.consumed);
-      yield* mapEventToChunks(parsed.message, toolBlocks, opts);
+      yield* mapEventToChunks(parsed.message, state, opts);
     }
     if (done) {
       if (buffer.byteLength > 0) {
         throw new BedrockError({
           kind: "api_error",
           message: `${buffer.byteLength.toString()} unparsed bytes remain at end of event stream`,
+        });
+      }
+      if (state.pendingIntervention !== null) {
+        throw new BedrockGuardrailViolationError({
+          stopReason: state.pendingIntervention,
+          trace: state.guardrailTrace,
         });
       }
       return;
