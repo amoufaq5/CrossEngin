@@ -1,3 +1,4 @@
+import { isModerationError } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import { OpenAIError } from "./errors.js";
@@ -65,5 +66,9 @@ describe("OpenAIContentFilteredError", () => {
   it("custom message is preserved", () => {
     const err = new OpenAIContentFilteredError({ message: "blocked by policy XYZ" });
     expect(err.message).toBe("blocked by policy XYZ");
+  });
+
+  it("kernel isModerationError recognizes it (M2.X.6.x cross-provider)", () => {
+    expect(isModerationError(new OpenAIContentFilteredError())).toBe(true);
   });
 });

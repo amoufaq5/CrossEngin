@@ -1,3 +1,4 @@
+import { isModerationError } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import { AnthropicError } from "./errors.js";
@@ -54,5 +55,9 @@ describe("AnthropicRefusalError", () => {
   it("custom message is preserved", () => {
     const err = new AnthropicRefusalError({ message: "model declined the request" });
     expect(err.message).toBe("model declined the request");
+  });
+
+  it("kernel isModerationError recognizes it (M2.X.6.x cross-provider)", () => {
+    expect(isModerationError(new AnthropicRefusalError())).toBe(true);
   });
 });

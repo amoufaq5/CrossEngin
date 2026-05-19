@@ -1,3 +1,4 @@
+import { isModerationError } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import { BedrockError } from "./errors.js";
@@ -201,5 +202,17 @@ describe("isGuardrailInterventionResponse", () => {
   it("returns false for normal stopReasons", () => {
     expect(isGuardrailInterventionResponse({ stopReason: "end_turn" })).toBe(false);
     expect(isGuardrailInterventionResponse({ stopReason: "tool_use" })).toBe(false);
+  });
+});
+
+describe("BedrockGuardrailViolationError x kernel isModerationError (M2.X.6.x)", () => {
+  it("kernel isModerationError recognizes guardrail_intervened", () => {
+    const err = new BedrockGuardrailViolationError({ stopReason: "guardrail_intervened" });
+    expect(isModerationError(err)).toBe(true);
+  });
+
+  it("kernel isModerationError recognizes content_filtered", () => {
+    const err = new BedrockGuardrailViolationError({ stopReason: "content_filtered" });
+    expect(isModerationError(err)).toBe(true);
   });
 });

@@ -15,12 +15,41 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
 M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.6 +
-M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 +
-M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 +
-M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 +
-M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,567 tests**,
-all green, no type errors. M2.X.6 ships parallel moderation
+M2.X.6.x + M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 +
+M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 + M4.10.x + M5
++ M5.5 + M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 +
+M6.5.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9
+landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,588 tests**,
+all green, no type errors. M2.X.6.x adds a kernel-level
+cross-provider moderation helper to `@crossengin/ai-providers`,
+closing ADR-0084 Q7 + ADR-0086 Q3. New `moderation.ts` module
+exports `MODERATION_ERROR_KINDS` const tuple ([
+"guardrail_intervened", "content_filtered", "refusal"] — the
+union of moderation-event kinds across Bedrock, OpenAI, and
+Anthropic), `ModerationErrorKind` type, `ModerationDiscriminator`
+interface, `isModerationErrorKind(value)` string discriminator,
+and the headline predicate
+`isModerationError(err): err is Error & {kind: ModerationErrorKind}`.
+Duck-typing approach: inspects `err.kind` against the shared
+tuple; works against any error class whose `.kind` matches the
+moderation slice. No changes to provider error classes —
+`BedrockGuardrailViolationError`, `OpenAIContentFilteredError`,
+`AnthropicRefusalError` are byte-identical to M2.9.8 / M2.X.6;
+they already set `.kind` to the right string values. Type
+narrowing: inside the predicate's true branch, `err.kind`
+narrows to `ModerationErrorKind` — verified by a TS assignment
+test. Robust against non-Error inputs (null / undefined /
+primitives / objects without `kind` / objects with non-string
+`kind`). Cross-package integration tests in all three real
+providers verify their error classes flow through the kernel
+helper. Operators using the router catch one error shape
+instead of three:
+  if (isModerationError(err)) auditViolation(err.kind);
+Pattern set for future kernel-level cross-provider helpers
+(retryability, token-limit detection). Forward-compatible: a
+fourth provider's novel moderation kind just gets appended to
+the tuple. M2.X.6 ships parallel moderation
 surfaces in `@crossengin/ai-providers-openai` and
 `@crossengin/ai-providers-anthropic`, matching M2.9.8's pattern.
 New `moderation.ts` module in each package exports a typed
@@ -837,7 +866,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0086 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0087 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -898,7 +927,10 @@ three-state semantics: BedrockGuardrailConfig / null / undefined),
 ADR-0086 covers M2.X.6 (OpenAI + Anthropic moderation surfaces —
 `OpenAIContentFilteredError` for `finish_reason: "content_filter"`
 and `AnthropicRefusalError` for `stop_reason: "refusal"`,
-matching the M2.9.8 post-usage_final-throw pattern).
+matching the M2.9.8 post-usage_final-throw pattern), ADR-0087
+covers M2.X.6.x (cross-provider moderation helper — kernel-level
+`isModerationError(err)` predicate + `MODERATION_ERROR_KINDS`
+shared tuple, duck-typing against `err.kind`).
 
 ## Architecture in 90 seconds
 
@@ -1789,7 +1821,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0086 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0087 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1847,7 +1879,10 @@ three-state semantics for tenant-specific / A-B-cohort /
 admin-escape-hatch use cases), ADR-0086 covers Phase 2 M2.X.6
 (OpenAI + Anthropic moderation surfaces — typed errors for
 `finish_reason: "content_filter"` and `stop_reason: "refusal"`
-matching the M2.9.8 post-usage_final-throw pattern). When you
-ship a new package, write the matching ADR in the same session,
-following `0000-template.md` and the style of the existing
-0026-0037 batch.
+matching the M2.9.8 post-usage_final-throw pattern), ADR-0087
+covers Phase 2 M2.X.6.x (cross-provider moderation helper —
+kernel-level `isModerationError(err)` predicate + shared
+`MODERATION_ERROR_KINDS` tuple). When you ship a new package,
+write the matching ADR in the same session, following
+`0000-template.md` and the style of the existing 0026-0037
+batch.
