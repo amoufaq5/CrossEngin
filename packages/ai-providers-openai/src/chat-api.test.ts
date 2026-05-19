@@ -666,3 +666,103 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
     expect(ids).toContain("tu_b");
   });
 });
+
+describe("buildOpenAIChatRequest — LlmMessage.name threading (M2.X.10)", () => {
+  function build(messages: ReadonlyArray<Record<string, unknown>>) {
+    return buildOpenAIChatRequest(
+      {
+        task: "executor",
+        messages: messages as never,
+        tenantId: "ten-1",
+        sessionId: "ses-1",
+      },
+      { defaultModel: "gpt-4o" },
+    );
+  }
+
+  it("threads name through system messages", () => {
+    const built = build([
+      { role: "system", content: "you are X", name: "moderator" },
+    ]);
+    expect(built.messages[0]).toEqual({
+      role: "system",
+      content: "you are X",
+      name: "moderator",
+    });
+  });
+
+  it("threads name through user messages (string content)", () => {
+    const built = build([{ role: "user", content: "hi", name: "alice" }]);
+    expect(built.messages[0]).toEqual({
+      role: "user",
+      content: "hi",
+      name: "alice",
+    });
+  });
+
+  it("threads name through user messages (array content)", () => {
+    const built = build([
+      {
+        role: "user",
+        content: [{ type: "text", text: "hi" }],
+        name: "bob_42",
+      },
+    ]);
+    expect(built.messages[0]).toMatchObject({
+      role: "user",
+      name: "bob_42",
+    });
+    expect(Array.isArray(built.messages[0]!.content)).toBe(true);
+  });
+
+  it("threads name through assistant messages (text-only)", () => {
+    const built = build([
+      { role: "assistant", content: "hello back", name: "claude-v1" },
+    ]);
+    expect(built.messages[0]).toEqual({
+      role: "assistant",
+      content: "hello back",
+      name: "claude-v1",
+    });
+  });
+
+  it("threads name through assistant messages with tool_calls", () => {
+    const built = build([
+      {
+        role: "assistant",
+        content: "running",
+        toolUses: [{ id: "tu_1", name: "search", input: {} }],
+        name: "agent-7",
+      },
+    ]);
+    expect(built.messages[0]).toMatchObject({
+      role: "assistant",
+      name: "agent-7",
+      tool_calls: [
+        expect.objectContaining({ id: "tu_1" }),
+      ],
+    });
+  });
+
+  it("threads name through tool messages (existing behavior, regression check)", () => {
+    const built = build([
+      {
+        role: "tool",
+        toolCallId: "tu_1",
+        content: "result",
+        name: "search_tool",
+      },
+    ]);
+    expect(built.messages[0]).toEqual({
+      role: "tool",
+      content: "result",
+      tool_call_id: "tu_1",
+      name: "search_tool",
+    });
+  });
+
+  it("omits name field entirely when undefined", () => {
+    const built = build([{ role: "user", content: "hi" }]);
+    expect("name" in built.messages[0]!).toBe(false);
+  });
+});

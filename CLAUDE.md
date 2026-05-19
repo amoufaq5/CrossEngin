@@ -17,14 +17,28 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.6 +
-M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M3 +
+M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,794 tests**,
-all green, no type errors. M2.X.5.aa.x.1 expands the document
+**55 packages + 1 app, 119 meta-schema tables, 6,807 tests**,
+all green, no type errors. M2.X.10 enforces OpenAI's name
+regex at the kernel layer + threads `LlmMessage.name` through
+OpenAI Chat Completions on all four message roles (system,
+user, assistant, tool). Pre-M2.X.10 only the tool-role
+translator carried `name`; other roles silently dropped it.
+New kernel exports `LLM_MESSAGE_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/`
++ `LlmMessageNameSchema` (OpenAI's documented rules: 1-64
+chars, alphanumeric + underscore + hyphen). Bad names fail at
+zod parse time instead of as HTTP 400 from OpenAI. Anthropic +
+Bedrock + OpenAI Responses silently DROP `name` at translation
+(those APIs have no name field). Operators with multi-agent
+orchestration on OpenAI Chat get first-class participant
+attribution; cross-provider workflows aren't blocked because
+of the silent-drop policy. Pre-M2.X.10 tool-role threading
+preserved (regression-tested). M2.X.5.aa.x.1 expands the document
 format enum from 4 to 9 formats by adding the office set
 (doc, docx, xls, xlsx, html). Matches Bedrock Converse API's
 full document-format set. Closes ADR-0099 Q1. New helpers
@@ -1173,7 +1187,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0100 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0101 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -1281,7 +1295,10 @@ variant with UTF-8 decoding, OpenAI Responses uses format-
 aware MIME types, Bedrock passes format through natively),
 ADR-0100 covers M2.X.5.aa.x.1 (office document format
 expansion — doc/docx/xls/xlsx/html added; Bedrock native,
-Anthropic + OpenAI Responses throw with conversion guidance).
+Anthropic + OpenAI Responses throw with conversion guidance),
+ADR-0101 covers M2.X.10 (kernel LlmMessage.name regex
+enforcement + OpenAI Chat threading across all four roles;
+Anthropic + Bedrock + OpenAI Responses silently drop).
 
 ## Architecture in 90 seconds
 
@@ -2172,7 +2189,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0100 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0101 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -2271,7 +2288,9 @@ Phase 2 M2.X.5.aa.x (document format expansion txt/md/csv —
 4 formats × 3 providers all native), ADR-0100 covers Phase 2
 M2.X.5.aa.x.1 (office document format expansion — doc/docx/xls/
 xlsx/html added; Bedrock native, two-provider throw with
-conversion guidance).
+conversion guidance), ADR-0101 covers Phase 2 M2.X.10 (kernel
+LlmMessage.name enforcement + OpenAI Chat threading across all
+four message roles).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

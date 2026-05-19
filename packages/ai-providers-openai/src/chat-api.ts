@@ -105,7 +105,13 @@ export function buildOpenAIChatRequest(
 
 function translateMessage(m: LlmMessage): OpenAIChatMessage[] {
   if (m.role === "system") {
-    return [{ role: "system", content: contentToText(m.content) }];
+    return [
+      {
+        role: "system",
+        content: contentToText(m.content),
+        ...(m.name !== undefined ? { name: m.name } : {}),
+      },
+    ];
   }
   if (m.role === "user") {
     return translateUserMessage(m);
@@ -125,11 +131,12 @@ function translateMessage(m: LlmMessage): OpenAIChatMessage[] {
 
 function translateUserMessage(m: LlmMessage): OpenAIChatMessage[] {
   const attachments = m.attachments ?? [];
+  const nameField = m.name !== undefined ? { name: m.name } : {};
   if (
     attachments.length === 0 &&
     typeof m.content === "string"
   ) {
-    return [{ role: "user", content: m.content }];
+    return [{ role: "user", content: m.content, ...nameField }];
   }
   const out: OpenAIChatMessage[] = [];
   const userParts: OpenAIContentPart[] = [];
@@ -159,7 +166,7 @@ function translateUserMessage(m: LlmMessage): OpenAIChatMessage[] {
     }
   }
   if (userParts.length > 0) {
-    out.push({ role: "user", content: userParts });
+    out.push({ role: "user", content: userParts, ...nameField });
   }
   return out;
 }
@@ -190,19 +197,25 @@ function translateAssistantMessage(m: LlmMessage): OpenAIChatMessage {
       arguments: JSON.stringify(u.input ?? {}),
     },
   }));
+  const nameField = m.name !== undefined ? { name: m.name } : {};
   if (allToolCalls.length === 0) {
     if (otherParts.length === 0) {
-      return { role: "assistant", content: typeof m.content === "string" ? m.content : null };
+      return {
+        role: "assistant",
+        content: typeof m.content === "string" ? m.content : null,
+        ...nameField,
+      };
     }
     if (otherParts.length === 1 && otherParts[0]!.type === "text") {
-      return { role: "assistant", content: otherParts[0]!.text };
+      return { role: "assistant", content: otherParts[0]!.text, ...nameField };
     }
-    return { role: "assistant", content: otherParts };
+    return { role: "assistant", content: otherParts, ...nameField };
   }
   return {
     role: "assistant",
     content: contentForAssistantWithTools(otherParts),
     tool_calls: allToolCalls,
+    ...nameField,
   };
 }
 

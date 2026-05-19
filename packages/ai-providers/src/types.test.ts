@@ -377,6 +377,70 @@ describe("MessageAttachmentSchema (M2.X discriminated union)", () => {
   });
 });
 
+describe("LlmMessageSchema name field validation (M2.X.10)", () => {
+  it("accepts valid name with alphanumeric + underscore + hyphen", () => {
+    for (const name of ["alice", "Bob-42", "system_v2", "abc123", "a"]) {
+      expect(() =>
+        LlmMessageSchema.parse({
+          role: "user",
+          content: "hi",
+          name,
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects name with spaces or other special characters", () => {
+    for (const name of [
+      "name with space",
+      "name@example",
+      "name.dotted",
+      "name/slash",
+      "name+plus",
+    ]) {
+      expect(() =>
+        LlmMessageSchema.parse({
+          role: "user",
+          content: "hi",
+          name,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("rejects empty name", () => {
+    expect(() =>
+      LlmMessageSchema.parse({ role: "user", content: "hi", name: "" }),
+    ).toThrow();
+  });
+
+  it("rejects name longer than 64 chars", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: "hi",
+        name: "a".repeat(65),
+      }),
+    ).toThrow();
+  });
+
+  it("accepts name exactly 64 chars", () => {
+    expect(() =>
+      LlmMessageSchema.parse({
+        role: "user",
+        content: "hi",
+        name: "a".repeat(64),
+      }),
+    ).not.toThrow();
+  });
+
+  it("name is optional (omitted parses cleanly)", () => {
+    expect(() =>
+      LlmMessageSchema.parse({ role: "user", content: "hi" }),
+    ).not.toThrow();
+  });
+});
+
 describe("LlmMessageSchema with attachments (M2.X)", () => {
   it("parses a user message with image attachments", () => {
     expect(() =>

@@ -190,11 +190,14 @@ export const LlmContentSchema = z.union([
 ]);
 export type LlmContent = z.infer<typeof LlmContentSchema>;
 
+export const LLM_MESSAGE_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+export const LlmMessageNameSchema = z.string().regex(LLM_MESSAGE_NAME_PATTERN);
+
 export const LlmMessageSchema = z
   .object({
     role: z.enum(["system", "user", "assistant", "tool"]),
     content: LlmContentSchema,
-    name: z.string().optional(),
+    name: LlmMessageNameSchema.optional(),
     toolCallId: z.string().optional(),
     toolUses: z
       .array(
