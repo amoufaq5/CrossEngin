@@ -76,6 +76,17 @@ export interface BedrockBatchJobListResponse {
   readonly nextToken?: string;
 }
 
+export type BedrockBatchJobDetail = BedrockBatchJobSummary;
+
+export const BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN =
+  /^(?:arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:model-invocation-job\/[a-z0-9]{12}|[a-z0-9]{12})$/;
+
+export function isBedrockBatchJobIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" && BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN.test(value)
+  );
+}
+
 export interface BedrockListBatchesOptions {
   readonly statusEquals?: BedrockBatchJobStatus;
   readonly submitTimeAfter?: string;
@@ -210,7 +221,11 @@ export function parseBatchListResponse(raw: unknown): BedrockBatchJobListRespons
   return out;
 }
 
-function parseBatchJobSummary(raw: unknown): BedrockBatchJobSummary {
+export function parseBatchJobDetail(raw: unknown): BedrockBatchJobDetail {
+  return parseBatchJobSummary(raw);
+}
+
+export function parseBatchJobSummary(raw: unknown): BedrockBatchJobSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",

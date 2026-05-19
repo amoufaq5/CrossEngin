@@ -1288,6 +1288,136 @@ describe("BedrockProvider — listBatches (M2.X.5.aa.z.3)", () => {
   });
 });
 
+describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
+  function buildDetailBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
+      jobName: "tenant-x-detail",
+      modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      roleArn: "arn:aws:iam::123456789012:role/Batch",
+      status: "InProgress",
+      submitTime: "2026-05-19T00:00:00Z",
+      inputDataConfig: { s3InputDataConfig: { s3Uri: "s3://b/in/" } },
+      outputDataConfig: { s3OutputDataConfig: { s3Uri: "s3://b/out/" } },
+      ...overrides,
+    });
+  }
+
+  it("GETs control-plane /model-invocation-jobs/{id} with the encoded identifier", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: buildDetailBody() }),
+    });
+    await provider.getBatch("abcd1234efgh");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/model-invocation-jobs/abcd1234efgh");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: buildDetailBody() }),
+    });
+    const arn =
+      "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh";
+    await provider.getBatch(arn);
+    expect(capture.url).toContain("/model-invocation-jobs/");
+    expect(capture.url).toContain("%3A");
+    expect(capture.url).not.toContain(`/model-invocation-jobs/${arn}`);
+  });
+
+  it("validates identifier BEFORE fetch — invalid identifier never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getBatch("not-a-job")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    await expect(provider.getBatch("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("parses the response and returns a typed detail", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: buildDetailBody({
+          status: "Completed",
+          endTime: "2026-05-19T02:00:00Z",
+          message: "Done",
+        }),
+      }),
+    });
+    const detail = await provider.getBatch("abcd1234efgh");
+    expect(detail.status).toBe("Completed");
+    expect(detail.endTime).toBe("2026-05-19T02:00:00Z");
+    expect(detail.message).toBe("Done");
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "job does not exist",
+        }),
+      }),
+    });
+    await expect(provider.getBatch("abcd1234efgh")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.getBatch("abcd1234efgh")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: "<html>500</html>" }),
+    });
+    await expect(provider.getBatch("abcd1234efgh")).rejects.toMatchObject({
+      kind: "api_error",
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.getBatch("abcd1234efgh")).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

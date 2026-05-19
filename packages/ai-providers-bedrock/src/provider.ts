@@ -11,7 +11,10 @@ import type {
 
 import {
   buildBatchListQuery,
+  isBedrockBatchJobIdentifier,
+  parseBatchJobDetail,
   parseBatchListResponse,
+  type BedrockBatchJobDetail,
   type BedrockBatchJobListResponse,
   type BedrockListBatchesOptions,
 } from "./batch-api.js";
@@ -533,6 +536,27 @@ export class BedrockProvider implements LlmProvider {
       throw fromHttpResponse({ status: response.status, body: await response.text() });
     }
     return response;
+  }
+
+  async getBatch(jobIdentifier: string): Promise<BedrockBatchJobDetail> {
+    if (!isBedrockBatchJobIdentifier(jobIdentifier)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `getBatch: invalid jobIdentifier '${jobIdentifier}'`,
+      });
+    }
+    const path = `/model-invocation-jobs/${encodeURIComponent(jobIdentifier)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getBatch: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseBatchJobDetail(raw);
   }
 
   async listBatches(

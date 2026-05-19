@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN,
   BEDROCK_BATCH_JOB_STATUSES,
   BEDROCK_BATCH_LIST_MAX_RESULTS_MAX,
   BEDROCK_BATCH_LIST_MAX_RESULTS_MIN,
@@ -8,7 +9,9 @@ import {
   BEDROCK_BATCH_SORT_BY_VALUES,
   BEDROCK_BATCH_SORT_ORDER_VALUES,
   buildBatchListQuery,
+  isBedrockBatchJobIdentifier,
   isBedrockBatchJobStatus,
+  parseBatchJobDetail,
   parseBatchListResponse,
 } from "./batch-api.js";
 import { BedrockError } from "./errors.js";
@@ -302,5 +305,131 @@ describe("parseBatchListResponse", () => {
     expect(() => parseBatchListResponse({ invocationJobSummaries: [bad] })).toThrow(
       /subnetIds/,
     );
+  });
+});
+
+describe("isBedrockBatchJobIdentifier", () => {
+  it("accepts the 12-char unique identifier", () => {
+    expect(isBedrockBatchJobIdentifier("abc123def456")).toBe(true);
+    expect(isBedrockBatchJobIdentifier("0123456789ab")).toBe(true);
+  });
+
+  it("accepts a full job ARN", () => {
+    expect(
+      isBedrockBatchJobIdentifier(
+        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abc123def456",
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts ARNs in AWS partitions (aws-us-gov, aws-cn)", () => {
+    expect(
+      isBedrockBatchJobIdentifier(
+        "arn:aws-us-gov:bedrock:us-gov-west-1:123456789012:model-invocation-job/abc123def456",
+      ),
+    ).toBe(true);
+    expect(
+      isBedrockBatchJobIdentifier(
+        "arn:aws-cn:bedrock:cn-north-1:123456789012:model-invocation-job/abc123def456",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects malformed identifiers", () => {
+    expect(isBedrockBatchJobIdentifier("")).toBe(false);
+    expect(isBedrockBatchJobIdentifier("abc")).toBe(false); // too short
+    expect(isBedrockBatchJobIdentifier("abc123def4567")).toBe(false); // too long
+    expect(isBedrockBatchJobIdentifier("ABC123DEF456")).toBe(false); // uppercase
+    expect(isBedrockBatchJobIdentifier("abc-123-def-")).toBe(false); // hyphens
+    expect(isBedrockBatchJobIdentifier("not-an-arn:abc")).toBe(false);
+    expect(isBedrockBatchJobIdentifier(undefined)).toBe(false);
+    expect(isBedrockBatchJobIdentifier(null)).toBe(false);
+    expect(isBedrockBatchJobIdentifier(42)).toBe(false);
+  });
+
+  it("rejects ARNs with wrong service or resource type", () => {
+    expect(
+      isBedrockBatchJobIdentifier(
+        "arn:aws:s3:::my-bucket/abc123def456",
+      ),
+    ).toBe(false);
+    expect(
+      isBedrockBatchJobIdentifier(
+        "arn:aws:bedrock:us-east-1:123456789012:guardrail/abc123def456",
+      ),
+    ).toBe(false);
+  });
+
+  it("BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN is exported as a RegExp", () => {
+    expect(BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN).toBeInstanceOf(RegExp);
+  });
+});
+
+describe("parseBatchJobDetail", () => {
+  function sampleDetail(): unknown {
+    return {
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
+      jobName: "tenant-x-detail",
+      modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockBatch",
+      status: "InProgress",
+      submitTime: "2026-05-19T00:00:00Z",
+      message: "Processing 1000 records",
+      lastModifiedTime: "2026-05-19T00:05:00Z",
+      timeoutDurationInHours: 12,
+      inputDataConfig: {
+        s3InputDataConfig: {
+          s3Uri: "s3://bucket/in/",
+          s3InputFormat: "JSONL",
+          s3BucketOwner: "123456789012",
+        },
+      },
+      outputDataConfig: {
+        s3OutputDataConfig: {
+          s3Uri: "s3://bucket/out/",
+          s3EncryptionKeyId: "arn:aws:kms:us-east-1:123:key/xyz",
+          s3BucketOwner: "123456789012",
+        },
+      },
+    };
+  }
+
+  it("parses a complete detail response (same shape as a list summary)", () => {
+    const detail = parseBatchJobDetail(sampleDetail());
+    expect(detail.jobArn).toMatch(/abcd1234efgh$/);
+    expect(detail.status).toBe("InProgress");
+    expect(detail.message).toBe("Processing 1000 records");
+    expect(detail.timeoutDurationInHours).toBe(12);
+    expect(detail.inputDataConfig.s3InputDataConfig.s3InputFormat).toBe("JSONL");
+    expect(detail.outputDataConfig.s3OutputDataConfig.s3EncryptionKeyId).toMatch(
+      /^arn:aws:kms:/,
+    );
+  });
+
+  it("parses minimal required fields only", () => {
+    const minimal = {
+      jobArn: "arn:aws:bedrock:us-east-1:123:model-invocation-job/abcd1234efgh",
+      jobName: "minimal",
+      modelId: "anthropic.claude-3-haiku-20240307-v1:0",
+      roleArn: "arn:aws:iam::123:role/x",
+      status: "Submitted",
+      submitTime: "2026-05-19T00:00:00Z",
+      inputDataConfig: { s3InputDataConfig: { s3Uri: "s3://b/in/" } },
+      outputDataConfig: { s3OutputDataConfig: { s3Uri: "s3://b/out/" } },
+    };
+    const detail = parseBatchJobDetail(minimal);
+    expect(detail.status).toBe("Submitted");
+    expect(detail.message).toBeUndefined();
+  });
+
+  it("rejects non-object response", () => {
+    expect(() => parseBatchJobDetail(null)).toThrow(/not an object/);
+    expect(() => parseBatchJobDetail("oops")).toThrow(/not an object/);
+  });
+
+  it("rejects unknown status", () => {
+    const bad = { ...(sampleDetail() as Record<string, unknown>), status: "Queued" };
+    expect(() => parseBatchJobDetail(bad)).toThrow(/unknown job status/);
   });
 });

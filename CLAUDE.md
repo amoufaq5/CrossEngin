@@ -17,15 +17,47 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 +
 M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
-M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.6 +
+M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,891 tests**,
-all green, no type errors. M2.X.5.aa.z.3 ships
+**55 packages + 1 app, 119 meta-schema tables, 6,909 tests**,
+all green, no type errors. M2.X.5.aa.z.4 adds
+`BedrockProvider.getBatch(jobIdentifier)` — single-job
+lookup against AWS's `GetModelInvocationJob` control-plane
+endpoint, pairing with M2.X.5.aa.z.3's `listBatches` for
+polling, failure diagnostics, and webhook-driven retrieval
+workflows. New exports in `batch-api.ts`:
+`BedrockBatchJobDetail` type alias (same shape as
+`BedrockBatchJobSummary` — AWS returns identical wire
+formats for both endpoints), `BEDROCK_BATCH_JOB_IDENTIFIER_
+PATTERN` regex covering both AWS-accepted forms (12-char
+lowercase-alphanumeric unique id OR full job ARN across the
+three AWS partitions: aws, aws-us-gov, aws-cn),
+`isBedrockBatchJobIdentifier(value)` discriminator,
+`parseBatchJobDetail(raw)` exported wrapper around the
+(now-also-exported) `parseBatchJobSummary` parser.
+`getBatch` validates the identifier via the regex BEFORE
+the fetch (invalid input throws `BedrockError` with
+invalid_request_error kind without burning a request),
+URI-encodes the identifier in the path (`encodeURIComponent`
+converts ARN colons to %3A), GETs
+`/model-invocation-jobs/{encoded}` via the existing
+M2.X.5.aa.z.3 `signedControlPlaneGet` helper, parses via
+`parseBatchJobDetail`. 404s surface as typed
+not_found_error via the existing CODE_TO_KIND map
+(ResourceNotFoundException → not_found_error); other
+errors route through `fromHttpResponse` /
+`fromNetworkError` paths as M2.X.5.aa.z.3. Bedrock
+control-plane surface now has 2 of N operations
+(listBatches + getBatch); pattern set for future
+single-resource lookups (`getGuardrail`,
+`getInferenceProfile`, etc.) following the same
+regex-validate → encode → signedControlPlaneGet → parse
+shape. M2.X.5.aa.z.3 ships
 `BedrockProvider.listBatches(options?)` against AWS Bedrock's
 `ListModelInvocationJobs` control-plane endpoint. AWS does
 not ship a Files API; batch inference is the closest
@@ -1434,7 +1466,10 @@ native pagination shapes preserved; tenant offboarding + audit
 workflows unblocked), ADR-0105 covers M2.X.5.aa.z.3 (Bedrock
 batch inference listBatches — first control-plane operation on
 Bedrock; two-host model documented; pattern set for future
-control-plane enumeration methods).
+control-plane enumeration methods), ADR-0106 covers M2.X.5.aa.z.4
+(Bedrock batch inference getBatch — single-job lookup with
+identifier regex validation BEFORE fetch; polling-loop +
+failure-diagnostic workflows unblocked).
 
 ## Architecture in 90 seconds
 
@@ -1646,10 +1681,12 @@ re-exporting everything.
   typed kinds including `model_stream_error` for
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
   classes), provider (BedrockProvider with complete +
-  completeNonStreaming + embed + embedMultimodal + listBatches —
-  embed dispatches on family, loops over Titan or batches Cohere;
-  listBatches GETs the control-plane host with sig v4 + sorted
-  query string via signedControlPlaneGet helper). Capabilities:
+  completeNonStreaming + embed + embedMultimodal + listBatches
+  + getBatch — embed dispatches on family, loops over Titan or
+  batches Cohere; listBatches GETs the control-plane host with
+  sig v4 + sorted query string via signedControlPlaneGet helper;
+  getBatch validates jobIdentifier via regex BEFORE the fetch
+  then GETs /model-invocation-jobs/{encoded}). Capabilities:
   `{chat: true, streaming: true, toolUse: true, jsonMode: false,
   embedding: true, maxContextTokens: 200_000}`. The router has
   THREE real chat providers to chain — Anthropic + OpenAI + AWS
@@ -2453,7 +2490,14 @@ ADR-0105 covers Phase 2 M2.X.5.aa.z.3 (Bedrock batch inference
 listBatches — first control-plane operation on Bedrock,
 exposed via a separate controlPlaneBaseUrl + signedControlPlaneGet
 helper; three-provider enumeration parity achieved across
-OpenAI listFiles + Anthropic listFiles + Bedrock listBatches).
+OpenAI listFiles + Anthropic listFiles + Bedrock listBatches),
+ADR-0106 covers Phase 2 M2.X.5.aa.z.4 (Bedrock batch inference
+getBatch — single-job lookup pairing with listBatches;
+identifier validated against an AWS-partition-aware regex
+BEFORE the fetch; BedrockBatchJobDetail = BedrockBatchJobSummary
+alias since AWS returns identical wire shapes for both
+endpoints; parseBatchJobSummary promoted from private to
+exported for operator reuse).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
