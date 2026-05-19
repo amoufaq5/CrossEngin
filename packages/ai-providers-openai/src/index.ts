@@ -1,6 +1,7 @@
 export * from "./chat-api.js";
 export * from "./embeddings.js";
 export * from "./errors.js";
+export * from "./moderation.js";
 export * from "./pricing.js";
 export * from "./provider.js";
 export * from "./responses-api.js";

@@ -50,6 +50,12 @@ describe("AnthropicError.isRetryable", () => {
       expect(err.isRetryable()).toBe(false);
     }
   });
+
+  it("returns false for refusal (M2.X.6 — terminal)", () => {
+    expect(
+      new AnthropicError({ kind: "refusal", message: "x" }).isRetryable(),
+    ).toBe(false);
+  });
 });
 
 describe("fromHttpResponse", () => {

@@ -1,6 +1,7 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
+import { OpenAIContentFilteredError } from "./moderation.js";
 import { chunksFromSse, parseSseEvents } from "./streaming.js";
 
 const TEXT_STREAM = [
@@ -117,5 +118,36 @@ describe("chunksFromSse — empty + degenerate streams", () => {
     const chunks: CompletionChunk[] = [...chunksFromSse(raw, "gpt-4o-mini")];
     const texts = chunks.filter((c) => c.kind === "text");
     expect(texts).toHaveLength(1);
+  });
+});
+
+describe("chunksFromSse — content_filter finish reason (M2.X.6)", () => {
+  const FILTERED = [
+    `data: {"choices":[{"delta":{"role":"assistant","content":"Sure, here's"},"finish_reason":null}]}`,
+    `data: {"choices":[{"delta":{},"finish_reason":"content_filter"}]}`,
+    `data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`,
+    `data: [DONE]`,
+  ].join("\n\n");
+
+  it("yields text + usage_final chunks BEFORE throwing OpenAIContentFilteredError", () => {
+    const chunks: CompletionChunk[] = [];
+    let caught: unknown;
+    try {
+      for (const chunk of chunksFromSse(FILTERED, "gpt-4o-mini")) {
+        chunks.push(chunk);
+      }
+    } catch (err) {
+      caught = err;
+    }
+    expect(chunks).toContainEqual({ kind: "text", text: "Sure, here's" });
+    expect(chunks.some((c) => c.kind === "usage_final")).toBe(true);
+    expect(caught).toBeInstanceOf(OpenAIContentFilteredError);
+    const e = caught as OpenAIContentFilteredError;
+    expect(e.kind).toBe("content_filtered");
+    expect(e.isRetryable()).toBe(false);
+  });
+
+  it("normal finish_reason='stop' does NOT throw", () => {
+    expect(() => [...chunksFromSse(TEXT_STREAM, "gpt-4o-mini")]).not.toThrow();
   });
 });

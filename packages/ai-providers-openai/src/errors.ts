@@ -9,6 +9,7 @@ export const OPENAI_ERROR_KINDS = [
   "request_too_large",
   "network_error",
   "timeout_error",
+  "content_filtered",
   "unknown_error",
 ] as const;
 export type OpenAIErrorKind = (typeof OPENAI_ERROR_KINDS)[number];

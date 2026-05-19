@@ -9,6 +9,7 @@ export const ANTHROPIC_ERROR_KINDS = [
   "request_too_large",
   "network_error",
   "timeout_error",
+  "refusal",
   "unknown_error",
 ] as const;
 export type AnthropicErrorKind = (typeof ANTHROPIC_ERROR_KINDS)[number];

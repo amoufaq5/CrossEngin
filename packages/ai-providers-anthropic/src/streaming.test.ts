@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { AnthropicRefusalError } from "./moderation.js";
 import { chunksFromSse, parseSseEvents } from "./streaming.js";
 
 const SAMPLE = `event: message_start
@@ -130,5 +131,48 @@ describe("chunksFromSse — malformed input", () => {
   it("skips events whose data is a JSON array", () => {
     const chunks = [...chunksFromSse(`event: x\ndata: [1,2,3]\n\n`, "claude-sonnet-4-6")];
     expect(chunks.filter((c) => c.kind !== "usage_final")).toEqual([]);
+  });
+});
+
+describe("chunksFromSse — refusal stop reason (M2.X.6)", () => {
+  const REFUSED_SAMPLE = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":7,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I can't"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":3}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`;
+
+  it("yields text + usage_final chunks BEFORE throwing AnthropicRefusalError", () => {
+    const chunks: unknown[] = [];
+    let caught: unknown;
+    try {
+      for (const chunk of chunksFromSse(REFUSED_SAMPLE, "claude-sonnet-4-6")) {
+        chunks.push(chunk);
+      }
+    } catch (err) {
+      caught = err;
+    }
+    expect(chunks).toContainEqual({ kind: "text", text: "I can't" });
+    expect(chunks.some((c) => (c as { kind: string }).kind === "usage_final")).toBe(true);
+    expect(caught).toBeInstanceOf(AnthropicRefusalError);
+    const e = caught as AnthropicRefusalError;
+    expect(e.kind).toBe("refusal");
+    expect(e.isRetryable()).toBe(false);
+  });
+
+  it("non-refusal stop_reason (end_turn) does NOT throw", () => {
+    expect(() => [...chunksFromSse(SAMPLE, "claude-sonnet-4-6")]).not.toThrow();
   });
 });

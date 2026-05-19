@@ -1,6 +1,10 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import { normalizeChatUsage, type OpenAIChatUsage } from "./chat-api.js";
+import {
+  OpenAIContentFilteredError,
+  isContentFilterFinishReason,
+} from "./moderation.js";
 import type { OpenAIChatModel } from "./pricing.js";
 
 export interface SseEvent {
@@ -35,6 +39,7 @@ interface StreamState {
   readonly model: OpenAIChatModel;
   readonly toolsByIndex: Map<number, ToolBuffer>;
   usage: OpenAIChatUsage | null;
+  contentFiltered: boolean;
 }
 
 export function* chunksFromSse(
@@ -45,9 +50,17 @@ export function* chunksFromSse(
     model,
     toolsByIndex: new Map(),
     usage: null,
+    contentFiltered: false,
   };
   yield* processSseEvents(raw, state);
   yield* finalChunks(state);
+  throwIfContentFiltered(state);
+}
+
+function throwIfContentFiltered(state: StreamState): void {
+  if (state.contentFiltered) {
+    throw new OpenAIContentFilteredError();
+  }
 }
 
 function* processSseEvents(
@@ -79,6 +92,10 @@ function* handlePayload(
   const choices = payload["choices"];
   if (!Array.isArray(choices) || choices.length === 0) return;
   const choice = choices[0] as Record<string, unknown>;
+  const finishReason = choice["finish_reason"];
+  if (typeof finishReason === "string" && isContentFilterFinishReason(finishReason)) {
+    state.contentFiltered = true;
+  }
   const delta = choice["delta"];
   if (delta === null || typeof delta !== "object" || Array.isArray(delta)) {
     yield* finishToolCalls(choice["finish_reason"], state);
@@ -174,6 +191,7 @@ export async function* readSseStream(
     model,
     toolsByIndex: new Map(),
     usage: null,
+    contentFiltered: false,
   };
   let buffer = "";
   while (true) {
@@ -193,4 +211,5 @@ export async function* readSseStream(
     for (const chunk of processSseEvents(buffer, state)) yield chunk;
   }
   for (const chunk of finalChunks(state)) yield chunk;
+  throwIfContentFiltered(state);
 }

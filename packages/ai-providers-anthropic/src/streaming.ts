@@ -1,6 +1,7 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import { normalizeUsage, type AnthropicUsage } from "./messages-api.js";
+import { AnthropicRefusalError, isRefusalStopReason } from "./moderation.js";
 import type { AnthropicModel } from "./pricing.js";
 
 export interface SseEvent {
@@ -35,20 +36,32 @@ interface StreamState {
   cachedInputTokens: number;
   cacheCreationInputTokens: number;
   toolCallIds: Map<number, string>;
+  refused: boolean;
 }
 
-export function* chunksFromSse(
-  raw: string,
-  model: AnthropicModel,
-): Generator<CompletionChunk, void, void> {
-  const state: StreamState = {
+function newStreamState(model: AnthropicModel): StreamState {
+  return {
     model,
     inputTokens: 0,
     outputTokens: 0,
     cachedInputTokens: 0,
     cacheCreationInputTokens: 0,
     toolCallIds: new Map(),
+    refused: false,
   };
+}
+
+function throwIfRefused(state: StreamState): void {
+  if (state.refused) {
+    throw new AnthropicRefusalError();
+  }
+}
+
+export function* chunksFromSse(
+  raw: string,
+  model: AnthropicModel,
+): Generator<CompletionChunk, void, void> {
+  const state = newStreamState(model);
   yield* processSseEvents(raw, state);
   yield {
     kind: "usage_final",
@@ -59,6 +72,7 @@ export function* chunksFromSse(
       cache_creation_input_tokens: state.cacheCreationInputTokens,
     }),
   };
+  throwIfRefused(state);
 }
 
 function* processSseEvents(
@@ -147,6 +161,13 @@ function* handleEvent(
     if (usage !== null && typeof usage === "object" && !Array.isArray(usage)) {
       applyUsageDelta(usage as Partial<AnthropicUsage>, state);
     }
+    const delta = payload["delta"];
+    if (delta !== null && typeof delta === "object" && !Array.isArray(delta)) {
+      const d = delta as Record<string, unknown>;
+      if (typeof d["stop_reason"] === "string" && isRefusalStopReason(d["stop_reason"] as string)) {
+        state.refused = true;
+      }
+    }
     return;
   }
 }
@@ -183,14 +204,7 @@ export async function* readSseStream(
 ): AsyncGenerator<CompletionChunk, void, void> {
   const decoder = new TextDecoder();
   const reader = body.getReader();
-  const state: StreamState = {
-    model,
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    toolCallIds: new Map(),
-  };
+  const state = newStreamState(model);
   let buffer = "";
   while (true) {
     const { value, done } = await reader.read();
@@ -217,4 +231,5 @@ export async function* readSseStream(
       cache_creation_input_tokens: state.cacheCreationInputTokens,
     }),
   };
+  throwIfRefused(state);
 }

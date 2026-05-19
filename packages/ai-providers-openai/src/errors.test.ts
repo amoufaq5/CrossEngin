@@ -53,6 +53,12 @@ describe("OpenAIError.isRetryable", () => {
       expect(err.isRetryable()).toBe(false);
     }
   });
+
+  it("returns false for content_filtered (M2.X.6 — terminal)", () => {
+    expect(
+      new OpenAIError({ kind: "content_filtered", message: "x" }).isRetryable(),
+    ).toBe(false);
+  });
 });
 
 describe("fromHttpResponse", () => {

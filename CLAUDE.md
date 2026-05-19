@@ -14,13 +14,46 @@ healthcare verticals ride on top.
 ## Where we are
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.9 +
-M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M3 + M3.5
-+ M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8
-+ M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
-M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 + M7-wire + M7.5
-+ M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,544 tests**,
-all green, no type errors. M2.9.8.x adds two new public methods
+M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.6 +
+M3 + M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 +
+M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 +
+M5.6 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M7 +
+M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
+**55 packages + 1 app, 119 meta-schema tables, 6,567 tests**,
+all green, no type errors. M2.X.6 ships parallel moderation
+surfaces in `@crossengin/ai-providers-openai` and
+`@crossengin/ai-providers-anthropic`, matching M2.9.8's pattern.
+New `moderation.ts` module in each package exports a typed
+error class (`OpenAIContentFilteredError extends OpenAIError`,
+`AnthropicRefusalError extends AnthropicError`) plus
+discriminator helpers (`isContentFilterFinishReason` /
+`isContentFilteredResponse`, `isRefusalStopReason` /
+`isRefusalResponse`) and the relevant stop-reason constants
+(`OPENAI_CONTENT_FILTER_FINISH_REASON = "content_filter"`,
+`ANTHROPIC_REFUSAL_STOP_REASON = "refusal"`). Both providers'
+`_ERROR_KINDS` grow by one (`content_filtered` /  `refusal`);
+neither is in `RETRYABLE_KINDS`. Schema extension: Anthropic's
+`AnthropicResponse.stop_reason` union now includes `"refusal"`
+(OpenAI's `finish_reason` already had `"content_filter"`).
+Streaming detection: both `chunksFromSse` / `readSseStream`
+generators track a contentFiltered / refused flag in stream
+state; at the appropriate event (`finish_reason: "content_
+filter"` for OpenAI, `message_delta.delta.stop_reason: "refusal"`
+for Anthropic), set the flag without throwing; after yielding
+`usage_final` normally, throw the typed error. Same
+post-usage_final-throw ordering as M2.9.8 — cost accounting
+flows even on moderation. Non-streaming asymmetry preserved:
+`completeNonStreaming` returns the raw response; callers use
+the discriminator helpers to detect. Cross-provider error
+landscape: all three real providers now throw non-retryable
+typed errors on moderation events. The shared `content_filtered`
+kind name between Bedrock + OpenAI is intentional — operators
+classifying logs by `error.kind` get matching coverage.
+ADR-0084 Q7 (cross-provider abstraction) now has three concrete
+data points to reason about; revisit in future M2.X.6.x if
+patterns stabilize. Zero kernel changes: `CompletionRequest`,
+`CompletionChunk`, `LlmProvider` interface — all untouched.
+M2.9.8.x adds two new public methods
 to BedrockProvider for per-request guardrail override:
 `completeWithGuardrail(req, guardrailOverride?)` (streaming) +
 `completeNonStreamingWithGuardrail(req, guardrailOverride?)`
@@ -804,7 +837,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0085 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0086 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -861,7 +894,11 @@ for streaming consumers and `isGuardrailInterventionResponse`
 helper for non-streaming), ADR-0085 covers M2.9.8.x
 (per-request guardrail override via `completeWithGuardrail` +
 `completeNonStreamingWithGuardrail` sibling methods, with
-three-state semantics: BedrockGuardrailConfig / null / undefined).
+three-state semantics: BedrockGuardrailConfig / null / undefined),
+ADR-0086 covers M2.X.6 (OpenAI + Anthropic moderation surfaces —
+`OpenAIContentFilteredError` for `finish_reason: "content_filter"`
+and `AnthropicRefusalError` for `stop_reason: "refusal"`,
+matching the M2.9.8 post-usage_final-throw pattern).
 
 ## Architecture in 90 seconds
 
@@ -1752,7 +1789,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0085 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0086 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1807,7 +1844,10 @@ content moderation with thrown errors for streaming + typed
 stopReason for non-streaming), ADR-0085 covers Phase 2 M2.9.8.x
 (Bedrock per-request guardrail override — sibling methods with
 three-state semantics for tenant-specific / A-B-cohort /
-admin-escape-hatch use cases). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+admin-escape-hatch use cases), ADR-0086 covers Phase 2 M2.X.6
+(OpenAI + Anthropic moderation surfaces — typed errors for
+`finish_reason: "content_filter"` and `stop_reason: "refusal"`
+matching the M2.9.8 post-usage_final-throw pattern). When you
+ship a new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.

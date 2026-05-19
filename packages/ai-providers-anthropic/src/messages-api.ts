@@ -64,7 +64,12 @@ export interface AnthropicResponse {
   readonly role: "assistant";
   readonly model: string;
   readonly content: readonly AnthropicContentBlock[];
-  readonly stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use";
+  readonly stop_reason:
+    | "end_turn"
+    | "max_tokens"
+    | "stop_sequence"
+    | "tool_use"
+    | "refusal";
   readonly usage: AnthropicUsage;
 }
 
