@@ -4,6 +4,7 @@ import type { Transcript } from "@crossengin/ai-architect-pg";
 import type {
   CompletionChunk,
   CompletionRequest,
+  LlmContentBlock,
   LlmMessage,
   LlmProvider,
   LlmTool,
@@ -134,8 +135,10 @@ export const DEFAULT_CHAT_MAX_TOKENS = 4096;
 export const DEFAULT_TENANT_ID = "00000000-0000-4000-8000-000000000000";
 export const DEFAULT_MAX_TOOL_ITERATIONS = 5;
 
+export type UserContent = string | readonly LlmContentBlock[];
+
 export interface ChatTurnInput {
-  readonly userInput: string;
+  readonly userInput: UserContent;
   readonly history: readonly LlmMessage[];
   readonly systemPrompt: string;
   readonly tenantId: string;
@@ -143,6 +146,40 @@ export interface ChatTurnInput {
   readonly model?: string;
   readonly maxTokens?: number;
   readonly tools?: readonly LlmTool[];
+}
+
+export function userContentToTranscriptText(content: UserContent): string {
+  if (typeof content === "string") return content;
+  const parts: string[] = [];
+  for (const block of content) {
+    switch (block.type) {
+      case "text":
+        parts.push(block.text);
+        break;
+      case "image":
+        parts.push(`[image:${block.mediaType}:${block.data.length.toString()}b]`);
+        break;
+      case "image_url":
+        parts.push(`[image_url:${block.url}]`);
+        break;
+      case "document":
+        parts.push(`[document:${block.format}:${block.data.length.toString()}b]`);
+        break;
+      case "document_url":
+        parts.push(`[document_url:${block.url}]`);
+        break;
+      case "file_id":
+        parts.push(`[file_id:${block.fileId}]`);
+        break;
+      case "tool_use":
+        parts.push(`[tool_use:${block.name}]`);
+        break;
+      case "tool_result":
+        parts.push(`[tool_result:${block.toolUseId}]`);
+        break;
+    }
+  }
+  return parts.join("\n");
 }
 
 export interface CapturedToolCall {
@@ -177,6 +214,85 @@ export function buildCompletionRequest(input: ChatTurnInput): CompletionRequest 
     maxTokens: input.maxTokens,
     tools: input.tools !== undefined ? [...input.tools] : undefined,
   };
+}
+
+export type ParsedUserLine =
+  | { readonly kind: "attach"; readonly block: LlmContentBlock }
+  | { readonly kind: "clear_attachments" }
+  | { readonly kind: "show_attachments" }
+  | { readonly kind: "exit" }
+  | { readonly kind: "send"; readonly text: string }
+  | { readonly kind: "noop" }
+  | { readonly kind: "error"; readonly message: string };
+
+export function parseUserLine(line: string): ParsedUserLine {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return { kind: "noop" };
+  if (trimmed === "/exit" || trimmed === "/quit") return { kind: "exit" };
+  if (trimmed === "/clear-attachments") return { kind: "clear_attachments" };
+  if (trimmed === "/show-attachments") return { kind: "show_attachments" };
+  if (!trimmed.startsWith("/attach ")) {
+    return { kind: "send", text: trimmed };
+  }
+  const rest = trimmed.slice("/attach ".length).trim();
+  const space = rest.indexOf(" ");
+  if (space < 0) {
+    return {
+      kind: "error",
+      message: "/attach requires a type and a value (e.g. /attach image_url https://...)",
+    };
+  }
+  const type = rest.slice(0, space);
+  const value = rest.slice(space + 1).trim();
+  if (value.length === 0) {
+    return { kind: "error", message: `/attach ${type} requires a non-empty value` };
+  }
+  switch (type) {
+    case "image_url":
+      return { kind: "attach", block: { type: "image_url", url: value } };
+    case "document_url":
+      return { kind: "attach", block: { type: "document_url", url: value } };
+    case "file_id":
+      return { kind: "attach", block: { type: "file_id", fileId: value } };
+    case "text":
+      return { kind: "attach", block: { type: "text", text: value } };
+    default:
+      return {
+        kind: "error",
+        message: `unknown /attach type '${type}' (supported: image_url, document_url, file_id, text)`,
+      };
+  }
+}
+
+export function composeUserContent(
+  text: string,
+  pendingBlocks: readonly LlmContentBlock[],
+): UserContent {
+  if (pendingBlocks.length === 0) return text;
+  const blocks: LlmContentBlock[] = [...pendingBlocks];
+  if (text.length > 0) blocks.push({ type: "text", text });
+  return blocks;
+}
+
+export function describeAttachment(block: LlmContentBlock): string {
+  switch (block.type) {
+    case "image_url":
+      return `image_url: ${block.url}`;
+    case "document_url":
+      return `document_url: ${block.url}`;
+    case "file_id":
+      return `file_id: ${block.fileId}`;
+    case "text":
+      return `text: ${block.text.slice(0, 80)}${block.text.length > 80 ? "…" : ""}`;
+    case "image":
+      return `image: ${block.mediaType} (${block.data.length.toString()}b)`;
+    case "document":
+      return `document: ${block.format} (${block.data.length.toString()}b)`;
+    case "tool_use":
+      return `tool_use: ${block.name}`;
+    case "tool_result":
+      return `tool_result: ${block.toolUseId}`;
+  }
 }
 
 export function buildContinuationRequest(input: {
@@ -436,7 +552,7 @@ export interface ChatExchangeOptions {
   readonly io: IoStreams;
   readonly format: "human" | "json";
   readonly history: readonly LlmMessage[];
-  readonly userInput: string;
+  readonly userInput: UserContent;
   readonly systemPrompt: string;
   readonly tenantId: string;
   readonly sessionId: string;
@@ -475,7 +591,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
       turnIndex,
       messageIndex,
       role: "user",
-      content: opts.userInput,
+      content: userContentToTranscriptText(opts.userInput),
     });
     messageIndex += 1;
   }
@@ -820,16 +936,55 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
 
   if (opts.format === "human") {
     opts.io.stdout.write(
-      "CrossEngin Architect chat. Type your message; Ctrl-D to exit; /exit to quit.\n",
+      "CrossEngin Architect chat. Type your message; Ctrl-D to exit; /exit to quit.\n" +
+        "Attach blocks with /attach <type> <value>; /show-attachments; /clear-attachments.\n",
     );
   }
 
+  const pendingBlocks: LlmContentBlock[] = [];
   while (true) {
     const line = await opts.lines.next();
     if (line === null) break;
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    if (trimmed === "/exit" || trimmed === "/quit") break;
+    const parsed = parseUserLine(line);
+    if (parsed.kind === "noop") continue;
+    if (parsed.kind === "exit") break;
+    if (parsed.kind === "attach") {
+      pendingBlocks.push(parsed.block);
+      if (opts.format === "human") {
+        opts.io.stdout.write(`[attached ${describeAttachment(parsed.block)}]\n`);
+      }
+      continue;
+    }
+    if (parsed.kind === "clear_attachments") {
+      const count = pendingBlocks.length;
+      pendingBlocks.length = 0;
+      if (opts.format === "human") {
+        opts.io.stdout.write(`[cleared ${count.toString()} attachment(s)]\n`);
+      }
+      continue;
+    }
+    if (parsed.kind === "show_attachments") {
+      if (opts.format === "human") {
+        if (pendingBlocks.length === 0) {
+          opts.io.stdout.write("[no pending attachments]\n");
+        } else {
+          for (let i = 0; i < pendingBlocks.length; i++) {
+            opts.io.stdout.write(
+              `[${(i + 1).toString()}] ${describeAttachment(pendingBlocks[i]!)}\n`,
+            );
+          }
+        }
+      }
+      continue;
+    }
+    if (parsed.kind === "error") {
+      if (opts.format === "human") {
+        opts.io.stdout.write(`[error: ${parsed.message}]\n`);
+      }
+      continue;
+    }
+    const userInput = composeUserContent(parsed.text, pendingBlocks);
+    pendingBlocks.length = 0;
     if (opts.format === "human") opts.io.stdout.write("\nArchitect: ");
     const result = await runChatExchange({
       provider: opts.provider,
@@ -837,7 +992,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       io: opts.io,
       format: opts.format,
       history,
-      userInput: trimmed,
+      userInput,
       systemPrompt: opts.systemPrompt,
       tenantId: opts.tenantId,
       sessionId: opts.sessionId,

@@ -21,15 +21,61 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.6 + M2.X.12 +
+M2.X.5.aa.z.15 + M2.X.6 + M2.X.12 + M5.10.5 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 7,218 tests**,
-all green, no type errors. M2.X.12 ships the fourth
+**55 packages + 1 app, 119 meta-schema tables, 7,252 tests**,
+all green, no type errors. M5.10.5 closes the M2.X.5 loop —
+the `crossengin chat` REPL in `apps/architect-cli` now accepts
+inline content-block attachments. Before this milestone the
+kernel `LlmMessage.content` supported `string | readonly
+LlmContentBlock[]` (since M2.X.5 / ADR-0088) and all four
+provider translators handled the union, but the REPL still
+serialized every user turn as a plain string — operators
+couldn't paste an image_url, file_id, or document_url into a
+chat turn. M5.10.5 adds five new exports to
+`apps/architect-cli/src/chat.ts`: `UserContent` type alias
+(`string | readonly LlmContentBlock[]`), `parseUserLine(line)`
+slash-command parser returning a discriminated
+`ParsedUserLine` union (kinds: attach / clear_attachments /
+show_attachments / exit / send / noop / error),
+`composeUserContent(text, pendingBlocks)` that returns plain
+string when no pending blocks or LlmContentBlock[] otherwise,
+`userContentToTranscriptText(content)` that flattens blocks
+to bracketed placeholders for transcript storage (transcript
+schema's content field stays string-typed),
+`describeAttachment(block)` human-readable single-line
+description. Slash-command vocabulary: `/attach image_url
+<url>`, `/attach document_url <url>`, `/attach file_id <id>`,
+`/attach text <text>` (prefatory context), `/clear-attachments`,
+`/show-attachments`. Existing `/exit` and `/quit` preserved.
+REPL loop maintains pendingBlocks[] state — after a successful
+send, pending blocks reset to empty (per-turn semantics, no
+leak across turns). `ChatTurnInput.userInput` +
+`ChatExchangeOptions.userInput` widened from `string` to
+`UserContent`. `buildCompletionRequest` + `runChatTurn`
+unchanged — type widening propagates through
+`LlmMessage.content` since the kernel union already supported
+it. Transcript flattens block-rich messages to placeholder
+strings so DB schema unchanged. Backwards compat fully
+preserved — all 42 pre-existing chat tests pass without
+modification. 34 new tests cover parseUserLine (10 cases —
+plain text / noop / exit / clear / show / 4 attach types /
+unknown type / missing value / fall-through), composeUserContent
+(4 cases — string / blocks+text / multiple blocks / empty
+text), userContentToTranscriptText (5 cases — string /
+image_url / file_id / document_url / image bytes),
+describeAttachment (5 cases — all block types + truncation),
+runChatExchange with content blocks (2 cases), runChatRepl
+attachment commands (5 cases — thread through / clear /
+show / parse error / no leak across turns). Pattern set for
+future kernel multimodal additions: when M2.X.5.aa.z.x adds
+a new block variant, the REPL gets a new /attach branch +
+tests (~5 lines). M2.X.12 ships the fourth
 cross-provider kernel error classifier — `isConflictError(err)`
 in `@crossengin/ai-providers/conflict.ts`. Two Bedrock 409-
 emitting endpoints (stopBatch from M2.X.5.aa.z.5 + createBatch
@@ -1911,7 +1957,11 @@ failure triage + throughput analysis unblocked), ADR-0118
 covers M2.X.12 (conflict_error kernel kind + isConflictError
 cross-provider classifier — fourth in the family after
 isModerationError + isRetryableError + isInputTooLargeError;
-two Bedrock 409 endpoints + OpenAI 409s justify the lift).
+two Bedrock 409 endpoints + OpenAI 409s justify the lift),
+ADR-0119 covers M5.10.5 (chat REPL widens user input to
+LlmContentBlock[] — closes the M2.X.5 investment;
+`/attach image_url|document_url|file_id|text` slash commands;
+per-turn attachment reset; transcript flattens to placeholders).
 
 ## Architecture in 90 seconds
 
@@ -3031,7 +3081,13 @@ established M2.X.6.x / M2.X.7 / M2.X.9 pattern; triggered by
 two Bedrock 409-emitting endpoints (stopBatch + createBatch)
 plus OpenAI 409 surfaces; three provider error tables extended;
 conflict_error is NOT retryable; two existing tests upgraded
-to assert the new classified kind).
+to assert the new classified kind), ADR-0119 covers Phase 2
+M5.10.5 (chat REPL widens user input to LlmContentBlock[] —
+closes the M2.X.5/.x/.y/.z/.aa investment loop;
+parseUserLine slash-command parser; composeUserContent helper;
+per-turn attachment reset semantics; transcript schema
+unchanged via userContentToTranscriptText flattening; pattern
+set for future kernel multimodal additions).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

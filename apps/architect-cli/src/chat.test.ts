@@ -14,16 +14,20 @@ import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
   NullTranscript,
   buildCompletionRequest,
+  composeUserContent,
+  describeAttachment,
   formatUsageLine,
   interactiveApprover,
   jsonChunkRenderer,
   lineReaderFromIterable,
   linesFromReadable,
+  parseUserLine,
   plainTextRenderer,
   runChatExchange,
   runChatRepl,
   runChatTurn,
   systemPromptSha256,
+  userContentToTranscriptText,
   type Transcript,
 } from "./chat.js";
 import type { IoStreams } from "./format.js";
@@ -1106,5 +1110,389 @@ describe("runChatRepl — transcript wiring", () => {
     expect(end.inputTokens).toBe(30);
     expect(end.outputTokens).toBe(8);
     expect(end.costUsd).toBeCloseTo(0.003, 6);
+  });
+});
+
+describe("parseUserLine (M5.10.5)", () => {
+  it("returns send for plain text lines", () => {
+    expect(parseUserLine("hello there")).toEqual({ kind: "send", text: "hello there" });
+  });
+
+  it("returns send with trimmed text", () => {
+    expect(parseUserLine("  spaces  ")).toEqual({ kind: "send", text: "spaces" });
+  });
+
+  it("returns noop for empty or whitespace lines", () => {
+    expect(parseUserLine("")).toEqual({ kind: "noop" });
+    expect(parseUserLine("   ")).toEqual({ kind: "noop" });
+  });
+
+  it("returns exit for /exit + /quit", () => {
+    expect(parseUserLine("/exit")).toEqual({ kind: "exit" });
+    expect(parseUserLine("/quit")).toEqual({ kind: "exit" });
+  });
+
+  it("returns clear_attachments + show_attachments", () => {
+    expect(parseUserLine("/clear-attachments")).toEqual({ kind: "clear_attachments" });
+    expect(parseUserLine("/show-attachments")).toEqual({ kind: "show_attachments" });
+  });
+
+  it("parses /attach image_url", () => {
+    expect(parseUserLine("/attach image_url https://example.com/img.png")).toEqual({
+      kind: "attach",
+      block: { type: "image_url", url: "https://example.com/img.png" },
+    });
+  });
+
+  it("parses /attach document_url", () => {
+    expect(parseUserLine("/attach document_url https://example.com/doc.pdf")).toEqual({
+      kind: "attach",
+      block: { type: "document_url", url: "https://example.com/doc.pdf" },
+    });
+  });
+
+  it("parses /attach file_id", () => {
+    expect(parseUserLine("/attach file_id file-abc123")).toEqual({
+      kind: "attach",
+      block: { type: "file_id", fileId: "file-abc123" },
+    });
+  });
+
+  it("parses /attach text (multi-word value preserved)", () => {
+    expect(parseUserLine("/attach text some prefatory context for the model")).toEqual(
+      {
+        kind: "attach",
+        block: { type: "text", text: "some prefatory context for the model" },
+      },
+    );
+  });
+
+  it("returns error for unknown attach type", () => {
+    const r = parseUserLine("/attach audio_url https://example.com/audio.mp3");
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toMatch(/unknown.*audio_url/);
+  });
+
+  it("returns error for /attach without a value", () => {
+    const r = parseUserLine("/attach image_url");
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toMatch(/value/);
+  });
+
+  it("returns error for /attach with type but no space", () => {
+    const r = parseUserLine("/attach image_url ");
+    expect(r.kind).toBe("error");
+  });
+
+  it("treats lines starting with / but not matching known commands as text", () => {
+    const r = parseUserLine("/notacommand really");
+    expect(r).toEqual({ kind: "send", text: "/notacommand really" });
+  });
+});
+
+describe("composeUserContent (M5.10.5)", () => {
+  it("returns plain string when no pending blocks", () => {
+    expect(composeUserContent("hello", [])).toBe("hello");
+  });
+
+  it("returns LlmContentBlock[] with pending blocks + final text block", () => {
+    const blocks = composeUserContent("describe this", [
+      { type: "image_url", url: "https://example.com/img.png" },
+    ]);
+    expect(Array.isArray(blocks)).toBe(true);
+    expect(blocks).toEqual([
+      { type: "image_url", url: "https://example.com/img.png" },
+      { type: "text", text: "describe this" },
+    ]);
+  });
+
+  it("preserves pending block order and appends text last", () => {
+    const blocks = composeUserContent("compare", [
+      { type: "image_url", url: "https://a.example/1.png" },
+      { type: "image_url", url: "https://b.example/2.png" },
+    ]);
+    expect((blocks as ReadonlyArray<{ type: string }>).map((b) => b.type)).toEqual([
+      "image_url",
+      "image_url",
+      "text",
+    ]);
+  });
+
+  it("omits text block when text is empty", () => {
+    const blocks = composeUserContent("", [
+      { type: "image_url", url: "https://example.com/img.png" },
+    ]);
+    expect(blocks).toEqual([
+      { type: "image_url", url: "https://example.com/img.png" },
+    ]);
+  });
+});
+
+describe("userContentToTranscriptText (M5.10.5)", () => {
+  it("passes plain string through", () => {
+    expect(userContentToTranscriptText("hello")).toBe("hello");
+  });
+
+  it("renders image_url as placeholder", () => {
+    const out = userContentToTranscriptText([
+      { type: "image_url", url: "https://example.com/img.png" },
+      { type: "text", text: "describe this" },
+    ]);
+    expect(out).toBe("[image_url:https://example.com/img.png]\ndescribe this");
+  });
+
+  it("renders file_id as placeholder", () => {
+    const out = userContentToTranscriptText([
+      { type: "file_id", fileId: "file-abc123" },
+      { type: "text", text: "summarize" },
+    ]);
+    expect(out).toBe("[file_id:file-abc123]\nsummarize");
+  });
+
+  it("renders document_url as placeholder", () => {
+    const out = userContentToTranscriptText([
+      { type: "document_url", url: "https://example.com/doc.pdf" },
+    ]);
+    expect(out).toBe("[document_url:https://example.com/doc.pdf]");
+  });
+
+  it("renders image bytes as placeholder with size", () => {
+    const out = userContentToTranscriptText([
+      {
+        type: "image",
+        mediaType: "image/png",
+        data: "iVBORw0KGgoAAA",
+      },
+    ]);
+    expect(out).toContain("image:image/png:");
+    expect(out).toContain("b]");
+  });
+});
+
+describe("describeAttachment (M5.10.5)", () => {
+  it("formats image_url", () => {
+    expect(
+      describeAttachment({ type: "image_url", url: "https://example.com/img.png" }),
+    ).toBe("image_url: https://example.com/img.png");
+  });
+
+  it("formats file_id", () => {
+    expect(describeAttachment({ type: "file_id", fileId: "file-abc" })).toBe(
+      "file_id: file-abc",
+    );
+  });
+
+  it("formats document_url", () => {
+    expect(
+      describeAttachment({ type: "document_url", url: "https://example.com/doc" }),
+    ).toBe("document_url: https://example.com/doc");
+  });
+
+  it("formats short text", () => {
+    expect(describeAttachment({ type: "text", text: "short" })).toBe("text: short");
+  });
+
+  it("truncates long text with ellipsis", () => {
+    const long = "x".repeat(100);
+    const out = describeAttachment({ type: "text", text: long });
+    expect(out).toMatch(/^text: x{80}…$/);
+  });
+});
+
+describe("runChatExchange — content blocks (M5.10.5)", () => {
+  it("accepts a LlmContentBlock[] userInput end-to-end", async () => {
+    const buf = buffers();
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS], captured });
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(buf.io),
+      io: buf.io,
+      format: "human",
+      history: [],
+      userInput: [
+        { type: "image_url", url: "https://example.com/img.png" },
+        { type: "text", text: "describe this image" },
+      ],
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+    });
+    expect(result.assistantText).toBe("Hello there");
+    const userMsg = captured[0]!.messages.find((m) => m.role === "user")!;
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    const blocks = userMsg.content as ReadonlyArray<{ type: string }>;
+    expect(blocks[0]!.type).toBe("image_url");
+    expect(blocks[1]!.type).toBe("text");
+  });
+
+  it("writes a flattened transcript line when content is blocks", async () => {
+    const messages: Array<{ role: string; content: string }> = [];
+    const transcript: Transcript = {
+      ...NullTranscript,
+      async onMessage(input) {
+        messages.push({ role: input.role, content: input.content });
+        const base = await NullTranscript.onMessage(input);
+        return base;
+      },
+    };
+    const buf = buffers();
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS] });
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(buf.io),
+      io: buf.io,
+      format: "human",
+      history: [],
+      userInput: [
+        { type: "image_url", url: "https://example.com/img.png" },
+        { type: "text", text: "describe" },
+      ],
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+      transcript,
+    });
+    const userLine = messages.find((m) => m.role === "user")!;
+    expect(userLine.content).toBe("[image_url:https://example.com/img.png]\ndescribe");
+  });
+});
+
+describe("runChatRepl — attachment commands (M5.10.5)", () => {
+  it("threads pending blocks into the next send", async () => {
+    const buf = buffers();
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS], captured });
+    const lines = lineReaderFromIterable(
+      (async function* () {
+        yield "/attach image_url https://example.com/img.png";
+        yield "look at this";
+      })(),
+    );
+    await runChatRepl({
+      provider,
+      io: buf.io,
+      lines,
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+    });
+    expect(buf.out()).toContain(
+      "[attached image_url: https://example.com/img.png]",
+    );
+    const userMsg = captured[0]!.messages.find((m) => m.role === "user")!;
+    expect(Array.isArray(userMsg.content)).toBe(true);
+  });
+
+  it("/clear-attachments drops pending blocks before sending", async () => {
+    const buf = buffers();
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS], captured });
+    const lines = lineReaderFromIterable(
+      (async function* () {
+        yield "/attach image_url https://example.com/img.png";
+        yield "/clear-attachments";
+        yield "plain text turn";
+      })(),
+    );
+    await runChatRepl({
+      provider,
+      io: buf.io,
+      lines,
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+    });
+    expect(buf.out()).toContain("[cleared 1 attachment(s)]");
+    const userMsg = captured[0]!.messages.find((m) => m.role === "user")!;
+    expect(typeof userMsg.content).toBe("string");
+    expect(userMsg.content).toBe("plain text turn");
+  });
+
+  it("/show-attachments lists pending blocks without consuming them", async () => {
+    const buf = buffers();
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS], captured });
+    const lines = lineReaderFromIterable(
+      (async function* () {
+        yield "/attach image_url https://example.com/a.png";
+        yield "/attach file_id file-xyz";
+        yield "/show-attachments";
+        yield "describe";
+      })(),
+    );
+    await runChatRepl({
+      provider,
+      io: buf.io,
+      lines,
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+    });
+    expect(buf.out()).toContain("[1] image_url: https://example.com/a.png");
+    expect(buf.out()).toContain("[2] file_id: file-xyz");
+    const userMsg = captured[0]!.messages.find((m) => m.role === "user")!;
+    const blocks = userMsg.content as ReadonlyArray<{ type: string }>;
+    expect(blocks.length).toBe(3); // both attachments + text
+  });
+
+  it("surfaces parse errors without crashing the REPL", async () => {
+    const buf = buffers();
+    const provider = new FakeProvider({ responses: [ONE_TURN_CHUNKS] });
+    const lines = lineReaderFromIterable(
+      (async function* () {
+        yield "/attach unknown_block https://example.com";
+        yield "/exit";
+      })(),
+    );
+    await runChatRepl({
+      provider,
+      io: buf.io,
+      lines,
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+    });
+    expect(buf.out()).toContain("[error: unknown /attach type 'unknown_block'");
+  });
+
+  it("attachments cleared after a send (do not leak into next turn)", async () => {
+    const buf = buffers();
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({
+      responses: [ONE_TURN_CHUNKS, ONE_TURN_CHUNKS],
+      captured,
+    });
+    const lines = lineReaderFromIterable(
+      (async function* () {
+        yield "/attach image_url https://example.com/img.png";
+        yield "first turn with image";
+        yield "second turn plain";
+      })(),
+    );
+    await runChatRepl({
+      provider,
+      io: buf.io,
+      lines,
+      systemPrompt: DEFAULT_ARCHITECT_SYSTEM_PROMPT,
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+    });
+    const firstUser = captured[0]!.messages.find((m) => m.role === "user")!;
+    expect(Array.isArray(firstUser.content)).toBe(true);
+    const secondUser = captured[1]!.messages.filter((m) => m.role === "user");
+    const latest = secondUser[secondUser.length - 1]!;
+    expect(typeof latest.content).toBe("string");
+    expect(latest.content).toBe("second turn plain");
   });
 });
