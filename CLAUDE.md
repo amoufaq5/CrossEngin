@@ -18,15 +18,50 @@ M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X +
 M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa +
 M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z +
 M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
-M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.6 +
+M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.6 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 119 meta-schema tables, 6,947 tests**,
-all green, no type errors. M2.X.5.aa.z.6 closes the Bedrock
+**55 packages + 1 app, 119 meta-schema tables, 6,976 tests**,
+all green, no type errors. M2.X.5.aa.z.7 ships the second
+Bedrock control-plane enumeration after listBatches:
+`BedrockProvider.listGuardrails(options?)` against AWS's
+`ListGuardrails` endpoint. Operators can now audit which
+guardrails exist on their account, reconcile their internal
+tenant→guardrail mapping against AWS's view, and detect drift
+(a guardrail expected READY that's actually FAILED / DELETING)
+— all through the kernel. New module `guardrails-api.ts`
+exports `BEDROCK_GUARDRAIL_STATUSES` 6-value const tuple
+(CREATING / UPDATING / VERSIONING / READY / FAILED / DELETING
+— uppercase, AWS-verbatim), `BedrockGuardrailStatus` type +
+`isBedrockGuardrailStatus` discriminator, `BedrockGuardrailSummary`
+type (id / arn / status / name / version / createdAt /
+updatedAt required + description optional),
+`BedrockGuardrailListResponse` ({guardrails, nextToken?} —
+nextToken omitted when absent / empty),
+`buildGuardrailListQuery` pure boundary-validator (validates
+guardrailIdentifier non-empty, maxResults integer in
+[1, 1000], nextToken non-empty), and `parseGuardrailListResponse`
++ `parseGuardrailSummary` strict parsers. Provider method
+reuses the existing `signedControlPlaneGet` rail from
+M2.X.5.aa.z.3 — no transport changes; just a new path
+(`/guardrails`). Behavioral note on AWS semantics: omitting
+`guardrailIdentifier` returns the DRAFT version of every
+guardrail (roster mode); supplying `guardrailIdentifier`
+returns DRAFT + all numbered versions of that ONE guardrail
+(version-history mode). Module separation discipline:
+existing `guardrails.ts` continues to own inference-time
+concerns (`BedrockGuardrailConfig`); new `guardrails-api.ts`
+owns control-plane concerns. Both export through the barrel.
+Bedrock control-plane surface now has 5 of N operations
+(listBatches / getBatch / stopBatch / createBatch /
+listGuardrails); pattern proven twice for paginated
+enumeration; adding `listInferenceProfiles` /
+`listImportedModels` / `listCustomModels` is now mechanical.
+M2.X.5.aa.z.6 closes the Bedrock
 batch CRUD with `BedrockProvider.createBatch(input)` against
 AWS's `CreateModelInvocationJob` endpoint. All four documented
 batch operations (list + get + stop + create) now have
@@ -1549,7 +1584,11 @@ batch inference createBatch — closes the four-endpoint batch
 CRUD surface; pure boundary validator buildCreateBatchBody
 enforces 14 documented AWS constraints; idempotency via
 clientRequestToken; cost attribution via tags; VPC-scoped
-batch jobs supported).
+batch jobs supported), ADR-0109 covers M2.X.5.aa.z.7 (Bedrock
+listGuardrails — second control-plane enumeration after
+listBatches; new guardrails-api.ts module separated from
+inference-time guardrails.ts; pattern now proven twice for
+paginated control-plane reads).
 
 ## Architecture in 90 seconds
 
@@ -1762,7 +1801,8 @@ re-exporting everything.
   ModelStreamErrorException; CODE_TO_KIND maps 15 AWS exception
   classes), provider (BedrockProvider with complete +
   completeNonStreaming + embed + embedMultimodal + listBatches
-  + getBatch + stopBatch + createBatch — embed dispatches on
+  + getBatch + stopBatch + createBatch + listGuardrails —
+  embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -2596,7 +2636,13 @@ buildCreateBatchBody enforces 14 documented AWS constraints
 fast-fail at the boundary; signedControlPlanePost widened to
 accept an optional body; second 409-emitting endpoint now
 justifies a dedicated conflict_error kernel kind, proposed
-as M2.X.12).
+as M2.X.12), ADR-0109 covers Phase 2 M2.X.5.aa.z.7 (Bedrock
+listGuardrails — second control-plane enumeration following
+the M2.X.5.aa.z.3 pattern; new guardrails-api.ts module
+keeps inference-time guardrails.ts and control-plane concerns
+separated; six-value status tuple matching AWS uppercase
+verbatim; behavioral note documented — guardrailIdentifier
+toggles between roster-mode and version-history-mode).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

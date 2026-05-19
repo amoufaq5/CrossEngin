@@ -53,6 +53,12 @@ import {
   type BedrockGuardrailConfig,
 } from "./guardrails.js";
 import {
+  buildGuardrailListQuery,
+  parseGuardrailListResponse,
+  type BedrockGuardrailListResponse,
+  type BedrockListGuardrailsOptions,
+} from "./guardrails-api.js";
+import {
   BEDROCK_CHAT_MODELS,
   BEDROCK_CHAT_PRICING,
   BEDROCK_DEFAULT_EMBEDDING_MODEL,
@@ -561,6 +567,26 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async listGuardrails(
+    options: BedrockListGuardrailsOptions = {},
+  ): Promise<BedrockGuardrailListResponse> {
+    const query = buildGuardrailListQuery(options);
+    const text = await this.signedControlPlaneGet({
+      path: "/guardrails",
+      query,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listGuardrails: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseGuardrailListResponse(raw);
   }
 
   async createBatch(
