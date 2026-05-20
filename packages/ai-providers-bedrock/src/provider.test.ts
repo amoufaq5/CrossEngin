@@ -3797,6 +3797,368 @@ describe("BedrockProvider — stopBatch (M2.X.5.aa.z.5)", () => {
   });
 });
 
+describe("BedrockProvider — deleteCustomModel (M2.X.5.aa.z.21)", () => {
+  it("DELETEs control-plane /custom-models/{id} with empty body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteCustomModel("my-cm-id");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/custom-models/my-cm-id");
+    expect(capture.init?.method).toBe("DELETE");
+    expect(capture.init?.body.byteLength).toBe(0);
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    const arn = "arn:aws:bedrock:us-east-1:123:custom-model/abc";
+    await provider.deleteCustomModel(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteCustomModel("abc");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.deleteCustomModel("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "" }),
+    });
+    const result = await provider.deleteCustomModel("abc");
+    expect(result).toBeUndefined();
+  });
+
+  it("tolerates a 204 No Content response (typical DELETE outcome)", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 204, text: "" }),
+    });
+    await expect(provider.deleteCustomModel("abc")).resolves.toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error (caller decides idempotency)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such model",
+        }),
+      }),
+    });
+    await expect(provider.deleteCustomModel("abc")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
+  });
+
+  it("classifies 409 ConflictException as conflict_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "model is referenced by a provisioned throughput",
+        }),
+      }),
+    });
+    await expect(provider.deleteCustomModel("abc")).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.deleteCustomModel("abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({ __type: "ThrottlingException", message: "slow down" }),
+      }),
+    });
+    await expect(provider.deleteCustomModel("abc")).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.deleteCustomModel("abc")).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
+describe("BedrockProvider — deleteImportedModel (M2.X.5.aa.z.21)", () => {
+  it("DELETEs control-plane /imported-models/{id}", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteImportedModel("im-abc");
+    expect(capture.url).toContain("/imported-models/im-abc");
+    expect(capture.init?.method).toBe("DELETE");
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    const arn = "arn:aws:bedrock:us-east-1:123:imported-model/abc";
+    await provider.deleteImportedModel(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.deleteImportedModel("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on success (204)", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 204, text: "" }),
+    });
+    await expect(provider.deleteImportedModel("im-abc")).resolves.toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such imported model",
+        }),
+      }),
+    });
+    await expect(provider.deleteImportedModel("im-abc")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.deleteImportedModel("im-abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({ __type: "ThrottlingException", message: "slow down" }),
+      }),
+    });
+    await expect(provider.deleteImportedModel("im-abc")).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
+  });
+});
+
+describe("BedrockProvider — deleteGuardrail (M2.X.5.aa.z.21)", () => {
+  it("DELETEs control-plane /guardrails/{id} with no query when version omitted", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteGuardrail("gr-abc");
+    expect(capture.url).toContain("/guardrails/gr-abc");
+    expect(capture.url).not.toContain("?");
+    expect(capture.init?.method).toBe("DELETE");
+  });
+
+  it("appends ?guardrailVersion when provided", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteGuardrail("gr-abc", "DRAFT");
+    expect(capture.url).toContain("/guardrails/gr-abc");
+    expect(capture.url).toContain("guardrailVersion=DRAFT");
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    const arn = "arn:aws:bedrock:us-east-1:123:guardrail/abc";
+    await provider.deleteGuardrail(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.deleteGuardrail("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("validates guardrailVersion BEFORE fetch when provided empty", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.deleteGuardrail("gr-abc", "")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 202, text: "" }),
+    });
+    await expect(provider.deleteGuardrail("gr-abc")).resolves.toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such guardrail",
+        }),
+      }),
+    });
+    await expect(provider.deleteGuardrail("gr-abc")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
+  });
+
+  it("classifies 409 ConflictException as conflict_error (in-use guardrail)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "guardrail is in use by an application",
+        }),
+      }),
+    });
+    await expect(provider.deleteGuardrail("gr-abc")).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.deleteGuardrail("gr-abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({ __type: "ThrottlingException", message: "slow down" }),
+      }),
+    });
+    await expect(provider.deleteGuardrail("gr-abc")).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

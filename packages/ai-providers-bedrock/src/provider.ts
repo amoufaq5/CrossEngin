@@ -758,6 +758,17 @@ export class BedrockProvider implements LlmProvider {
     return parseCustomModelDetail(raw);
   }
 
+  async deleteCustomModel(modelIdentifier: string): Promise<void> {
+    if (modelIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "deleteCustomModel: modelIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/custom-models/${encodeURIComponent(modelIdentifier)}`;
+    await this.signedControlPlaneDelete({ path });
+  }
+
   async listCustomModels(
     options: BedrockListCustomModelsOptions = {},
   ): Promise<BedrockCustomModelListResponse> {
@@ -799,6 +810,17 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseImportedModelDetail(raw);
+  }
+
+  async deleteImportedModel(modelIdentifier: string): Promise<void> {
+    if (modelIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "deleteImportedModel: modelIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/imported-models/${encodeURIComponent(modelIdentifier)}`;
+    await this.signedControlPlaneDelete({ path });
   }
 
   async listImportedModels(
@@ -894,6 +916,28 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseGuardrailDetail(raw);
+  }
+
+  async deleteGuardrail(
+    guardrailIdentifier: string,
+    guardrailVersion?: string,
+  ): Promise<void> {
+    if (guardrailIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "deleteGuardrail: guardrailIdentifier must be a non-empty string",
+      });
+    }
+    if (guardrailVersion !== undefined && guardrailVersion.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "deleteGuardrail: guardrailVersion must be a non-empty string when provided",
+      });
+    }
+    const path = `/guardrails/${encodeURIComponent(guardrailIdentifier)}`;
+    const query: Record<string, string> =
+      guardrailVersion !== undefined ? { guardrailVersion } : {};
+    await this.signedControlPlaneDelete({ path, query });
   }
 
   async listGuardrails(
@@ -1062,6 +1106,54 @@ export class BedrockProvider implements LlmProvider {
       throw fromHttpResponse({ status: response.status, body: await response.text() });
     }
     return response.text();
+  }
+
+  private async signedControlPlaneDelete(input: {
+    readonly path: string;
+    readonly query?: Record<string, string>;
+  }): Promise<void> {
+    const host = new URL(this.controlPlaneBaseUrl).host;
+    const body = new Uint8Array(0);
+    const query = input.query ?? {};
+    const signed = signRequest({
+      method: "DELETE",
+      host,
+      path: input.path,
+      query,
+      headers: {
+        accept: "application/json",
+      },
+      body,
+      region: this.region,
+      service: SERVICE,
+      credentials: this.credentials,
+      now: this.clock(),
+    });
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      host,
+      "x-amz-date": signed.amzDate,
+      "x-amz-content-sha256": signed.contentSha256,
+      authorization: signed.authorization,
+    };
+    if (this.credentials.sessionToken !== undefined) {
+      headers["x-amz-security-token"] = this.credentials.sessionToken;
+    }
+    const qs = encodeQueryString(query);
+    const url = `${this.controlPlaneBaseUrl}${input.path}${qs.length > 0 ? `?${qs}` : ""}`;
+    let response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "DELETE",
+        headers,
+        body,
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
   }
 }
 

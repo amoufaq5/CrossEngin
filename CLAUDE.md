@@ -21,15 +21,47 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 121 meta-schema tables, 7,569 tests**,
-all green, no type errors. M6.7 ships the first persisted
+**56 packages + 1 app, 121 meta-schema tables, 7,597 tests**,
+all green, no type errors. M2.X.5.aa.z.21 ships the FIRST
+DELETE write surfaces on the Bedrock control plane:
+`deleteCustomModel(modelIdentifier)`, `deleteImportedModel(
+modelIdentifier)`, `deleteGuardrail(guardrailIdentifier,
+guardrailVersion?)`. New shared `signedControlPlaneDelete`
+transport (DELETE variant of GET; query optional; empty body;
+Sig v4 signed via existing signRequest). The three methods
+follow the established pattern: validate identifier
+non-empty BEFORE fetch (saves cost + load), URI-encode the
+identifier path segment (handles `:` in ARNs), control-plane
+host only (not bedrock-runtime), return void on any 2xx
+(200, 202, 204), propagate 404 as not_found_error
+VERBATIM (caller decides idempotency — the router short-
+circuit (M6.6.y) handles automated lifecycle pipelines and
+operators wanting silent idempotency wrap in a 3-line try/
+catch `isNotFoundError` predicate; the reverse — provider-
+swallowed 404 with caller needing the signal — is
+impossible to reverse), 409 → conflict_error (in-use
+resource — provisioned throughput attached, guardrail used
+by application), 403 → permission_error, 429 →
+rate_limit_error. deleteGuardrail carries optional
+guardrailVersion (omit = delete whole guardrail / all
+versions; provide = delete that specific version — matches
+AWS semantics; symmetric with getGuardrail's optional
+version parameter). 28 new tests in provider.test.ts cover
+URL shape + DELETE method + ARN URI-encoding + control-
+plane host + identifier-blank pre-flight + 204 success +
+404 / 409 / 403 / 429 / network propagation across all
+three deletes. Three operator workflows unblocked: post-
+fine-tune custom-model cleanup, rejected-upload imported-
+model removal, deprecated-guardrail retirement. Bedrock
+control plane now has 18 read + 2 stop + 1 create + 3
+delete = 24 operations. M6.7 ships the first persisted
 ai-router substrate: `@crossengin/ai-router-pg` package with
 `PostgresCostTracker` (drop-in replacement for
 `InMemoryCostTracker` against the same `CostTracker` interface)
@@ -2518,7 +2550,14 @@ M6.7 (PostgresCostTracker — first persisted ai-router
 substrate — closes ADR-0059's deferred cost-tracker
 persistence Q — `@crossengin/ai-router-pg` package +
 META_LLM_COST_WINDOWS table — atomic UPSERT with SQL-side
-expiry CASE — drop-in CostTracker replacement).
+expiry CASE — drop-in CostTracker replacement), ADR-0136
+covers M2.X.5.aa.z.21 (Bedrock DELETE control-plane
+surfaces — FIRST DELETE write surfaces — deleteCustomModel
++ deleteImportedModel + deleteGuardrail + shared
+signedControlPlaneDelete transport — propagates 404 as
+not_found_error so router short-circuit (M6.6.y) handles
+automated lifecycle pipelines and operators wanting silent
+idempotency wrap with isNotFoundError predicate).
 
 ## Architecture in 90 seconds
 
@@ -3799,7 +3838,22 @@ gateways race-free in a single round-trip; tumbling-window
 semantic matches InMemoryCostTracker exactly so the
 substitution is drop-in; closes 3 operator gaps: multi-replica
 under-enforcement, cross-restart zeroing, and dashboard
-observability via `SELECT * FROM meta.llm_cost_windows`).
+observability via `SELECT * FROM meta.llm_cost_windows`),
+ADR-0136 covers Phase 2 M2.X.5.aa.z.21 (Bedrock DELETE
+control-plane surfaces — FIRST DELETE write surfaces ever
+shipped on the Bedrock substrate; deleteCustomModel +
+deleteImportedModel + deleteGuardrail + shared
+signedControlPlaneDelete transport; mirrors the corresponding
+GET endpoints exactly on path / identifier shape; 404
+propagation pattern documented — caller decides idempotency
+via isNotFoundError(err) predicate wrap, never provider-
+swallowed because that would block the router short-circuit
+(M6.6.y) and verify-then-recreate workflows; deleteGuardrail
+preserves AWS asymmetric default — omit-version = delete all,
+provide-version = delete that one; transport rail reusable
+for future DELETE rollouts on inference-profiles / prompts /
+flows; Bedrock control plane now has 18 read + 2 stop + 1
+create + 3 delete = 24 operations).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
