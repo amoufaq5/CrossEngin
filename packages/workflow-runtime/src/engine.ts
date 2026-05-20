@@ -692,6 +692,14 @@ export class WorkflowEngine {
         activityKey,
       }) ?? unsupportedHandler;
     const state = await this.getInstanceState(instanceId);
+    const activityStartedAt = this.clock.now().getTime();
+    await this.emitInstrumentation("activity_started", {
+      tenantId,
+      instanceId,
+      definitionId: definition.id,
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+      attributes: { activityId, activityKey, activityKind: kind },
+    });
     const startedSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -734,9 +742,18 @@ export class WorkflowEngine {
         retryable: false,
       };
     }
+    const activityDurationMs = this.clock.now().getTime() - activityStartedAt;
 
     const completionSeq = (await this.eventLog.latestSequence(instanceId))!;
     if (outcome.status === "succeeded") {
+      await this.emitInstrumentation("activity_completed", {
+        tenantId,
+        instanceId,
+        definitionId: definition.id,
+        correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+        durationMs: activityDurationMs,
+        attributes: { activityId, activityKey, activityKind: kind },
+      });
       await this.appendEvent({
         instanceId,
         tenantId,
@@ -772,6 +789,21 @@ export class WorkflowEngine {
         }
       }
     } else if (outcome.status === "failed") {
+      await this.emitInstrumentation("activity_failed", {
+        tenantId,
+        instanceId,
+        definitionId: definition.id,
+        correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+        durationMs: activityDurationMs,
+        attributes: {
+          activityId,
+          activityKey,
+          activityKind: kind,
+          errorCode: outcome.errorCode,
+          errorMessage: outcome.errorMessage,
+          retryable: outcome.retryable,
+        },
+      });
       await this.appendEvent({
         instanceId,
         tenantId,

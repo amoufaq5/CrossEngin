@@ -21,15 +21,43 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,534 tests**,
-all green, no type errors. M2.X.5.aa.z.20 closes the
+**55 packages + 1 app, 120 meta-schema tables, 7,541 tests**,
+all green, no type errors. M8.1 adds activity execution
+instrumentation to the workflow runtime — closes ADR-0120
+Q3, the longest-outstanding deferred Q from the M8 milestone.
+WORKFLOW_INSTRUMENTATION_KINDS grows from 11 → 14 with three
+new event kinds: activity_started (fires before the
+event-log row append; captures activityStartedAt timestamp
+for duration tracking), activity_completed (fires after
+handler returns success outcome; populates durationMs =
+clock.now() - activityStartedAt + activityId / activityKey /
+activityKind attributes), activity_failed (fires after
+handler returns failed outcome OR throws an uncaught
+exception; populates durationMs + errorCode + errorMessage +
+retryable attributes). Three new emit calls land in the
+existing applyScheduleActivity method; no new transport, no
+new types. META_WORKFLOW_TRACES.kind CHECK constraint
+extended additively to allow the three new kinds. Same shape
+as M8's existing instrumentation events (kind + tenantId +
+instanceId + definitionId + correlationId + occurredAt +
+durationMs + attributes). Instrumentation fires BEFORE the
+corresponding event-log append — consistent with M8's
+pattern. Handler-exception path covered: both `return {
+status: "failed" }` (operator-controlled failure) and
+`throw new Error(...)` (uncaught) surface activity_failed
+with the error context. Three workflows unblocked: activity
+latency dashboards (p50/p95/p99 via durationMs aggregation
+queries), activity failure alerting (errorCode +
+errorMessage + retryable on a single trace event), per-
+activity-kind cost attribution rail ready for M6.7
+PostgresCostTracker. M2.X.5.aa.z.20 closes the
 customization-job CRUD with
 `BedrockProvider.createModelCustomizationJob(input)` —
 LARGEST write surface remaining on Bedrock's control plane.
@@ -2401,7 +2429,10 @@ documented), ADR-0131 covers M2.X.5.aa.z.20 (Bedrock
 createModelCustomizationJob — largest write surface remaining
 on Bedrock; customization-job CRUD now complete; 12+ boundary-
 validation rules; AWS contract preserved verbatim including
-customModelKmsKeyId vs KmsKeyArn asymmetry).
+customModelKmsKeyId vs KmsKeyArn asymmetry), ADR-0132 covers
+M8.1 (workflow runtime activity execution instrumentation —
+closes ADR-0120 Q3 — adds activity_started / activity_completed
+/ activity_failed kinds with durationMs + error context).
 
 ## Architecture in 90 seconds
 
@@ -3641,7 +3672,20 @@ includes customModelKmsKeyId (not KmsKeyArn — preserved
 verbatim) and create-vs-get field-naming asymmetry per
 ADR-0123; three workflows unblocked: programmatic fine-tune
 submission, automated retry-on-failure with adjusted
-hyperparameters, distillation lineage capture).
+hyperparameters, distillation lineage capture), ADR-0132
+covers Phase 2 M8.1 (workflow runtime activity execution
+instrumentation — closes ADR-0120 Q3, the longest-outstanding
+deferred Q from the M8 milestone; WORKFLOW_INSTRUMENTATION_KINDS
+grows 11→14 with activity_started + activity_completed +
+activity_failed; durationMs computed from engine clock;
+handler-exception path covered (both controlled `return
+{status: "failed"}` and uncaught `throw` surface
+activity_failed with HANDLER_EXCEPTION errorCode);
+META_WORKFLOW_TRACES.kind CHECK constraint widened
+additively; three operator workflows enabled: latency
+dashboards via durationMs aggregation, failure alerting on
+the indexed kind column, per-activity-kind cost attribution
+rail ready for future M6.7 PostgresCostTracker).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

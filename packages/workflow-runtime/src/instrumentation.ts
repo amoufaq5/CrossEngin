@@ -8,6 +8,9 @@ export const WORKFLOW_INSTRUMENTATION_KINDS = [
   "signal_consumed",
   "timer_fired",
   "activity_scheduled",
+  "activity_started",
+  "activity_completed",
+  "activity_failed",
   "action_applied",
   "engine_error",
 ] as const;

@@ -843,3 +843,238 @@ describe("WorkflowEngine — instrumentation (M8)", () => {
     expect(result.status).toBe("waiting_for_signal");
   });
 });
+
+describe("WorkflowEngine — activity execution instrumentation (M8.1)", () => {
+  function activityDef(overrides: {
+    activityKey?: string;
+    activityKind?: string;
+    completedTransition?: boolean;
+    failedTransition?: boolean;
+  } = {}): WorkflowDefinition {
+    const activityKey = overrides.activityKey ?? "process_payment";
+    const activityKind = overrides.activityKind ?? "transformation";
+    const transitions = [];
+    if (overrides.completedTransition !== false) {
+      transitions.push({
+        name: "complete",
+        fromState: "draft",
+        toState: "done",
+        trigger: { kind: "activity_completed" as const, activityKey },
+        guards: [],
+        preTransitionActions: [],
+        postTransitionActions: [],
+      });
+    }
+    if (overrides.failedTransition === true) {
+      transitions.push({
+        name: "fail",
+        fromState: "draft",
+        toState: "failed",
+        trigger: { kind: "activity_failed" as const, activityKey },
+        guards: [],
+        preTransitionActions: [],
+        postTransitionActions: [],
+      });
+    }
+    return {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_activity",
+              parameters: {
+                activityKey,
+                kind: activityKind,
+                input: { amount: 100 },
+              },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "Done",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "failed",
+          kind: "terminal_failure",
+          label: "Failed",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions,
+      initialState: "draft",
+    };
+  }
+
+  it("emits activity_scheduled + activity_started + activity_completed in order on success", async () => {
+    const cap = captureInstrumentation();
+    const def = activityDef();
+    const { engine } = makeEngine({
+      definition: def,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-1",
+    });
+    const activityEvents = cap.events.filter((e) =>
+      e.kind.startsWith("activity_"),
+    );
+    expect(activityEvents.map((e) => e.kind)).toEqual([
+      "activity_scheduled",
+      "activity_started",
+      "activity_completed",
+    ]);
+  });
+
+  it("includes activityId / activityKey / activityKind on each event", async () => {
+    const cap = captureInstrumentation();
+    const def = activityDef({ activityKey: "process_payment" });
+    const { engine } = makeEngine({
+      definition: def,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-2",
+    });
+    const completed = cap.events.find((e) => e.kind === "activity_completed")!;
+    expect(completed.attributes["activityKey"]).toBe("process_payment");
+    expect(completed.attributes["activityKind"]).toBe("transformation");
+    expect(typeof completed.attributes["activityId"]).toBe("string");
+  });
+
+  it("activity_completed carries a non-negative durationMs", async () => {
+    const cap = captureInstrumentation();
+    const def = activityDef();
+    const { engine } = makeEngine({
+      definition: def,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-3",
+    });
+    const completed = cap.events.find((e) => e.kind === "activity_completed")!;
+    expect(completed.durationMs).not.toBeNull();
+    expect(completed.durationMs!).toBeGreaterThanOrEqual(0);
+  });
+
+  it("emits activity_failed with errorCode + errorMessage + retryable when handler fails", async () => {
+    const failingHandler: ActivityHandler = () => ({
+      status: "failed",
+      errorCode: "TEST_FAIL",
+      errorMessage: "intentional failure",
+      retryable: false,
+    });
+    const registry = createDefaultRegistry();
+    registry.registerForKind("http_call", failingHandler);
+    const def = activityDef({
+      activityKey: "do_thing",
+      activityKind: "http_call",
+      completedTransition: false,
+      failedTransition: true,
+    });
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({
+      definition: def,
+      registry,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-fail",
+    });
+    const failed = cap.events.find((e) => e.kind === "activity_failed")!;
+    expect(failed).toBeDefined();
+    expect(failed.attributes["errorCode"]).toBe("TEST_FAIL");
+    expect(failed.attributes["errorMessage"]).toBe("intentional failure");
+    expect(failed.attributes["retryable"]).toBe(false);
+    expect(failed.durationMs).not.toBeNull();
+  });
+
+  it("activity_failed also fires when handler THROWS (exception path)", async () => {
+    const throwingHandler: ActivityHandler = () => {
+      throw new Error("boom");
+    };
+    const registry = createDefaultRegistry();
+    registry.registerForKind("http_call", throwingHandler);
+    const def = activityDef({
+      activityKey: "do_thing",
+      activityKind: "http_call",
+      completedTransition: false,
+      failedTransition: true,
+    });
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({
+      definition: def,
+      registry,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-throw",
+    });
+    const failed = cap.events.find((e) => e.kind === "activity_failed")!;
+    expect(failed).toBeDefined();
+    expect(failed.attributes["errorCode"]).toBe("HANDLER_EXCEPTION");
+    expect(failed.attributes["errorMessage"]).toBe("boom");
+  });
+
+  it("activity_scheduled fires BEFORE activity_started in the instrumentation stream", async () => {
+    const cap = captureInstrumentation();
+    const def = activityDef();
+    const { engine } = makeEngine({
+      definition: def,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-order",
+    });
+    const scheduledIdx = cap.events.findIndex(
+      (e) => e.kind === "activity_scheduled",
+    );
+    const startedIdx = cap.events.findIndex((e) => e.kind === "activity_started");
+    expect(scheduledIdx).toBeGreaterThanOrEqual(0);
+    expect(startedIdx).toBeGreaterThan(scheduledIdx);
+  });
+
+  it("propagates correlationId through activity events", async () => {
+    const cap = captureInstrumentation();
+    const def = activityDef();
+    const { engine } = makeEngine({
+      definition: def,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "act-corr-xyz",
+    });
+    const activityEvents = cap.events.filter((e) =>
+      e.kind.startsWith("activity_"),
+    );
+    for (const e of activityEvents) {
+      expect(e.correlationId).toBe("act-corr-xyz");
+    }
+  });
+});
