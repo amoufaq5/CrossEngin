@@ -21,15 +21,46 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,283 tests**,
-all green, no type errors. M8 closes the workflow runtime
+**55 packages + 1 app, 120 meta-schema tables, 7,303 tests**,
+all green, no type errors. M2.X.5.aa.z.16 ships
+`BedrockProvider.getModelImportJob(jobIdentifier)` — the
+rich-detail companion to listModelImportJobs (M2.X.5.aa.z.15).
+Failure-triage workflows now fully unblocked: when a Failed
+job surfaces in the roster, operators look up the specific
+job to read failureMessage (AWS's typed error),
+modelDataSource.s3DataSource.s3Uri (S3 source bucket),
+roleArn (IAM role for permission verification),
+importedModelKmsKeyArn (KMS compliance), vpcConfig (subnet +
+security-group routing). Fourth extended-shape detail
+instance in the Bedrock package after Guardrail
+(M2.X.5.aa.z.8), ImportedModel (M2.X.5.aa.z.12), and
+CustomModel (M2.X.5.aa.z.14). Pattern fully stable. New
+types in `model-import-jobs-api.ts`:
+BedrockModelImportJobS3DataSource ({s3Uri}),
+BedrockModelImportJobDataSource ({s3DataSource}),
+BedrockModelImportJobVpcConfig ({subnetIds[],
+securityGroupIds[]}), BedrockModelImportJobDetail (5 required
++ 8 optional fields). parseModelImportJobDetail strict
+parser validates 5 required fields, reuses
+isBedrockModelImportJobStatus discriminator from
+M2.X.5.aa.z.15, validates nested s3DataSource.s3Uri + VPC
+arrays of strings. Provider validates identifier non-empty
+BEFORE fetch, URI-encodes path component, reuses
+signedControlPlaneGet rail. Asymmetry with summary preserved:
+importedModelArn + importedModelName optional in both
+(populated only post-success per AWS docs); detail adds
+roleArn (required), failureMessage (Failed-only),
+modelDataSource (required), vpcConfig (optional),
+importedModelKmsKeyArn (optional). Bedrock control-plane
+surface now has 14 of N operations; module count unchanged at
+15. M8 closes the workflow runtime
 depth gap — the first production-grade observability surface
 for workflows. New `WorkflowInstrumentation` interface in
 `@crossengin/workflow-runtime/src/instrumentation.ts` with 11
@@ -2025,7 +2056,12 @@ ADR-0120 covers M8 (workflow runtime instrumentation hooks +
 META_WORKFLOW_TRACES — first production-grade observability
 surface for workflows; 11 documented event kinds; PG sink
 opt-in via persistTraces; combineInstrumentations fan-out;
-OTel-ready event shape; closes the workflow runtime depth gap).
+OTel-ready event shape; closes the workflow runtime depth gap),
+ADR-0121 covers M2.X.5.aa.z.16 (Bedrock getModelImportJob —
+fourth extended-shape detail instance; failure-triage +
+KMS-audit + VPC-compliance workflows unblocked via
+failureMessage / modelDataSource.s3DataSource.s3Uri / roleArn
+/ importedModelKmsKeyArn / vpcConfig).
 
 ## Architecture in 90 seconds
 
@@ -2251,7 +2287,8 @@ re-exporting everything.
   + getBatch + stopBatch + createBatch + listGuardrails +
   getGuardrail + listInferenceProfiles + getInferenceProfile
   + listImportedModels + getImportedModel + listCustomModels +
-  getCustomModel + listModelImportJobs — embed dispatches on
+  getCustomModel + listModelImportJobs + getModelImportJob —
+  embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -3171,7 +3208,14 @@ META_WORKFLOW_EVENTS; PostgresWorkflowInstrumentation
 implementation; buildPersistentEngine gains persistTraces +
 instrumentation options; observability failures NEVER crash
 the engine; OTel-ready event shape; combineInstrumentations
-fan-out helper).
+fan-out helper), ADR-0121 covers Phase 2 M2.X.5.aa.z.16
+(Bedrock getModelImportJob — fourth extended-shape detail
+instance after Guardrail / ImportedModel / CustomModel;
+import-job triage workflows fully unblocked; failure
+diagnostics + IAM role audit + KMS + VPC config all
+surfaced via the rich GetModelImportJob response;
+parseModelImportJobDetail reuses M2.X.5.aa.z.15's
+isBedrockModelImportJobStatus discriminator).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

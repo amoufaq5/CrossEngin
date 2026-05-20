@@ -86,7 +86,9 @@ import {
 } from "./inference-profiles-api.js";
 import {
   buildModelImportJobListQuery,
+  parseModelImportJobDetail,
   parseModelImportJobListResponse,
+  type BedrockModelImportJobDetail,
   type BedrockModelImportJobListResponse,
   type BedrockListModelImportJobsOptions,
 } from "./model-import-jobs-api.js";
@@ -599,6 +601,29 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async getModelImportJob(
+    jobIdentifier: string,
+  ): Promise<BedrockModelImportJobDetail> {
+    if (jobIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "getModelImportJob: jobIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/model-import-jobs/${encodeURIComponent(jobIdentifier)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getModelImportJob: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseModelImportJobDetail(raw);
   }
 
   async listModelImportJobs(

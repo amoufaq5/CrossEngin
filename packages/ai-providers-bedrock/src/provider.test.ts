@@ -1418,6 +1418,153 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
+  function detailBody(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobName: "import-tenant-x-2026-04-15",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockImportRole",
+      status: "Completed",
+      creationTime: "2026-04-15T12:00:00Z",
+      modelDataSource: {
+        s3DataSource: { s3Uri: "s3://tenant-x-artifacts/llama3/" },
+      },
+      importedModelName: "tenant-x-llama3-finetune",
+      importedModelArn:
+        "arn:aws:bedrock:us-east-1:123:imported-model/xyz789",
+      endTime: "2026-04-15T13:00:00Z",
+      ...overrides,
+    });
+  }
+
+  it("GETs the control-plane /model-import-jobs/{id} endpoint", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    await provider.getModelImportJob("abc123def456");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/model-import-jobs/abc123def456");
+    expect(capture.url).not.toContain("?");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: detailBody() }),
+    });
+    const arn =
+      "arn:aws:bedrock:us-east-1:123:model-import-job/abc123def456";
+    await provider.getModelImportJob(arn);
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getModelImportJob("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("parses a completed-job detail with imported-model fields + KMS + VPC", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          importedModelKmsKeyArn: "arn:aws:kms:us-east-1:123:key/k1",
+          vpcConfig: {
+            subnetIds: ["subnet-aaa"],
+            securityGroupIds: ["sg-111", "sg-222"],
+          },
+        }),
+      }),
+    });
+    const detail = await provider.getModelImportJob("abc123def456");
+    expect(detail.status).toBe("Completed");
+    expect(detail.importedModelArn).toMatch(/imported-model/);
+    expect(detail.modelDataSource.s3DataSource.s3Uri).toBe(
+      "s3://tenant-x-artifacts/llama3/",
+    );
+    expect(detail.importedModelKmsKeyArn).toMatch(/^arn:aws:kms:/);
+    expect(detail.vpcConfig?.subnetIds).toEqual(["subnet-aaa"]);
+    expect(detail.vpcConfig?.securityGroupIds.length).toBe(2);
+  });
+
+  it("parses a Failed-job detail with failureMessage", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        text: detailBody({
+          status: "Failed",
+          failureMessage: "role missing s3:GetObject permission",
+        }),
+      }),
+    });
+    const detail = await provider.getModelImportJob("abc123def456");
+    expect(detail.status).toBe("Failed");
+    expect(detail.failureMessage).toMatch(/s3:GetObject/);
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such job",
+        }),
+      }),
+    });
+    await expect(
+      provider.getModelImportJob("abc123def456"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.getModelImportJob("abc123def456"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
+    await expect(
+      provider.getModelImportJob("abc123def456"),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.getModelImportJob("abc123def456"),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 describe("BedrockProvider — listModelImportJobs (M2.X.5.aa.z.15)", () => {
   function listBody(opts: {
     items?: ReadonlyArray<Record<string, unknown>>;

@@ -49,6 +49,171 @@ export interface BedrockModelImportJobListResponse {
   readonly nextToken?: string;
 }
 
+export interface BedrockModelImportJobS3DataSource {
+  readonly s3Uri: string;
+}
+
+export interface BedrockModelImportJobDataSource {
+  readonly s3DataSource: BedrockModelImportJobS3DataSource;
+}
+
+export interface BedrockModelImportJobVpcConfig {
+  readonly subnetIds: readonly string[];
+  readonly securityGroupIds: readonly string[];
+}
+
+export interface BedrockModelImportJobDetail {
+  readonly jobArn: string;
+  readonly jobName: string;
+  readonly roleArn: string;
+  readonly status: BedrockModelImportJobStatus;
+  readonly creationTime: string;
+  readonly modelDataSource: BedrockModelImportJobDataSource;
+  readonly importedModelName?: string;
+  readonly importedModelArn?: string;
+  readonly failureMessage?: string;
+  readonly lastModifiedTime?: string;
+  readonly endTime?: string;
+  readonly vpcConfig?: BedrockModelImportJobVpcConfig;
+  readonly importedModelKmsKeyArn?: string;
+}
+
+export function parseModelImportJobDetail(
+  raw: unknown,
+): BedrockModelImportJobDetail {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getModelImportJob: response is not a JSON object",
+    });
+  }
+  const j = raw as Record<string, unknown>;
+  const jobArn = expectStringDetail(j, "jobArn");
+  const jobName = expectStringDetail(j, "jobName");
+  const roleArn = expectStringDetail(j, "roleArn");
+  const status = j["status"];
+  if (!isBedrockModelImportJobStatus(status)) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: `getModelImportJob: unknown job status '${String(status)}' on job '${jobArn}'`,
+    });
+  }
+  const creationTime = expectStringDetail(j, "creationTime");
+  const modelDataSource = parseModelDataSource(j["modelDataSource"]);
+  const out: {
+    -readonly [K in keyof BedrockModelImportJobDetail]: BedrockModelImportJobDetail[K];
+  } = {
+    jobArn,
+    jobName,
+    roleArn,
+    status,
+    creationTime,
+    modelDataSource,
+  };
+  if (
+    typeof j["importedModelName"] === "string" &&
+    j["importedModelName"].length > 0
+  ) {
+    out.importedModelName = j["importedModelName"];
+  }
+  if (
+    typeof j["importedModelArn"] === "string" &&
+    j["importedModelArn"].length > 0
+  ) {
+    out.importedModelArn = j["importedModelArn"];
+  }
+  if (typeof j["failureMessage"] === "string" && j["failureMessage"].length > 0) {
+    out.failureMessage = j["failureMessage"];
+  }
+  if (
+    typeof j["lastModifiedTime"] === "string" &&
+    j["lastModifiedTime"].length > 0
+  ) {
+    out.lastModifiedTime = j["lastModifiedTime"];
+  }
+  if (typeof j["endTime"] === "string" && j["endTime"].length > 0) {
+    out.endTime = j["endTime"];
+  }
+  if (
+    typeof j["importedModelKmsKeyArn"] === "string" &&
+    j["importedModelKmsKeyArn"].length > 0
+  ) {
+    out.importedModelKmsKeyArn = j["importedModelKmsKeyArn"];
+  }
+  if (j["vpcConfig"] !== undefined && j["vpcConfig"] !== null) {
+    out.vpcConfig = parseVpcConfig(j["vpcConfig"]);
+  }
+  return out;
+}
+
+function parseModelDataSource(raw: unknown): BedrockModelImportJobDataSource {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getModelImportJob: modelDataSource is missing or not an object",
+    });
+  }
+  const o = raw as { s3DataSource?: unknown };
+  if (o.s3DataSource === null || typeof o.s3DataSource !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message:
+        "getModelImportJob: modelDataSource.s3DataSource is missing or not an object",
+    });
+  }
+  const inner = o.s3DataSource as Record<string, unknown>;
+  if (typeof inner["s3Uri"] !== "string" || inner["s3Uri"].length === 0) {
+    throw new BedrockError({
+      kind: "api_error",
+      message:
+        "getModelImportJob: missing required string field 'modelDataSource.s3DataSource.s3Uri'",
+    });
+  }
+  return { s3DataSource: { s3Uri: inner["s3Uri"] } };
+}
+
+function parseVpcConfig(raw: unknown): BedrockModelImportJobVpcConfig {
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getModelImportJob: vpcConfig is not an object",
+    });
+  }
+  const o = raw as Record<string, unknown>;
+  const subnetIds = o["subnetIds"];
+  if (!Array.isArray(subnetIds) || !subnetIds.every((s) => typeof s === "string")) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getModelImportJob: vpcConfig.subnetIds is not a string[]",
+    });
+  }
+  const securityGroupIds = o["securityGroupIds"];
+  if (
+    !Array.isArray(securityGroupIds) ||
+    !securityGroupIds.every((s) => typeof s === "string")
+  ) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "getModelImportJob: vpcConfig.securityGroupIds is not a string[]",
+    });
+  }
+  return {
+    subnetIds: subnetIds as string[],
+    securityGroupIds: securityGroupIds as string[],
+  };
+}
+
+function expectStringDetail(obj: Record<string, unknown>, key: string): string {
+  const v = obj[key];
+  if (typeof v !== "string" || v.length === 0) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: `getModelImportJob: missing required string field '${key}'`,
+    });
+  }
+  return v;
+}
+
 export interface BedrockListModelImportJobsOptions {
   readonly creationTimeBefore?: string;
   readonly creationTimeAfter?: string;

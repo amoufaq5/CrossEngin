@@ -10,6 +10,7 @@ import {
   BEDROCK_MODEL_IMPORT_JOB_STATUSES,
   buildModelImportJobListQuery,
   isBedrockModelImportJobStatus,
+  parseModelImportJobDetail,
   parseModelImportJobListResponse,
   parseModelImportJobSummary,
 } from "./model-import-jobs-api.js";
@@ -305,5 +306,129 @@ describe("parseModelImportJobListResponse", () => {
     expect(() =>
       parseModelImportJobListResponse({ modelImportJobSummaries: "oops" }),
     ).toThrow(/not an array/);
+  });
+});
+
+describe("parseModelImportJobDetail", () => {
+  function minimal(): Record<string, unknown> {
+    return {
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobName: "import-tenant-x-2026-04-15",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockImportRole",
+      status: "InProgress",
+      creationTime: "2026-04-15T12:00:00Z",
+      modelDataSource: {
+        s3DataSource: { s3Uri: "s3://tenant-x-artifacts/llama3/" },
+      },
+    };
+  }
+
+  it("parses minimal required fields (in-progress job)", () => {
+    const d = parseModelImportJobDetail(minimal());
+    expect(d.jobArn).toMatch(/abc123def456$/);
+    expect(d.status).toBe("InProgress");
+    expect(d.roleArn).toMatch(/^arn:aws:iam::/);
+    expect(d.modelDataSource.s3DataSource.s3Uri).toBe(
+      "s3://tenant-x-artifacts/llama3/",
+    );
+    expect(d.importedModelArn).toBeUndefined();
+    expect(d.failureMessage).toBeUndefined();
+  });
+
+  it("parses a completed job with imported-model fields populated", () => {
+    const d = parseModelImportJobDetail({
+      ...minimal(),
+      status: "Completed",
+      importedModelName: "tenant-x-llama3-finetune",
+      importedModelArn:
+        "arn:aws:bedrock:us-east-1:123:imported-model/xyz789",
+      lastModifiedTime: "2026-04-15T13:00:00Z",
+      endTime: "2026-04-15T13:00:00Z",
+      importedModelKmsKeyArn: "arn:aws:kms:us-east-1:123:key/k1",
+    });
+    expect(d.status).toBe("Completed");
+    expect(d.importedModelName).toBe("tenant-x-llama3-finetune");
+    expect(d.importedModelArn).toMatch(/^arn:aws:bedrock:/);
+    expect(d.lastModifiedTime).toBe("2026-04-15T13:00:00Z");
+    expect(d.endTime).toBe("2026-04-15T13:00:00Z");
+    expect(d.importedModelKmsKeyArn).toMatch(/^arn:aws:kms:/);
+  });
+
+  it("parses a failed job with failureMessage", () => {
+    const d = parseModelImportJobDetail({
+      ...minimal(),
+      status: "Failed",
+      failureMessage: "role does not have s3:GetObject on bucket",
+      lastModifiedTime: "2026-04-15T12:05:00Z",
+      endTime: "2026-04-15T12:05:00Z",
+    });
+    expect(d.status).toBe("Failed");
+    expect(d.failureMessage).toMatch(/s3:GetObject/);
+  });
+
+  it("parses vpcConfig with subnetIds + securityGroupIds", () => {
+    const d = parseModelImportJobDetail({
+      ...minimal(),
+      vpcConfig: {
+        subnetIds: ["subnet-aaa", "subnet-bbb"],
+        securityGroupIds: ["sg-111"],
+      },
+    });
+    expect(d.vpcConfig?.subnetIds).toEqual(["subnet-aaa", "subnet-bbb"]);
+    expect(d.vpcConfig?.securityGroupIds).toEqual(["sg-111"]);
+  });
+
+  it("rejects missing required field", () => {
+    const bad = minimal();
+    delete bad["roleArn"];
+    expect(() => parseModelImportJobDetail(bad)).toThrow(/roleArn/);
+  });
+
+  it("rejects unknown status", () => {
+    expect(() =>
+      parseModelImportJobDetail({ ...minimal(), status: "Stopped" }),
+    ).toThrow(/unknown job status/);
+  });
+
+  it("rejects missing modelDataSource", () => {
+    const bad = minimal();
+    delete bad["modelDataSource"];
+    expect(() => parseModelImportJobDetail(bad)).toThrow(/modelDataSource/);
+  });
+
+  it("rejects modelDataSource without s3DataSource", () => {
+    expect(() =>
+      parseModelImportJobDetail({ ...minimal(), modelDataSource: {} }),
+    ).toThrow(/s3DataSource/);
+  });
+
+  it("rejects s3DataSource without s3Uri", () => {
+    expect(() =>
+      parseModelImportJobDetail({
+        ...minimal(),
+        modelDataSource: { s3DataSource: {} },
+      }),
+    ).toThrow(/s3Uri/);
+  });
+
+  it("rejects vpcConfig with non-string entries", () => {
+    expect(() =>
+      parseModelImportJobDetail({
+        ...minimal(),
+        vpcConfig: { subnetIds: [42], securityGroupIds: ["sg-1"] },
+      }),
+    ).toThrow(/subnetIds/);
+    expect(() =>
+      parseModelImportJobDetail({
+        ...minimal(),
+        vpcConfig: { subnetIds: ["s-1"], securityGroupIds: [null] },
+      }),
+    ).toThrow(/securityGroupIds/);
+  });
+
+  it("rejects non-object response", () => {
+    expect(() => parseModelImportJobDetail(null)).toThrow(/not a JSON object/);
+    expect(() => parseModelImportJobDetail("oops")).toThrow(/not a JSON object/);
   });
 });
