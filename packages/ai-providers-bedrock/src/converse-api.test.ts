@@ -2,11 +2,13 @@ import type { CompletionRequest } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import {
+  BEDROCK_CACHE_POINT,
   buildBedrockConverseRequest,
   buildBedrockImageBlock,
   extractTextFromConverseResponse,
   extractToolCallsFromConverseResponse,
   isBedrockImageFormat,
+  isCachePointBlock,
   normalizeConverseUsage,
   type BedrockConverseResponse,
 } from "./converse-api.js";
@@ -843,5 +845,192 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
         status: "success",
       },
     });
+  });
+});
+
+describe("buildBedrockConverseRequest — cacheBreakpoint emission (M2.X.11.x)", () => {
+  it("inserts a cachePoint block AFTER a text block with cacheBreakpoint", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "long context",
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+              { type: "text", text: "fresh question" },
+            ],
+          },
+        ],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    expect(blocks.length).toBe(3); // text + cachePoint + text
+    expect(blocks[0]).toEqual({ text: "long context" });
+    expect(blocks[1]).toEqual({ cachePoint: { type: "default" } });
+    expect(blocks[2]).toEqual({ text: "fresh question" });
+  });
+
+  it("inserts cachePoint after an image block", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                format: "png",
+                bytes: "iVBORw0KGgo",
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+              { type: "text", text: "describe" },
+            ],
+          },
+        ],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    expect(blocks.length).toBe(3);
+    expect(isCachePointBlock(blocks[1]!)).toBe(true);
+  });
+
+  it("inserts cachePoint after a document block", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                format: "pdf",
+                bytes: "JVBER",
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+              { type: "text", text: "summarize" },
+            ],
+          },
+        ],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    expect(blocks[1]).toEqual(BEDROCK_CACHE_POINT);
+  });
+
+  it("emits NO cachePoint when cacheBreakpoint is absent", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "long context" },
+              { type: "text", text: "fresh question" },
+            ],
+          },
+        ],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    expect(blocks.length).toBe(2);
+    expect(blocks.every((b) => !isCachePointBlock(b))).toBe(true);
+  });
+
+  it("inserts multiple cachePoint blocks for multi-breakpoint prefixes", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "system context A",
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+              {
+                type: "text",
+                text: "tools schema",
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+              { type: "text", text: "user question" },
+            ],
+          },
+        ],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    // text + cachePoint + text + cachePoint + text = 5
+    expect(blocks.length).toBe(5);
+    expect(isCachePointBlock(blocks[1]!)).toBe(true);
+    expect(isCachePointBlock(blocks[3]!)).toBe(true);
+  });
+
+  it("inserts cachePoint after a tool_use block on assistant message", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "search",
+                input: { q: "x" },
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    expect(blocks.length).toBe(2);
+    expect(isCachePointBlock(blocks[1]!)).toBe(true);
+  });
+
+  it("plain-string content emits no cachePoint", () => {
+    const req = buildBedrockConverseRequest(
+      baseReq({
+        messages: [{ role: "user", content: "plain string" }],
+      }),
+      { defaultMaxTokens: 1000 },
+    );
+    const blocks = req.messages[0]!.content;
+    expect(blocks.length).toBe(1);
+    expect(blocks[0]).toEqual({ text: "plain string" });
+  });
+
+  it("image_url block still throws (no cachePoint inserted on unsupported block)", () => {
+    expect(() =>
+      buildBedrockConverseRequest(
+        baseReq({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  url: "https://example.com/img.png",
+                  cacheBreakpoint: { type: "ephemeral" },
+                },
+              ],
+            },
+          ],
+        }),
+        { defaultMaxTokens: 1000 },
+      ),
+    ).toThrow(/image_url/);
   });
 });

@@ -21,15 +21,38 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,399 tests**,
-all green, no type errors. M2.X.11 adds a `cacheBreakpoint?:
+**55 packages + 1 app, 120 meta-schema tables, 7,407 tests**,
+all green, no type errors. M2.X.11.x wires `cacheBreakpoint`
+through the Bedrock Converse translator (the deferred Q1 from
+ADR-0125). Single-line change in
+`@crossengin/ai-providers-bedrock/converse-api.ts`
+appendKernelBlocks loop: after emitting each translated block,
+if the kernel block carries cacheBreakpoint, append the shared
+BEDROCK_CACHE_POINT constant
+({cachePoint: {type: "default"}}). The supporting
+infrastructure (BedrockCachePointBlock type,
+BEDROCK_CACHE_POINT constant, isCachePointBlock discriminator)
+was pre-built in M2.9 — this milestone is the call site that
+finally uses them. Vocabulary asymmetry preserved: kernel uses
+"ephemeral" (matching Anthropic-first naming); Bedrock wire
+uses "default" (only documented value); translator maps
+ephemeral → default verbatim. Cross-provider parity achieved
+across Anthropic + Bedrock for the cacheBreakpoint field;
+OpenAI continues to silently drop (no per-block knob in their
+API). All four prior M2.X.5.* multimodal block variants
+(image / document / file_id / tool_use) benefit end-to-end on
+Bedrock now. Pure translator change — no new types, no new
+transport, no kernel API change. Tool-role messages don't yet
+preserve cacheBreakpoint (existing translator flattens to
+string via contentToText) — Q1 deferred. M2.X.11 adds a
+`cacheBreakpoint?:
 LlmCacheBreakpoint` optional field on every LlmContentBlock
 variant (text / image / image_url / document / document_url /
 file_id / tool_use / tool_result — all 8 schemas extended).
@@ -2207,7 +2230,11 @@ covers M2.X.11 (cacheBreakpoint field on LlmContentBlock +
 Anthropic prompt caching — additive optional field on all
 8 block variants; Anthropic translator emits
 cache_control:{type:"ephemeral"}; OpenAI + Bedrock silently
-drop for tight scope).
+drop for tight scope), ADR-0126 covers M2.X.11.x (Bedrock
+cachePoint translator wiring — single-line append in
+appendKernelBlocks loop; reuses M2.9's BEDROCK_CACHE_POINT
+infrastructure; cross-provider parity now on Anthropic +
+Bedrock).
 
 ## Architecture in 90 seconds
 
@@ -3394,7 +3421,14 @@ wrapper; AnthropicContentBlock union widened; AWS Bedrock's
 separate cachePoint BLOCK type wire shape deferred to a
 follow-up; OpenAI implicit-caching path silently drops the
 field; long-context chat workloads see ~10x input-cost
-reduction on cache hits).
+reduction on cache hits), ADR-0126 covers Phase 2 M2.X.11.x
+(Bedrock cachePoint translator wiring — closes the Q1 deferred
+from ADR-0125; single-line append in appendKernelBlocks loop
+inserts the shared BEDROCK_CACHE_POINT constant after each
+kernel block with cacheBreakpoint; M2.9's pre-built
+cachePoint infrastructure earns its keep; cross-provider
+parity now on Anthropic + Bedrock for the kernel
+cacheBreakpoint field).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

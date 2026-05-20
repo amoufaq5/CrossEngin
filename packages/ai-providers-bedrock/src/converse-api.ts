@@ -290,6 +290,9 @@ function appendKernelBlocks(
   }
   for (const b of content) {
     out.push(translateKernelBlock(b));
+    if (b.cacheBreakpoint !== undefined) {
+      out.push(BEDROCK_CACHE_POINT);
+    }
   }
 }
 
