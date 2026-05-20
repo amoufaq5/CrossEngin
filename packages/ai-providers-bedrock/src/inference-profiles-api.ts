@@ -218,3 +218,143 @@ function expectString(obj: Record<string, unknown>, key: string): string {
   }
   return v;
 }
+
+export const BEDROCK_INFERENCE_PROFILE_NAME_MAX_LEN = 64;
+export const BEDROCK_INFERENCE_PROFILE_NAME_PATTERN = /^([0-9a-zA-Z][_-]?){1,63}$/;
+export const BEDROCK_INFERENCE_PROFILE_DESCRIPTION_MAX_LEN = 200;
+export const BEDROCK_INFERENCE_PROFILE_DESCRIPTION_PATTERN = /^([0-9a-zA-Z][ _-]?)+$/;
+export const BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_MAX_LEN = 256;
+export const BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_PATTERN = /^[a-zA-Z0-9-]+$/;
+export const BEDROCK_INFERENCE_PROFILE_MAX_TAGS = 200;
+export const BEDROCK_INFERENCE_PROFILE_TAG_KEY_MAX_LEN = 128;
+export const BEDROCK_INFERENCE_PROFILE_TAG_VALUE_MAX_LEN = 256;
+export const BEDROCK_INFERENCE_PROFILE_COPY_FROM_MAX_LEN = 2048;
+
+export interface BedrockInferenceProfileTag {
+  readonly key: string;
+  readonly value: string;
+}
+
+export interface BedrockInferenceProfileModelSource {
+  readonly copyFrom: string;
+}
+
+export interface BedrockCreateInferenceProfileInput {
+  readonly inferenceProfileName: string;
+  readonly modelSource: BedrockInferenceProfileModelSource;
+  readonly description?: string;
+  readonly clientRequestToken?: string;
+  readonly tags?: ReadonlyArray<BedrockInferenceProfileTag>;
+}
+
+export interface BedrockCreateInferenceProfileResponse {
+  readonly inferenceProfileArn: string;
+  readonly status: BedrockInferenceProfileStatus;
+}
+
+export function buildCreateInferenceProfileBody(
+  input: BedrockCreateInferenceProfileInput,
+): string {
+  if (
+    input.inferenceProfileName.length < 1 ||
+    input.inferenceProfileName.length > BEDROCK_INFERENCE_PROFILE_NAME_MAX_LEN ||
+    !BEDROCK_INFERENCE_PROFILE_NAME_PATTERN.test(input.inferenceProfileName)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createInferenceProfile: invalid inferenceProfileName '${input.inferenceProfileName}'`,
+    });
+  }
+  if (
+    input.modelSource.copyFrom.length < 1 ||
+    input.modelSource.copyFrom.length > BEDROCK_INFERENCE_PROFILE_COPY_FROM_MAX_LEN
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createInferenceProfile: modelSource.copyFrom length must be in [1, ${BEDROCK_INFERENCE_PROFILE_COPY_FROM_MAX_LEN.toString()}], got ${input.modelSource.copyFrom.length.toString()}`,
+    });
+  }
+  if (input.description !== undefined) {
+    if (
+      input.description.length < 1 ||
+      input.description.length > BEDROCK_INFERENCE_PROFILE_DESCRIPTION_MAX_LEN ||
+      !BEDROCK_INFERENCE_PROFILE_DESCRIPTION_PATTERN.test(input.description)
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createInferenceProfile: invalid description`,
+      });
+    }
+  }
+  if (input.clientRequestToken !== undefined) {
+    if (
+      input.clientRequestToken.length < 1 ||
+      input.clientRequestToken.length >
+        BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_MAX_LEN ||
+      !BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_PATTERN.test(
+        input.clientRequestToken,
+      )
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createInferenceProfile: invalid clientRequestToken`,
+      });
+    }
+  }
+  if (input.tags !== undefined) {
+    if (input.tags.length > BEDROCK_INFERENCE_PROFILE_MAX_TAGS) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createInferenceProfile: tags count must be ≤ ${BEDROCK_INFERENCE_PROFILE_MAX_TAGS.toString()}, got ${input.tags.length.toString()}`,
+      });
+    }
+    for (const tag of input.tags) {
+      if (
+        tag.key.length < 1 ||
+        tag.key.length > BEDROCK_INFERENCE_PROFILE_TAG_KEY_MAX_LEN
+      ) {
+        throw new BedrockError({
+          kind: "invalid_request_error",
+          message: `createInferenceProfile: tag key length must be in [1, ${BEDROCK_INFERENCE_PROFILE_TAG_KEY_MAX_LEN.toString()}]`,
+        });
+      }
+      if (tag.value.length > BEDROCK_INFERENCE_PROFILE_TAG_VALUE_MAX_LEN) {
+        throw new BedrockError({
+          kind: "invalid_request_error",
+          message: `createInferenceProfile: tag value length must be ≤ ${BEDROCK_INFERENCE_PROFILE_TAG_VALUE_MAX_LEN.toString()}`,
+        });
+      }
+    }
+  }
+  const body: Record<string, unknown> = {
+    inferenceProfileName: input.inferenceProfileName,
+    modelSource: input.modelSource,
+  };
+  if (input.description !== undefined) body["description"] = input.description;
+  if (input.clientRequestToken !== undefined) {
+    body["clientRequestToken"] = input.clientRequestToken;
+  }
+  if (input.tags !== undefined) body["tags"] = input.tags;
+  return JSON.stringify(body);
+}
+
+export function parseCreateInferenceProfileResponse(
+  raw: unknown,
+): BedrockCreateInferenceProfileResponse {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "createInferenceProfile: response is not a JSON object",
+    });
+  }
+  const j = raw as Record<string, unknown>;
+  const inferenceProfileArn = expectString(j, "inferenceProfileArn");
+  const status = j["status"];
+  if (!isBedrockInferenceProfileStatus(status)) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: `createInferenceProfile: unknown status '${String(status)}'`,
+    });
+  }
+  return { inferenceProfileArn, status };
+}

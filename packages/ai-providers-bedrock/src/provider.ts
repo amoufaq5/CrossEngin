@@ -77,9 +77,13 @@ import {
   type BedrockListImportedModelsOptions,
 } from "./imported-models-api.js";
 import {
+  buildCreateInferenceProfileBody,
   buildInferenceProfileListQuery,
+  parseCreateInferenceProfileResponse,
   parseInferenceProfileDetail,
   parseInferenceProfileListResponse,
+  type BedrockCreateInferenceProfileInput,
+  type BedrockCreateInferenceProfileResponse,
   type BedrockInferenceProfileDetail,
   type BedrockInferenceProfileListResponse,
   type BedrockListInferenceProfilesOptions,
@@ -883,6 +887,27 @@ export class BedrockProvider implements LlmProvider {
     }
     const path = `/inference-profiles/${encodeURIComponent(profileIdentifier)}`;
     await this.signedControlPlaneDelete({ path });
+  }
+
+  async createInferenceProfile(
+    input: BedrockCreateInferenceProfileInput,
+  ): Promise<BedrockCreateInferenceProfileResponse> {
+    const bodyStr = buildCreateInferenceProfileBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const text = await this.signedControlPlanePost({
+      path: "/inference-profiles",
+      body,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `createInferenceProfile: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseCreateInferenceProfileResponse(raw);
   }
 
   async listInferenceProfiles(

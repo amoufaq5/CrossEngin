@@ -6,12 +6,15 @@ import {
   BEDROCK_INFERENCE_PROFILE_LIST_MAX_RESULTS_MIN,
   BEDROCK_INFERENCE_PROFILE_STATUSES,
   BEDROCK_INFERENCE_PROFILE_TYPES,
+  buildCreateInferenceProfileBody,
   buildInferenceProfileListQuery,
   isBedrockInferenceProfileStatus,
   isBedrockInferenceProfileType,
+  parseCreateInferenceProfileResponse,
   parseInferenceProfileDetail,
   parseInferenceProfileListResponse,
   parseInferenceProfileSummary,
+  type BedrockCreateInferenceProfileInput,
 } from "./inference-profiles-api.js";
 
 describe("BEDROCK_INFERENCE_PROFILE enums", () => {
@@ -314,5 +317,183 @@ describe("parseInferenceProfileDetail", () => {
 
   it("rejects non-object input", () => {
     expect(() => parseInferenceProfileDetail(null)).toThrow(/not an object/);
+  });
+});
+
+describe("buildCreateInferenceProfileBody (M2.X.5.aa.z.23)", () => {
+  function valid(
+    overrides: Partial<BedrockCreateInferenceProfileInput> = {},
+  ): BedrockCreateInferenceProfileInput {
+    return {
+      inferenceProfileName: "my-app-profile",
+      modelSource: {
+        copyFrom:
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+      },
+      ...overrides,
+    };
+  }
+
+  it("emits required fields verbatim into JSON", () => {
+    const body = JSON.parse(buildCreateInferenceProfileBody(valid())) as Record<
+      string,
+      unknown
+    >;
+    expect(body["inferenceProfileName"]).toBe("my-app-profile");
+    expect(body["modelSource"]).toEqual({
+      copyFrom:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+    });
+  });
+
+  it("omits optional fields when not provided", () => {
+    const body = JSON.parse(buildCreateInferenceProfileBody(valid())) as Record<
+      string,
+      unknown
+    >;
+    expect("description" in body).toBe(false);
+    expect("clientRequestToken" in body).toBe(false);
+    expect("tags" in body).toBe(false);
+  });
+
+  it("emits description when provided", () => {
+    const body = JSON.parse(
+      buildCreateInferenceProfileBody(valid({ description: "for tenant A" })),
+    ) as Record<string, unknown>;
+    expect(body["description"]).toBe("for tenant A");
+  });
+
+  it("emits clientRequestToken + tags when provided", () => {
+    const body = JSON.parse(
+      buildCreateInferenceProfileBody(
+        valid({
+          clientRequestToken: "req-abc-123",
+          tags: [{ key: "env", value: "prod" }],
+        }),
+      ),
+    ) as Record<string, unknown>;
+    expect(body["clientRequestToken"]).toBe("req-abc-123");
+    expect(body["tags"]).toEqual([{ key: "env", value: "prod" }]);
+  });
+
+  it("rejects blank inferenceProfileName", () => {
+    expect(() => buildCreateInferenceProfileBody(valid({ inferenceProfileName: "" }))).toThrow(
+      BedrockError,
+    );
+  });
+
+  it("rejects inferenceProfileName > 64 chars", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ inferenceProfileName: "a".repeat(65) })),
+    ).toThrow(/invalid inferenceProfileName/);
+  });
+
+  it("rejects inferenceProfileName violating the pattern", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ inferenceProfileName: "with spaces" })),
+    ).toThrow(/invalid inferenceProfileName/);
+  });
+
+  it("rejects blank modelSource.copyFrom", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ modelSource: { copyFrom: "" } })),
+    ).toThrow(/modelSource\.copyFrom/);
+  });
+
+  it("rejects modelSource.copyFrom > 2048 chars", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(
+        valid({ modelSource: { copyFrom: "a".repeat(2049) } }),
+      ),
+    ).toThrow(/modelSource\.copyFrom/);
+  });
+
+  it("rejects description > 200 chars", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ description: "a".repeat(201) })),
+    ).toThrow(/invalid description/);
+  });
+
+  it("rejects description violating the pattern (e.g., punctuation)", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ description: "has, comma" })),
+    ).toThrow(/invalid description/);
+  });
+
+  it("rejects clientRequestToken > 256 chars", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ clientRequestToken: "a".repeat(257) })),
+    ).toThrow(/clientRequestToken/);
+  });
+
+  it("rejects clientRequestToken violating the pattern", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ clientRequestToken: "has spaces" })),
+    ).toThrow(/clientRequestToken/);
+  });
+
+  it("rejects more than 200 tags", () => {
+    const tags = Array.from({ length: 201 }, (_, i) => ({
+      key: `k${i.toString()}`,
+      value: "v",
+    }));
+    expect(() => buildCreateInferenceProfileBody(valid({ tags }))).toThrow(
+      /tags count/,
+    );
+  });
+
+  it("rejects a tag with key longer than 128 chars", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(
+        valid({ tags: [{ key: "a".repeat(129), value: "v" }] }),
+      ),
+    ).toThrow(/tag key length/);
+  });
+
+  it("rejects a tag with value longer than 256 chars", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(
+        valid({ tags: [{ key: "k", value: "a".repeat(257) }] }),
+      ),
+    ).toThrow(/tag value length/);
+  });
+
+  it("rejects a tag with empty key", () => {
+    expect(() =>
+      buildCreateInferenceProfileBody(valid({ tags: [{ key: "", value: "v" }] })),
+    ).toThrow(/tag key length/);
+  });
+});
+
+describe("parseCreateInferenceProfileResponse (M2.X.5.aa.z.23)", () => {
+  it("parses inferenceProfileArn + status", () => {
+    const r = parseCreateInferenceProfileResponse({
+      inferenceProfileArn:
+        "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc",
+      status: "ACTIVE",
+    });
+    expect(r.inferenceProfileArn).toContain("application-inference-profile/abc");
+    expect(r.status).toBe("ACTIVE");
+  });
+
+  it("rejects unknown status", () => {
+    expect(() =>
+      parseCreateInferenceProfileResponse({
+        inferenceProfileArn: "arn:aws:bedrock:us-east-1:123:application-inference-profile/x",
+        status: "PENDING",
+      }),
+    ).toThrow(/unknown status/);
+  });
+
+  it("rejects missing inferenceProfileArn", () => {
+    expect(() =>
+      parseCreateInferenceProfileResponse({ status: "ACTIVE" }),
+    ).toThrow(/missing required string field/);
+  });
+
+  it("rejects non-object input", () => {
+    expect(() => parseCreateInferenceProfileResponse(null)).toThrow(
+      /not a JSON object/,
+    );
   });
 });

@@ -21,15 +21,58 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 124 meta-schema tables, 7,670 tests**,
-all green, no type errors. M6.7.z adds the FOURTH ai-router-
+**56 packages + 1 app, 124 meta-schema tables, 7,704 tests**,
+all green, no type errors. M2.X.5.aa.z.23 closes ADR-0138 Q3
+by adding `createInferenceProfile(input)` to BedrockProvider
+— the 2nd CREATE on the Bedrock control plane (after
+createBatch from M2.X.5.aa.z.6 / ADR-0108 and
+createModelCustomizationJob from M2.X.5.aa.z.20 / ADR-0131).
+Completes the full APPLICATION-inference-profile lifecycle on
+the substrate: create (M2.X.5.aa.z.23 this) + list (M2.X.5.aa.z.9)
++ get (M2.X.5.aa.z.10) + delete (M2.X.5.aa.z.22). AWS contract
+faithfully preserved: required fields = inferenceProfileName
+(pattern ^([0-9a-zA-Z][_-]?){1,63}$, length [1, 64]) +
+modelSource.copyFrom (length [1, 2048] no pattern — accepts
+foundation-model ARNs OR system-inference-profile ARNs); optional
+fields = description (pattern ^([0-9a-zA-Z][ _-]?)+$, length
+[1, 200]), clientRequestToken (pattern ^[a-zA-Z0-9-]+$, length
+[1, 256] for AWS idempotency), tags (max 200, per-tag key
+length [1, 128] + value length [0, 256]). modelSource is a
+structured object (only `copyFrom` variant today) — future AWS
+expansion (e.g., hypothetical routingConfig) is an additive
+type extension. NO pre-flight guard needed (vs delete which
+needs one): AWS only creates type=APPLICATION via this endpoint,
+operators can't accidentally create a SYSTEM profile. Response
+is minimal — `{inferenceProfileArn, status}`; operators
+wanting full detail call getInferenceProfile next.
+Boundary validation in pure `buildCreateInferenceProfileBody`
+enforces all 8 documented constraints BEFORE fetch (saves
+cost + load). Symmetric error propagation: 404 →
+not_found_error (copyFrom ARN missing), 409 →
+conflict_error (name collision), 403 → permission_error, 429
+→ rate_limit_error. clientRequestToken supports AWS's
+idempotency contract: repeated POSTs with same token return
+same ARN without re-creating. 34 new tests: 19 in
+inference-profiles-api.test.ts (body shape happy path,
+optional-field threading, all 8 boundary-validation rejections
+across name + copyFrom + description + clientRequestToken +
+tags-count + tag-key-length + tag-value-length + empty-tag-key,
+response parsing happy + unknown status + missing arn +
+non-object), 15 in provider.test.ts (POST shape + JSON body +
+URL + headers + Sig v4, body bytes contain required fields,
+returns parsed shape, control-plane-not-runtime host,
+identifier-blank pre-flight × 2 cases, 409/404/403/429 error
+propagation, optional fields thread through, parse failure as
+api_error, network errors). Bedrock control plane: 18 read +
+2 stop + 2 create + 4 delete = 26 operations. M6.7.z adds the
+FOURTH ai-router-
 pg substrate: `RouterInstrumentation` interface +
 META_LLM_CALL_TRACES table (124th) +
 PostgresRouterInstrumentation adapter. Closes three deferred
@@ -2808,7 +2851,13 @@ milestone; pattern parity with M8 WorkflowInstrumentation;
 attempt granularity with willFallback derived; 124th table
 audit-optimized + tenant-RLS; ai-router-pg adapter set now
 at 4 substrates — cost-windows + cost-ceilings + latency-
-samples + call-traces).
+samples + call-traces), ADR-0142 covers M2.X.5.aa.z.23
+(Bedrock createInferenceProfile — closes ADR-0138 Q3 —
+2nd CREATE on Bedrock control plane; completes full
+APPLICATION lifecycle on the substrate (create + list + get
++ delete); pure boundary validation for 8 documented
+constraints; modelSource discriminated union forward-compat;
+clientRequestToken hooks AWS's idempotency contract).
 
 ## Architecture in 90 seconds
 
@@ -4204,7 +4253,29 @@ verbatim; ai-router-pg adapter set now at 4 substrates —
 cost-windows + cost-ceilings + latency-samples + call-
 traces — router is fully observable; storage ~200 bytes/row;
 embed-path instrumentation + correlationId field + ceiling-
-resolution traces all listed as additive future Qs).
+resolution traces all listed as additive future Qs),
+ADR-0142 covers Phase 2 M2.X.5.aa.z.23 (Bedrock
+createInferenceProfile APPLICATION-only via copyFrom —
+closes ADR-0138 Q3; 2nd CREATE on the Bedrock control plane
+after createBatch (ADR-0108) and createModelCustomizationJob
+(ADR-0131); completes the full APPLICATION-inference-profile
+lifecycle on the substrate — create + list + get + delete;
+AWS contract preserved with required inferenceProfileName +
+modelSource.copyFrom and optional description +
+clientRequestToken + tags; pure boundary validation enforces
+8 documented constraints (name length+pattern, copyFrom
+length, description length+pattern, clientRequestToken
+length+pattern, tags count, tag key+value lengths) BEFORE
+fetch; modelSource is a structured object so future AWS
+expansion (hypothetical routingConfig) is an additive type
+extension; NO pre-flight guard needed unlike delete (AWS
+only creates APPLICATION via this endpoint, no SYSTEM
+ambiguity); response is minimal — `{inferenceProfileArn,
+status}` — operators wanting full detail call getInferenceProfile
+next; clientRequestToken hooks AWS's idempotency contract;
+symmetric error propagation 404/409/403/429; Bedrock control
+plane now has 18 read + 2 stop + 2 create + 4 delete = 26
+operations).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

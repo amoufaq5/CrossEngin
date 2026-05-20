@@ -4441,6 +4441,213 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
   });
 });
 
+describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
+  function validInput() {
+    return {
+      inferenceProfileName: "my-app-profile",
+      modelSource: {
+        copyFrom:
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+      },
+    };
+  }
+
+  function buildSuccessFetch(capture?: FetchCapture): FetchLike {
+    return buildFetch({
+      capture,
+      ok: true,
+      status: 201,
+      text: JSON.stringify({
+        inferenceProfileArn:
+          "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc",
+        status: "ACTIVE",
+      }),
+    });
+  }
+
+  it("POSTs control-plane /inference-profiles with the JSON body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createInferenceProfile(validInput());
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/inference-profiles");
+    expect(capture.init?.method).toBe("POST");
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("includes inferenceProfileName + modelSource in the body bytes", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createInferenceProfile(validInput());
+    const bodyStr = new TextDecoder().decode(capture.init!.body);
+    const body = JSON.parse(bodyStr) as Record<string, unknown>;
+    expect(body["inferenceProfileName"]).toBe("my-app-profile");
+    expect(body["modelSource"]).toEqual(validInput().modelSource);
+  });
+
+  it("returns the parsed inferenceProfileArn + status on success", async () => {
+    const provider = build({ fetch: buildSuccessFetch() });
+    const result = await provider.createInferenceProfile(validInput());
+    expect(result.inferenceProfileArn).toContain(
+      "application-inference-profile/abc",
+    );
+    expect(result.status).toBe("ACTIVE");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createInferenceProfile(validInput());
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates inferenceProfileName BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createInferenceProfile({
+        ...validInput(),
+        inferenceProfileName: "",
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates modelSource.copyFrom BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createInferenceProfile({
+        ...validInput(),
+        modelSource: { copyFrom: "" },
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 409 ConflictException as conflict_error (name already exists)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "profile with this name already exists",
+        }),
+      }),
+    });
+    await expect(
+      provider.createInferenceProfile(validInput()),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 404 as not_found_error (copyFrom ARN doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such source",
+        }),
+      }),
+    });
+    await expect(
+      provider.createInferenceProfile(validInput()),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.createInferenceProfile(validInput()),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.createInferenceProfile(validInput()),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("threads description + clientRequestToken + tags into the body when provided", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createInferenceProfile({
+      ...validInput(),
+      description: "for tenant A",
+      clientRequestToken: "req-abc-123",
+      tags: [{ key: "env", value: "prod" }],
+    });
+    const bodyStr = new TextDecoder().decode(capture.init!.body);
+    const body = JSON.parse(bodyStr) as Record<string, unknown>;
+    expect(body["description"]).toBe("for tenant A");
+    expect(body["clientRequestToken"]).toBe("req-abc-123");
+    expect(body["tags"]).toEqual([{ key: "env", value: "prod" }]);
+  });
+
+  it("propagates parse failures as api_error", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 201, text: "not json" }),
+    });
+    await expect(
+      provider.createInferenceProfile(validInput()),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.createInferenceProfile(validInput()),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
