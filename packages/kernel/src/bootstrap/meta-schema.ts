@@ -9216,6 +9216,29 @@ export const META_ARCHITECT_PROPOSALS: TableDefinition = {
   },
 };
 
+export const META_LLM_COST_WINDOWS: TableDefinition = {
+  schema: "meta",
+  name: "llm_cost_windows",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "window_start_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "window_cost_usd",
+      type: "NUMERIC(18,8)",
+      notNull: true,
+      check: "window_cost_usd >= 0",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "llm_cost_windows_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9337,4 +9360,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_MESSAGES,
   META_ARCHITECT_TOOL_INVOCATIONS,
   META_ARCHITECT_PROPOSALS,
+  META_LLM_COST_WINDOWS,
 ];

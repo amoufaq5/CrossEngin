@@ -21,15 +21,48 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,551 tests**,
-all green, no type errors. M6.6.y extends the ai-router's
+**56 packages + 1 app, 121 meta-schema tables, 7,569 tests**,
+all green, no type errors. M6.7 ships the first persisted
+ai-router substrate: `@crossengin/ai-router-pg` package with
+`PostgresCostTracker` (drop-in replacement for
+`InMemoryCostTracker` against the same `CostTracker` interface)
++ `META_LLM_COST_WINDOWS` (121st meta-schema table — one row
+per tenant, natural PK on tenant_id, NUMERIC(18,8) cost
+column, RLS tenant-isolated). Closes ADR-0059's deferred
+cost-tracker persistence Q. Single-row-per-tenant tumbling
+window matches the in-memory contract exactly: when the
+first request arrives after the window expires, the window
+resets to "now"; concurrent recordUsage calls from multiple
+gateway replicas safely increment via atomic UPSERT (ON
+CONFLICT DO UPDATE with a CASE clause that decides
+reset-vs-increment entirely in SQL — single round-trip,
+race-free). TS-side clock injection for testability (same
+shape as InMemoryCostTracker). checkCeiling logic identical
+to InMemoryCostTracker: per-request gate first (no DB hit
+when over per-request cap), window gate second (one SELECT).
+NUMERIC(18,8) precision preserved via ::TEXT cast + Number()
+parse on read. Three workflows unblocked: multi-replica
+gateway cost enforcement (was 3× over-spend before), cross-
+restart durability (was zeroed on recycle), operator
+observability via `SELECT * FROM meta.llm_cost_windows`.
+Established X / X-pg pattern preserved (kernel/kernel-pg,
+workflow-runtime/workflow-runtime-pg, api-gateway-runtime/
+api-gateway-pg, ai-architect/ai-architect-pg, now ai-router/
+ai-router-pg). 18 new tests in cost-tracker.test.ts cover
+getWindow (5 — null + within-window + expired + boundary +
+tenant filter), recordUsage (5 — UPSERT shape + param
+threading + clock injection + default window + CASE branch
+shape), checkCeiling (6 — per-request + no-window-cap + within
++ exceeded + expired-window + per-request-first-gate), and
+2 InMemory-parity tests (NUMERIC string round-trip + shape
+match). M6.6.y extends the ai-router's
 retry / fallback short-circuit list with isNotFoundError —
 closes ADR-0133 Q1, the deferred Q from M6.6.x. One-line
 change in `isRouterRetryable` (router.ts): not-found errors
@@ -2480,7 +2513,12 @@ router special-cases isNotFoundError for retry chain short-
 circuit — closes ADR-0133 Q1 — not-found errors join
 moderation + conflict as terminal in the isRouterRetryable
 gate; identifier mismatches don't benefit from fallback
-because identifiers are provider-scoped).
+because identifiers are provider-scoped), ADR-0135 covers
+M6.7 (PostgresCostTracker — first persisted ai-router
+substrate — closes ADR-0059's deferred cost-tracker
+persistence Q — `@crossengin/ai-router-pg` package +
+META_LLM_COST_WINDOWS table — atomic UPSERT with SQL-side
+expiry CASE — drop-in CostTracker replacement).
 
 ## Architecture in 90 seconds
 
@@ -3748,7 +3786,20 @@ conflict as terminal in isRouterRetryable; identifier
 mismatches don't benefit from fallback because identifiers are
 provider-scoped — OpenAI file_id ≠ Anthropic file ID ≠ Bedrock
 ARN; three classifiers now short-circuit: moderation +
-conflict + not_found; rate_limit fallback path preserved).
+conflict + not_found; rate_limit fallback path preserved),
+ADR-0135 covers Phase 2 M6.7 (PostgresCostTracker — first
+persisted ai-router cost accumulator — closes ADR-0059's
+longest-deferred Q; new `@crossengin/ai-router-pg` package
+follows the established X / X-pg adapter pattern; adds 121st
+meta-schema table META_LLM_COST_WINDOWS with one row per
+tenant — natural PK on tenant_id, NUMERIC(18,8) cost
+precision, RLS tenant-isolated; atomic UPSERT with SQL-side
+expiry CASE makes concurrent recordUsage from multi-replica
+gateways race-free in a single round-trip; tumbling-window
+semantic matches InMemoryCostTracker exactly so the
+substitution is drop-in; closes 3 operator gaps: multi-replica
+under-enforcement, cross-restart zeroing, and dashboard
+observability via `SELECT * FROM meta.llm_cost_windows`).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

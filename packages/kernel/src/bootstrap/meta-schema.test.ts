@@ -117,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 120 tables", () => {
-    expect(META_TABLES).toHaveLength(120);
+  it("contains 121 tables", () => {
+    expect(META_TABLES).toHaveLength(121);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -195,6 +195,7 @@ describe("META_TABLES", () => {
       "legal_holds",
       "lineage_edges",
       "lineage_nodes",
+      "llm_cost_windows",
       "manifests",
       "ml_consent",
       "ml_datasets",
