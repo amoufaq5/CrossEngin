@@ -9357,6 +9357,7 @@ export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
       check:
         "opt_out_reason IS NULL OR (char_length(opt_out_reason) BETWEEN 1 AND 256)",
     },
+    { name: "opt_out_until", type: "TIMESTAMPTZ" },
     { name: "last_pruned_at", type: "TIMESTAMPTZ" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],

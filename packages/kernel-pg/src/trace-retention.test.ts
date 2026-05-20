@@ -628,6 +628,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       enabled: boolean;
       opt_out: boolean;
       opt_out_reason: string | null;
+      opt_out_until: string | null;
       last_pruned_at: string | null;
     }> = {},
   ): Record<string, unknown> {
@@ -638,6 +639,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       enabled: true,
       opt_out: false,
       opt_out_reason: null,
+      opt_out_until: null,
       last_pruned_at: null,
       ...overrides,
     };
@@ -679,6 +681,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       enabled: false,
       optOut: false,
       optOutReason: null,
+      optOutUntil: null,
       lastPrunedAt: "2026-05-20T12:00:00.000Z",
     });
   });
@@ -971,9 +974,8 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       c.sql.startsWith("DELETE FROM meta.workflow_traces"),
     );
     expect(platformDelete?.sql).toContain("opt_out = true");
-    expect(platformDelete?.sql).toContain(
-      "(enabled = true OR opt_out = true)",
-    );
+    expect(platformDelete?.sql).toContain("enabled = true");
+    expect(platformDelete?.sql).toContain("opt_out_until IS NULL OR opt_out_until > now()");
   });
 
   it("previewPrune reports opt-out tenants with status='skipped_opt_out' wouldDeleteCount=0 and issues NO COUNT for that tenant", async () => {
@@ -1042,9 +1044,9 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
         c.sql.includes("COUNT(*)") &&
         c.sql.includes("FROM meta.workflow_traces"),
     );
-    expect(platformCount?.sql).toContain(
-      "(enabled = true OR opt_out = true)",
-    );
+    expect(platformCount?.sql).toContain("enabled = true");
+    expect(platformCount?.sql).toContain("opt_out = true");
+    expect(platformCount?.sql).toContain("opt_out_until IS NULL OR opt_out_until > now()");
   });
 
   it("disabled-and-not-opt-out tenant falls back to platform default (M6.7.zz.tenant baseline preserved)", async () => {
@@ -1175,6 +1177,180 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     expect(tenantResult?.status).toBe("skipped_opt_out");
     expect(tenantResult?.optOutReason).toBe("vip_contract:tenant-xyz");
   });
+
+  describe("opt_out_until expiry semantics (M6.7.zz.tenant.opt-out.expiry)", () => {
+    const NOW_MS = Date.parse("2026-05-20T12:00:00.000Z");
+    const FUTURE_ISO = "2027-01-01T00:00:00.000Z";
+    const PAST_ISO = "2025-01-01T00:00:00.000Z";
+
+    it("opt_out with null opt_out_until is treated as indefinite (skipped_opt_out)", async () => {
+      const conn = mockConnection((sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: null,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const results = await r.prune();
+      const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+      expect(tenantResult?.status).toBe("skipped_opt_out");
+    });
+
+    it("opt_out with future opt_out_until is active (skipped_opt_out)", async () => {
+      const conn = mockConnection((sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: FUTURE_ISO,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const results = await r.prune();
+      const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+      expect(tenantResult?.status).toBe("skipped_opt_out");
+      expect(tenantResult?.optOutUntil).toBe(FUTURE_ISO);
+    });
+
+    it("opt_out with past opt_out_until is expired (skipped_opt_out_expired) and issues NO DELETE for that tenant", async () => {
+      const capture: Capture[] = [];
+      const conn = mockConnection(
+        (sql) => {
+          if (
+            sql.startsWith("SELECT") &&
+            sql.includes("FROM meta.tenant_retention_policies")
+          ) {
+            return {
+              rows: [
+                tenantPolicyRow(TENANT_A, "workflow_traces", {
+                  opt_out: true,
+                  enabled: false,
+                  opt_out_until: PAST_ISO,
+                  opt_out_reason: "legal_hold:case#42",
+                }),
+              ],
+              rowCount: 1,
+            };
+          }
+          return { rows: [], rowCount: 0 };
+        },
+        capture,
+      );
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const results = await r.prune();
+      const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+      expect(tenantResult?.status).toBe("skipped_opt_out_expired");
+      expect(tenantResult?.optOutUntil).toBe(PAST_ISO);
+      expect(tenantResult?.optOutReason).toBe("legal_hold:case#42");
+      const tenantDelete = capture.find(
+        (c) =>
+          c.sql.startsWith("DELETE FROM meta.workflow_traces") &&
+          c.sql.includes("tenant_id = $1"),
+      );
+      expect(tenantDelete).toBeUndefined();
+    });
+
+    it("opt_out_until exactly at clock now is treated as expired (boundary case)", async () => {
+      const NOW_ISO = "2026-05-20T12:00:00.000Z";
+      const conn = mockConnection((sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: NOW_ISO,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const results = await r.prune();
+      const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+      expect(tenantResult?.status).toBe("skipped_opt_out_expired");
+    });
+
+    it("previewPrune surfaces skipped_opt_out_expired for expired opt-outs", async () => {
+      const conn = mockConnection((sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: PAST_ISO,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const results = await r.previewPrune();
+      const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+      expect(tenantResult?.status).toBe("skipped_opt_out_expired");
+      expect(tenantResult?.optOutUntil).toBe(PAST_ISO);
+    });
+
+    it("listTenantPolicies SELECT includes opt_out_until column", async () => {
+      const capture: Capture[] = [];
+      const conn = mockConnection(
+        () => ({ rows: [], rowCount: 0 }),
+        capture,
+      );
+      const r = new PostgresTraceRetention({ conn });
+      await r.listTenantPolicies();
+      expect(capture[0]?.sql).toContain("opt_out_until");
+    });
+
+    it("listTenantPolicies maps opt_out_until to optOutUntil field", async () => {
+      const conn = mockConnection(() => ({
+        rows: [
+          tenantPolicyRow(TENANT_A, "workflow_traces", {
+            opt_out: true,
+            enabled: false,
+            opt_out_until: FUTURE_ISO,
+          }),
+        ],
+        rowCount: 1,
+      }));
+      const r = new PostgresTraceRetention({ conn });
+      const policies = await r.listTenantPolicies();
+      expect(policies[0]?.optOutUntil).toBe(FUTURE_ISO);
+    });
+  });
 });
 
 describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)", () => {
@@ -1188,6 +1364,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       enabled: boolean;
       opt_out: boolean;
       opt_out_reason: string | null;
+      opt_out_until: string | null;
       last_pruned_at: string | null;
     }> = {},
   ): Record<string, unknown> {
@@ -1198,6 +1375,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       enabled: true,
       opt_out: false,
       opt_out_reason: null,
+      opt_out_until: null,
       last_pruned_at: null,
       ...overrides,
     };
@@ -1456,6 +1634,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       enabled: false,
       tenantId: TENANT_A,
       optOutReason: null,
+      optOutUntil: null,
     });
   });
 
@@ -1586,5 +1765,163 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       c.sql.includes("FROM meta.tenant_retention_policies"),
     );
     expect(tenantCall?.sql).toContain("opt_out_reason");
+  });
+
+  describe("opt_out_until expiry (M6.7.zz.tenant.opt-out.expiry)", () => {
+    const NOW_MS = Date.parse("2026-05-20T12:00:00.000Z");
+    const FUTURE_ISO = "2027-01-01T00:00:00.000Z";
+    const PAST_ISO = "2025-01-01T00:00:00.000Z";
+
+    it("active opt_out with future opt_out_until returns tenant_opt_out with optOutUntil", async () => {
+      const conn = mockConnection((sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: FUTURE_ISO,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+      if (result.source === "tenant_opt_out") {
+        expect(result.optOutUntil).toBe(FUTURE_ISO);
+      } else {
+        throw new Error("expected source='tenant_opt_out'");
+      }
+    });
+
+    it("expired opt_out falls through to platform when platform policy exists", async () => {
+      const conn = mockConnection((sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: PAST_ISO,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("FROM meta.retention_policies")) {
+          return {
+            rows: [policyRow("workflow_traces", { retention_days: 90 })],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+      expect(result.source).toBe("platform");
+      if (result.source === "platform") {
+        expect(result.retentionDays).toBe(90);
+      }
+    });
+
+    it("expired opt_out with no platform policy returns source='none'", async () => {
+      const conn = mockConnection((sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: PAST_ISO,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+      expect(result.source).toBe("none");
+    });
+
+    it("null opt_out_until is treated as indefinite (active)", async () => {
+      const conn = mockConnection((sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: null,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+      const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+      const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+      expect(result.source).toBe("tenant_opt_out");
+      if (result.source === "tenant_opt_out") {
+        expect(result.optOutUntil).toBeNull();
+      }
+    });
+
+    it("clock injection drives expiry decision (same row resolves differently across clocks)", async () => {
+      const handler = (sql: string) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const beforeExpiry = Date.parse("2026-05-20T12:00:00.000Z");
+      const afterExpiry = Date.parse("2026-07-01T12:00:00.000Z");
+      const rBefore = new PostgresTraceRetention({
+        conn: mockConnection(handler),
+        clock: () => beforeExpiry,
+      });
+      const rAfter = new PostgresTraceRetention({
+        conn: mockConnection(handler),
+        clock: () => afterExpiry,
+      });
+      const resultBefore = await rBefore.effectiveRetention(
+        TENANT_A,
+        "workflow_traces",
+      );
+      const resultAfter = await rAfter.effectiveRetention(
+        TENANT_A,
+        "workflow_traces",
+      );
+      expect(resultBefore.source).toBe("tenant_opt_out");
+      expect(resultAfter.source).toBe("none");
+    });
+
+    it("effectiveRetention SELECT includes opt_out_until column", async () => {
+      const capture: Capture[] = [];
+      const conn = mockConnection(
+        () => ({ rows: [], rowCount: 0 }),
+        capture,
+      );
+      const r = new PostgresTraceRetention({ conn });
+      await r.effectiveRetention(TENANT_A, "workflow_traces");
+      const tenantCall = capture.find((c) =>
+        c.sql.includes("FROM meta.tenant_retention_policies"),
+      );
+      expect(tenantCall?.sql).toContain("opt_out_until");
+    });
   });
 });

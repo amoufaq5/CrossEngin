@@ -34,6 +34,7 @@ export interface TenantRetentionPolicyRow {
   readonly enabled: boolean;
   readonly optOut: boolean;
   readonly optOutReason: string | null;
+  readonly optOutUntil: string | null;
   readonly lastPrunedAt: string | null;
 }
 
@@ -41,6 +42,7 @@ export type RetentionRunStatus =
   | "pruned"
   | "skipped_disabled"
   | "skipped_opt_out"
+  | "skipped_opt_out_expired"
   | "skipped_unknown_table";
 
 export interface RetentionRunResult {
@@ -51,12 +53,14 @@ export interface RetentionRunResult {
   readonly deletedCount: number;
   readonly cutoffMs: number | null;
   readonly optOutReason?: string | null;
+  readonly optOutUntil?: string | null;
 }
 
 export type RetentionPreviewStatus =
   | "previewed"
   | "skipped_disabled"
   | "skipped_opt_out"
+  | "skipped_opt_out_expired"
   | "skipped_unknown_table";
 
 export interface RetentionPreviewResult {
@@ -67,6 +71,7 @@ export interface RetentionPreviewResult {
   readonly wouldDeleteCount: number;
   readonly cutoffMs: number | null;
   readonly optOutReason?: string | null;
+  readonly optOutUntil?: string | null;
 }
 
 export type EffectiveRetentionResolution =
@@ -82,6 +87,7 @@ export type EffectiveRetentionResolution =
       readonly enabled: false;
       readonly tenantId: string;
       readonly optOutReason: string | null;
+      readonly optOutUntil: string | null;
     }
   | {
       readonly source: "platform";
@@ -105,6 +111,7 @@ interface RawTenantPolicyRow extends RawPolicyRow {
   readonly tenant_id: string;
   readonly opt_out: boolean;
   readonly opt_out_reason: string | null;
+  readonly opt_out_until: string | null;
 }
 
 export class PostgresTraceRetention {
@@ -132,7 +139,7 @@ export class PostgresTraceRetention {
 
   async listTenantPolicies(): Promise<ReadonlyArray<TenantRetentionPolicyRow>> {
     const result = await this.conn.query<RawTenantPolicyRow>(
-      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, last_pruned_at
+      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, opt_out_until, last_pruned_at
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        ORDER BY table_name ASC, tenant_id ASC`,
     );
@@ -143,8 +150,15 @@ export class PostgresTraceRetention {
       enabled: r.enabled,
       optOut: r.opt_out,
       optOutReason: r.opt_out_reason,
+      optOutUntil: r.opt_out_until,
       lastPrunedAt: r.last_pruned_at,
     }));
+  }
+
+  private isOptOutActive(policy: TenantRetentionPolicyRow, nowMs: number): boolean {
+    if (!policy.optOut) return false;
+    if (policy.optOutUntil === null) return true;
+    return Date.parse(policy.optOutUntil) > nowMs;
   }
 
   async prune(): Promise<ReadonlyArray<RetentionRunResult>> {
@@ -155,14 +169,16 @@ export class PostgresTraceRetention {
 
     for (const policy of tenantPolicies) {
       if (policy.optOut) {
+        const active = this.isOptOutActive(policy, now);
         results.push({
           tableName: policy.tableName,
           tenantId: policy.tenantId,
-          status: "skipped_opt_out",
+          status: active ? "skipped_opt_out" : "skipped_opt_out_expired",
           retentionDays: policy.retentionDays,
           deletedCount: 0,
           cutoffMs: null,
           optOutReason: policy.optOutReason,
+          optOutUntil: policy.optOutUntil,
         });
         continue;
       }
@@ -241,7 +257,10 @@ export class PostgresTraceRetention {
              WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
                AND tenant_id NOT IN (
                  SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
-                 WHERE table_name = $2 AND (enabled = true OR opt_out = true)
+                 WHERE table_name = $2
+                   AND (enabled = true
+                        OR (opt_out = true
+                            AND (opt_out_until IS NULL OR opt_out_until > now())))
                )`,
             [cutoffMs, policy.tableName],
           )
@@ -276,14 +295,16 @@ export class PostgresTraceRetention {
 
     for (const policy of tenantPolicies) {
       if (policy.optOut) {
+        const active = this.isOptOutActive(policy, now);
         results.push({
           tableName: policy.tableName,
           tenantId: policy.tenantId,
-          status: "skipped_opt_out",
+          status: active ? "skipped_opt_out" : "skipped_opt_out_expired",
           retentionDays: policy.retentionDays,
           wouldDeleteCount: 0,
           cutoffMs: null,
           optOutReason: policy.optOutReason,
+          optOutUntil: policy.optOutUntil,
         });
         continue;
       }
@@ -359,7 +380,10 @@ export class PostgresTraceRetention {
              WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
                AND tenant_id NOT IN (
                  SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
-                 WHERE table_name = $2 AND (enabled = true OR opt_out = true)
+                 WHERE table_name = $2
+                   AND (enabled = true
+                        OR (opt_out = true
+                            AND (opt_out_until IS NULL OR opt_out_until > now())))
                )`,
             [cutoffMs, policy.tableName],
           )
@@ -387,7 +411,7 @@ export class PostgresTraceRetention {
     tableName: string,
   ): Promise<EffectiveRetentionResolution> {
     const tenantResult = await this.conn.query<RawTenantPolicyRow>(
-      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, last_pruned_at
+      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, opt_out_until, last_pruned_at
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        WHERE tenant_id = $1 AND table_name = $2`,
       [tenantId, tableName],
@@ -395,13 +419,19 @@ export class PostgresTraceRetention {
     const tenantRow = tenantResult.rows[0];
     if (tenantRow !== undefined) {
       if (tenantRow.opt_out) {
-        return {
-          source: "tenant_opt_out",
-          retentionDays: null,
-          enabled: false,
-          tenantId: tenantRow.tenant_id,
-          optOutReason: tenantRow.opt_out_reason,
-        };
+        const active =
+          tenantRow.opt_out_until === null ||
+          Date.parse(tenantRow.opt_out_until) > this.clock();
+        if (active) {
+          return {
+            source: "tenant_opt_out",
+            retentionDays: null,
+            enabled: false,
+            tenantId: tenantRow.tenant_id,
+            optOutReason: tenantRow.opt_out_reason,
+            optOutUntil: tenantRow.opt_out_until,
+          };
+        }
       }
       if (tenantRow.enabled) {
         return {

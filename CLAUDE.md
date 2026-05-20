@@ -21,15 +21,95 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,096 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.reason
+**56 packages + 1 app, 128 meta-schema tables, 8,109 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.expiry
+closes ADR-0160 Q2 by adding `opt_out_until TIMESTAMPTZ`
+NULLABLE column to META_TENANT_RETENTION_POLICIES with no
+CHECK on the date value itself. Opt-outs are now self-
+managing: the resolver / prune / preview check expiry at
+read time using the application clock (in the adapter) and
+PG's `now()` (in the SQL NOT IN subquery). Active opt-outs
+still skip pruning entirely; expired opt-outs fall through
+to platform-default — automatic at the expiry instant, no
+operator intervention. Pain solved: forgotten opt-outs
+(operator flips opt_out=true for a 6-month legal hold and
+forgets to lift; substrate now auto-lifts at opt_out_until),
+calendar-driven holds (legal teams stipulate end dates;
+operators record the exact date), audit reports lagging
+reality (dashboards no longer show forever-expired opt-outs
+as active), compliance theater (data persists past the legal
+end-of-hold creating worse posture). Semantic: opt_out=false
+→ no opt-out regardless; opt_out=true + opt_out_until=NULL
+→ indefinite; opt_out=true + opt_out_until > now → active;
+opt_out=true + opt_out_until <= now → expired. Expired rows
+are NOT auto-deleted — they persist as audit trail. Operators
+query `WHERE opt_out = true AND opt_out_until < now()` to
+find expired rows and decide to clear / extend / convert.
+EffectiveRetentionResolution tenant_opt_out variant gains
+required optOutUntil: string | null field. Resolver only
+emits tenant_opt_out when active; expired falls through to
+enabled check (false per CHECK constraint) then to platform-
+default — self-healing at expiry crossings. New status
+"skipped_opt_out_expired" added to RetentionRunStatus +
+RetentionPreviewStatus enums; per-tenant iteration picks
+status active ? "skipped_opt_out" : "skipped_opt_out_expired"
+so operators auditing prune runs see expirations distinctly
+from genuinely-disabled rows. Platform-default DELETE +
+previewPrune COUNT NOT IN subqueries widen from
+`(enabled OR opt_out)` to `(enabled OR (opt_out AND
+(opt_out_until IS NULL OR opt_out_until > now())))` —
+expired opt-outs are NOT excluded so platform sweep covers
+their tenant_id's data. Two clock sources by design — adapter
+uses injected clock for testability, SQL uses PG `now()` to
+avoid parameter-shape changes; sub-second drift acceptable
+for day-grained retention semantics; operators NTP-sync in
+practice. Schema choices: NULLABLE not NOT NULL since most
+opt-outs are indefinite (legal hold of unknown duration, VIP
+contract until customer revocation); no CHECK on date value
+since `> created_at` forces future-dated and `> now()` is
+nonsensical at INSERT-only evaluation; no CHECK tying
+opt_out_until to opt_out=true since operators may pre-stage
+expiry before flipping opt_out (mirrors ADR-0161 reason
+column decision). Boundary case: opt_out_until == now() is
+treated as expired (strict `>` comparison). Backward
+compatible additive schema — existing rows get opt_out_until
+NULL by default; resolver / prune treat NULL as indefinite
+preserving M6.7.zz.tenant.opt-out semantics. Rejected
+alternatives: TIMESTAMP not TIMESTAMPTZ (timezone ambiguity),
+PG trigger auto-clearing opt_out on expiry (destroys
+historical audit signal + implementation complexity),
+INTERVAL duration not endpoint (relative-to-what?
+ambiguity), separate
+meta.tenant_retention_opt_out_expirations table (joins
+everywhere; opt_out_until is a property of the opt-out),
+opt_out_indefinite BOOLEAN companion column (NULL already
+encodes "no expiry"), overloading last_pruned_at for
+expiry (path to bugs), PG-side-only resolution (kills
+testability — injected clock pattern established in
+PostgresLatencyTracker etc.). 13 new tests: opt_out + null
+opt_out_until is indefinite (skipped_opt_out), opt_out +
+future opt_out_until is active (skipped_opt_out +
+optOutUntil populated), opt_out + past opt_out_until is
+expired (skipped_opt_out_expired + NO DELETE issued for
+tenant), boundary case opt_out_until == clock now treated
+as expired, previewPrune surfaces skipped_opt_out_expired,
+listTenantPolicies SELECT includes opt_out_until column,
+listTenantPolicies maps opt_out_until to optOutUntil camelCase
+field, effectiveRetention tenant_opt_out variant with future
+opt_out_until populates optOutUntil, expired opt-out falls
+through to platform when platform policy exists, expired
+opt-out + no platform returns none, null opt_out_until
+treated as indefinite/active, clock injection drives expiry
+decision (same row resolves differently across clocks),
+effectiveRetention SELECT includes opt_out_until column.
+M6.7.zz.tenant.opt-out.reason
 closes ADR-0160 Q1 by adding `opt_out_reason TEXT` NULLABLE
 column to META_TENANT_RETENTION_POLICIES with length CHECK
 "opt_out_reason IS NULL OR (char_length(opt_out_reason)
@@ -3947,7 +4027,19 @@ reason to opt_out state — preserves historical context
 on lift-off + supports pre-staged opt-outs; no pattern
 constraint — operator taxonomies vary; informational
 audit context for compliance dashboards + onboarding
-handoff + per-reason metrics).
+handoff + per-reason metrics),
+ADR-0162 covers M6.7.zz.tenant.opt-out.expiry
+(opt_out_until TIMESTAMPTZ NULLABLE column with read-time
+expiry — closes ADR-0160 Q2 — opt-outs auto-expire at the
+resolver / prune / preview clock; new skipped_opt_out_expired
+status distinguishes expirations from genuine disable;
+tenant_opt_out variant gains optOutUntil; SQL NOT IN
+subquery widens from (enabled OR opt_out) to (enabled OR
+(opt_out AND (opt_out_until IS NULL OR opt_out_until > now())));
+two clock sources by design — adapter uses injected clock
+for testability, SQL uses PG now() to avoid parameter-shape
+changes; self-managing legal holds + calendar-driven
+expirations + reduced compliance theater).
 
 ## Architecture in 90 seconds
 
@@ -5436,6 +5528,75 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0162 covers Phase 2 M6.7.zz.tenant.opt-out.expiry
+(opt_out_until TIMESTAMPTZ NULLABLE column with read-time
+expiry semantics — closes ADR-0160 Q2; adds opt_out_until
+to META_TENANT_RETENTION_POLICIES with no CHECK on the
+date value itself — operators set whatever absolute
+timestamp they want, substrate doesn't prescribe past-vs-
+future; semantic — opt_out=true + opt_out_until=NULL is
+indefinite, opt_out=true + opt_out_until > now is active,
+opt_out=true + opt_out_until <= now is expired (functionally
+equivalent to opt_out=false for read/prune semantics, row
+persists as audit trail); expired rows NOT auto-deleted —
+operators query WHERE opt_out=true AND opt_out_until < now
+to find expired rows and decide to clear/extend/convert;
+pain solved — forgotten opt-outs (operator flips for 6-month
+hold and forgets to lift, substrate now auto-lifts), legal
+holds with known end dates (operators record exact date,
+substrate honors it), audit reports showing expired-as-active
+(no longer happens), compliance theater (data persists past
+legal end-of-hold creating worse posture); EffectiveRetentionResolution
+tenant_opt_out variant gains required optOutUntil: string |
+null field — resolver only emits tenant_opt_out when active,
+expired falls through to enabled check (false per CHECK
+from ADR-0160) then to platform-default — self-healing at
+expiry instant; new status skipped_opt_out_expired added to
+RetentionRunStatus + RetentionPreviewStatus enums; per-tenant
+iteration picks status active ? skipped_opt_out : skipped_opt_out_expired
+so operators see expirations distinct from genuine disable;
+platform-default DELETE + previewPrune COUNT NOT IN subqueries
+widen from (enabled OR opt_out) to (enabled OR (opt_out
+AND (opt_out_until IS NULL OR opt_out_until > now()))) —
+expired opt-outs NOT excluded so platform sweep covers
+their data; two clock sources by design — adapter uses
+injected clock for testability (clock injection pattern
+established in PostgresLatencyTracker etc.), SQL uses PG
+now() to avoid parameter-shape changes; sub-second drift
+acceptable for day-grained retention; operators NTP-sync;
+boundary case opt_out_until == clock now treated as expired
+(strict > comparison); schema choices — NULLABLE since most
+opt-outs are indefinite, no CHECK on date value (> created_at
+forces future-dated, > now() nonsensical at INSERT-only),
+no CHECK tying to opt_out=true (operators may pre-stage
+expiry before flipping flag); rejected alternatives —
+TIMESTAMP not TIMESTAMPTZ (timezone ambiguity), PG trigger
+auto-clearing opt_out (destroys historical audit signal +
+complexity), INTERVAL duration not absolute endpoint
+(relative-to-what ambiguity), separate
+meta.tenant_retention_opt_out_expirations table (joins
+everywhere), opt_out_indefinite BOOLEAN companion (NULL
+already encodes no expiry), overloading last_pruned_at
+(path to bugs), PG-side-only resolution (kills testability);
+13 new tests: opt_out + null until is indefinite, opt_out
++ future until is active with optOutUntil populated, opt_out
++ past until is expired with skipped_opt_out_expired + NO
+DELETE for tenant, boundary opt_out_until == clock treated
+as expired, previewPrune surfaces skipped_opt_out_expired,
+listTenantPolicies SELECT includes opt_out_until,
+listTenantPolicies maps to optOutUntil camelCase,
+effectiveRetention tenant_opt_out variant populates
+optOutUntil, expired opt-out falls through to platform when
+policy exists, expired + no platform returns none, null
+until treated as indefinite/active, clock injection drives
+expiry decision (same row resolves differently across
+clocks), effectiveRetention SELECT includes opt_out_until;
+future Qs cover auto-cleanup periodic job for stale
+expired rows, expiry notifications via @crossengin/notifications,
+set-at timestamp opt_out_until_set_at for audit, CLI
+exposure via --until flag, per-table vs all-table opt-outs,
+race semantics at exact expiry instant documented, history-
+aware queries via append-only history table).
 ADR-0161 covers Phase 2 M6.7.zz.tenant.opt-out.reason
 (opt_out_reason TEXT NULLABLE audit context column —
 closes ADR-0160 Q1; adds opt_out_reason TEXT to
