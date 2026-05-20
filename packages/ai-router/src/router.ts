@@ -25,6 +25,10 @@ import {
   type CostCeiling,
   type CostTracker,
 } from "./cost-tracker.js";
+import {
+  NoopRouterInstrumentation,
+  type RouterInstrumentation,
+} from "./instrumentation.js";
 import { InMemoryLatencyTracker, type LatencyTracker } from "./latency-tracker.js";
 import { ProviderResolutionError, resolveProviders } from "./resolve.js";
 import {
@@ -46,6 +50,7 @@ export interface DefaultLlmRouterOptions extends RouterConfig {
   readonly getTenantCostCeiling?: (tenantId: string) => Promise<CostCeiling | undefined>;
   readonly costTracker?: CostTracker;
   readonly latencyTracker?: LatencyTracker;
+  readonly instrumentation?: RouterInstrumentation;
   readonly clock?: () => number;
 }
 
@@ -91,6 +96,7 @@ export class DefaultLlmRouter implements LlmRouter {
     | undefined;
   private readonly costTracker: CostTracker;
   private readonly latencyTracker: LatencyTracker;
+  private readonly instrumentation: RouterInstrumentation;
   private readonly clock: () => number;
 
   constructor(opts: DefaultLlmRouterOptions) {
@@ -103,6 +109,7 @@ export class DefaultLlmRouter implements LlmRouter {
     this.getTenantCostCeiling = opts.getTenantCostCeiling;
     this.costTracker = opts.costTracker ?? new InMemoryCostTracker();
     this.latencyTracker = opts.latencyTracker ?? new InMemoryLatencyTracker();
+    this.instrumentation = opts.instrumentation ?? NoopRouterInstrumentation;
     this.clock = opts.clock ?? (() => Date.now());
   }
 
@@ -129,21 +136,47 @@ export class DefaultLlmRouter implements LlmRouter {
     const choices = await this.chooseProviders(req.task, req.tenantId);
     await this.enforceCeilingPreflight(req.tenantId, this.estimatePreflightCost(req, choices[0]!));
     const attempts: RouterAttempt[] = [];
-    for (const choice of choices) {
+    for (let i = 0; i < choices.length; i++) {
+      const choice = choices[i]!;
       const startMs = this.clock();
       const chunks: CompletionChunk[] = [];
       let usageCost = 0;
+      let usageInputTokens = 0;
+      let usageOutputTokens = 0;
+      let usageCachedInputTokens = 0;
+      await this.instrumentation.onEvent({
+        kind: "llm_call_started",
+        tenantId: req.tenantId,
+        sessionId: req.sessionId,
+        task: req.task,
+        providerId: choice.providerId,
+        modelId: choice.modelId,
+        occurredAt: new Date(startMs).toISOString(),
+        durationMs: null,
+        attributes: {
+          attemptIndex: i,
+          totalChoices: choices.length,
+        },
+      });
       try {
         await withRetry(
           async () => {
             chunks.length = 0;
             usageCost = 0;
+            usageInputTokens = 0;
+            usageOutputTokens = 0;
+            usageCachedInputTokens = 0;
             for await (const chunk of choice.provider.complete({
               ...req,
               model: choice.modelId,
             })) {
               chunks.push(chunk);
-              if (chunk.kind === "usage_final") usageCost = chunk.usage.cost;
+              if (chunk.kind === "usage_final") {
+                usageCost = chunk.usage.cost;
+                usageInputTokens = chunk.usage.inputTokens;
+                usageOutputTokens = chunk.usage.outputTokens;
+                usageCachedInputTokens = chunk.usage.cachedInputTokens ?? 0;
+              }
             }
           },
           { policy: this.retry },
@@ -164,6 +197,23 @@ export class DefaultLlmRouter implements LlmRouter {
           latencyMs,
           success: false,
         });
+        const willFallback = isRouterRetryable(err) && i < choices.length - 1;
+        await this.instrumentation.onEvent({
+          kind: "llm_call_failed",
+          tenantId: req.tenantId,
+          sessionId: req.sessionId,
+          task: req.task,
+          providerId: choice.providerId,
+          modelId: choice.modelId,
+          occurredAt: new Date(startMs).toISOString(),
+          durationMs: latencyMs,
+          attributes: {
+            errorKind: errorKind(err),
+            errorMessage: err instanceof Error ? err.message : String(err),
+            attempts: this.retry.maxAttempts,
+            willFallback,
+          },
+        });
         if (!isRouterRetryable(err)) throw err;
         continue;
       }
@@ -183,6 +233,23 @@ export class DefaultLlmRouter implements LlmRouter {
       await this.costTracker.recordUsage({
         tenantId: req.tenantId,
         costUsd: usageCost,
+      });
+      await this.instrumentation.onEvent({
+        kind: "llm_call_completed",
+        tenantId: req.tenantId,
+        sessionId: req.sessionId,
+        task: req.task,
+        providerId: choice.providerId,
+        modelId: choice.modelId,
+        occurredAt: new Date(startMs).toISOString(),
+        durationMs: latencyMs,
+        attributes: {
+          costUsd: usageCost,
+          inputTokens: usageInputTokens,
+          outputTokens: usageOutputTokens,
+          cachedInputTokens: usageCachedInputTokens,
+          attempts: 1,
+        },
       });
       for (const chunk of chunks) yield chunk;
       return;

@@ -9239,6 +9239,60 @@ export const META_LLM_COST_WINDOWS: TableDefinition = {
   },
 };
 
+export const META_LLM_CALL_TRACES: TableDefinition = {
+  schema: "meta",
+  name: "llm_call_traces",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "provider_id", type: "TEXT", notNull: true },
+    { name: "model_id", type: "TEXT", notNull: true },
+    { name: "task", type: "TEXT", notNull: true },
+    { name: "session_id", type: "TEXT", notNull: true },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('llm_call_started', 'llm_call_completed', 'llm_call_failed')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "duration_ms",
+      type: "INTEGER",
+      check: "duration_ms IS NULL OR duration_ms >= 0",
+    },
+    { name: "attributes", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    {
+      name: "created_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_llm_call_traces_tenant_occurred",
+      columns: ["tenant_id", "occurred_at"],
+    },
+    {
+      name: "idx_llm_call_traces_provider_kind_occurred",
+      columns: ["provider_id", "kind", "occurred_at"],
+    },
+    {
+      name: "idx_llm_call_traces_session",
+      columns: ["tenant_id", "session_id"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "llm_call_traces_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_LLM_LATENCY_SAMPLES: TableDefinition = {
   schema: "meta",
   name: "llm_latency_samples",
@@ -9422,4 +9476,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_LLM_COST_WINDOWS,
   META_LLM_COST_CEILINGS,
   META_LLM_LATENCY_SAMPLES,
+  META_LLM_CALL_TRACES,
 ];

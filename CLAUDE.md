@@ -21,15 +21,75 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 123 meta-schema tables, 7,649 tests**,
-all green, no type errors. M6.7.y completes the ai-router-pg
+**56 packages + 1 app, 124 meta-schema tables, 7,670 tests**,
+all green, no type errors. M6.7.z adds the FOURTH ai-router-
+pg substrate: `RouterInstrumentation` interface +
+META_LLM_CALL_TRACES table (124th) +
+PostgresRouterInstrumentation adapter. Closes three deferred
+Qs in one milestone: ADR-0135 Q2 (router-scoped
+instrumentation), ADR-0137 Q3+Q4 (ceiling audit + observability),
+ADR-0140 Q3 (per-LLM-call trace rail). Pattern parity with M8
+WorkflowInstrumentation — same onEvent(event):
+Promise<void>|void signature, same captureRouterInstrumentation()
++ combineRouterInstrumentations() helpers, same
+NoopRouterInstrumentation default (no behavior change for
+existing callers — wiring is opt-in). Three event kinds:
+llm_call_started (before fetch after preflight; attrs:
+attemptIndex, totalChoices), llm_call_completed (on success;
+attrs: costUsd, inputTokens, outputTokens, cachedInputTokens,
+attempts), llm_call_failed (per-provider failure; attrs:
+errorKind, errorMessage, attempts, willFallback — derived
+from remaining choices at emit time so terminal short-
+circuits from ADR-0091/0133/0134 show willFallback=false).
+Per-attempt granularity — a complete() with fallover emits
+2N events for N attempts; matches operator mental model "what
+happened at each step?". Event sequences documented:
+happy path (started→completed), fallover (started→failed→
+started→completed), terminal non-retryable (started→failed
+willFallback=false), all-exhausted (full chain ending with
+AllProvidersExhaustedError). META_LLM_CALL_TRACES table:
+audit-optimized (vs LATENCY_SAMPLES which is aggregation-
+optimized) — full event context (tenant, session, task,
+model, costUsd, tokens, errors), JSONB attributes for
+flexibility, tenant-scoped with RLS_ISOLATION, three indexes
+serving the three canonical operator queries — (tenant_id,
+occurred_at) for "tenant recent activity", (provider_id,
+kind, occurred_at) for "anthropic failures last hour",
+(tenant_id, session_id) for "session audit trail
+reconstruction". Distinct from LATENCY_SAMPLES on purpose:
+different read patterns deserve different schemas — single
+mega-table would have aggregations scan-and-decode large
+rows + audits compete with high-volume sample writes.
+PostgresRouterInstrumentation: single INSERT per onEvent,
+no batching/buffering, mirrors PostgresWorkflowInstrumentation
+verbatim. ai-router-pg adapter set now has 4 substrates:
+cost-windows (M6.7), cost-ceilings (M6.7.x), latency-samples
+(M6.7.y), call-traces (M6.7.z) — router is fully observable.
+Append-only — retention is a future milestone (~M6.7.z.1
+covering all three append-only trace surfaces uniformly).
+Storage ~200 bytes/row → 1M calls/day = ~600MB/day after
+indexes; PG-native partitioning is operator-side concern.
+21 new tests: 11 in router.test.ts (started→completed
+sequence on happy path, full event field threading, costUsd
++ token attributes on completed, durationMs null-on-started
++ non-null-on-completed, failed with willFallback=true on
+retryable+fallback, full started/failed/started/completed
+on fallover, willFallback=false on terminal AllProvidersExhausted,
+ISO 8601 occurredAt, noop default behavior unchanged,
+attemptIndex 0→1 across chain, non-retryable→willFallback=false),
+10 in router-instrumentation.test.ts (INSERT shape, 9-column
+param order, completed with cost+tokens, failed with
+error+willFallback, JSONB attribute serialization, null
+durationMs threading, verbatim ISO 8601, no batching/single
+INSERT per event, PG error propagation, contract compat).
+M6.7.y completes the ai-router-pg
 adapter set by adding `PostgresLatencyTracker` — the third
 and final persistable tracker (after PostgresCostTracker
 from M6.7 and PostgresCostCeilingResolver from M6.7.x).
@@ -2735,13 +2795,20 @@ side post-hoc cumulative cap independent of and orthogonal
 to --cost-ceiling-usd; enforcement in REPL loop not router
 since session budget needs REAL not estimated cost;
 operators can run bounded interactive + loop scripts),
-ADR-0140 covers M6.7.y (PostgresLatencyTracker — completes
-the ai-router-pg adapter set after M6.7 cost-tracker +
-M6.7.x ceilings; LatencyTracker interface async-ified
-(internal-only breaking change); META_LLM_LATENCY_SAMPLES
-as the 123rd table; record = single INSERT, stats = single
-windowed SELECT with PG percentile_cont aggregate; provider-
-level not tenant-scoped; no RLS).
+ADR-0140 covers M6.7.y (PostgresLatencyTracker —
+LatencyTracker interface async-ified (internal-only breaking
+change); META_LLM_LATENCY_SAMPLES as the 123rd table;
+record = single INSERT, stats = single windowed SELECT with
+PG percentile_cont aggregate; provider-level not tenant-
+scoped; no RLS), ADR-0141 covers M6.7.z (RouterInstrumentation
++ META_LLM_CALL_TRACES + PostgresRouterInstrumentation —
+closes ADR-0135 Q2 + ADR-0137 Q3+Q4 + ADR-0140 Q3 in one
+milestone; pattern parity with M8 WorkflowInstrumentation;
+3 event kinds — llm_call_started/completed/failed; per-
+attempt granularity with willFallback derived; 124th table
+audit-optimized + tenant-RLS; ai-router-pg adapter set now
+at 4 substrates — cost-windows + cost-ceilings + latency-
+samples + call-traces).
 
 ## Architecture in 90 seconds
 
@@ -4092,31 +4159,52 @@ complement to M6.7 server-side multi-replica enforcement,
 not a duplicate; operators can run bounded interactive
 sessions or batch loops with budget guard rails), ADR-0140
 covers Phase 2 M6.7.y (PostgresLatencyTracker + LatencyTracker
-contract async-ification — completes the ai-router-pg
-adapter set with 3 substrates (PostgresCostTracker M6.7,
-PostgresCostCeilingResolver M6.7.x, PostgresLatencyTracker
-M6.7.y); LatencyTracker interface becomes async — both
-record() and stats() return Promises; internal-only
-breaking change since only the router calls record (two
-new awaits) plus InMemoryLatencyTracker upgraded
-mechanically; fire-and-forget alternative rejected for
-silent-failure + unbounded-queue concerns + contract-
-inconsistency with already-async CostTracker; 1ms PG INSERT
-overhead per LLM request is negligible vs LLM call
-duration; META_LLM_LATENCY_SAMPLES as 123rd meta-schema
-table — append-only sample log with composite (provider_id,
-recorded_at) index, latency_ms >= 0 CHECK, NO tenant
-scoping (provider-level observability not per-tenant) NO
-RLS (platform-wide same pattern as META_TENANTS);
+contract async-ification — LatencyTracker interface becomes
+async — both record() and stats() return Promises; internal-
+only breaking change since only the router calls record (two
+new awaits) plus InMemoryLatencyTracker upgraded mechanically;
+fire-and-forget alternative rejected for silent-failure +
+unbounded-queue concerns + contract-inconsistency with
+already-async CostTracker; 1ms PG INSERT overhead per LLM
+request is negligible vs LLM call duration;
+META_LLM_LATENCY_SAMPLES as 123rd meta-schema table —
+append-only sample log with composite (provider_id,
+recorded_at) index, latency_ms >= 0 CHECK, NO tenant scoping
+(provider-level observability not per-tenant) NO RLS
+(platform-wide same pattern as META_TENANTS);
 PostgresLatencyTracker.record = single INSERT,
-.stats = single windowed SELECT with CTE LIMIT N then
-PG native percentile_cont aggregate — microseconds even at
+.stats = single windowed SELECT with CTE LIMIT N then PG
+native percentile_cont aggregate — microseconds even at
 millions of rows via index-only scans; continuous
 percentile_cont interpolation differs from in-memory's
 floor-index only at tiny window sizes (nil at window>=20);
 operators can answer "anthropic p95 last hour?" with a
 single SELECT; future Q1 retention policy, Q2 per-tenant
-extension via additive ALTER TABLE).
+extension via additive ALTER TABLE), ADR-0141 covers Phase
+2 M6.7.z (RouterInstrumentation + META_LLM_CALL_TRACES +
+PostgresRouterInstrumentation — closes ADR-0135 Q2 +
+ADR-0137 Q3+Q4 + ADR-0140 Q3 in one milestone; pattern
+parity with M8 WorkflowInstrumentation — same onEvent
+signature, same captureX/combineXs helpers, same NoopX
+default — no behavior change for existing callers; three
+event kinds llm_call_started + llm_call_completed +
+llm_call_failed; per-attempt granularity (N attempts = 2N
+events); willFallback derived from remaining choice index
+so terminal short-circuits from ADR-0091/0133/0134 show
+willFallback=false; META_LLM_CALL_TRACES as 124th meta-
+schema table — audit-optimized (full event context: tenant,
+session, task, model, costUsd, tokens, errors) +
+tenant-scoped with RLS + 3 indexes serving canonical
+operator queries (tenant-recent + provider-failures +
+session-audit); distinct from LATENCY_SAMPLES on purpose —
+different read patterns (aggregation vs audit) deserve
+different schemas; PostgresRouterInstrumentation single-
+INSERT-per-event mirroring PostgresWorkflowInstrumentation
+verbatim; ai-router-pg adapter set now at 4 substrates —
+cost-windows + cost-ceilings + latency-samples + call-
+traces — router is fully observable; storage ~200 bytes/row;
+embed-path instrumentation + correlationId field + ceiling-
+resolution traces all listed as additive future Qs).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

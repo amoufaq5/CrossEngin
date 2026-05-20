@@ -13,6 +13,7 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import { CostCeilingExceededError, InMemoryCostTracker } from "./cost-tracker.js";
+import { captureRouterInstrumentation } from "./instrumentation.js";
 import { InMemoryLatencyTracker } from "./latency-tracker.js";
 import { ProviderResolutionError } from "./resolve.js";
 import {
@@ -112,6 +113,7 @@ function buildRouter(opts: {
     typeof DefaultLlmRouter
   >[0]["getTenantCostCeiling"];
   costTracker?: InMemoryCostTracker;
+  instrumentation?: ConstructorParameters<typeof DefaultLlmRouter>[0]["instrumentation"];
 }): DefaultLlmRouter {
   return new DefaultLlmRouter({
     providers: opts.providers,
@@ -123,6 +125,7 @@ function buildRouter(opts: {
     getTenantCostCeiling: opts.getTenantCostCeiling,
     costTracker: opts.costTracker,
     latencyTracker: new InMemoryLatencyTracker(),
+    instrumentation: opts.instrumentation,
     clock: () => 0,
   });
 }
@@ -767,5 +770,156 @@ describe("DefaultLlmRouter.complete — per-tenant cost ceiling (M6.7.x)", () =>
     await expect(async () => {
       for await (const _ of router.complete(fakeReq())) void _;
     }).rejects.toThrow(CostCeilingExceededError);
+  });
+});
+
+describe("DefaultLlmRouter.complete — RouterInstrumentation (M6.7.z)", () => {
+  it("emits llm_call_started then llm_call_completed on the happy path", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const kinds = cap.events.map((e) => e.kind);
+    expect(kinds).toEqual(["llm_call_started", "llm_call_completed"]);
+  });
+
+  it("threads tenantId + sessionId + task + providerId + modelId on every event", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    for (const event of cap.events) {
+      expect(event.tenantId).toBe(TENANT);
+      expect(event.sessionId).toBe("sess-1");
+      expect(event.task).toBe("executor");
+      expect(event.providerId).toBe("anthropic");
+      expect(event.modelId).toBe("anthropic-model-1");
+    }
+  });
+
+  it("populates costUsd / inputTokens / outputTokens / attempts on llm_call_completed", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const completed = cap.events.find((e) => e.kind === "llm_call_completed")!;
+    expect(completed.attributes["costUsd"]).toBeGreaterThan(0);
+    expect(completed.attributes["inputTokens"]).toBeGreaterThan(0);
+    expect(completed.attributes["outputTokens"]).toBeGreaterThan(0);
+    expect(completed.attributes["attempts"]).toBe(1);
+  });
+
+  it("includes durationMs on llm_call_completed but null on llm_call_started", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const started = cap.events.find((e) => e.kind === "llm_call_started")!;
+    const completed = cap.events.find((e) => e.kind === "llm_call_completed")!;
+    expect(started.durationMs).toBeNull();
+    expect(completed.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("emits llm_call_failed when a provider exhausts retries (with willFallback=true if fallback exists)", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const failed = cap.events.find((e) => e.kind === "llm_call_failed");
+    expect(failed).toBeDefined();
+    expect(failed?.providerId).toBe("anthropic");
+    expect(failed?.attributes["willFallback"]).toBe(true);
+    expect(failed?.attributes["errorKind"]).toBeDefined();
+  });
+
+  it("emits the full started/failed/started/completed sequence on fallover", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const kinds = cap.events.map((e) => e.kind);
+    expect(kinds).toEqual([
+      "llm_call_started",
+      "llm_call_failed",
+      "llm_call_started",
+      "llm_call_completed",
+    ]);
+    expect(cap.events[0]?.providerId).toBe("anthropic");
+    expect(cap.events[2]?.providerId).toBe("openai");
+  });
+
+  it("emits llm_call_failed with willFallback=false on the last provider when AllProvidersExhausted", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new StubProvider("openai", "always_retryable")],
+    ]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow(AllProvidersExhaustedError);
+    const failed = cap.events.filter((e) => e.kind === "llm_call_failed");
+    expect(failed).toHaveLength(2);
+    expect(failed[0]?.attributes["willFallback"]).toBe(true);
+    expect(failed[1]?.attributes["willFallback"]).toBe(false);
+  });
+
+  it("emits an ISO 8601 occurredAt string on every event", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    for (const event of cap.events) {
+      expect(event.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    }
+  });
+
+  it("no instrumentation = no observable behavior change (defaults to noop)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({ providers });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of router.complete(fakeReq())) chunks.push(c);
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
+  it("emits attemptIndex 0 then 1 across fallback chain", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const starts = cap.events.filter((e) => e.kind === "llm_call_started");
+    expect(starts[0]?.attributes["attemptIndex"]).toBe(0);
+    expect(starts[1]?.attributes["attemptIndex"]).toBe(1);
+  });
+
+  it("non-retryable error emits llm_call_failed (no fallback) with willFallback=false", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "fatal")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow();
+    const failed = cap.events.filter((e) => e.kind === "llm_call_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.providerId).toBe("anthropic");
+    expect(failed[0]?.attributes["willFallback"]).toBe(false);
   });
 });
