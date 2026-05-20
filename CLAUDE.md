@@ -21,15 +21,39 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,454 tests**,
-all green, no type errors. M2.X.14 lifts the SIXTH
+**55 packages + 1 app, 120 meta-schema tables, 7,479 tests**,
+all green, no type errors. M2.X.15 lifts the SEVENTH
+cross-provider error classifier — `isPermissionError(err)`
+in `@crossengin/ai-providers/permission.ts`. Closes ADR-0128
+Q1 mechanically. All three providers emit `permission_error`
+(Anthropic + OpenAI via classifyHttpStatus(403); Bedrock via
+CODE_TO_KIND["AccessDeniedException"] → permission_error —
+Bedrock's classifyHttpStatus collapses 401||403 to
+authentication_error broadly, the typed-exception path
+provides finer detail). Zero provider changes. Structurally
+identical to authentication.ts (M2.X.14). Single-kind tuple
+(`permission_error` only). Explicitly distinct from
+authentication_error: 401 = bad credentials → rotate;
+403 = valid credentials, no access → grant principal access
+or use different principal. Operators wanting "any
+auth-related" compose
+`isAuthenticationError(err) || isPermissionError(err)`
+inline (the canonical pattern documented in the test file
+itself). Three workflow patterns enabled: cross-account /
+cross-tenant access denial handling (translate to
+TenantAccessDeniedError with structured tenant-facing
+message), multi-region access policies (inference profile
+routing through a region the operator lacks access to),
+resource-scoped access (guardrail / custom-model /
+inference-profile created in account A is 403 to account B).
+M2.X.14 lifts the SIXTH
 cross-provider error classifier to the kernel —
 `isAuthenticationError(err)` in
 `@crossengin/ai-providers/authentication.ts`. Closes ADR-0127
@@ -1040,17 +1064,18 @@ kind via their classifyHttpStatus paths),
 `InputTooLargeErrorKind` type, `isInputTooLargeErrorKind`
 discriminator, `InputTooLargeDiscriminator` interface, and the
 headline predicate. The kernel surface now partitions the
-error space into seven buckets: retryable (try again with
+error space into eight buckets: retryable (try again with
 backoff), moderation (terminal; audit), input-too-large
 (terminal; reduce input), conflict (terminal; reconcile
 state — M2.X.12), not-found (terminal; resource absence —
 M2.X.13), authentication (terminal; rotate credentials —
-M2.X.14), other (permission / invalid_request / unknown —
+M2.X.14), permission (terminal; grant access or switch
+principal — M2.X.15), other (invalid_request / unknown —
 terminal; surface to user). Operators classifying errors
-across providers use six parallel discriminators with no
+across providers use seven parallel discriminators with no
 provider-package imports: isModerationError +
 isRetryableError + isInputTooLargeError + isConflictError +
-isNotFoundError + isAuthenticationError.
+isNotFoundError + isAuthenticationError + isPermissionError.
 Mutual exclusivity verified by tests: a request_too_large
 error is NOT retryable + NOT a moderation event.
 Cross-package integration tests in all three providers verify
@@ -2296,7 +2321,11 @@ M2.X.14 (authentication_error kernel kind +
 isAuthenticationError cross-provider classifier — sixth
 kernel classifier closing ADR-0127 Q1; explicitly EXCLUDES
 permission_error since auth and permission have distinct
-remediation paths).
+remediation paths), ADR-0129 covers M2.X.15 (permission_error
+kernel kind + isPermissionError cross-provider classifier —
+seventh kernel classifier closing ADR-0128 Q1; pairs with
+isAuthenticationError; cross-account / cross-tenant /
+cross-region access denial workflows now documented).
 
 ## Architecture in 90 seconds
 
@@ -3506,7 +3535,16 @@ classifyHttpStatus(401), Bedrock additionally via CODE_TO_KIND
 for AWS-specific exception names; explicitly distinct from
 permission_error since 401 and 403 have different remediation
 paths; credential rotation + multi-tenant key validation + CI
-boot-check workflows now documented).
+boot-check workflows now documented), ADR-0129 covers Phase 2
+M2.X.15 (permission_error kernel kind + isPermissionError
+cross-provider classifier — seventh kernel classifier
+completing the canonical 4xx/5xx classifier suite except for
+invalid_request_error; closes ADR-0128 Q1 mechanically;
+Anthropic + OpenAI emit permission_error from
+classifyHttpStatus(403), Bedrock via
+CODE_TO_KIND["AccessDeniedException"]; pairs with
+isAuthenticationError for "any auth-related issue" composite
+via inline OR).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

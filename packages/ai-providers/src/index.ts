@@ -9,3 +9,4 @@ export * from "./input-too-large.js";
 export * from "./conflict.js";
 export * from "./not-found.js";
 export * from "./authentication.js";
+export * from "./permission.js";
