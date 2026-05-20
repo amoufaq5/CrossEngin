@@ -32,12 +32,14 @@ export interface TenantRetentionPolicyRow {
   readonly tableName: string;
   readonly retentionDays: number;
   readonly enabled: boolean;
+  readonly optOut: boolean;
   readonly lastPrunedAt: string | null;
 }
 
 export type RetentionRunStatus =
   | "pruned"
   | "skipped_disabled"
+  | "skipped_opt_out"
   | "skipped_unknown_table";
 
 export interface RetentionRunResult {
@@ -52,6 +54,7 @@ export interface RetentionRunResult {
 export type RetentionPreviewStatus =
   | "previewed"
   | "skipped_disabled"
+  | "skipped_opt_out"
   | "skipped_unknown_table";
 
 export interface RetentionPreviewResult {
@@ -68,6 +71,12 @@ export type EffectiveRetentionResolution =
       readonly source: "tenant";
       readonly retentionDays: number;
       readonly enabled: true;
+      readonly tenantId: string;
+    }
+  | {
+      readonly source: "tenant_opt_out";
+      readonly retentionDays: null;
+      readonly enabled: false;
       readonly tenantId: string;
     }
   | {
@@ -90,6 +99,7 @@ interface RawPolicyRow {
 
 interface RawTenantPolicyRow extends RawPolicyRow {
   readonly tenant_id: string;
+  readonly opt_out: boolean;
 }
 
 export class PostgresTraceRetention {
@@ -117,7 +127,7 @@ export class PostgresTraceRetention {
 
   async listTenantPolicies(): Promise<ReadonlyArray<TenantRetentionPolicyRow>> {
     const result = await this.conn.query<RawTenantPolicyRow>(
-      `SELECT tenant_id, table_name, retention_days, enabled, last_pruned_at
+      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, last_pruned_at
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        ORDER BY table_name ASC, tenant_id ASC`,
     );
@@ -126,6 +136,7 @@ export class PostgresTraceRetention {
       tableName: r.table_name,
       retentionDays: r.retention_days,
       enabled: r.enabled,
+      optOut: r.opt_out,
       lastPrunedAt: r.last_pruned_at,
     }));
   }
@@ -137,6 +148,17 @@ export class PostgresTraceRetention {
     const now = this.clock();
 
     for (const policy of tenantPolicies) {
+      if (policy.optOut) {
+        results.push({
+          tableName: policy.tableName,
+          tenantId: policy.tenantId,
+          status: "skipped_opt_out",
+          retentionDays: policy.retentionDays,
+          deletedCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
       if (!policy.enabled) {
         results.push({
           tableName: policy.tableName,
@@ -212,7 +234,7 @@ export class PostgresTraceRetention {
              WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
                AND tenant_id NOT IN (
                  SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
-                 WHERE table_name = $2 AND enabled = true
+                 WHERE table_name = $2 AND (enabled = true OR opt_out = true)
                )`,
             [cutoffMs, policy.tableName],
           )
@@ -246,6 +268,17 @@ export class PostgresTraceRetention {
     const now = this.clock();
 
     for (const policy of tenantPolicies) {
+      if (policy.optOut) {
+        results.push({
+          tableName: policy.tableName,
+          tenantId: policy.tenantId,
+          status: "skipped_opt_out",
+          retentionDays: policy.retentionDays,
+          wouldDeleteCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
       if (!policy.enabled) {
         results.push({
           tableName: policy.tableName,
@@ -318,7 +351,7 @@ export class PostgresTraceRetention {
              WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
                AND tenant_id NOT IN (
                  SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
-                 WHERE table_name = $2 AND enabled = true
+                 WHERE table_name = $2 AND (enabled = true OR opt_out = true)
                )`,
             [cutoffMs, policy.tableName],
           )
@@ -346,19 +379,29 @@ export class PostgresTraceRetention {
     tableName: string,
   ): Promise<EffectiveRetentionResolution> {
     const tenantResult = await this.conn.query<RawTenantPolicyRow>(
-      `SELECT tenant_id, table_name, retention_days, enabled, last_pruned_at
+      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, last_pruned_at
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        WHERE tenant_id = $1 AND table_name = $2`,
       [tenantId, tableName],
     );
     const tenantRow = tenantResult.rows[0];
-    if (tenantRow !== undefined && tenantRow.enabled) {
-      return {
-        source: "tenant",
-        retentionDays: tenantRow.retention_days,
-        enabled: true,
-        tenantId: tenantRow.tenant_id,
-      };
+    if (tenantRow !== undefined) {
+      if (tenantRow.opt_out) {
+        return {
+          source: "tenant_opt_out",
+          retentionDays: null,
+          enabled: false,
+          tenantId: tenantRow.tenant_id,
+        };
+      }
+      if (tenantRow.enabled) {
+        return {
+          source: "tenant",
+          retentionDays: tenantRow.retention_days,
+          enabled: true,
+          tenantId: tenantRow.tenant_id,
+        };
+      }
     }
 
     const platformResult = await this.conn.query<RawPolicyRow>(

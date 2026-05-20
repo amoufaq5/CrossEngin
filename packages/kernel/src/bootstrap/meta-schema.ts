@@ -9344,6 +9344,13 @@ export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
       check: "retention_days >= 1",
     },
     { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    {
+      name: "opt_out",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+      check: "NOT (enabled = true AND opt_out = true)",
+    },
     { name: "last_pruned_at", type: "TIMESTAMPTZ" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],

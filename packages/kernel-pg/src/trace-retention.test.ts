@@ -626,6 +626,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     overrides: Partial<{
       retention_days: number;
       enabled: boolean;
+      opt_out: boolean;
       last_pruned_at: string | null;
     }> = {},
   ): Record<string, unknown> {
@@ -634,6 +635,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       table_name: tableName,
       retention_days: 7,
       enabled: true,
+      opt_out: false,
       last_pruned_at: null,
       ...overrides,
     };
@@ -673,6 +675,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       tableName: "workflow_traces",
       retentionDays: 14,
       enabled: false,
+      optOut: false,
       lastPrunedAt: "2026-05-20T12:00:00.000Z",
     });
   });
@@ -882,6 +885,188 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     );
     expect(tables).not.toContain("llm_latency_samples");
   });
+
+  it("prune skips opt-out tenants with status='skipped_opt_out' and issues NO DELETE for that tenant", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                enabled: false,
+                opt_out: true,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_opt_out");
+    expect(tenantResult?.deletedCount).toBe(0);
+    const tenantDelete = capture.find(
+      (c) =>
+        c.sql.startsWith("DELETE FROM meta.workflow_traces") &&
+        c.sql.includes("tenant_id = $1"),
+    );
+    expect(tenantDelete).toBeUndefined();
+  });
+
+  it("opt-out tenant takes precedence over enabled — opt_out=true wins even when enabled looks active", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_opt_out");
+  });
+
+  it("platform-default DELETE excludes opt-out tenants too via the NOT IN subquery", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.retention_policies")
+        ) {
+          return {
+            rows: [policyRow("workflow_traces")],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const platformDelete = capture.find((c) =>
+      c.sql.startsWith("DELETE FROM meta.workflow_traces"),
+    );
+    expect(platformDelete?.sql).toContain("opt_out = true");
+    expect(platformDelete?.sql).toContain(
+      "(enabled = true OR opt_out = true)",
+    );
+  });
+
+  it("previewPrune reports opt-out tenants with status='skipped_opt_out' wouldDeleteCount=0 and issues NO COUNT for that tenant", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                enabled: false,
+                opt_out: true,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: "999" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.previewPrune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_opt_out");
+    expect(tenantResult?.wouldDeleteCount).toBe(0);
+    const tenantCount = capture.find(
+      (c) =>
+        c.sql.includes("COUNT(*)") &&
+        c.sql.includes("FROM meta.workflow_traces") &&
+        c.sql.includes("tenant_id = $1"),
+    );
+    expect(tenantCount).toBeUndefined();
+  });
+
+  it("previewPrune platform-default COUNT excludes opt-out tenants via NOT IN subquery", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.retention_policies")
+        ) {
+          return {
+            rows: [policyRow("workflow_traces")],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: "0" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.previewPrune();
+    const platformCount = capture.find(
+      (c) =>
+        c.sql.includes("COUNT(*)") &&
+        c.sql.includes("FROM meta.workflow_traces"),
+    );
+    expect(platformCount?.sql).toContain(
+      "(enabled = true OR opt_out = true)",
+    );
+  });
+
+  it("disabled-and-not-opt-out tenant falls back to platform default (M6.7.zz.tenant baseline preserved)", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: false,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_disabled");
+  });
 });
 
 describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)", () => {
@@ -893,6 +1078,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
     overrides: Partial<{
       retention_days: number;
       enabled: boolean;
+      opt_out: boolean;
       last_pruned_at: string | null;
     }> = {},
   ): Record<string, unknown> {
@@ -901,6 +1087,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       table_name: tableName,
       retention_days: 7,
       enabled: true,
+      opt_out: false,
       last_pruned_at: null,
       ...overrides,
     };
@@ -1133,6 +1320,96 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       expect(enabled).toBe(true);
     } else {
       throw new Error("expected source='tenant'");
+    }
+  });
+
+  it("returns source='tenant_opt_out' when per-tenant policy has opt_out=true", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result).toEqual({
+      source: "tenant_opt_out",
+      retentionDays: null,
+      enabled: false,
+      tenantId: TENANT_A,
+    });
+  });
+
+  it("opt_out takes precedence over platform policy — no platform fallback when opt_out=true", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                enabled: false,
+                opt_out: true,
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("FROM meta.retention_policies")) {
+          return {
+            rows: [policyRow("workflow_traces", { retention_days: 90 })],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result.source).toBe("tenant_opt_out");
+    const platformCall = capture.find(
+      (c) =>
+        c.sql.includes("FROM meta.retention_policies") &&
+        !c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(platformCall).toBeUndefined();
+  });
+
+  it("TypeScript discriminated union: source='tenant_opt_out' narrows with null retentionDays + tenantId + enabled=false", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    if (result.source === "tenant_opt_out") {
+      const tenantId: string = result.tenantId;
+      const retentionDays: null = result.retentionDays;
+      const enabled: false = result.enabled;
+      expect(tenantId).toBe(TENANT_A);
+      expect(retentionDays).toBeNull();
+      expect(enabled).toBe(false);
+    } else {
+      throw new Error("expected source='tenant_opt_out'");
     }
   });
 });

@@ -21,15 +21,68 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,079 tests**,
-all green, no type errors. M6.7.zz.tenant.dashboard closes
+**56 packages + 1 app, 128 meta-schema tables, 8,088 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out closes
+ADR-0159 Q1 by adding `opt_out BOOLEAN NOT NULL DEFAULT false`
+column to META_TENANT_RETENTION_POLICIES with cross-column
+CHECK `NOT (enabled = true AND opt_out = true)`. The
+existing `enabled = false` semantic was overloaded — meant
+"this override is disabled, use platform default." Real
+compliance scenarios need a distinct semantic: opt-out
+tenants must have NO data pruned regardless of platform
+default. Use cases unblocked: legal hold tenants
+(litigation/subpoena/audit), 21 CFR Part 11 clinical
+trials, VIP contracts stipulating "retain until customer
+requests deletion." Schema delta is additive — existing
+rows get opt_out=false by default, no migration friction.
+The cross-column CHECK rejects the contradictory state
+(enabled=true AND opt_out=true) at INSERT/UPDATE time.
+Operators encode opt-out as enabled=false, opt_out=true;
+active policy as enabled=true, opt_out=false; fall-back-to-
+platform as enabled=false, opt_out=false. EffectiveRetentionResolution
+discriminated union grows from 3 to 4 variants with new
+`tenant_opt_out` (retentionDays=null + enabled=false +
+tenantId). Resolution algorithm extended: tenant row found
++ opt_out=true → return tenant_opt_out variant (skip
+platform query, highest priority); else enabled=true →
+tenant variant; else fall through to platform. retention_days
+stays NOT NULL with CHECK >= 1 even for opt-out rows — the
+column stores a placeholder (typically the previously-
+configured value), so flipping opt_out back to false
+restores the prior policy without re-prompting operators
+for a number. The resolver's tenant_opt_out variant returns
+retentionDays=null because semantically there IS no
+retention applied — emitting the placeholder would mislead
+consumers reading the output. Prune semantics: per-tenant
+loop gains opt-out branch BEFORE enabled check —
+RetentionRunStatus + RetentionPreviewStatus enums gain
+"skipped_opt_out". Platform-default DELETE's NOT IN
+subquery extends from `enabled = true` to `(enabled = true
+OR opt_out = true)` — opt-out tenants are excluded from
+platform pruning too. Same change in previewPrune COUNT
+subquery. Three rejected alternatives: retention_days = -1
+sentinel (overloads numeric semantics), make retention_days
+NULLABLE (operators lose placeholder when toggling), replace
+enabled BOOLEAN with policy_state TEXT enum (breaking
+schema change). 9 new tests: prune skipped_opt_out + no
+DELETE issued for opt-out tenant, opt_out=true takes
+precedence over enabled state, platform DELETE NOT IN
+subquery extended to opt_out, previewPrune skipped_opt_out
++ no COUNT for opt-out tenant, previewPrune platform COUNT
+NOT IN extended, disabled-and-not-opt-out tenant still
+falls back to platform-default (baseline preserved),
+effectiveRetention returns tenant_opt_out, opt_out
+precedence over platform fallback (single round-trip —
+platform query skipped), TypeScript discriminated union
+narrowing on source='tenant_opt_out' asserting retentionDays:
+null + tenantId: string + enabled: false. M6.7.zz.tenant.dashboard closes
 ADR-0155 Q6 by adding `effectiveRetention(tenantId,
 tableName)` to PostgresTraceRetention — single resolver
 method returning a discriminated-union
@@ -3815,7 +3868,14 @@ single round-trip happy path when enabled per-tenant policy
 exists; method on PostgresTraceRetention not separate
 class since retention has no router-side hot path; admin
 dashboard + compliance audit + GDPR Article 15 + admin UI
-workflows unblocked).
+workflows unblocked), ADR-0160 covers M6.7.zz.tenant.opt-out
+(opt_out flag on META_TENANT_RETENTION_POLICIES — closes
+ADR-0159 Q1 — separate column from enabled with cross-
+column CHECK rejecting (enabled=true AND opt_out=true);
+EffectiveRetentionResolution gains tenant_opt_out variant;
+prune + previewPrune extended with skipped_opt_out status
++ NOT IN subquery widened to (enabled OR opt_out); legal
+hold + 21 CFR Part 11 + VIP contract workflows unblocked).
 
 ## Architecture in 90 seconds
 
@@ -5304,6 +5364,70 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0160 covers Phase 2 M6.7.zz.tenant.opt-out
+(per-tenant retention opt_out flag — closes ADR-0159 Q1;
+adds opt_out BOOLEAN NOT NULL DEFAULT false column to
+META_TENANT_RETENTION_POLICIES with cross-column CHECK
+constraint `NOT (enabled = true AND opt_out = true)`
+rejecting contradictory state at INSERT/UPDATE; existing
+enabled=false semantic was overloaded — meant both "use
+this override" and "fall back to platform"; real
+compliance scenarios need a distinct semantic where opt-out
+tenants have NO data pruned regardless of platform default;
+use cases unblocked — legal hold tenants under litigation/
+subpoena/audit, 21 CFR Part 11 clinical trials with
+"retain until manually purged" requirements, VIP/enterprise
+contracts stipulating "retain until customer requests
+deletion"; encoding scheme — opt-out = enabled:false +
+opt_out:true, active policy = enabled:true + opt_out:false,
+fallback-to-platform = enabled:false + opt_out:false;
+contradictory enabled:true + opt_out:true rejected by
+CHECK; EffectiveRetentionResolution discriminated union
+grows from 3 to 4 variants with new tenant_opt_out
+(retentionDays:null + enabled:false + tenantId);
+resolution algorithm extended — tenant row found with
+opt_out:true wins (skip platform query, highest priority),
+else enabled:true returns tenant variant, else fall to
+platform; retention_days stays NOT NULL with CHECK >= 1
+even for opt-out rows — column stores placeholder
+(typically previously-configured value) so flipping
+opt_out back to false restores prior policy without
+re-prompting operators; resolver's tenant_opt_out variant
+returns retentionDays:null because semantically there IS
+no retention applied — emitting placeholder would mislead
+consumers; prune semantics extended — per-tenant loop
+gains opt-out branch BEFORE enabled check;
+RetentionRunStatus + RetentionPreviewStatus enums gain
+"skipped_opt_out"; platform-default DELETE NOT IN
+subquery widened from `enabled = true` to `(enabled = true
+OR opt_out = true)` so opt-out tenants excluded from
+platform pruning too; same widening in previewPrune COUNT
+subquery; backward compatible additive schema — existing
+rows get opt_out=false by default, no migration friction;
+three rejected alternatives — retention_days = -1 sentinel
+(overloads numeric semantics + breaks CHECK >= 1),
+NULLABLE retention_days (operators lose placeholder when
+toggling), replace enabled with policy_state TEXT enum
+(breaking schema migration); rejected leaving CHECK off
+(adapter could prefer opt_out and silently ignore enabled
+but DB-side constraint catches inconsistent state at
+INSERT/UPDATE before adapter sees row); 9 new tests:
+prune skipped_opt_out + no DELETE for opt-out tenant,
+opt_out precedence over enabled, platform DELETE NOT IN
+subquery extended verified, previewPrune skipped_opt_out
++ no COUNT for opt-out tenant, previewPrune platform
+COUNT NOT IN extended, disabled-and-not-opt-out tenant
+still falls back to platform (M6.7.zz.tenant baseline
+preserved), effectiveRetention returns tenant_opt_out,
+opt_out precedence over platform fallback verified,
+TypeScript discriminated union narrowing on
+source='tenant_opt_out' asserting retentionDays:null +
+tenantId:string + enabled:false; future Qs cover opt_out
+reason field for audit context, opt_out_until expiry
+column for time-bound holds, opt-out impact on retention
+dashboard alerts, CLI exposure via `crossengin retention
+opt-out` subcommand, tenant-initiated opt-out via API
+endpoint).
 ADR-0157 covers Phase 2 M6.8.x.trace
 (`ceiling_resolved` RouterInstrumentation event +
 getTenantCostCeilingDetailed callback — closes ADR-0154 Q1;
