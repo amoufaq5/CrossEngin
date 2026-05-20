@@ -324,6 +324,16 @@ export async function runChat(
     }
     costCeiling = { maxUsdPerRequest: parsed };
   }
+  const maxCostFlag = getStringFlag(command, "max-cost-usd");
+  let maxCostUsd: number | undefined;
+  if (maxCostFlag !== null) {
+    const parsed = Number.parseFloat(maxCostFlag);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      printError(ctx.io, `chat: invalid --max-cost-usd: ${maxCostFlag}`);
+      return 2;
+    }
+    maxCostUsd = parsed;
+  }
 
   let provider: LlmProvider;
   let providerInfo: { providerKind: "single" | "router"; availableProviders: readonly string[] } = {
@@ -394,6 +404,7 @@ export async function runChat(
       maxToolIterations,
       transcript,
       autoApprove,
+      maxCostUsd,
     });
     if (command.format === "json") {
       printJson(ctx.io, {
@@ -402,6 +413,7 @@ export async function runChat(
         aggregateUsage: result.aggregateUsage,
         providerKind: providerInfo.providerKind,
         availableProviders: providerInfo.availableProviders,
+        ...(result.budgetExceeded === true ? { budgetExceeded: true } : {}),
       });
     } else {
       const providerSuffix =

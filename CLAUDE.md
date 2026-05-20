@@ -26,10 +26,51 @@ M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
-M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
+M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 122 meta-schema tables, 7,626 tests**,
-all green, no type errors. M2.X.5.aa.z.22 closes ADR-0136 Q2
+**56 packages + 1 app, 122 meta-schema tables, 7,637 tests**,
+all green, no type errors. M5.11 adds `--max-cost-usd $X` to
+`crossengin chat` — a session-scoped post-hoc cumulative
+budget cap. Independent from `--cost-ceiling-usd` (which
+remains the per-request gate via router preflight); both
+can coexist. Enforcement lives entirely in the REPL loop
+(not router) for three reasons: (a) router's preflight uses
+ESTIMATED cost while session budget needs REAL cost; (b)
+router is provider-orchestration but session budget is CLI-
+state, separation of concerns; (c) `maxUsdPerWindow` would
+require fake-long windowSeconds — code smell. Check fires at
+TOP of each REPL while-iteration BEFORE consuming the next
+input line: if aggregate.cost >= maxCostUsd, emit
+budget_exceeded announcement and break. Implications: the
+LAST turn that pushes cumulative cost over the budget IS
+allowed to complete (cost observed AFTER response streams);
+NEXT input is refused — matches "give me one more answer,
+then stop" UX. One-shot mode (single turn): budget check
+fires AFTER the turn since there's no next iteration;
+result.budgetExceeded surfaces informationally. Display
+surfaces: human mode shows "Session budget: $X.XXXX USD."
+header, "[budget: $Y.YYYY of $X.XXXX spent]" line after
+each turn, "[session budget exceeded: $Y spent, $X budget —
+exiting]" notice on exhaustion. JSON mode emits
+{kind:"budget_exceeded",spent_usd,budget_usd} chunk on
+exit. ChatReplResult.budgetExceeded?: boolean surfaces on
+programmatic returns + JSON output. Validation: parse as
+finite positive number; exit 2 on bad value. Exit 0 on
+budget exhaustion (the session ran successfully; budget
+honored — operators wanting hard-failure check the flag).
+No breaking change: existing callers without the flag see
+identical behavior. CLI flag is the client-side complement
+to M6.7 (server-side PostgresCostTracker) + M6.7.x (server-
+side per-tenant ceilings) — both substrates remain, neither
+duplicates. 11 new tests: 9 in chat.test.ts (REPL refuses
+subsequent input after budget crossed + 3-input/2-response
+scenario, under-spend doesn't set flag, human header, human
+per-turn line, human exit notice, JSON budget_exceeded
+chunk, no-budget legacy behavior unchanged, one-shot
+over/under-budget flag presence/absence), 2 in
+commands.test.ts (--max-cost-usd=-1 exits 2 with clear
+error, valid positive value runs the turn). M2.X.5.aa.z.22
+closes ADR-0136 Q2
 by adding `deleteInferenceProfile(profileIdentifier)` to
 BedrockProvider — the 4th DELETE on the Bedrock control
 plane and the first "smart" delete with a mandatory pre-
@@ -2642,7 +2683,12 @@ ADR-0136 Q2 — first "smart" delete with mandatory pre-
 flight GET that reads `type` and refuses SYSTEM_DEFINED
 profiles before any DELETE is issued; 4th DELETE on the
 Bedrock control plane; pre-flight-guard pattern set for
-future two-typed resources).
+future two-typed resources), ADR-0139 covers M5.11
+(`crossengin chat --max-cost-usd` session budget — client-
+side post-hoc cumulative cap independent of and orthogonal
+to --cost-ceiling-usd; enforcement in REPL loop not router
+since session budget needs REAL not estimated cost;
+operators can run bounded interactive + loop scripts).
 
 ## Architecture in 90 seconds
 
@@ -3975,7 +4021,23 @@ propagates the DELETE-side 404 verbatim — same idempotency-
 via-isNotFoundError pattern as ADR-0136 applies; pre-flight-
 guard pattern established for future two-typed resources;
 Bedrock control plane now has 18 read + 2 stop + 1 create +
-4 delete = 25 operations).
+4 delete = 25 operations), ADR-0139 covers Phase 2 M5.11
+(`crossengin chat --max-cost-usd $X` session budget flag —
+session-scoped post-hoc cumulative cap independent of and
+orthogonal to --cost-ceiling-usd which remains the per-
+request gate; enforcement lives in REPL loop not router for
+three reasons (router preflight uses estimated cost while
+budget needs real cost; router is transport but budget is
+CLI-state; maxUsdPerWindow would need fake-long windowSeconds
+as code smell); check at top of each REPL iteration BEFORE
+consuming next input — last turn allowed to complete but
+next refused; one-shot mode flags exceedance informationally
+after the single turn; human + JSON display surfaces with
+parity; no breaking change — existing callers see identical
+behavior without the flag; CLI client-side budget is the
+complement to M6.7 server-side multi-replica enforcement,
+not a duplicate; operators can run bounded interactive
+sessions or batch loops with budget guard rails).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

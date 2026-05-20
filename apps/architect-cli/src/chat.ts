@@ -506,6 +506,7 @@ export interface ChatReplOptions {
   readonly maxToolIterations?: number;
   readonly transcript?: Transcript;
   readonly autoApprove?: boolean;
+  readonly maxCostUsd?: number;
 }
 
 export function interactiveApprover(opts: {
@@ -883,6 +884,7 @@ function snapshotAccumulated(agg: {
 export interface ChatReplResult {
   readonly turns: number;
   readonly aggregateUsage: Usage;
+  readonly budgetExceeded?: boolean;
 }
 
 export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult> {
@@ -930,7 +932,14 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
     turns += 1;
     if (opts.oneShot) {
       await emitSessionEnd(opts.transcript, turns, aggregate);
-      return { turns, aggregateUsage: snapshotAccumulated(aggregate) };
+      const exceeded =
+        opts.maxCostUsd !== undefined && aggregate.cost > opts.maxCostUsd;
+      if (exceeded) announceBudgetExceeded(opts, aggregate.cost, opts.maxCostUsd!);
+      return {
+        turns,
+        aggregateUsage: snapshotAccumulated(aggregate),
+        ...(exceeded ? { budgetExceeded: true } : {}),
+      };
     }
   }
 
@@ -939,10 +948,24 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       "CrossEngin Architect chat. Type your message; Ctrl-D to exit; /exit to quit.\n" +
         "Attach blocks with /attach <type> <value>; /show-attachments; /clear-attachments.\n",
     );
+    if (opts.maxCostUsd !== undefined) {
+      opts.io.stdout.write(
+        `Session budget: $${opts.maxCostUsd.toFixed(4)} USD.\n`,
+      );
+    }
   }
 
+  let budgetExceeded = false;
   const pendingBlocks: LlmContentBlock[] = [];
   while (true) {
+    if (
+      opts.maxCostUsd !== undefined &&
+      aggregate.cost >= opts.maxCostUsd
+    ) {
+      budgetExceeded = true;
+      announceBudgetExceeded(opts, aggregate.cost, opts.maxCostUsd);
+      break;
+    }
     const line = await opts.lines.next();
     if (line === null) break;
     const parsed = parseUserLine(line);
@@ -1007,11 +1030,42 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
     turns += 1;
-    if (opts.format === "human") opts.io.stdout.write("\n");
+    if (opts.format === "human") {
+      opts.io.stdout.write("\n");
+      if (opts.maxCostUsd !== undefined) {
+        opts.io.stdout.write(
+          `[budget: $${aggregate.cost.toFixed(4)} of $${opts.maxCostUsd.toFixed(4)} spent]\n`,
+        );
+      }
+    }
   }
 
   await emitSessionEnd(opts.transcript, turns, aggregate);
-  return { turns, aggregateUsage: snapshotAccumulated(aggregate) };
+  return {
+    turns,
+    aggregateUsage: snapshotAccumulated(aggregate),
+    ...(budgetExceeded ? { budgetExceeded: true } : {}),
+  };
+}
+
+function announceBudgetExceeded(
+  opts: ChatReplOptions,
+  spentUsd: number,
+  budgetUsd: number,
+): void {
+  if (opts.format === "json") {
+    opts.io.stdout.write(
+      JSON.stringify({
+        kind: "budget_exceeded",
+        spent_usd: Number(spentUsd.toFixed(6)),
+        budget_usd: Number(budgetUsd.toFixed(6)),
+      }) + "\n",
+    );
+    return;
+  }
+  opts.io.stdout.write(
+    `\n[session budget exceeded: $${spentUsd.toFixed(4)} spent, $${budgetUsd.toFixed(4)} budget — exiting]\n`,
+  );
 }
 
 async function emitSessionEnd(

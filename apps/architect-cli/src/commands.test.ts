@@ -358,6 +358,39 @@ describe("runChat", () => {
     expect(out()).toContain("fine");
   });
 
+  it("returns exit 2 on a malformed --max-cost-usd value (M5.11)", async () => {
+    const { ctx, err } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: new StubProvider([
+        { kind: "text", text: "x" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]),
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--max-cost-usd=-1"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--max-cost-usd");
+  });
+
+  it("accepts --max-cost-usd with a valid positive number and runs the turn (M5.11)", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "ok" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, out } = buffers({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      providerOverride: provider,
+    });
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--max-cost-usd=1.0"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("ok");
+  });
+
   it("returns exit 2 when --max-tokens is not a positive number", async () => {
     const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
     const code = await runChat(parsed("chat", "--max-tokens=not-a-number"), ctx);

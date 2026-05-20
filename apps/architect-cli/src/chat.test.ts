@@ -413,6 +413,191 @@ describe("runChatRepl — interactive", () => {
   });
 });
 
+describe("runChatRepl — --max-cost-usd session budget (M5.11)", () => {
+  const TURN_COST = 0.0000045;
+  const HIGH_COST_CHUNKS: readonly CompletionChunk[] = [
+    { kind: "text", text: "ok" },
+    {
+      kind: "usage_final",
+      usage: { inputTokens: 12, outputTokens: 6, cachedInputTokens: 0, cost: TURN_COST },
+    },
+  ];
+
+  it("REPL — refuses subsequent input once aggregate cost crosses the budget", async () => {
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({
+      responses: [HIGH_COST_CHUNKS, HIGH_COST_CHUNKS],
+      captured,
+    });
+    const { io } = buffers();
+    const result = await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1", "q2", "q3"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+      maxCostUsd: TURN_COST * 1.5,
+    });
+    expect(result.turns).toBe(2);
+    expect(result.budgetExceeded).toBe(true);
+    expect(captured).toHaveLength(2);
+  });
+
+  it("REPL — budget under-spend does NOT set budgetExceeded", async () => {
+    const provider = new FakeProvider({ responses: [HIGH_COST_CHUNKS] });
+    const { io } = buffers();
+    const result = await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+      maxCostUsd: 100.0,
+    });
+    expect(result.turns).toBe(1);
+    expect(result.budgetExceeded).toBeUndefined();
+  });
+
+  it("REPL — human-mode header announces the budget", async () => {
+    const provider = new FakeProvider({ responses: [HIGH_COST_CHUNKS] });
+    const { io, out } = buffers();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+      maxCostUsd: 0.5,
+    });
+    expect(out()).toContain("Session budget: $0.5000 USD");
+  });
+
+  it("REPL — human-mode per-turn line shows running spend", async () => {
+    const provider = new FakeProvider({ responses: [HIGH_COST_CHUNKS] });
+    const { io, out } = buffers();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+      maxCostUsd: 0.5,
+    });
+    expect(out()).toMatch(/\[budget: \$\d\.\d{4} of \$0\.5000 spent\]/);
+  });
+
+  it("REPL — human-mode exit notice on budget exceedance names spent + budget", async () => {
+    const provider = new FakeProvider({
+      responses: [HIGH_COST_CHUNKS, HIGH_COST_CHUNKS],
+    });
+    const { io, out } = buffers();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1", "q2", "q3"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+      maxCostUsd: TURN_COST * 1.5,
+    });
+    expect(out()).toContain("session budget exceeded");
+  });
+
+  it("REPL — JSON-mode emits a budget_exceeded chunk on exit", async () => {
+    const provider = new FakeProvider({
+      responses: [HIGH_COST_CHUNKS, HIGH_COST_CHUNKS],
+    });
+    const { io, out } = buffers();
+    await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1", "q2", "q3"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "json",
+      oneShot: false,
+      maxCostUsd: TURN_COST * 1.5,
+    });
+    const lines = out().trim().split("\n").filter((l) => l.length > 0);
+    const parsed = lines.map((l) => JSON.parse(l) as { kind: string });
+    expect(parsed.some((p) => p.kind === "budget_exceeded")).toBe(true);
+  });
+
+  it("REPL — no maxCostUsd = no enforcement (legacy behavior unchanged)", async () => {
+    const provider = new FakeProvider({
+      responses: [HIGH_COST_CHUNKS, HIGH_COST_CHUNKS, HIGH_COST_CHUNKS],
+    });
+    const { io, out } = buffers();
+    const result = await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(asyncIter(["q1", "q2", "q3"])),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      oneShot: false,
+    });
+    expect(result.turns).toBe(3);
+    expect(result.budgetExceeded).toBeUndefined();
+    expect(out()).not.toContain("Session budget");
+    expect(out()).not.toContain("session budget exceeded");
+  });
+
+  it("one-shot — flags budgetExceeded when the single turn exceeds the budget", async () => {
+    const provider = new FakeProvider({ responses: [HIGH_COST_CHUNKS] });
+    const { io } = buffers();
+    const result = await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(emptyAsyncIterable()),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      prompt: "hi",
+      oneShot: true,
+      maxCostUsd: TURN_COST * 0.5,
+    });
+    expect(result.turns).toBe(1);
+    expect(result.budgetExceeded).toBe(true);
+  });
+
+  it("one-shot — under-budget single turn does NOT flag budgetExceeded", async () => {
+    const provider = new FakeProvider({ responses: [HIGH_COST_CHUNKS] });
+    const { io } = buffers();
+    const result = await runChatRepl({
+      provider,
+      io,
+      lines: lineReaderFromIterable(emptyAsyncIterable()),
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      format: "human",
+      prompt: "hi",
+      oneShot: true,
+      maxCostUsd: TURN_COST * 10,
+    });
+    expect(result.turns).toBe(1);
+    expect(result.budgetExceeded).toBeUndefined();
+  });
+});
+
 describe("linesFromReadable", () => {
   it("splits a stream on newlines", async () => {
     const stream = makeReadable("first\nsecond\nthird\n");
