@@ -115,6 +115,9 @@ function buildRouter(opts: {
   getTenantCostCeiling?: ConstructorParameters<
     typeof DefaultLlmRouter
   >[0]["getTenantCostCeiling"];
+  getTenantCostCeilingDetailed?: ConstructorParameters<
+    typeof DefaultLlmRouter
+  >[0]["getTenantCostCeilingDetailed"];
   costTracker?: InMemoryCostTracker;
   instrumentation?: ConstructorParameters<typeof DefaultLlmRouter>[0]["instrumentation"];
 }): DefaultLlmRouter {
@@ -126,6 +129,7 @@ function buildRouter(opts: {
     retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0, jitter: false },
     costCeiling: opts.costCeiling,
     getTenantCostCeiling: opts.getTenantCostCeiling,
+    getTenantCostCeilingDetailed: opts.getTenantCostCeilingDetailed,
     costTracker: opts.costTracker,
     latencyTracker: new InMemoryLatencyTracker(),
     instrumentation: opts.instrumentation,
@@ -777,14 +781,18 @@ describe("DefaultLlmRouter.complete — per-tenant cost ceiling (M6.7.x)", () =>
 });
 
 describe("DefaultLlmRouter.complete — RouterInstrumentation (M6.7.z)", () => {
-  it("emits llm_call_started then llm_call_completed on the happy path", async () => {
+  it("emits ceiling_resolved + llm_call_started + llm_call_completed on the happy path", async () => {
     const provider = new StubProvider("anthropic", "ok");
     const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
     const cap = captureRouterInstrumentation();
     const router = buildRouter({ providers, instrumentation: cap.instrumentation });
     for await (const _ of router.complete(fakeReq())) void _;
     const kinds = cap.events.map((e) => e.kind);
-    expect(kinds).toEqual(["llm_call_started", "llm_call_completed"]);
+    expect(kinds).toEqual([
+      "ceiling_resolved",
+      "llm_call_started",
+      "llm_call_completed",
+    ]);
   });
 
   it("threads tenantId + sessionId + task + providerId + modelId on every event", async () => {
@@ -842,7 +850,7 @@ describe("DefaultLlmRouter.complete — RouterInstrumentation (M6.7.z)", () => {
     expect(failed?.attributes["errorKind"]).toBeDefined();
   });
 
-  it("emits the full started/failed/started/completed sequence on fallover", async () => {
+  it("emits the full ceiling_resolved + started/failed/started/completed sequence on fallover", async () => {
     const providers = new Map<string, LlmProvider>([
       ["anthropic", new StubProvider("anthropic", "always_retryable")],
       ["openai", new StubProvider("openai", "ok")],
@@ -852,13 +860,15 @@ describe("DefaultLlmRouter.complete — RouterInstrumentation (M6.7.z)", () => {
     for await (const _ of router.complete(fakeReq())) void _;
     const kinds = cap.events.map((e) => e.kind);
     expect(kinds).toEqual([
+      "ceiling_resolved",
       "llm_call_started",
       "llm_call_failed",
       "llm_call_started",
       "llm_call_completed",
     ]);
-    expect(cap.events[0]?.providerId).toBe("anthropic");
-    expect(cap.events[2]?.providerId).toBe("openai");
+    // ceiling_resolved precedes the llm_call_* events; provider IDs start at index 1.
+    expect(cap.events[1]?.providerId).toBe("anthropic");
+    expect(cap.events[3]?.providerId).toBe("openai");
   });
 
   it("emits llm_call_failed with willFallback=false on the last provider when AllProvidersExhausted", async () => {
@@ -1066,14 +1076,218 @@ describe("DefaultLlmRouter.embed — RouterInstrumentation (M6.7.z.embed)", () =
   });
 });
 
-describe("ROUTER_INSTRUMENTATION_KINDS — embed kinds (M6.7.z.embed)", () => {
-  it("includes the 3 new embed kinds additively (original 3 llm kinds preserved)", () => {
+describe("ROUTER_INSTRUMENTATION_KINDS — all kinds (M6.7.z + M6.7.z.embed + M6.8.x.trace)", () => {
+  it("includes the 6 llm/embed kinds + ceiling_resolved (7 total)", () => {
     expect(ROUTER_INSTRUMENTATION_KINDS).toContain("embed_call_started");
     expect(ROUTER_INSTRUMENTATION_KINDS).toContain("embed_call_completed");
     expect(ROUTER_INSTRUMENTATION_KINDS).toContain("embed_call_failed");
     expect(ROUTER_INSTRUMENTATION_KINDS).toContain("llm_call_started");
     expect(ROUTER_INSTRUMENTATION_KINDS).toContain("llm_call_completed");
     expect(ROUTER_INSTRUMENTATION_KINDS).toContain("llm_call_failed");
-    expect(ROUTER_INSTRUMENTATION_KINDS.length).toBe(6);
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("ceiling_resolved");
+    expect(ROUTER_INSTRUMENTATION_KINDS.length).toBe(7);
+  });
+});
+
+describe("DefaultLlmRouter.complete — ceiling_resolved instrumentation (M6.8.x.trace)", () => {
+  it("emits ceiling_resolved with source='none' when no ceiling at any level", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved).toBeDefined();
+    expect(resolved.attributes["source"]).toBe("none");
+    expect(resolved.attributes["hasCeiling"]).toBe(false);
+    expect("ceiling" in resolved.attributes).toBe(false);
+  });
+
+  it("emits ceiling_resolved with source='global' when only router costCeiling is set", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerRequest: 1.0 },
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("global");
+    expect(resolved.attributes["hasCeiling"]).toBe(true);
+    expect(resolved.attributes["ceiling"]).toEqual({ maxUsdPerRequest: 1.0 });
+  });
+
+  it("emits ceiling_resolved with source='override' when basic getTenantCostCeiling returns a ceiling", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      getTenantCostCeiling: async () => ({ maxUsdPerRequest: 2.0 }),
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("override");
+    expect(resolved.attributes["hasCeiling"]).toBe(true);
+    expect(resolved.attributes["ceiling"]).toEqual({ maxUsdPerRequest: 2.0 });
+  });
+
+  it("emits ceiling_resolved with source='global' when basic getTenantCostCeiling returns undefined and costCeiling is set", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerWindow: 100.0 },
+      getTenantCostCeiling: async () => undefined,
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("global");
+    expect(resolved.attributes["ceiling"]).toEqual({ maxUsdPerWindow: 100.0 });
+  });
+
+  it("emits ceiling_resolved with source='tier' + tierId when getTenantCostCeilingDetailed returns tier", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      getTenantCostCeilingDetailed: async () => ({
+        ceiling: { maxUsdPerRequest: 5.0 },
+        source: "tier" as const,
+        tierId: "pro",
+      }),
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("tier");
+    expect(resolved.attributes["tierId"]).toBe("pro");
+    expect(resolved.attributes["ceiling"]).toEqual({ maxUsdPerRequest: 5.0 });
+  });
+
+  it("emits ceiling_resolved with source='override' from getTenantCostCeilingDetailed (tierId absent)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      getTenantCostCeilingDetailed: async () => ({
+        ceiling: { maxUsdPerRequest: 50.0 },
+        source: "override" as const,
+      }),
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("override");
+    expect("tierId" in resolved.attributes).toBe(false);
+  });
+
+  it("falls back to global when getTenantCostCeilingDetailed returns source='none'", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerWindow: 50.0 },
+      getTenantCostCeilingDetailed: async () => ({
+        ceiling: undefined,
+        source: "none" as const,
+      }),
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("global");
+    expect(resolved.attributes["ceiling"]).toEqual({ maxUsdPerWindow: 50.0 });
+  });
+
+  it("ceiling_resolved is emitted BEFORE the first llm_call_started", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolvedIdx = cap.events.findIndex((e) => e.kind === "ceiling_resolved");
+    const firstStartedIdx = cap.events.findIndex((e) => e.kind === "llm_call_started");
+    expect(resolvedIdx).toBeGreaterThanOrEqual(0);
+    expect(firstStartedIdx).toBeGreaterThan(resolvedIdx);
+  });
+
+  it("ceiling_resolved carries tenantId + sessionId + task + providerId + modelId from the request", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.tenantId).toBe(TENANT);
+    expect(resolved.sessionId).toBe("sess-1");
+    expect(resolved.task).toBe("executor");
+    expect(resolved.providerId).toBe("anthropic");
+    expect(resolved.modelId).toBe("anthropic-model-1");
+  });
+
+  it("ceiling_resolved has durationMs=null (resolution doesn't have a duration concept)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    for await (const _ of router.complete(fakeReq())) void _;
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.durationMs).toBeNull();
+  });
+
+  it("ceiling_resolved still emits when ceiling is exceeded (event fires before the throw)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerRequest: 0.0000001 },
+      instrumentation: cap.instrumentation,
+    });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow(CostCeilingExceededError);
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved");
+    expect(resolved).toBeDefined();
+    expect(resolved!.attributes["source"]).toBe("global");
+  });
+
+  it("getTenantCostCeilingDetailed takes precedence over getTenantCostCeiling when both wired", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const cap = captureRouterInstrumentation();
+    let basicCalled = 0;
+    let detailedCalled = 0;
+    const router = buildRouter({
+      providers,
+      getTenantCostCeiling: async () => {
+        basicCalled += 1;
+        return { maxUsdPerRequest: 99.0 };
+      },
+      getTenantCostCeilingDetailed: async () => {
+        detailedCalled += 1;
+        return {
+          ceiling: { maxUsdPerRequest: 5.0 },
+          source: "tier" as const,
+          tierId: "pro",
+        };
+      },
+      instrumentation: cap.instrumentation,
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    expect(detailedCalled).toBeGreaterThan(0);
+    expect(basicCalled).toBe(0);
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("tier");
+    expect(resolved.attributes["ceiling"]).toEqual({ maxUsdPerRequest: 5.0 });
   });
 });

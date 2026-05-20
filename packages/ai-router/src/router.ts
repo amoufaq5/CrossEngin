@@ -23,6 +23,7 @@ import {
   CostCeilingExceededError,
   InMemoryCostTracker,
   type CostCeiling,
+  type CostCeilingResolution,
   type CostTracker,
 } from "./cost-tracker.js";
 import {
@@ -48,6 +49,9 @@ export interface DefaultLlmRouterOptions extends RouterConfig {
   readonly retry?: RetryPolicy;
   readonly costCeiling?: CostCeiling;
   readonly getTenantCostCeiling?: (tenantId: string) => Promise<CostCeiling | undefined>;
+  readonly getTenantCostCeilingDetailed?: (
+    tenantId: string,
+  ) => Promise<CostCeilingResolution>;
   readonly costTracker?: CostTracker;
   readonly latencyTracker?: LatencyTracker;
   readonly instrumentation?: RouterInstrumentation;
@@ -94,6 +98,9 @@ export class DefaultLlmRouter implements LlmRouter {
   private readonly getTenantCostCeiling:
     | ((tenantId: string) => Promise<CostCeiling | undefined>)
     | undefined;
+  private readonly getTenantCostCeilingDetailed:
+    | ((tenantId: string) => Promise<CostCeilingResolution>)
+    | undefined;
   private readonly costTracker: CostTracker;
   private readonly latencyTracker: LatencyTracker;
   private readonly instrumentation: RouterInstrumentation;
@@ -107,6 +114,7 @@ export class DefaultLlmRouter implements LlmRouter {
     this.retry = opts.retry ?? DEFAULT_RETRY_POLICY;
     this.costCeiling = opts.costCeiling;
     this.getTenantCostCeiling = opts.getTenantCostCeiling;
+    this.getTenantCostCeilingDetailed = opts.getTenantCostCeilingDetailed;
     this.costTracker = opts.costTracker ?? new InMemoryCostTracker();
     this.latencyTracker = opts.latencyTracker ?? new InMemoryLatencyTracker();
     this.instrumentation = opts.instrumentation ?? NoopRouterInstrumentation;
@@ -134,7 +142,11 @@ export class DefaultLlmRouter implements LlmRouter {
 
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
     const choices = await this.chooseProviders(req.task, req.tenantId);
-    await this.enforceCeilingPreflight(req.tenantId, this.estimatePreflightCost(req, choices[0]!));
+    await this.enforceCeilingPreflight(
+      req,
+      choices[0]!,
+      this.estimatePreflightCost(req, choices[0]!),
+    );
     const attempts: RouterAttempt[] = [];
     for (let i = 0; i < choices.length; i++) {
       const choice = choices[i]!;
@@ -385,27 +397,60 @@ export class DefaultLlmRouter implements LlmRouter {
   }
 
   private async enforceCeilingPreflight(
-    tenantId: string,
+    req: CompletionRequest,
+    choice: { provider: LlmProvider; modelId: string; providerId: string },
     estimatedCostUsd: number,
   ): Promise<void> {
-    const ceiling = await this.resolveCeiling(tenantId);
-    if (ceiling === undefined) return;
+    const resolution = await this.resolveCeilingDetailed(req.tenantId);
+    const occurredAt = new Date(this.clock()).toISOString();
+    const ceilingAttr: Record<string, unknown> = {
+      source: resolution.source,
+      hasCeiling: resolution.ceiling !== undefined,
+    };
+    if (resolution.ceiling !== undefined) {
+      ceilingAttr["ceiling"] = resolution.ceiling;
+    }
+    if (resolution.tierId !== undefined) {
+      ceilingAttr["tierId"] = resolution.tierId;
+    }
+    await this.instrumentation.onEvent({
+      kind: "ceiling_resolved",
+      tenantId: req.tenantId,
+      sessionId: req.sessionId,
+      task: req.task,
+      providerId: choice.providerId,
+      modelId: choice.modelId,
+      occurredAt,
+      durationMs: null,
+      attributes: ceilingAttr,
+    });
+    if (resolution.ceiling === undefined) return;
     const check = await this.costTracker.checkCeiling({
-      tenantId,
+      tenantId: req.tenantId,
       estimatedCostUsd,
-      ceiling,
+      ceiling: resolution.ceiling,
     });
     if (!check.allowed) {
       throw new CostCeilingExceededError(check);
     }
   }
 
-  private async resolveCeiling(tenantId: string): Promise<CostCeiling | undefined> {
-    if (this.getTenantCostCeiling !== undefined) {
+  private async resolveCeilingDetailed(
+    tenantId: string,
+  ): Promise<CostCeilingResolution> {
+    if (this.getTenantCostCeilingDetailed !== undefined) {
+      const detailed = await this.getTenantCostCeilingDetailed(tenantId);
+      if (detailed.source !== "none") return detailed;
+    } else if (this.getTenantCostCeiling !== undefined) {
       const tenantCeiling = await this.getTenantCostCeiling(tenantId);
-      if (tenantCeiling !== undefined) return tenantCeiling;
+      if (tenantCeiling !== undefined) {
+        return { ceiling: tenantCeiling, source: "override" };
+      }
     }
-    return this.costCeiling;
+    if (this.costCeiling !== undefined) {
+      return { ceiling: this.costCeiling, source: "global" };
+    }
+    return { ceiling: undefined, source: "none" };
   }
 
   private estimatePreflightCost(

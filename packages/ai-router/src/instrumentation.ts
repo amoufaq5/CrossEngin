@@ -5,6 +5,7 @@ export const ROUTER_INSTRUMENTATION_KINDS = [
   "embed_call_started",
   "embed_call_completed",
   "embed_call_failed",
+  "ceiling_resolved",
 ] as const;
 export type RouterInstrumentationKind =
   (typeof ROUTER_INSTRUMENTATION_KINDS)[number];

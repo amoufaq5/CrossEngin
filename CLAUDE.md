@@ -21,15 +21,77 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M6.8.x.trace + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,042 tests**,
-all green, no type errors. M8.2 adds timer_set + timer_cancelled
+**56 packages + 1 app, 128 meta-schema tables, 8,054 tests**,
+all green, no type errors. M6.8.x.trace closes ADR-0154 Q1
+by emitting a new `ceiling_resolved` RouterInstrumentation
+event automatically from DefaultLlmRouter.enforceCeilingPreflight.
+ROUTER_INSTRUMENTATION_KINDS grows 6 → 7 with ceiling_resolved
+at slot 7. Operators previously had source attribution via
+PostgresCostCeilingResolver.resolveDetailed() (synchronous),
+but no automatic audit trail — they had to wrap the resolver
+themselves. Four additive changes: (1) new kind in the
+ROUTER constant; (2) new types CostCeilingSource +
+CostCeilingResolution in @crossengin/ai-router/cost-tracker.ts
+with router-side enum widening to include "global" (the
+router's own costCeiling) — the resolver-side enum only
+emits "override"|"tier"|"none" but the router's source enum
+adds "global" for the costCeiling fallback case; (3) new
+optional callback getTenantCostCeilingDetailed?: (tenantId)
+=> Promise<CostCeilingResolution> on
+DefaultLlmRouterOptions — operators wire
+PostgresCostCeilingResolver.resolveDetailed directly here;
+detailed callback takes PRECEDENCE over basic
+getTenantCostCeiling when both wired; if detailed returns
+source="none" the router falls back to global; if only
+basic is wired and returns a ceiling, source degrades to
+"override" (can't disambiguate from tier without the
+detailed shape); (4) META_LLM_CALL_TRACES.kind CHECK
+constraint extended additively — no migration. Resolution
+precedence walks 4 levels: detailed→basic→global→none. The
+event fires BEFORE the ceiling check so even when
+CostCeilingExceededError throws, operators see the resolution
+in their audit trail (critical for debugging blocked
+requests). Event attributes are TypeScript discriminated-
+union shaped: {source, hasCeiling} always present; ceiling
+present only when hasCeiling=true; tierId present only when
+source==="tier". Wire ordering: ceiling_resolved →
+llm_call_started → llm_call_completed (matches the logical
+ordering of enforceCeilingPreflight at the start of
+complete()). Three operator workflows unblocked: compliance
+audit dashboards answering "did Tenant X get the expected
+policy at this moment?", tier migration verification (did
+pro promotion take effect on the next request?),
+forensic reconstruction of blocked requests by correlating
+ceiling_resolved with llm_call_failed kind="cost_ceiling_exceeded"
+via session_id. PostgresRouterInstrumentation handles the
+new kind transparently since the wire format is unchanged.
+No breaking change: existing 6 kinds preserved; new callback
+is opt-in; legacy getTenantCostCeiling callback continues
+working with degraded "override" source. embed() doesn't
+currently call enforceCeilingPreflight so ceiling_resolved
+doesn't fire there — adding embed ceiling enforcement is a
+separate milestone. 12 new tests in router.test.ts:
+source="none" emission when no ceiling, source="global"
+emission with router costCeiling only, source="override"
+emission via basic callback, source="global" fallback when
+basic returns undefined, source="tier" emission with tierId
+via detailed callback, source="override" via detailed
+(tierId absent), fall-back-to-global when detailed returns
+source="none", emit BEFORE first llm_call_started ordering,
+field threading (tenantId/sessionId/task/providerId/modelId),
+durationMs is null, event still fires when ceiling
+exceeded + throws CostCeilingExceededError, detailed
+callback takes precedence over basic when both wired.
+Three existing tests updated to include ceiling_resolved
+in the expected event sequence + kinds.length=7. M8.2 adds
+timer_set + timer_cancelled
 to WORKFLOW_INSTRUMENTATION_KINDS (14 → 16) closing the timer
 lifecycle observability gap. Before M8.2, operators saw
 timer_fired events but not timer_set creations or
@@ -3628,7 +3690,16 @@ correlation BEFORE the event-log append; timer_cancelled
 kind-defined and CHECK-allowed but emission deferred until
 cancel_timer action is implemented in a future milestone;
 operator workflows unlocked — timer creation throughput,
-set-to-fire latency, cancellation rate).
+set-to-fire latency, cancellation rate), ADR-0157 covers
+M6.8.x.trace (`ceiling_resolved` event — closes ADR-0154 Q1
+— ROUTER_INSTRUMENTATION_KINDS grows 6→7; automatic
+emission from enforceCeilingPreflight before the ceiling
+check so audit signal survives CostCeilingExceededError;
+new getTenantCostCeilingDetailed?: callback for full source
+attribution (override|tier|global|none); legacy
+getTenantCostCeiling callback continues working with
+degraded "override" source; PostgresCostCeilingResolver.resolveDetailed
+is now first-class operator wiring).
 
 ## Architecture in 90 seconds
 
@@ -5046,7 +5117,42 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0156 covers Phase 2 M8.2 (Workflow runtime
+operations), ADR-0157 covers Phase 2 M6.8.x.trace
+(`ceiling_resolved` RouterInstrumentation event +
+getTenantCostCeilingDetailed callback — closes ADR-0154 Q1;
+ROUTER_INSTRUMENTATION_KINDS grows 6→7 with ceiling_resolved
+at slot 7; new optional callback getTenantCostCeilingDetailed?:
+(tenantId) => Promise<CostCeilingResolution> for full source
+attribution — detailed callback takes PRECEDENCE over the
+legacy basic getTenantCostCeiling when both wired; new
+CostCeilingResolution + CostCeilingSource types in
+@crossengin/ai-router/cost-tracker.ts with router-side enum
+widening to include "global" (resolver-side enum only emits
+override|tier|none, router adds global for costCeiling
+fallback); resolution precedence walks 4 levels detailed →
+basic → global → none; legacy basic callback degrades to
+source="override" (router can't disambiguate from tier
+without detailed shape); detailed returning source="none"
+falls back to router-level global; event fires BEFORE the
+ceiling check so audit signal survives even when
+CostCeilingExceededError throws — critical for debugging
+blocked requests; event attributes use TypeScript
+discriminated-union pattern (source + hasCeiling always
+present, ceiling/tierId conditional); wire ordering
+ceiling_resolved → llm_call_started → llm_call_completed
+matches enforceCeilingPreflight's logical position;
+META_LLM_CALL_TRACES.kind CHECK constraint extended
+additively — no migration; three operator workflows
+unblocked — compliance audit dashboards, tier migration
+verification, forensic reconstruction of blocked requests;
+PostgresRouterInstrumentation handles the new kind
+transparently since wire format unchanged; embed() doesn't
+emit ceiling_resolved yet — separate milestone needed to
+add ceiling enforcement to the embed path; no breaking
+change — existing callers without instrumentation, with
+basic-only callback, or with no callback continue working
+identically).
+ADR-0156 covers Phase 2 M8.2 (Workflow runtime
 timer_set + timer_cancelled instrumentation —
 WORKFLOW_INSTRUMENTATION_KINDS grows 14→16 additively with
 timer_set at slot 8 before timer_fired and timer_cancelled

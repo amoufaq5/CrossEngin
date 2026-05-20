@@ -4,6 +4,14 @@ export interface CostCeiling {
   readonly windowSeconds?: number;
 }
 
+export type CostCeilingSource = "override" | "tier" | "global" | "none";
+
+export interface CostCeilingResolution {
+  readonly ceiling: CostCeiling | undefined;
+  readonly source: CostCeilingSource;
+  readonly tierId?: string;
+}
+
 export interface CostUsageWindow {
   readonly tenantId: string;
   readonly windowStartUnixMs: number;
