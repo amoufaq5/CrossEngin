@@ -4648,6 +4648,319 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
   });
 });
 
+describe("BedrockProvider — tagResource (M2.X.5.aa.z.24)", () => {
+  const VALID_ARN =
+    "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
+
+  it("POSTs to /tags with resourceARN in the query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "{}" }) });
+    await provider.tagResource({
+      resourceArn: VALID_ARN,
+      tags: [{ key: "env", value: "prod" }],
+    });
+    expect(capture.url).toContain("/tags");
+    expect(capture.url).toContain("resourceARN=");
+    expect(capture.init?.method).toBe("POST");
+  });
+
+  it("includes the tags array in the body bytes", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "{}" }) });
+    await provider.tagResource({
+      resourceArn: VALID_ARN,
+      tags: [{ key: "env", value: "prod" }],
+    });
+    const bodyStr = new TextDecoder().decode(capture.init!.body);
+    const body = JSON.parse(bodyStr) as Record<string, unknown>;
+    expect(body["tags"]).toEqual([{ key: "env", value: "prod" }]);
+  });
+
+  it("URI-encodes ARN colons in the query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "{}" }) });
+    await provider.tagResource({
+      resourceArn: VALID_ARN,
+      tags: [{ key: "k", value: "v" }],
+    });
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "{}" }) });
+    await provider.tagResource({
+      resourceArn: VALID_ARN,
+      tags: [{ key: "k", value: "v" }],
+    });
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates resourceArn BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.tagResource({ resourceArn: "", tags: [{ key: "k", value: "v" }] }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "{}" }),
+    });
+    const result = await provider.tagResource({
+      resourceArn: VALID_ARN,
+      tags: [{ key: "k", value: "v" }],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error (resource ARN doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such resource",
+        }),
+      }),
+    });
+    await expect(
+      provider.tagResource({
+        resourceArn: VALID_ARN,
+        tags: [{ key: "k", value: "v" }],
+      }),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.tagResource({
+        resourceArn: VALID_ARN,
+        tags: [{ key: "k", value: "v" }],
+      }),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.tagResource({
+        resourceArn: VALID_ARN,
+        tags: [{ key: "k", value: "v" }],
+      }),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+});
+
+describe("BedrockProvider — untagResource (M2.X.5.aa.z.24)", () => {
+  const VALID_ARN = "arn:aws:bedrock:us-east-1:123:custom-model/abc";
+
+  it("POSTs to /untag with resourceARN in the query string", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "{}" }) });
+    await provider.untagResource({ resourceArn: VALID_ARN, tagKeys: ["env"] });
+    expect(capture.url).toContain("/untag");
+    expect(capture.url).toContain("resourceARN=");
+    expect(capture.init?.method).toBe("POST");
+  });
+
+  it("includes the tagKeys array in the body bytes", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "{}" }) });
+    await provider.untagResource({
+      resourceArn: VALID_ARN,
+      tagKeys: ["env", "team"],
+    });
+    const body = JSON.parse(new TextDecoder().decode(capture.init!.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body["tagKeys"]).toEqual(["env", "team"]);
+  });
+
+  it("validates resourceArn BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.untagResource({ resourceArn: "", tagKeys: ["k"] }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "{}" }),
+    });
+    const result = await provider.untagResource({
+      resourceArn: VALID_ARN,
+      tagKeys: ["env"],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.untagResource({ resourceArn: VALID_ARN, tagKeys: ["k"] }),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+});
+
+describe("BedrockProvider — listTagsForResource (M2.X.5.aa.z.24)", () => {
+  const VALID_ARN = "arn:aws:bedrock:us-east-1:123:guardrail/abc";
+
+  it("POSTs to /listTagsForResource with resourceARN in the BODY (not the query)", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, text: JSON.stringify({ tags: [] }) }),
+    });
+    await provider.listTagsForResource({ resourceArn: VALID_ARN });
+    expect(capture.url).toContain("/listTagsForResource");
+    expect(capture.url).not.toContain("resourceARN=");
+    const body = JSON.parse(new TextDecoder().decode(capture.init!.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body["resourceARN"]).toBe(VALID_ARN);
+  });
+
+  it("returns the parsed tags array on success", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({
+          tags: [
+            { key: "env", value: "prod" },
+            { key: "team", value: "platform" },
+          ],
+        }),
+      }),
+    });
+    const result = await provider.listTagsForResource({ resourceArn: VALID_ARN });
+    expect(result.tags).toEqual([
+      { key: "env", value: "prod" },
+      { key: "team", value: "platform" },
+    ]);
+  });
+
+  it("returns empty tags when the resource has none", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ tags: [] }),
+      }),
+    });
+    const result = await provider.listTagsForResource({ resourceArn: VALID_ARN });
+    expect(result.tags).toEqual([]);
+  });
+
+  it("validates resourceArn BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listTagsForResource({ resourceArn: "" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.listTagsForResource({ resourceArn: VALID_ARN }),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates parse failures as api_error", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
+    });
+    await expect(
+      provider.listTagsForResource({ resourceArn: VALID_ARN }),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.listTagsForResource({ resourceArn: VALID_ARN }),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

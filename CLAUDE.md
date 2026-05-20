@@ -21,15 +21,59 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,728 tests**,
-all green, no type errors. M6.8 closes ADR-0137 Q2 with a
+**56 packages + 1 app, 127 meta-schema tables, 7,781 tests**,
+all green, no type errors. M2.X.5.aa.z.24 closes ADR-0142 Q2
+by adding `tagResource(input)` + `untagResource(input)` +
+`listTagsForResource(input)` — the FIRST multi-resource
+operations on the Bedrock control plane. Previously every
+CREATE method accepted `tags` at creation but operators
+couldn't mutate tags post-creation; now they can across every
+Bedrock ARN (custom-models + imported-models + guardrails +
+inference-profiles + jobs + batches). New tagging-api.ts file
+hosts types + builders + parser. AWS contract preserved
+verbatim including the WIRE-SHAPE ASYMMETRY (the interesting
+part): TagResource POSTs to `/tags?resourceARN={arn}` with
+body `{tags:[...]}`, UntagResource POSTs to
+`/untag?resourceARN={arn}` with body `{tagKeys:[...]}`,
+ListTagsForResource POSTs to `/listTagsForResource` with body
+`{resourceARN:"..."}` (note the uppercase ARN in the body!).
+AWS doesn't document the reason for the asymmetry but the
+substrate doesn't paper over it — operators reading AWS docs
+see exactly the same shape they get. signedControlPlanePost
+transport extended additively to accept optional query strings
+(needed for TagResource + UntagResource); existing callers
+unaffected. Pure boundary validation in builders enforces all
+documented constraints BEFORE fetch: resourceArn length
+[1, 1011] + arn:aws prefix, tag count [1, 200], tag key length
+[1, 128] + pattern ^[a-zA-Z0-9\\s_.:/=+@-]*$, tag value length
+[0, 256] + same pattern (empty value VALID per AWS contract,
+empty key REJECTED), tagKey list count [1, 200]. Error
+messages include the index of the bad tag entry for crisp
+debugging on 200-tag batches: "invalid tag key at index 2".
+BedrockTag is the canonical cross-resource shape; existing
+per-resource tag types (BedrockBatchTag,
+BedrockInferenceProfileTag, etc.) remain for documentation
+clarity since they're structurally identical. Symmetric error
+propagation 404→not_found_error / 403→permission_error / 429→
+rate_limit_error. Bedrock control plane: 18 read + 2 stop + 2
+create + 4 delete + 3 tag = 29 operations. Pattern set for
+future cross-resource operations. 53 new tests: 32 in
+tagging-api.test.ts (builders for all 3 methods + query
+builders + parser with full edge cases including
+index-aware error messages, empty tag values valid, 200-tag
+boundary), 21 in provider.test.ts (POST URL + query + body
+threading + URI encoding + Sig v4 headers + control-plane
+host + identifier-blank pre-flight + 404/403/429 propagation +
+parse failures + network errors across all 3 methods + the
+asymmetry that ListTagsForResource has NO query string).
+M6.8 closes ADR-0137 Q2 with a
 normalized cost-tier substrate: META_LLM_COST_TIERS (126th)
 + META_LLM_TENANT_TIER_MEMBERSHIPS (127th) + extended
 PostgresCostCeilingResolver. Operators with many tenants on a
@@ -2975,7 +3019,12 @@ normalized tier substrate for shared pricing plans;
 three-level fallback per-tenant→tier→global with whole-object
 override at each level preserving M6.7.x semantics; ON DELETE
 RESTRICT prevents orphaning; tier policy changes propagate
-to all members via one UPDATE on the tier row).
+to all members via one UPDATE on the tier row), ADR-0145
+covers M2.X.5.aa.z.24 (Bedrock cross-resource tagging —
+closes ADR-0142 Q2 — first multi-resource Bedrock operations;
+tagResource + untagResource + listTagsForResource work
+across every Bedrock ARN; AWS wire-shape asymmetry preserved
+verbatim — query on tag/untag, body on list).
 
 ## Architecture in 90 seconds
 
@@ -4393,7 +4442,27 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0144 covers Phase 2 M6.8 (META_LLM_COST_TIERS + per-
+operations), ADR-0145 covers Phase 2 M2.X.5.aa.z.24 (Bedrock cross-
+resource tagging — closes ADR-0142 Q2; first multi-resource
+operations on the Bedrock substrate — tagResource +
+untagResource + listTagsForResource work across every
+Bedrock ARN with no URI templating per resource type; AWS
+wire-shape asymmetry preserved verbatim — TagResource +
+UntagResource carry resourceARN in the QUERY string while
+ListTagsForResource carries resourceARN in the BODY (with
+uppercase ARN per AWS docs); signedControlPlanePost extended
+additively with optional query strings — existing callers
+unaffected; pure boundary validation enforces 7 documented
+constraints (resourceArn length+prefix, tag/tagKey count
+[1, 200], tag key length+pattern, tag value length+pattern
+where empty value is VALID per AWS contract); error messages
+include the index of the bad tag entry for crisp debugging
+on 200-tag batches; BedrockTag is the canonical cross-resource
+shape with existing per-resource tag types preserved for self-
+documenting CREATE method signatures; pattern set for future
+cross-resource operations; Bedrock control plane now has 18
+read + 2 stop + 2 create + 4 delete + 3 tag = 29 operations).
+ADR-0144 covers Phase 2 M6.8 (META_LLM_COST_TIERS + per-
 tenant tier memberships — closes ADR-0137 Q2; two new
 meta-schema tables 126th+127th; META_LLM_COST_TIERS is
 platform-wide no-RLS with tier_id PK (slug pattern

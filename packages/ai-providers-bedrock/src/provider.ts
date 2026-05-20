@@ -123,6 +123,18 @@ import {
   type BedrockMultimodalEmbeddingModel,
 } from "./pricing.js";
 import { signRequest, type AwsCredentials } from "./signing.js";
+import {
+  buildListTagsForResourceBody,
+  buildTagResourceBody,
+  buildTagResourceQuery,
+  buildUntagResourceBody,
+  buildUntagResourceQuery,
+  parseListTagsForResourceResponse,
+  type BedrockListTagsForResourceInput,
+  type BedrockListTagsForResourceResponse,
+  type BedrockTagResourceInput,
+  type BedrockUntagResourceInput,
+} from "./tagging-api.js";
 
 export const BEDROCK_DEFAULT_REGION = "us-east-1";
 export const BEDROCK_DEFAULT_MODEL: BedrockChatModel =
@@ -1056,6 +1068,41 @@ export class BedrockProvider implements LlmProvider {
     return parseBatchListResponse(raw);
   }
 
+  async tagResource(input: BedrockTagResourceInput): Promise<void> {
+    const bodyStr = buildTagResourceBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const query = buildTagResourceQuery(input);
+    await this.signedControlPlanePost({ path: "/tags", body, query });
+  }
+
+  async untagResource(input: BedrockUntagResourceInput): Promise<void> {
+    const bodyStr = buildUntagResourceBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const query = buildUntagResourceQuery(input);
+    await this.signedControlPlanePost({ path: "/untag", body, query });
+  }
+
+  async listTagsForResource(
+    input: BedrockListTagsForResourceInput,
+  ): Promise<BedrockListTagsForResourceResponse> {
+    const bodyStr = buildListTagsForResourceBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const text = await this.signedControlPlanePost({
+      path: "/listTagsForResource",
+      body,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listTagsForResource: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseListTagsForResourceResponse(raw);
+  }
+
   private async signedControlPlaneGet(input: {
     readonly path: string;
     readonly query: Record<string, string>;
@@ -1107,13 +1154,16 @@ export class BedrockProvider implements LlmProvider {
   private async signedControlPlanePost(input: {
     readonly path: string;
     readonly body?: Uint8Array;
+    readonly query?: Record<string, string>;
   }): Promise<string> {
     const host = new URL(this.controlPlaneBaseUrl).host;
     const body = input.body ?? new Uint8Array(0);
+    const query = input.query ?? {};
     const signed = signRequest({
       method: "POST",
       host,
       path: input.path,
+      query,
       headers: {
         "content-type": "application/json",
         accept: "application/json",
@@ -1135,7 +1185,8 @@ export class BedrockProvider implements LlmProvider {
     if (this.credentials.sessionToken !== undefined) {
       headers["x-amz-security-token"] = this.credentials.sessionToken;
     }
-    const url = `${this.controlPlaneBaseUrl}${input.path}`;
+    const qs = encodeQueryString(query);
+    const url = `${this.controlPlaneBaseUrl}${input.path}${qs.length > 0 ? `?${qs}` : ""}`;
     let response;
     try {
       response = await this.fetchImpl(url, {
