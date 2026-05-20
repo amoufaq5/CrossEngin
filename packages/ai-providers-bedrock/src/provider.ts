@@ -124,6 +124,14 @@ import {
   type BedrockEmbeddingModel,
   type BedrockMultimodalEmbeddingModel,
 } from "./pricing.js";
+import {
+  buildProvisionedThroughputListQuery,
+  parseProvisionedModelDetail,
+  parseProvisionedModelListResponse,
+  type BedrockListProvisionedModelThroughputsOptions,
+  type BedrockProvisionedModelDetail,
+  type BedrockProvisionedModelListResponse,
+} from "./provisioned-throughput-api.js";
 import { signRequest, type AwsCredentials } from "./signing.js";
 import {
   buildListTagsForResourceBody,
@@ -966,6 +974,50 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseInferenceProfileListResponse(raw);
+  }
+
+  async getProvisionedModelThroughput(
+    provisionedModelId: string,
+  ): Promise<BedrockProvisionedModelDetail> {
+    if (provisionedModelId.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "getProvisionedModelThroughput: provisionedModelId must be a non-empty string",
+      });
+    }
+    const path = `/provisioned-model-throughputs/${encodeURIComponent(provisionedModelId)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getProvisionedModelThroughput: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseProvisionedModelDetail(raw);
+  }
+
+  async listProvisionedModelThroughputs(
+    options: BedrockListProvisionedModelThroughputsOptions = {},
+  ): Promise<BedrockProvisionedModelListResponse> {
+    const query = buildProvisionedThroughputListQuery(options);
+    const text = await this.signedControlPlaneGet({
+      path: "/provisioned-model-throughputs",
+      query,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listProvisionedModelThroughputs: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseProvisionedModelListResponse(raw);
   }
 
   async getGuardrail(

@@ -21,15 +21,59 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,802 tests**,
-all green, no type errors. M2.X.5.aa.z.25 closes ADR-0142 Q1
+**56 packages + 1 app, 127 meta-schema tables, 7,860 tests**,
+all green, no type errors. M2.X.5.aa.z.26 adds Bedrock
+provisioned-throughput (PT) INSPECTION surfaces:
+`getProvisionedModelThroughput(provisionedModelId)` +
+`listProvisionedModelThroughputs(options?)`. PTs are paid
+dedicated capacity (one-month ~$5K, six-month committed)
+backing foundation or custom models. Operators previously
+had zero substrate visibility — cost dashboards couldn't
+project monthly commitments, reconciliation couldn't find
+orphaned PTs leaking $5K-$50K/month each after custom-model
+decommissioning, incident response had to drop to AWS
+Console. This milestone closes those gaps with read-only
+endpoints; mutation (create/update/delete) deliberately
+deferred — PT cost per operation is 100×-1000× higher than
+inference profiles so creation needs a careful idempotency
++ cost-confirmation story. New provisioned-throughput-api.ts
+file hosts types + builders + parsers. AWS contract
+preserved verbatim: 4 statuses (Creating / InService /
+Updating / Failed), 2 commitment durations (OneMonth /
+SixMonths). Three-ARN distinction surfaces clearly:
+modelArn (current backing model) vs desiredModelArn (target
+after pending update) vs foundationModelArn (foundation
+behind any custom variants) — operators reading these
+distinguish mid-migration (modelArn !== desiredModelArn)
+from steady state. Detail extends summary with optional
+failureMessage (only present when status === Failed) for
+incident-response context. List filters: statusEquals (find
+Failed PTs), modelArnEquals (find PTs for a specific model
+= reconciliation primary key), nameContains, sortBy +
+sortOrder, maxResults [1, 1000], nextToken. Pure boundary
+validation pre-fetch; integer validation on modelUnits
+guards against floating-point JSON quirks (rejecting 1.5);
+unknown-status surfaces as api_error so undocumented AWS
+additions fail loudly. Bedrock control plane: 20 read + 2
+stop + 2 create + 4 delete + 3 tag + 1 update = 32
+operations. No new transport infrastructure — reuses
+signedControlPlaneGet. 58 new tests: 37 in
+provisioned-throughput-api.test.ts (enums, query builder
+across 8 filter dimensions + boundary rejections, 3 parsers
+with required-field + optional-field + integer-validation
++ enum-validation coverage), 21 in provider.test.ts (GET
+URL + URI-encoding + Sig v4 headers + control-plane host +
+identifier-blank pre-flight + detail return shape +
+commitment fields + failureMessage threading + 404/403/parse
+propagation across both methods + filter threading via query
++ 429/network errors). M2.X.5.aa.z.25 closes ADR-0142 Q1
 by adding `updateInferenceProfile(profileIdentifier, input)`
 — the FIRST PATCH operation on the Bedrock control plane.
 Operator pain it closes: description drift on existing
@@ -3077,7 +3121,15 @@ new signedControlPlanePatch transport; APPLICATION-only
 mandatory pre-flight guard mirroring deleteInferenceProfile;
 description-only mutation since tags have their own canonical
 M2.X.5.aa.z.24 surface; race-deleted 404 propagates verbatim;
-full APPLICATION lifecycle now on the substrate).
+full APPLICATION lifecycle now on the substrate), ADR-0147
+covers M2.X.5.aa.z.26 (Bedrock provisioned-throughput
+inspection — read-only get + list of PT resources;
+three-ARN distinction surfaces clearly (modelArn vs
+desiredModelArn vs foundationModelArn) — operators detect
+mid-migration; mutation deferred since PT cost is 100×-1000×
+higher than inference profiles needing careful design;
+operator wins on cost visibility + orphan reconciliation +
+incident-response failure messages).
 
 ## Architecture in 90 seconds
 
@@ -4495,7 +4547,38 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0146 covers Phase 2 M2.X.5.aa.z.25 (Bedrock
+operations), ADR-0147 covers Phase 2 M2.X.5.aa.z.26 (Bedrock
+provisioned-throughput inspection — getProvisionedModelThroughput
++ listProvisionedModelThroughputs read-only surfaces; PTs are
+paid dedicated capacity (one-month ~$5K, six-month committed)
+backing foundation or custom models; substrate previously had
+zero PT visibility — cost dashboards couldn't project monthly
+commitments, reconciliation couldn't find orphaned PTs leaking
+$5K-$50K/month after custom-model decommissioning, incident
+response dropped to AWS Console; this milestone closes those
+gaps; mutation (create/update/delete) deliberately deferred —
+PT cost per operation is 100×-1000× higher than inference
+profiles needing careful idempotency + cost-confirmation
+design; new provisioned-throughput-api.ts with types +
+builders + parsers; AWS contract preserved verbatim with 4
+statuses + 2 commitment durations + path-based URI mirroring
+inference-profiles; THREE-ARN distinction surfaces clearly —
+modelArn (current backing model) vs desiredModelArn (target
+after pending update) vs foundationModelArn (foundation
+behind any custom variants) — operators distinguish mid-
+migration (modelArn !== desiredModelArn) from steady state;
+detail extends summary with optional failureMessage (only
+present when status === Failed) for incident-response
+context; list filters across 8 dimensions (statusEquals,
+modelArnEquals, nameContains, sortBy, sortOrder, maxResults,
+nextToken); pure boundary validation pre-fetch; integer
+validation on modelUnits guards against floating-point JSON
+quirks; unknown-status surfaces as api_error so undocumented
+AWS additions fail loudly; no new transport — reuses
+signedControlPlaneGet; Bedrock control plane now has 20 read
++ 2 stop + 2 create + 4 delete + 3 tag + 1 update = 32
+operations).
+ADR-0146 covers Phase 2 M2.X.5.aa.z.25 (Bedrock
 updateInferenceProfile PATCH with APPLICATION-only guard —
 closes ADR-0142 Q1; first PATCH operation on the Bedrock
 control plane; new signedControlPlanePatch transport mirrors

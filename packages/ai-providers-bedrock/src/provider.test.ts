@@ -5294,6 +5294,326 @@ describe("BedrockProvider — updateInferenceProfile (M2.X.5.aa.z.25)", () => {
   });
 });
 
+describe("BedrockProvider — getProvisionedModelThroughput (M2.X.5.aa.z.26)", () => {
+  function detailJson(
+    overrides: Record<string, unknown> = {},
+  ): string {
+    return JSON.stringify({
+      provisionedModelName: "tenant-a-pt",
+      provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+      modelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+      desiredModelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+      foundationModelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+      modelUnits: 1,
+      desiredModelUnits: 1,
+      status: "InService",
+      creationTime: "2026-05-19T12:00:00.000Z",
+      lastModifiedTime: "2026-05-19T12:00:00.000Z",
+      ...overrides,
+    });
+  }
+
+  it("GETs the control-plane /provisioned-model-throughputs/{id}", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: detailJson() }),
+    });
+    await provider.getProvisionedModelThroughput("abc");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/provisioned-model-throughputs/abc");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: detailJson() }),
+    });
+    await provider.getProvisionedModelThroughput(
+      "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+    );
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: detailJson() }),
+    });
+    await provider.getProvisionedModelThroughput("abc");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.getProvisionedModelThroughput(""),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("returns the parsed detail on success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: detailJson() }),
+    });
+    const detail = await provider.getProvisionedModelThroughput("abc");
+    expect(detail.provisionedModelName).toBe("tenant-a-pt");
+    expect(detail.status).toBe("InService");
+    expect(detail.modelUnits).toBe(1);
+  });
+
+  it("threads commitmentDuration when present on a committed PT", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: true,
+        status: 200,
+        text: detailJson({
+          commitmentDuration: "OneMonth",
+          commitmentExpirationTime: "2026-06-19T12:00:00.000Z",
+        }),
+      }),
+    });
+    const detail = await provider.getProvisionedModelThroughput("abc");
+    expect(detail.commitmentDuration).toBe("OneMonth");
+    expect(detail.commitmentExpirationTime).toBe("2026-06-19T12:00:00.000Z");
+  });
+
+  it("threads failureMessage when status is Failed", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: true,
+        status: 200,
+        text: detailJson({
+          status: "Failed",
+          failureMessage: "insufficient capacity",
+        }),
+      }),
+    });
+    const detail = await provider.getProvisionedModelThroughput("abc");
+    expect(detail.status).toBe("Failed");
+    expect(detail.failureMessage).toBe("insufficient capacity");
+  });
+
+  it("propagates 404 as not_found_error (PT doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.getProvisionedModelThroughput("abc"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({
+          __type: "AccessDeniedException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.getProvisionedModelThroughput("abc"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates parse failures as api_error", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
+    });
+    await expect(
+      provider.getProvisionedModelThroughput("abc"),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+});
+
+describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)", () => {
+  function listJson(
+    overrides: Record<string, unknown> = {},
+  ): string {
+    return JSON.stringify({
+      provisionedModelSummaries: [
+        {
+          provisionedModelName: "pt-1",
+          provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/1",
+          modelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+          desiredModelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+          foundationModelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+          modelUnits: 2,
+          desiredModelUnits: 2,
+          status: "InService",
+          creationTime: "2026-05-19T12:00:00.000Z",
+          lastModifiedTime: "2026-05-19T12:00:00.000Z",
+        },
+      ],
+      ...overrides,
+    });
+  }
+
+  it("GETs the control-plane /provisioned-model-throughputs", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listProvisionedModelThroughputs();
+    expect(capture.url).toContain("/provisioned-model-throughputs");
+    expect(capture.init?.method).toBe("GET");
+  });
+
+  it("threads statusEquals filter through to the query", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listProvisionedModelThroughputs({ statusEquals: "InService" });
+    expect(capture.url).toContain("statusEquals=InService");
+  });
+
+  it("threads modelArnEquals filter through (URI-encoded)", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listProvisionedModelThroughputs({
+      modelArnEquals:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet",
+    });
+    expect(capture.url).toContain("modelArnEquals=arn%3Aaws%3Abedrock");
+  });
+
+  it("threads maxResults + sortBy + sortOrder + nextToken", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listProvisionedModelThroughputs({
+      maxResults: 50,
+      sortBy: "CreationTime",
+      sortOrder: "Descending",
+      nextToken: "page2",
+    });
+    expect(capture.url).toContain("maxResults=50");
+    expect(capture.url).toContain("sortBy=CreationTime");
+    expect(capture.url).toContain("sortOrder=Descending");
+    expect(capture.url).toContain("nextToken=page2");
+  });
+
+  it("returns the parsed list response", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: listJson() }),
+    });
+    const result = await provider.listProvisionedModelThroughputs();
+    expect(result.provisionedModelSummaries).toHaveLength(1);
+    expect(result.provisionedModelSummaries[0]?.provisionedModelName).toBe(
+      "pt-1",
+    );
+  });
+
+  it("threads nextToken back when present", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: true,
+        status: 200,
+        text: listJson({ nextToken: "page2" }),
+      }),
+    });
+    const result = await provider.listProvisionedModelThroughputs();
+    expect(result.nextToken).toBe("page2");
+  });
+
+  it("validates BEFORE fetch (bad maxResults)", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listProvisionedModelThroughputs({ maxResults: 0 }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({
+          __type: "AccessDeniedException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.listProvisionedModelThroughputs(),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.listProvisionedModelThroughputs(),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("propagates parse failures as api_error", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
+    });
+    await expect(
+      provider.listProvisionedModelThroughputs(),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.listProvisionedModelThroughputs(),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
