@@ -21,15 +21,64 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 125 meta-schema tables, 7,720 tests**,
-all green, no type errors. M6.7.zz closes ADR-0120 Q5 +
+**56 packages + 1 app, 127 meta-schema tables, 7,728 tests**,
+all green, no type errors. M6.8 closes ADR-0137 Q2 with a
+normalized cost-tier substrate: META_LLM_COST_TIERS (126th)
++ META_LLM_TENANT_TIER_MEMBERSHIPS (127th) + extended
+PostgresCostCeilingResolver. Operators with many tenants on a
+shared pricing plan previously had to insert N identical rows
+into META_LLM_COST_CEILINGS; updating the free-tier policy
+required N UPDATEs and was racy. The tier substrate
+normalizes: define `free`/`pro`/`enterprise` tiers ONCE, link
+tenants via memberships, and adjust tier-wide policy via a
+single UPDATE on the tier row that takes effect next request
+for every member. META_LLM_COST_TIERS: tier_id TEXT PK
+(pattern ^[a-z0-9][a-z0-9_-]{0,63}$ for URL-safe + log-
+friendly slugs), display_name, NULLABLE policy columns same
+semantics as M6.7.x (NULL = unbounded on that axis),
+platform-wide no RLS (tiers are operator-defined policies
+not tenant data). META_LLM_TENANT_TIER_MEMBERSHIPS:
+tenant_id PK (one tier per tenant — multi-tier resolution
+ambiguity blocked at the schema level), tier_id FK with
+ON DELETE RESTRICT (a tier can't be deleted while any tenant
+references it — forces deliberate migration; CASCADE would
+be a footgun silently stripping ceiling protection from all
+members), RLS-enabled with TENANT_ISOLATION_USING policy.
+Resolver semantic post-M6.8 is three-level fallback: per-
+tenant override (M6.7.x semantics preserved — whole-object
+override) → tier (whole-object) → global (router constructor
+default). Each level wins as a complete CostCeiling, no field-
+by-field merge — operator reasoning stays mechanical "tenant
+X has policy P, P is the law for that tenant." Field-merge
+alternative was considered but rejected because it would
+break M6.7.x semantics where NULL means "explicitly unbounded"
+(under merge it would mean "fall back to tier"). Implementation:
+TWO PG round-trips in the worst case (no per-tenant + no tier
+= 2 queries); best case 1 (per-tenant exists, tier lookup
+skipped). JOIN-in-one-query alternative rejected because it
+forces field-merge OR clutters the SELECT with CASE WHEN
+expressions per column. Three operator pains closed: free-tier
+policy fan-out (1 UPDATE on the tier row affects all members
+vs N UPDATEs on individual ceilings), pricing plan
+normalization (tier definitions are O(tiers) rows; memberships
+are O(tenants)), per-tenant override expressiveness (a Pro-tier
+tenant can still get a custom raise via a row in
+META_LLM_COST_CEILINGS that takes precedence over the tier).
+8 new tests in cost-ceiling-resolver.test.ts: tier fallback
+when no per-tenant row exists, per-tenant precedence (no tier
+query issued), undefined when neither exists, JOIN SQL shape
+(meta.llm_tenant_tier_memberships INNER JOIN
+meta.llm_cost_tiers ON tier_id), tier with NULL fields →
+empty ceiling, NUMERIC precision preservation, exactly-one-
+query when per-tenant exists, exactly-two-queries when both
+absent. M6.7.zz closes ADR-0120 Q5 +
 ADR-0140 Q1 + ADR-0141 Q1 in one cross-cutting substrate:
 META_RETENTION_POLICIES table (125th) + PostgresTraceRetention
 adapter in `@crossengin/kernel-pg`. The three append-only
@@ -2920,7 +2969,13 @@ table with hardcoded CHECK allowlist for the 3 trace tables;
 adapter in kernel-pg with hardcoded PRUNABLE_TABLES map
 preventing SQL injection; per-policy autonomy + idempotent
 prune + clock injection; future trace surfaces add via 2-edit
-mechanical change).
+mechanical change), ADR-0144 covers M6.8 (META_LLM_COST_TIERS
++ META_LLM_TENANT_TIER_MEMBERSHIPS — closes ADR-0137 Q2 —
+normalized tier substrate for shared pricing plans;
+three-level fallback per-tenant→tier→global with whole-object
+override at each level preserving M6.7.x semantics; ON DELETE
+RESTRICT prevents orphaning; tier policy changes propagate
+to all members via one UPDATE on the tier row).
 
 ## Architecture in 90 seconds
 
@@ -4338,7 +4393,33 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0143 covers Phase 2 M6.7.zz
+operations), ADR-0144 covers Phase 2 M6.8 (META_LLM_COST_TIERS + per-
+tenant tier memberships — closes ADR-0137 Q2; two new
+meta-schema tables 126th+127th; META_LLM_COST_TIERS is
+platform-wide no-RLS with tier_id PK (slug pattern
+^[a-z0-9][a-z0-9_-]{0,63}$) + display_name + nullable
+policy columns same M6.7.x NULL=unbounded semantics;
+META_LLM_TENANT_TIER_MEMBERSHIPS is tenant-scoped RLS-
+enabled with tenant_id PK (one tier per tenant — multi-
+tier ambiguity blocked schema-side) + tier_id FK with
+ON DELETE RESTRICT (forces deliberate migration on tier
+deletion; CASCADE rejected as silent-strip footgun);
+PostgresCostCeilingResolver extended with three-level
+fallback per-tenant override → tier → global; each level
+wins as whole-object preserving M6.7.x semantics; field-
+merge alternative rejected because it would break NULL=
+unbounded meaning; two PG round-trips worst case (no per-
+tenant + no tier), one best case (per-tenant exists tier
+skipped); JOIN-in-one-query alternative rejected for
+forcing field-merge or cluttering SELECT with CASE WHEN
+per column; operator workflow: define tiers once via INSERT
+into llm_cost_tiers, link tenants via memberships, adjust
+tier-wide policy via single UPDATE on tier row that takes
+effect next request for every member; per-tenant overrides
+remain via existing META_LLM_COST_CEILINGS taking precedence
+over tier; future Qs cover resolution-source reporting,
+effective-from history, non-cost tier policy bundles).
+ADR-0143 covers Phase 2 M6.7.zz
 (META_RETENTION_POLICIES + PostgresTraceRetention cross-
 cutting retention substrate — closes ADR-0120 Q5 + ADR-0140
 Q1 + ADR-0141 Q1 in one milestone; the three append-only

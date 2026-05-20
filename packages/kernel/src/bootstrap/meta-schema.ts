@@ -9239,6 +9239,69 @@ export const META_LLM_COST_WINDOWS: TableDefinition = {
   },
 };
 
+export const META_LLM_COST_TIERS: TableDefinition = {
+  schema: "meta",
+  name: "llm_cost_tiers",
+  columns: [
+    {
+      name: "tier_id",
+      type: "TEXT",
+      notNull: true,
+      check: "tier_id ~ '^[a-z0-9][a-z0-9_-]{0,63}$'",
+    },
+    { name: "display_name", type: "TEXT", notNull: true },
+    {
+      name: "max_usd_per_request",
+      type: "NUMERIC(18,8)",
+      check: "max_usd_per_request IS NULL OR max_usd_per_request > 0",
+    },
+    {
+      name: "max_usd_per_window",
+      type: "NUMERIC(18,8)",
+      check: "max_usd_per_window IS NULL OR max_usd_per_window > 0",
+    },
+    {
+      name: "window_seconds",
+      type: "INTEGER",
+      check: "window_seconds IS NULL OR window_seconds > 0",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tier_id"],
+};
+
+export const META_LLM_TENANT_TIER_MEMBERSHIPS: TableDefinition = {
+  schema: "meta",
+  name: "llm_tenant_tier_memberships",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "tier_id",
+      type: "TEXT",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "llm_cost_tiers",
+        column: "tier_id",
+        onDelete: "RESTRICT",
+      },
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "llm_tenant_tier_memberships_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_RETENTION_POLICIES: TableDefinition = {
   schema: "meta",
   name: "retention_policies",
@@ -9499,6 +9562,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_PROPOSALS,
   META_LLM_COST_WINDOWS,
   META_LLM_COST_CEILINGS,
+  META_LLM_COST_TIERS,
+  META_LLM_TENANT_TIER_MEMBERSHIPS,
   META_LLM_LATENCY_SAMPLES,
   META_LLM_CALL_TRACES,
   META_RETENTION_POLICIES,
