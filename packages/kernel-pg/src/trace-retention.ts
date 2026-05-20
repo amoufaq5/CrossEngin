@@ -100,6 +100,19 @@ export type EffectiveRetentionResolution =
       readonly enabled: false;
     };
 
+export interface ExpiringOptOut {
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly optOutUntil: string;
+  readonly optOutReason: string | null;
+  readonly daysUntilExpiry: number;
+}
+
+export interface ExpiringOptOutsInput {
+  readonly withinDays: number;
+  readonly includeExpired?: boolean;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -463,6 +476,51 @@ export class PostgresTraceRetention {
       retentionDays: null,
       enabled: false,
     };
+  }
+
+  async expiringOptOuts(
+    input: ExpiringOptOutsInput,
+  ): Promise<ReadonlyArray<ExpiringOptOut>> {
+    if (!Number.isFinite(input.withinDays) || input.withinDays < 0) {
+      throw new Error(
+        `withinDays must be a finite number >= 0, got ${input.withinDays}`,
+      );
+    }
+    const includeExpired = input.includeExpired ?? false;
+    const now = this.clock();
+    const cutoffMs = now + input.withinDays * 86_400 * 1_000;
+
+    const sql = includeExpired
+      ? `SELECT tenant_id, table_name, opt_out_until, opt_out_reason
+         FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE opt_out = true
+           AND opt_out_until IS NOT NULL
+           AND opt_out_until <= to_timestamp($1 / 1000.0)
+         ORDER BY opt_out_until ASC`
+      : `SELECT tenant_id, table_name, opt_out_until, opt_out_reason
+         FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE opt_out = true
+           AND opt_out_until IS NOT NULL
+           AND opt_out_until > to_timestamp($2 / 1000.0)
+           AND opt_out_until <= to_timestamp($1 / 1000.0)
+         ORDER BY opt_out_until ASC`;
+    const params = includeExpired ? [cutoffMs] : [cutoffMs, now];
+
+    const result = await this.conn.query<{
+      tenant_id: string;
+      table_name: string;
+      opt_out_until: string;
+      opt_out_reason: string | null;
+    }>(sql, params);
+
+    return result.rows.map((r) => ({
+      tenantId: r.tenant_id,
+      tableName: r.table_name,
+      optOutUntil: r.opt_out_until,
+      optOutReason: r.opt_out_reason,
+      daysUntilExpiry:
+        (Date.parse(r.opt_out_until) - now) / (86_400 * 1_000),
+    }));
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {

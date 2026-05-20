@@ -21,15 +21,91 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,109 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.expiry
+**56 packages + 1 app, 128 meta-schema tables, 8,124 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.alerts
+closes ADR-0162 Q2 by adding `expiringOptOuts(input)`
+resolver to PostgresTraceRetention. The auto-expiry
+semantic shipped in M6.7.zz.tenant.opt-out.expiry lifted
+opt-outs without operator intervention but offered NO
+advance warning. Legal holds expiring next week are major
+operational events — legal extends, compliance reviews,
+operations plans pruning, customer success informs the
+customer. Without a query surface, operators wrote ad-hoc
+SQL, forgot to run it, missed the lead time. The new
+method returns a sorted list of opt-outs whose
+opt_out_until falls within a configurable window,
+optionally including already-expired entries; operators
+wire it into their notification pipeline via scheduled
+job (cron, Inngest, Kubernetes CronJob). Method signature:
+expiringOptOuts({withinDays: number, includeExpired?:
+boolean}): Promise<ExpiringOptOut[]> where ExpiringOptOut
+= {tenantId, tableName, optOutUntil (ISO 8601 always
+non-null), optOutReason (string | null), daysUntilExpiry
+(float, positive for future, negative for expired)}.
+Returns sorted by opt_out_until ASC (soonest first).
+Substrate stays passive — exposes data, operator wires
+delivery via their existing notification provider (Slack/
+PagerDuty/email/webhook); coupling between substrates
+avoided. Three operator workflows covered by one method:
+"what expires soon?" (withinDays=30 + includeExpired=false,
+the common alert query), "what's already expired?"
+(withinDays=0 + includeExpired=true, cleanup audit),
+"everything time-bound in the next year" (withinDays=365
++ includeExpired=true, compliance report). daysUntilExpiry
+is computed from injected clock() — substrate has authoritative
+clock, eliminates off-by-one bugs from operators re-implementing
+diff. Float precision preserved so operators bucket
+precisely (1d / 7d / 30d urgency tiers). Validation:
+withinDays must be finite >= 0; rejects negative, Infinity,
+NaN at API boundary with clear error. Excludes rows with
+opt_out=false or opt_out_until IS NULL (indefinite — by
+definition no expiry to alert on). Returns empty array
+when no rows match. Rejected alternatives: active push
+via @crossengin/notifications (coupling between substrates;
+operator notification provider choice varies; scheduling
+logic belongs at workflow/job layer), PG NOTIFY trigger
+(hidden behavior, no good 30-days-before event-time
+expression, requires LISTEN client), materialized view
+(refresh schedule complexity, query fast enough on indexed
+column), separate upcomingOptOuts + expiredOptOuts methods
+(operators with broad audit needs would call both — one
+parameterized method composable), tier bucketing in API
+(prescriptive — operator tier definitions vary 60/30/14/7
+vs 30/7), stateful alert tracking for dedupe (couples
+retention to alert delivery; dedup belongs at notification
+layer), return raw rows without daysUntilExpiry
+(re-implementing clock-aware diff per dashboard), cursor
+pagination (opt-outs bounded in practice, add if measured).
+No new schema — pure read-side method. 15 new tests:
+returns opt-outs within window with daysUntilExpiry
+computed, SQL excludes already-expired by default
+(includeExpired=false), SQL includes already-expired when
+includeExpired=true, daysUntilExpiry negative for expired
+rows, SQL filters opt_out=true + opt_out_until IS NOT
+NULL, ORDER BY opt_out_until ASC, withinDays=0 +
+includeExpired=false returns empty (strict window),
+withinDays=0 + includeExpired=true returns all expired,
+withinDays<0 throws, withinDays=Infinity throws,
+withinDays=NaN throws, empty result returns empty array,
+threads optOutReason from row, threads null optOutReason,
+supports tiered alert windows via daysUntilExpiry float
+precision. Documented future Qs: partial index on
+opt_out_until WHERE opt_out=true (defer until measured),
+cursor pagination (defer), alert state tracking table for
+dedup (defer to M6.7.zz.tenant.opt-out.alert-state if
+demanded), CLI exposure via `crossengin retention
+expiring --within-days N`, webhook delivery wrapper,
+per-tier convenience method, "recently lifted" reverse
+query for missed-notification audits, channel-specific
+integrations remain in @crossengin/notifications substrate.
+M6.7.zz.tenant.opt-out.expiry
 closes ADR-0160 Q2 by adding `opt_out_until TIMESTAMPTZ`
 NULLABLE column to META_TENANT_RETENTION_POLICIES with no
 CHECK on the date value itself. Opt-outs are now self-
@@ -4039,7 +4115,19 @@ subquery widens from (enabled OR opt_out) to (enabled OR
 two clock sources by design — adapter uses injected clock
 for testability, SQL uses PG now() to avoid parameter-shape
 changes; self-managing legal holds + calendar-driven
-expirations + reduced compliance theater).
+expirations + reduced compliance theater),
+ADR-0163 covers M6.7.zz.tenant.opt-out.alerts
+(expiringOptOuts resolver method — closes ADR-0162 Q2 —
+returns sorted list of opt-outs within a configurable
+window for advance-warning alert pipelines; substrate
+stays passive exposing data, operator wires notification
+delivery via scheduled job; one method covers three
+workflows ("what expires soon?", "what's already expired?",
+"everything time-bound in the next year") via withinDays
++ includeExpired parameters; daysUntilExpiry float
+pre-computed from injected clock; rejected active-push,
+PG-NOTIFY trigger, materialized view, and stateful alert
+tracking).
 
 ## Architecture in 90 seconds
 
@@ -5528,6 +5616,84 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0163 covers Phase 2 M6.7.zz.tenant.opt-out.alerts
+(expiringOptOuts resolver method on PostgresTraceRetention —
+closes ADR-0162 Q2; method signature expiringOptOuts({
+withinDays: number, includeExpired?: boolean}):
+Promise<ExpiringOptOut[]> where ExpiringOptOut = {tenantId,
+tableName, optOutUntil (ISO 8601 always non-null since
+NULL opt-outs are excluded — indefinite by definition no
+expiry to alert on), optOutReason (string | null),
+daysUntilExpiry (float, positive future / negative
+expired)}; semantic — matches rows where opt_out_until
+<= clock() + withinDays * 86400000; includeExpired=false
+default additionally requires opt_out_until > clock();
+sorted by opt_out_until ASC soonest first; pain solved —
+no advance warning before opt_out auto-lift, legal teams
+need extension lead time, compliance reviewers need notice,
+operations need pruning prep window, customer success
+needs to inform customer of contractual retention change;
+without query surface operators wrote ad-hoc SQL, forgot
+to run it, missed lead time; substrate stays passive
+(query surface not active push) so coupling between
+retention + notification substrates avoided + operators
+choose notification provider; one method covers three
+workflows — "what expires soon?" (withinDays=30 +
+includeExpired=false), "what's already expired?"
+(withinDays=0 + includeExpired=true), "everything time-
+bound in next year" (withinDays=365 + includeExpired=true);
+daysUntilExpiry pre-computed from injected clock since
+substrate has authoritative clock (eliminates off-by-one
+bugs from operators re-implementing diff with their own
+timezone handling); float precision preserved so operators
+bucket precisely 1d/7d/30d urgency tiers; validation —
+withinDays must be finite >= 0 (rejects negative,
+Infinity, NaN at API boundary with clear error);
+excludes opt_out=false (not opted out) and opt_out_until
+IS NULL (indefinite); returns empty array on no matches;
+rejected alternatives — active push via
+@crossengin/notifications (couples substrates, scheduling
+logic at wrong layer, operator notification provider
+choice varies), PG NOTIFY trigger (hidden behavior, no
+good 30-days-before event-time expression, requires
+LISTEN client process), materialized view (refresh
+schedule complexity, query fast on indexed column),
+separate upcomingOptOuts + expiredOptOuts methods
+(broad audit needs would call both — parameterized
+composable), tier bucketing in API (prescriptive —
+operator tier definitions vary 60/30/14/7 vs 30/7),
+stateful alert tracking substrate-side (couples retention
+to alert delivery — dedup belongs at notification layer),
+return raw rows without daysUntilExpiry (re-implementing
+diff per dashboard), cursor pagination (opt-outs bounded
+in practice — add if measured); no new schema, pure
+read-side method on existing table; clock source — adapter
+uses injected clock() throughout including cutoffMs
+parameter, NOT PG now() (unlike prune-side NOT IN subquery
+from ADR-0162) because operator-side scheduling drives
+test determinism via clock injection; 15 new tests in
+trace-retention.test.ts: returns opt-outs within window
+with daysUntilExpiry computed, SQL excludes already-expired
+by default, SQL includes already-expired when flag true,
+daysUntilExpiry negative for expired rows when included,
+SQL filters opt_out=true AND opt_out_until IS NOT NULL,
+ORDER BY opt_out_until ASC enforced, withinDays=0 +
+includeExpired=false returns empty (strict window),
+withinDays=0 + includeExpired=true returns all expired,
+withinDays<0 throws with clear error, withinDays=Infinity
+throws, withinDays=NaN throws, empty result returns empty
+array, threads optOutReason from row to result, threads
+null optOutReason when not set, supports tiered alert
+windows via daysUntilExpiry float precision (urgent/week/
+month buckets in app code); future Qs cover partial index
+on opt_out_until WHERE opt_out=true if measured slow,
+cursor pagination, alert state tracking table for cross-
+run dedup, CLI exposure via `crossengin retention expiring
+--within-days N --include-expired`, webhook delivery
+convenience wrapper, per-tier convenience method,
+"recently lifted" reverse query for missed-notification
+audits, channel-specific integrations remain in
+@crossengin/notifications substrate scope).
 ADR-0162 covers Phase 2 M6.7.zz.tenant.opt-out.expiry
 (opt_out_until TIMESTAMPTZ NULLABLE column with read-time
 expiry semantics — closes ADR-0160 Q2; adds opt_out_until

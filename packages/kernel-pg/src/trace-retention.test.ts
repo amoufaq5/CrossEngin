@@ -1925,3 +1925,213 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
     });
   });
 });
+
+describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const NOW_MS = Date.parse("2026-05-20T12:00:00.000Z");
+  const isoPlusDays = (d: number) =>
+    new Date(NOW_MS + d * 86_400 * 1_000).toISOString();
+
+  function row(
+    tenantId: string,
+    tableName: string,
+    optOutUntilIso: string,
+    optOutReason: string | null = null,
+  ): Record<string, unknown> {
+    return {
+      tenant_id: tenantId,
+      table_name: tableName,
+      opt_out_until: optOutUntilIso,
+      opt_out_reason: optOutReason,
+    };
+  }
+
+  it("returns opt-outs whose opt_out_until is within the window (default includeExpired=false)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        row(TENANT_A, "workflow_traces", isoPlusDays(5), "legal_hold:case#42"),
+        row(TENANT_B, "llm_call_traces", isoPlusDays(20)),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({ withinDays: 30 });
+    expect(results).toHaveLength(2);
+    expect(results[0]?.tenantId).toBe(TENANT_A);
+    expect(results[0]?.optOutReason).toBe("legal_hold:case#42");
+    expect(results[0]?.daysUntilExpiry).toBeCloseTo(5, 6);
+    expect(results[1]?.daysUntilExpiry).toBeCloseTo(20, 6);
+  });
+
+  it("SQL excludes already-expired when includeExpired=false (default)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    await r.expiringOptOuts({ withinDays: 30 });
+    expect(capture[0]?.sql).toContain("opt_out_until > to_timestamp($2");
+    expect(capture[0]?.sql).toContain("opt_out_until <= to_timestamp($1");
+    expect(capture[0]?.params).toEqual([
+      NOW_MS + 30 * 86_400 * 1_000,
+      NOW_MS,
+    ]);
+  });
+
+  it("SQL includes already-expired when includeExpired=true", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    await r.expiringOptOuts({ withinDays: 30, includeExpired: true });
+    expect(capture[0]?.sql).toContain("opt_out_until <= to_timestamp($1");
+    expect(capture[0]?.sql).not.toContain("opt_out_until > to_timestamp($2");
+    expect(capture[0]?.params).toEqual([NOW_MS + 30 * 86_400 * 1_000]);
+  });
+
+  it("daysUntilExpiry is negative for already-expired opt-outs (includeExpired=true)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [row(TENANT_A, "workflow_traces", isoPlusDays(-10))],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({
+      withinDays: 30,
+      includeExpired: true,
+    });
+    expect(results[0]?.daysUntilExpiry).toBeCloseTo(-10, 6);
+  });
+
+  it("SQL filters opt_out = true and opt_out_until IS NOT NULL", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    await r.expiringOptOuts({ withinDays: 30 });
+    expect(capture[0]?.sql).toContain("opt_out = true");
+    expect(capture[0]?.sql).toContain("opt_out_until IS NOT NULL");
+  });
+
+  it("SQL orders results by opt_out_until ASC (soonest first)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    await r.expiringOptOuts({ withinDays: 30 });
+    expect(capture[0]?.sql).toContain("ORDER BY opt_out_until ASC");
+  });
+
+  it("withinDays=0 + includeExpired=false returns empty window (nothing in the strict (now, now] range)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({ withinDays: 0 });
+    expect(results).toEqual([]);
+    expect(capture[0]?.params).toEqual([NOW_MS, NOW_MS]);
+  });
+
+  it("withinDays=0 + includeExpired=true returns all already-expired", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        row(TENANT_A, "workflow_traces", isoPlusDays(-30)),
+        row(TENANT_B, "llm_call_traces", isoPlusDays(-1)),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({
+      withinDays: 0,
+      includeExpired: true,
+    });
+    expect(results).toHaveLength(2);
+    expect(results[0]?.daysUntilExpiry).toBeCloseTo(-30, 6);
+    expect(results[1]?.daysUntilExpiry).toBeCloseTo(-1, 6);
+  });
+
+  it("withinDays < 0 throws", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(r.expiringOptOuts({ withinDays: -1 })).rejects.toThrow(
+      /withinDays/,
+    );
+  });
+
+  it("withinDays = Infinity throws", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.expiringOptOuts({ withinDays: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow(/withinDays/);
+  });
+
+  it("withinDays = NaN throws", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.expiringOptOuts({ withinDays: Number.NaN }),
+    ).rejects.toThrow(/withinDays/);
+  });
+
+  it("empty result returns empty array", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({ withinDays: 30 });
+    expect(results).toEqual([]);
+  });
+
+  it("threads optOutReason from row to result", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        row(TENANT_A, "workflow_traces", isoPlusDays(7), "vip_contract:xyz"),
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({ withinDays: 30 });
+    expect(results[0]?.optOutReason).toBe("vip_contract:xyz");
+  });
+
+  it("threads null optOutReason when row has no reason", async () => {
+    const conn = mockConnection(() => ({
+      rows: [row(TENANT_A, "workflow_traces", isoPlusDays(7), null)],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({ withinDays: 30 });
+    expect(results[0]?.optOutReason).toBeNull();
+  });
+
+  it("supports tiered alert windows (operator buckets by daysUntilExpiry)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        row(TENANT_A, "workflow_traces", isoPlusDays(0.5)),
+        row(TENANT_B, "workflow_traces", isoPlusDays(5)),
+        row(TENANT_A, "llm_call_traces", isoPlusDays(20)),
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
+    const results = await r.expiringOptOuts({ withinDays: 30 });
+    const urgent = results.filter((x) => x.daysUntilExpiry < 1);
+    const week = results.filter(
+      (x) => x.daysUntilExpiry >= 1 && x.daysUntilExpiry < 7,
+    );
+    const month = results.filter(
+      (x) => x.daysUntilExpiry >= 7 && x.daysUntilExpiry < 30,
+    );
+    expect(urgent).toHaveLength(1);
+    expect(week).toHaveLength(1);
+    expect(month).toHaveLength(1);
+  });
+});
