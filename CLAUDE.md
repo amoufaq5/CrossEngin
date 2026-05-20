@@ -21,15 +21,65 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,933 tests**,
-all green, no type errors. M2.X.5.aa.z.29 closes ADR-0147 Q3
+**56 packages + 1 app, 127 meta-schema tables, 7,991 tests**,
+all green, no type errors. M2.X.5.aa.z.30 adds Bedrock
+foundation-model discovery: `getFoundationModel(modelIdentifier)`
++ `listFoundationModels(options?)`. Operators feeding the
+CREATE endpoints (inferenceProfile.copyFrom, PT.modelId,
+batch.modelId, customizationJob.baseModelIdentifier) need
+to know which foundation models are available, what they
+support, and which regions expose them. Without substrate-
+side discovery, operators drop to AWS Console browsing or
+hard-coded model IDs against a static doc reference. Both
+drift as AWS releases new models or deprecates old ones.
+New foundation-models-api.ts hosts types + builders + parsers.
+URI mirrors inference-profiles / PT-inspection: path-based
+GET-individual + bare-path list with query filters. Four
+enums encode AWS-documented value sets: Modality
+(TEXT/IMAGE/EMBEDDING), Customization
+(FINE_TUNING/CONTINUED_PRE_TRAINING/DISTILLATION),
+InferenceType (ON_DEMAND/PROVISIONED), LifecycleStatus
+(ACTIVE/LEGACY). List filters: byCustomizationType,
+byInferenceType, byOutputModality, byProvider (length
+[1, 256]) — operators find "all Anthropic models", "all
+fine-tunable models", "all embedding models", "all PT-capable
+models" with one call each. No pagination from AWS (small
+model catalog per region; AWS doesn't expose nextToken).
+TYPE-ALIAS pattern: BedrockFoundationModelDetail = Summary
+(not extended-shape) because AWS returns same fields for
+both endpoints. parseFoundationModelDetail defensively
+unwraps AWS's {modelDetails: {...}} envelope — handles both
+wrapped and flat responses. Strict enum validation on
+parser responses: unknown modality/customization/inferenceType/
+lifecycle values surface as api_error (loud failure on
+undocumented AWS additions). All optional fields preserved
+conditionally based on AWS response (no silent default
+injection). Bedrock control plane: 22 read + 2 stop + 3
+create + 5 delete + 3 tag + 2 update = 37 operations.
+Discovery workflows now first-class: PT creation more
+reliable (verify model supports PROVISIONED before
+calling createPT), inference-profile creation more reliable
+(verify foundation model exists before copyFrom), legacy-
+model awareness (operators detect modelLifecycle.status ===
+LEGACY and plan migrations). No new transport infrastructure
+— reuses signedControlPlaneGet. 58 new tests: 40 in
+foundation-models-api.test.ts (4 enums × isX predicates,
+query builder across 4 filters with rejections, 3 parsers
+covering fully-populated + optional-field-omission + all
+enum/format rejections + modelDetails envelope unwrap + flat
+fallback + non-object/non-array rejections), 18 in
+provider.test.ts (GET URL + URI-encoding + Sig v4 headers +
+control-plane-not-runtime host + identifier-blank pre-flight
++ detail unwrap behavior + 404/403/parse error propagation
+across both methods + filter threading via query string +
+429/network errors). M2.X.5.aa.z.29 closes ADR-0147 Q3
 + ADR-0148 Q2 + ADR-0149 Q1 in one operation by adding
 `deleteProvisionedModelThroughput(provisionedModelId)`. PT
 lifecycle is now 4/4 COMPLETE on the substrate (create from
@@ -3290,7 +3340,14 @@ reuses signedControlPlaneDelete; no pre-flight guard since
 PTs always operator-owned; 409 ConflictException semantic
 surfaces when deleting committed PT mid-commitment —
 propagated verbatim; ADR-0150 marks 150 ADRs since project
-bootstrap).
+bootstrap), ADR-0151 covers M2.X.5.aa.z.30 (Bedrock
+foundation model discovery — read-only get + list of AWS-
+managed foundation models; operators discover availability +
+capabilities (modalities + customizations + inference types)
++ legacy-model awareness before committing to CREATEs;
+type-alias Detail=Summary pattern since AWS returns same
+fields; defensive modelDetails envelope unwrap; 4 enums
+strictly validated on responses).
 
 ## Architecture in 90 seconds
 
@@ -4708,7 +4765,36 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0150 covers Phase 2 M2.X.5.aa.z.29 (Bedrock
+operations), ADR-0151 covers Phase 2 M2.X.5.aa.z.30 (Bedrock foundation
+model discovery — getFoundationModel + listFoundationModels
+read-only surfaces; operators feeding CREATE endpoints need
+to know which foundation models are available, what they
+support, and which regions expose them; without substrate-
+side discovery operators drop to AWS Console or hard-coded
+model IDs that drift as AWS releases/deprecates models;
+new foundation-models-api.ts with types + builders + parsers
+mirroring inference-profiles + PT-inspection URI shapes;
+4 enums: Modality (TEXT/IMAGE/EMBEDDING), Customization
+(FINE_TUNING/CONTINUED_PRE_TRAINING/DISTILLATION),
+InferenceType (ON_DEMAND/PROVISIONED), LifecycleStatus
+(ACTIVE/LEGACY); 4 list filters: byCustomizationType,
+byInferenceType, byOutputModality, byProvider; no
+pagination from AWS — small model catalog per region;
+TYPE-ALIAS Detail=Summary pattern since AWS returns same
+fields (vs ADR-0116/0123 extended-shape pattern);
+parseFoundationModelDetail defensively unwraps AWS's
+{modelDetails: {...}} envelope; strict enum validation on
+parser responses — unknown values surface as api_error so
+undocumented AWS additions fail loudly; all optional fields
+preserved conditionally — no silent default injection;
+discovery workflows now first-class: PT creation more
+reliable, inference-profile creation more reliable, legacy-
+model awareness via modelLifecycle.status === LEGACY for
+migration planning; no new transport — reuses
+signedControlPlaneGet; Bedrock control plane now has 22
+read + 2 stop + 3 create + 5 delete + 3 tag + 2 update =
+37 operations).
+ADR-0150 covers Phase 2 M2.X.5.aa.z.29 (Bedrock
 deleteProvisionedModelThroughput — closes ADR-0147 Q3 +
 ADR-0148 Q2 + ADR-0149 Q1 in one milestone; PT lifecycle
 4/4 COMPLETE on substrate (create + read + update + delete

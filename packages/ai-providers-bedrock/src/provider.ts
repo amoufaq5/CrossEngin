@@ -125,6 +125,14 @@ import {
   type BedrockMultimodalEmbeddingModel,
 } from "./pricing.js";
 import {
+  buildFoundationModelListQuery,
+  parseFoundationModelDetail,
+  parseFoundationModelListResponse,
+  type BedrockFoundationModelDetail,
+  type BedrockFoundationModelListResponse,
+  type BedrockListFoundationModelsOptions,
+} from "./foundation-models-api.js";
+import {
   buildCreateProvisionedModelThroughputBody,
   buildProvisionedThroughputListQuery,
   buildUpdateProvisionedModelThroughputBody,
@@ -1074,6 +1082,50 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseProvisionedModelListResponse(raw);
+  }
+
+  async getFoundationModel(
+    modelIdentifier: string,
+  ): Promise<BedrockFoundationModelDetail> {
+    if (modelIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "getFoundationModel: modelIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/foundation-models/${encodeURIComponent(modelIdentifier)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getFoundationModel: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseFoundationModelDetail(raw);
+  }
+
+  async listFoundationModels(
+    options: BedrockListFoundationModelsOptions = {},
+  ): Promise<BedrockFoundationModelListResponse> {
+    const query = buildFoundationModelListQuery(options);
+    const text = await this.signedControlPlaneGet({
+      path: "/foundation-models",
+      query,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `listFoundationModels: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseFoundationModelListResponse(raw);
   }
 
   async getGuardrail(

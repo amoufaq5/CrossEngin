@@ -6222,6 +6222,258 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
   });
 });
 
+describe("BedrockProvider — getFoundationModel (M2.X.5.aa.z.30)", () => {
+  function detailJson(): string {
+    return JSON.stringify({
+      modelDetails: {
+        modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        modelArn:
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        modelName: "Claude 3.5 Sonnet",
+        providerName: "Anthropic",
+        inputModalities: ["TEXT", "IMAGE"],
+        outputModalities: ["TEXT"],
+        responseStreamingSupported: true,
+        customizationsSupported: ["FINE_TUNING"],
+        inferenceTypesSupported: ["ON_DEMAND", "PROVISIONED"],
+        modelLifecycle: { status: "ACTIVE" },
+      },
+    });
+  }
+
+  it("GETs control-plane /foundation-models/{id}", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: detailJson() }),
+    });
+    await provider.getFoundationModel("anthropic.claude-3-5-sonnet");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/foundation-models/anthropic.claude-3-5-sonnet");
+    expect(capture.init?.method).toBe("GET");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: detailJson() }),
+    });
+    await provider.getFoundationModel(
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+    );
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: detailJson() }),
+    });
+    await provider.getFoundationModel("anthropic.claude-3-5-sonnet");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.getFoundationModel("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("returns the parsed detail (unwrapping AWS's modelDetails envelope)", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: detailJson() }),
+    });
+    const d = await provider.getFoundationModel("anthropic.claude-3-5-sonnet");
+    expect(d.modelName).toBe("Claude 3.5 Sonnet");
+    expect(d.providerName).toBe("Anthropic");
+    expect(d.inputModalities).toEqual(["TEXT", "IMAGE"]);
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.getFoundationModel("unknown.model"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.getFoundationModel("anthropic.claude-3-5-sonnet"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates parse failures as api_error", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
+    });
+    await expect(
+      provider.getFoundationModel("anthropic.claude-3-5-sonnet"),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+});
+
+describe("BedrockProvider — listFoundationModels (M2.X.5.aa.z.30)", () => {
+  function listJson(): string {
+    return JSON.stringify({
+      modelSummaries: [
+        {
+          modelId: "anthropic.claude-3-5-sonnet",
+          modelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
+          modelName: "Sonnet",
+          providerName: "Anthropic",
+          inputModalities: ["TEXT"],
+          outputModalities: ["TEXT"],
+        },
+      ],
+    });
+  }
+
+  it("GETs control-plane /foundation-models", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listFoundationModels();
+    expect(capture.url).toContain("/foundation-models");
+    expect(capture.init?.method).toBe("GET");
+  });
+
+  it("threads byCustomizationType filter through the query", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listFoundationModels({ byCustomizationType: "FINE_TUNING" });
+    expect(capture.url).toContain("byCustomizationType=FINE_TUNING");
+  });
+
+  it("threads byInferenceType filter through the query", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listFoundationModels({ byInferenceType: "PROVISIONED" });
+    expect(capture.url).toContain("byInferenceType=PROVISIONED");
+  });
+
+  it("threads byOutputModality filter through the query", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listFoundationModels({ byOutputModality: "EMBEDDING" });
+    expect(capture.url).toContain("byOutputModality=EMBEDDING");
+  });
+
+  it("threads byProvider filter through the query", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
+    });
+    await provider.listFoundationModels({ byProvider: "Anthropic" });
+    expect(capture.url).toContain("byProvider=Anthropic");
+  });
+
+  it("returns the parsed list", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: listJson() }),
+    });
+    const result = await provider.listFoundationModels();
+    expect(result.modelSummaries).toHaveLength(1);
+    expect(result.modelSummaries[0]?.providerName).toBe("Anthropic");
+  });
+
+  it("validates BEFORE fetch (bad byProvider)", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.listFoundationModels({ byProvider: "" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(provider.listFoundationModels()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow",
+        }),
+      }),
+    });
+    await expect(provider.listFoundationModels()).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(provider.listFoundationModels()).rejects.toMatchObject({
+      kind: "network_error",
+    });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
