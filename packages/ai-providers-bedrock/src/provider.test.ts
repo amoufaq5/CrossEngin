@@ -6078,6 +6078,150 @@ describe("BedrockProvider — updateProvisionedModelThroughput (M2.X.5.aa.z.28)"
   });
 });
 
+describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)", () => {
+  it("DELETEs control-plane /provisioned-model-throughput/{id} with empty body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteProvisionedModelThroughput("pt-abc");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/provisioned-model-throughput/pt-abc");
+    expect(capture.init?.method).toBe("DELETE");
+    expect(capture.init?.body.byteLength).toBe(0);
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteProvisionedModelThroughput(
+      "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+    );
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.deleteProvisionedModelThroughput("pt-abc");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput(""),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on 200 success (on-demand PT deletes cleanly)", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "" }),
+    });
+    const result = await provider.deleteProvisionedModelThroughput("pt-abc");
+    expect(result).toBeUndefined();
+  });
+
+  it("tolerates 204 No Content (typical DELETE outcome)", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 204, text: "" }),
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput("pt-abc"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error (PT already gone)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such PT",
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput("pt-abc"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 409 ConflictException as conflict_error (committed PT mid-commitment)", async () => {
+    // AWS returns 409 ConflictException when attempting to delete a PT that
+    // has an active commitment period (one-month or six-month). The PT must
+    // age out of its commitment before it can be deleted.
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message:
+            "Cannot delete provisioned model throughput within commitment period",
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput("pt-abc"),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput("pt-abc"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput("pt-abc"),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.deleteProvisionedModelThroughput("pt-abc"),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

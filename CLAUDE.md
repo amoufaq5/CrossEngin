@@ -21,15 +21,52 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,922 tests**,
-all green, no type errors. M2.X.5.aa.z.28 closes ADR-0147 Q2
+**56 packages + 1 app, 127 meta-schema tables, 7,933 tests**,
+all green, no type errors. M2.X.5.aa.z.29 closes ADR-0147 Q3
++ ADR-0148 Q2 + ADR-0149 Q1 in one operation by adding
+`deleteProvisionedModelThroughput(provisionedModelId)`. PT
+lifecycle is now 4/4 COMPLETE on the substrate (create from
+M2.X.5.aa.z.27 + read from M2.X.5.aa.z.26 + update from
+M2.X.5.aa.z.28 + delete this milestone). Single DELETE
+endpoint, simple wire shape: DELETE
+/provisioned-model-throughput/{id} (singular, matching create
++ update). No pre-flight GET guard — PTs are always
+operator-owned (no SYSTEM-vs-APPLICATION distinction like
+inference profiles) so no guard needed and no extra round-
+trip. Reuses signedControlPlaneDelete transport from
+ADR-0136 (no new infrastructure). No mandatory
+clientRequestToken — delete doesn't create resources, AWS
+doesn't expose token on this endpoint. Interesting AWS-side
+semantic surfaces here: 409 ConflictException specifically
+when an operator tries to delete a COMMITTED PT mid-
+commitment (within the one-month or six-month lock-in
+period). Substrate propagates verbatim as conflict_error
+with code="ConflictException"; operators handle the
+workflow (wait it out, convert via update, or accept the
+cost — substrate doesn't try to be clever; AWS rejects
+substrate-side "force" anyway). Caller-decided idempotency
+via isNotFoundError predicate (same pattern as ADR-0136
+delete family). PT ARN stable in get/update/delete since
+create. Operator reconciliation workflow now: list →
+filter on-demand (no commitment) → delete each → handle
+409 on committed → schedule expiry retry. Bedrock control
+plane: 20 read + 2 stop + 3 create + 5 delete + 3 tag + 2
+update = 35 operations. ADR-0150 marks 150 ADRs since
+project bootstrap (124 of them Phase 2 ADR-0047 onward).
+11 new tests in provider.test.ts: DELETE URL + URI-encoding
++ Sig v4 headers + control-plane-not-runtime host +
+identifier-blank pre-flight + void on 200 + 204 No Content
+tolerance + 404 not-found + 409 ConflictException as
+conflict_error WITH the committed-mid-commitment context
+in the test name and message + 403/429/network errors.
+M2.X.5.aa.z.28 closes ADR-0147 Q2
 + ADR-0148 Q1 by adding
 `updateProvisionedModelThroughput(provisionedModelId, input)`.
 Mid-life PT mutation for model migration OR rename. AWS
@@ -3245,7 +3282,15 @@ because update doesn't multiply cost; reuses
 signedControlPlanePatch from ADR-0146; at-least-one-field
 rule rejects empty input; PT ARN stable across migration
 so downstream InvokeModel calls continue transparently;
-PT lifecycle 3/4 complete on substrate).
+PT lifecycle 3/4 complete on substrate), ADR-0150 covers
+M2.X.5.aa.z.29 (Bedrock deleteProvisionedModelThroughput —
+closes ADR-0147 Q3 + ADR-0148 Q2 + ADR-0149 Q1 in one
+operation; PT lifecycle now 4/4 COMPLETE on substrate;
+reuses signedControlPlaneDelete; no pre-flight guard since
+PTs always operator-owned; 409 ConflictException semantic
+surfaces when deleting committed PT mid-commitment —
+propagated verbatim; ADR-0150 marks 150 ADRs since project
+bootstrap).
 
 ## Architecture in 90 seconds
 
@@ -4663,7 +4708,34 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0149 covers Phase 2 M2.X.5.aa.z.28 (Bedrock
+operations), ADR-0150 covers Phase 2 M2.X.5.aa.z.29 (Bedrock
+deleteProvisionedModelThroughput — closes ADR-0147 Q3 +
+ADR-0148 Q2 + ADR-0149 Q1 in one milestone; PT lifecycle
+4/4 COMPLETE on substrate (create + read + update + delete
+all shipped); single DELETE endpoint with simple wire shape
+/provisioned-model-throughput/{id} (singular matching
+create + update; LIST/GET use plural); reuses
+signedControlPlaneDelete transport from ADR-0136 — no new
+infrastructure; NO pre-flight GET guard since PTs are
+always operator-owned (no SYSTEM-vs-APPLICATION
+distinction); NO mandatory clientRequestToken (delete
+doesn't create resources, AWS doesn't expose token on
+delete); the interesting AWS-side semantic is 409
+ConflictException specifically when deleting a COMMITTED PT
+mid-commitment (one-month or six-month lock-in not yet
+expired) — substrate propagates verbatim as conflict_error
+with code=ConflictException; operators handle the workflow
+(wait it out, accept the cost, or convert via update —
+substrate doesn't try to be clever since AWS rejects
+substrate-side "force" anyway); caller-decided idempotency
+via isNotFoundError predicate same pattern as ADR-0136
+delete family; reconciliation workflow now full-cycle: list
+→ filter on-demand → delete each → handle 409 on committed
+→ schedule expiry retry; Bedrock control plane now has 20
+read + 2 stop + 3 create + 5 delete + 3 tag + 2 update =
+35 operations; ADR-0150 marks the 150-ADR milestone since
+project bootstrap, 124 of them Phase 2 ADR-0047 onward).
+ADR-0149 covers Phase 2 M2.X.5.aa.z.28 (Bedrock
 updateProvisionedModelThroughput — closes ADR-0147 Q2 +
 ADR-0148 Q1; mid-life PT mutation for model migration OR
 rename; AWS contract PATCH /provisioned-model-throughput/{id}

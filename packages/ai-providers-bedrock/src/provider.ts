@@ -1006,6 +1006,18 @@ export class BedrockProvider implements LlmProvider {
     return parseProvisionedModelDetail(raw);
   }
 
+  async deleteProvisionedModelThroughput(provisionedModelId: string): Promise<void> {
+    if (provisionedModelId.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "deleteProvisionedModelThroughput: provisionedModelId must be a non-empty string",
+      });
+    }
+    const path = `/provisioned-model-throughput/${encodeURIComponent(provisionedModelId)}`;
+    await this.signedControlPlaneDelete({ path });
+  }
+
   async updateProvisionedModelThroughput(
     provisionedModelId: string,
     input: BedrockUpdateProvisionedModelThroughputInput,
