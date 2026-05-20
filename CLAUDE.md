@@ -21,15 +21,51 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,303 tests**,
-all green, no type errors. M2.X.5.aa.z.16 ships
+**55 packages + 1 app, 120 meta-schema tables, 7,339 tests**,
+all green, no type errors. M2.X.5.aa.z.17 ships
+`BedrockProvider.listModelCustomizationJobs(options?)` against
+AWS's `ListModelCustomizationJobs` endpoint — the seventh
+paginated control-plane enumeration. Parallels
+M2.X.5.aa.z.15's listModelImportJobs surface but for
+AWS-native fine-tunes/continued-pretrains/distillations (vs
+externally-trained imports). BedrockCustomModelDetail
+(M2.X.5.aa.z.14) surfaces a jobArn pointing to the
+ModelCustomizationJob that produced the model;
+listModelCustomizationJobs enumerates those jobs.
+Pipeline-health monitoring, failure triage, throughput
+analysis, cost attribution all unblocked. Key asymmetry vs
+import jobs: customization jobs have a RICHER 5-value status
+vocabulary — InProgress / Completed / Failed / Stopping /
+Stopped (operators can issue StopModelCustomizationJob
+mid-training to abort an expensive fine-tune). New module
+`model-customization-jobs-api.ts` exports
+BEDROCK_MODEL_CUSTOMIZATION_JOB_STATUSES 5-value tuple
+(mixed-case preserved verbatim, case-sensitive discriminator),
+boundary-validation constants, sortBy/sortOrder tuples,
+BedrockModelCustomizationJobSummary (5 required fields:
+jobArn, jobName, baseModelArn, status, creationTime + 5
+optional: lastModifiedTime, endTime, customModelArn,
+customModelName, customizationType),
+BedrockModelCustomizationJobListResponse,
+buildModelCustomizationJobListQuery pure boundary-validator
+(8 optional parameters: creationTimeBefore/After +
+nameContains + statusEquals + maxResults + nextToken +
+sortBy + sortOrder), strict parsers. customizationType
+preserved as string for forward-compat against AWS additions
+(FINE_TUNING / CONTINUED_PRE_TRAINING / DISTILLATION
+documented; AWS adds new). Provider reuses
+signedControlPlaneGet rail. Bedrock control-plane surface now
+has 15 of N operations; module count up to 16. Seven
+paginated enumerations now in place across 7 AWS resource
+types — the boundary-validator + strict-parser pattern is
+fully mature. M2.X.5.aa.z.16 ships
 `BedrockProvider.getModelImportJob(jobIdentifier)` — the
 rich-detail companion to listModelImportJobs (M2.X.5.aa.z.15).
 Failure-triage workflows now fully unblocked: when a Failed
@@ -2061,7 +2097,11 @@ ADR-0121 covers M2.X.5.aa.z.16 (Bedrock getModelImportJob —
 fourth extended-shape detail instance; failure-triage +
 KMS-audit + VPC-compliance workflows unblocked via
 failureMessage / modelDataSource.s3DataSource.s3Uri / roleArn
-/ importedModelKmsKeyArn / vpcConfig).
+/ importedModelKmsKeyArn / vpcConfig), ADR-0122 covers
+M2.X.5.aa.z.17 (Bedrock listModelCustomizationJobs — seventh
+paginated enumeration; parallels listModelImportJobs but for
+AWS-native fine-tunes with a richer 5-value status vocabulary
+including Stopping/Stopped).
 
 ## Architecture in 90 seconds
 
@@ -2287,8 +2327,8 @@ re-exporting everything.
   + getBatch + stopBatch + createBatch + listGuardrails +
   getGuardrail + listInferenceProfiles + getInferenceProfile
   + listImportedModels + getImportedModel + listCustomModels +
-  getCustomModel + listModelImportJobs + getModelImportJob —
-  embed dispatches on
+  getCustomModel + listModelImportJobs + getModelImportJob +
+  listModelCustomizationJobs — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -3215,7 +3255,13 @@ import-job triage workflows fully unblocked; failure
 diagnostics + IAM role audit + KMS + VPC config all
 surfaced via the rich GetModelImportJob response;
 parseModelImportJobDetail reuses M2.X.5.aa.z.15's
-isBedrockModelImportJobStatus discriminator).
+isBedrockModelImportJobStatus discriminator), ADR-0122 covers
+Phase 2 M2.X.5.aa.z.17 (Bedrock listModelCustomizationJobs —
+seventh paginated control-plane enumeration; AWS-native
+fine-tune surface paralleling listModelImportJobs but with a
+richer 5-value status vocabulary including Stopping/Stopped
+for operator-issued mid-training aborts; customizationType
+preserved as string for forward-compat).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

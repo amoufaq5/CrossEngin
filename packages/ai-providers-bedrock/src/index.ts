@@ -8,6 +8,7 @@ export * from "./guardrails.js";
 export * from "./guardrails-api.js";
 export * from "./imported-models-api.js";
 export * from "./inference-profiles-api.js";
+export * from "./model-customization-jobs-api.js";
 export * from "./model-import-jobs-api.js";
 export * from "./pricing.js";
 export * from "./provider.js";
