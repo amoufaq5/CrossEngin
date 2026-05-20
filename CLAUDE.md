@@ -21,15 +21,36 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,546 tests**,
-all green, no type errors. M6.6.x extends the ai-router's
+**55 packages + 1 app, 120 meta-schema tables, 7,551 tests**,
+all green, no type errors. M6.6.y extends the ai-router's
+retry / fallback short-circuit list with isNotFoundError —
+closes ADR-0133 Q1, the deferred Q from M6.6.x. One-line
+change in `isRouterRetryable` (router.ts): not-found errors
+(HTTP 404) join moderation + conflict as terminal — no
+provider-level retry, no fallback-provider attempt. Semantic:
+not-found means "identifier doesn't resolve (or this
+principal can't see it)"; retrying with the same identifier
+always fails the same way; switching to a different provider
+can't help either (identifiers are provider-scoped — an
+OpenAI file_id is not an Anthropic file ID is not a Bedrock
+ARN; re-issuing against a different provider can't succeed).
+Preserves the original error verbatim (kind +
+status === 404). Existing behavior on every other error
+class unchanged — rate_limit still falls over, moderation
+and conflict still early-exit separately, invalid_request
+still propagates as before. Three classifiers now short-
+circuit: moderation (M6.6), conflict (M6.6.x), not-found
+(M6.6.y). 5 new tests in router.test.ts validate the not-
+found early-exit (fallback bypass + no-retry + error
+preservation + distinct-from-conflict + rate_limit fallback
+preserved). M6.6.x extends the ai-router's
 retry / fallback short-circuit list with isConflictError —
 closes ADR-0118 Q2, the deferred Q from M2.X.12. One-line
 change in `isRouterRetryable` (router.ts): conflict errors
@@ -45,10 +66,9 @@ behavior on every other error class unchanged — rate_limit
 still falls over, moderation still early-exits separately,
 invalid_request still propagates as before. Pattern set for
 future classifier short-circuits: each future short-circuit
-(isNotFoundError, isInvalidRequestError, etc.) gets its own
-ADR with documented semantics — no lump-add. 5 new tests in
-router.test.ts validate the conflict early-exit + preserve
-the rate_limit fallback path. M8.1 adds activity execution
+gets its own ADR with documented semantics — no lump-add. 5
+new tests in router.test.ts validate the conflict early-exit
++ preserve the rate_limit fallback path. M8.1 adds activity execution
 instrumentation to the workflow runtime — closes ADR-0120
 Q3, the longest-outstanding deferred Q from the M8 milestone.
 WORKFLOW_INSTRUMENTATION_KINDS grows from 11 → 14 with three
@@ -2455,7 +2475,12 @@ closes ADR-0120 Q3 — adds activity_started / activity_completed
 ADR-0133 covers M6.6.x (ai-router special-cases
 isConflictError for retry chain short-circuit — closes
 ADR-0118 Q2 — conflict errors join moderation as terminal in
-the isRouterRetryable gate).
+the isRouterRetryable gate), ADR-0134 covers M6.6.y (ai-
+router special-cases isNotFoundError for retry chain short-
+circuit — closes ADR-0133 Q1 — not-found errors join
+moderation + conflict as terminal in the isRouterRetryable
+gate; identifier mismatches don't benefit from fallback
+because identifiers are provider-scoped).
 
 ## Architecture in 90 seconds
 
@@ -3715,7 +3740,15 @@ M2.X.12 conflict_error classifier milestone; one-line gate
 extension in isRouterRetryable; conflict errors join
 moderation as terminal; rate_limit / moderation / other paths
 unchanged; pattern set for future per-classifier short-circuit
-ADRs).
+ADRs), ADR-0134 covers Phase 2 M6.6.y (ai-router special-cases
+isNotFoundError for retry chain short-circuit — closes ADR-0133
+Q1 from the M6.6.x conflict short-circuit milestone; same
+shape one-line extension; not-found errors join moderation +
+conflict as terminal in isRouterRetryable; identifier
+mismatches don't benefit from fallback because identifiers are
+provider-scoped — OpenAI file_id ≠ Anthropic file ID ≠ Bedrock
+ARN; three classifiers now short-circuit: moderation +
+conflict + not_found; rate_limit fallback path preserved).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

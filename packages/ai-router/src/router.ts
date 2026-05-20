@@ -12,7 +12,12 @@ import type {
   TaskPolicyMap,
   TenantResidency,
 } from "@crossengin/ai-providers";
-import { contentToText, isConflictError, isModerationError } from "@crossengin/ai-providers";
+import {
+  contentToText,
+  isConflictError,
+  isModerationError,
+  isNotFoundError,
+} from "@crossengin/ai-providers";
 
 import {
   CostCeilingExceededError,
@@ -316,6 +321,11 @@ function isRouterRetryable(err: unknown): boolean {
   // fails the same way. Switching providers won't help either (the conflict
   // is on the operator's resource state, not the provider's availability).
   if (isConflictError(err)) return false;
+  // Not-found errors (HTTP 404) are terminal — the identifier doesn't exist
+  // (or this principal can't see it). Retrying with the same identifier
+  // always fails. Switching providers won't help: identifiers are
+  // provider-scoped (OpenAI file_id ≠ Anthropic file_id ≠ Bedrock ARN).
+  if (isNotFoundError(err)) return false;
   return isRetryableError(err);
 }
 
