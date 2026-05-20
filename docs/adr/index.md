@@ -130,13 +130,14 @@
 | [0125](0125-cache-breakpoint-content-block.md) | cacheBreakpoint field on LlmContentBlock + Anthropic prompt caching (Phase 2 M2.X.11) | 2 | Proposed | 2026-05-19 |
 | [0126](0126-bedrock-cache-point-translator.md) | Bedrock cachePoint translator for cacheBreakpoint (Phase 2 M2.X.11.x) | 2 | Proposed | 2026-05-19 |
 | [0127](0127-not-found-error-classifier.md) | not_found_error kernel kind + isNotFoundError cross-provider classifier (Phase 2 M2.X.13) | 2 | Proposed | 2026-05-19 |
+| [0128](0128-authentication-error-classifier.md) | authentication_error kernel kind + isAuthenticationError cross-provider classifier (Phase 2 M2.X.14) | 2 | Proposed | 2026-05-19 |
 
 ## Tiers
 
 ADRs are written in three tiers reflecting how foundational they are:
 
 - **Tier 1 — Foundation.** Must exist before any code. ADRs 0001, 0002, 0003, 0004, 0005, 0008, 0009, 0018, 0024, 0046.
-- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057, 0058, 0059, 0060, 0061, 0062, 0063, 0064, 0065, 0066, 0067, 0068, 0069, 0070, 0071, 0072, 0073, 0074, 0075, 0076, 0077, 0078, 0079, 0080, 0081, 0082, 0083, 0084, 0085, 0086, 0087, 0088, 0089, 0090, 0091, 0092, 0093, 0094, 0095, 0096, 0097, 0098, 0099, 0100, 0101, 0102, 0103, 0104, 0105, 0106, 0107, 0108, 0109, 0110, 0111, 0112, 0113, 0114, 0115, 0116, 0117, 0118, 0119, 0120, 0121, 0122, 0123, 0124, 0125, 0126, 0127.
+- **Tier 2 — Phase 1-3.** Written during kernel + workflow + AI Architect build-out. ADRs 0006, 0007, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0020, 0023, 0025, 0027, 0028, 0030, 0031, 0034, 0036, 0037, 0038, 0039, 0040, 0041, 0042, 0043, 0044, 0045, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, 0056, 0057, 0058, 0059, 0060, 0061, 0062, 0063, 0064, 0065, 0066, 0067, 0068, 0069, 0070, 0071, 0072, 0073, 0074, 0075, 0076, 0077, 0078, 0079, 0080, 0081, 0082, 0083, 0084, 0085, 0086, 0087, 0088, 0089, 0090, 0091, 0092, 0093, 0094, 0095, 0096, 0097, 0098, 0099, 0100, 0101, 0102, 0103, 0104, 0105, 0106, 0107, 0108, 0109, 0110, 0111, 0112, 0113, 0114, 0115, 0116, 0117, 0118, 0119, 0120, 0121, 0122, 0123, 0124, 0125, 0126, 0127, 0128.
 - **Tier 3 — Phase 4+.** Written as we approach mobile, billing, i18n, marketplace, ML, FinOps, forensics, and multi-region active-active work. ADRs 0019, 0021, 0022, 0026, 0029, 0032, 0033, 0035.
 
 ## Statuses
@@ -253,3 +254,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 99 | 0125 | 2,500 | Drafted alongside cacheBreakpoint LlmContentBlock field + Anthropic translator (Phase 2 M2.X.11) |
 | 100 | 0126 | 2,000 | Drafted alongside Bedrock cachePoint translator wiring (Phase 2 M2.X.11.x) |
 | 101 | 0127 | 2,500 | Drafted alongside not_found_error 5th cross-provider classifier (Phase 2 M2.X.13) |
+| 102 | 0128 | 2,500 | Drafted alongside authentication_error 6th cross-provider classifier (Phase 2 M2.X.14) |

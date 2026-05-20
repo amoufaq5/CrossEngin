@@ -21,15 +21,42 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,430 tests**,
-all green, no type errors. M2.X.13 lifts the FIFTH
+**55 packages + 1 app, 120 meta-schema tables, 7,454 tests**,
+all green, no type errors. M2.X.14 lifts the SIXTH
+cross-provider error classifier to the kernel —
+`isAuthenticationError(err)` in
+`@crossengin/ai-providers/authentication.ts`. Closes ADR-0127
+Q1 mechanically. All three providers (Anthropic, OpenAI,
+Bedrock) already emit `authentication_error` from
+`classifyHttpStatus(401)`; Bedrock additionally maps
+ExpiredTokenException / InvalidSignatureException /
+MissingAuthenticationTokenException / UnrecognizedClientException
+via CODE_TO_KIND. The kind is wired everywhere — this
+milestone adds the kernel-level predicate. Zero provider
+changes required. Structurally identical to the prior five
+classifiers (M2.X.6.x / M2.X.7 / M2.X.9 / M2.X.12 / M2.X.13):
+AUTHENTICATION_ERROR_KINDS tuple + isAuthenticationErrorKind
+predicate + isAuthenticationError(err) duck-typed
+discriminator on .kind. Single-kind tuple (authentication_error
+only). Explicitly EXCLUDES permission_error (HTTP 403 vs 401
+have distinct remediation paths — auth = rotate credentials,
+permission = grant access or use different principal);
+operators wanting both compose isAuthenticationError(err) ||
+isPermissionError(err). Three workflow patterns documented:
+credential rotation flow (catch + refresh + retry),
+multi-tenant key validation at request boundary (translate
+to TenantKeyInvalidError with structured message), CI boot-
+time credential check (fail loud rather than burying in
+generic exception). isPermissionError (HTTP 403) is the next
+mechanical lift, called out as Q1 in ADR-0128. M2.X.13 lifts
+the FIFTH
 cross-provider error classifier to the kernel —
 `isNotFoundError(err)` in
 `@crossengin/ai-providers/not-found.ts`. All three providers
@@ -1013,16 +1040,17 @@ kind via their classifyHttpStatus paths),
 `InputTooLargeErrorKind` type, `isInputTooLargeErrorKind`
 discriminator, `InputTooLargeDiscriminator` interface, and the
 headline predicate. The kernel surface now partitions the
-error space into six buckets: retryable (try again with
+error space into seven buckets: retryable (try again with
 backoff), moderation (terminal; audit), input-too-large
 (terminal; reduce input), conflict (terminal; reconcile
 state — M2.X.12), not-found (terminal; resource absence —
-M2.X.13), other (auth / permission / invalid_request /
-unknown — terminal; surface to user). Operators classifying
-errors across providers use five parallel discriminators with
-no provider-package imports: isModerationError +
+M2.X.13), authentication (terminal; rotate credentials —
+M2.X.14), other (permission / invalid_request / unknown —
+terminal; surface to user). Operators classifying errors
+across providers use six parallel discriminators with no
+provider-package imports: isModerationError +
 isRetryableError + isInputTooLargeError + isConflictError +
-isNotFoundError.
+isNotFoundError + isAuthenticationError.
 Mutual exclusivity verified by tests: a request_too_large
 error is NOT retryable + NOT a moderation event.
 Cross-package integration tests in all three providers verify
@@ -2263,7 +2291,12 @@ Bedrock), ADR-0127 covers M2.X.13 (not_found_error kernel
 kind + isNotFoundError cross-provider classifier — fifth
 kernel classifier; zero provider changes since the kind was
 already wired everywhere; idempotent cleanup workflows now
-have a documented cross-provider pattern).
+have a documented cross-provider pattern), ADR-0128 covers
+M2.X.14 (authentication_error kernel kind +
+isAuthenticationError cross-provider classifier — sixth
+kernel classifier closing ADR-0127 Q1; explicitly EXCLUDES
+permission_error since auth and permission have distinct
+remediation paths).
 
 ## Architecture in 90 seconds
 
@@ -3465,7 +3498,15 @@ zero provider changes required since all three providers
 already emit not_found_error from classifyHttpStatus(404);
 kernel error-space partition now has six buckets;
 idempotent cleanup workflows have a documented cross-provider
-pattern).
+pattern), ADR-0128 covers Phase 2 M2.X.14 (authentication_error
+kernel kind + isAuthenticationError cross-provider classifier
+— sixth kernel classifier; closes ADR-0127 Q1 mechanically;
+all three providers already emit authentication_error from
+classifyHttpStatus(401), Bedrock additionally via CODE_TO_KIND
+for AWS-specific exception names; explicitly distinct from
+permission_error since 401 and 403 have different remediation
+paths; credential rotation + multi-tenant key validation + CI
+boot-check workflows now documented).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
