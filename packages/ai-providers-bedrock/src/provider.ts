@@ -611,6 +611,18 @@ export class BedrockProvider implements LlmProvider {
     return parseBatchJobDetail(raw);
   }
 
+  async stopModelCustomizationJob(jobIdentifier: string): Promise<void> {
+    if (jobIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "stopModelCustomizationJob: jobIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/model-customization-jobs/${encodeURIComponent(jobIdentifier)}/stop`;
+    await this.signedControlPlanePost({ path });
+  }
+
   async getModelCustomizationJob(
     jobIdentifier: string,
   ): Promise<BedrockModelCustomizationJobDetail> {

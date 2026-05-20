@@ -1418,6 +1418,148 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () => {
+  it("POSTs control-plane /model-customization-jobs/{id}/stop with empty body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.stopModelCustomizationJob("abc123");
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/model-customization-jobs/abc123/stop");
+    expect(capture.init?.method).toBe("POST");
+    expect(capture.init?.body.byteLength).toBe(0);
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    const arn =
+      "arn:aws:bedrock:us-east-1:123:model-customization-job/abc";
+    await provider.stopModelCustomizationJob(arn);
+    expect(capture.url).toContain("%3A");
+    expect(capture.url).toContain("/stop");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildFetch({ capture, text: "" }) });
+    await provider.stopModelCustomizationJob("abc123");
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates identifier BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.stopModelCustomizationJob("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "" }),
+    });
+    const result = await provider.stopModelCustomizationJob("abc123");
+    expect(result).toBeUndefined();
+  });
+
+  it("tolerates an empty JSON object body", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "{}" }),
+    });
+    await expect(
+      provider.stopModelCustomizationJob("abc123"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such job",
+        }),
+      }),
+    });
+    await expect(
+      provider.stopModelCustomizationJob("abc123"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("classifies 409 ConflictException as conflict_error (terminal-state job)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "job is already in terminal state",
+        }),
+      }),
+    });
+    await expect(
+      provider.stopModelCustomizationJob("abc123"),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.stopModelCustomizationJob("abc123"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.stopModelCustomizationJob("abc123"),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.stopModelCustomizationJob("abc123"),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 describe("BedrockProvider — getModelCustomizationJob (M2.X.5.aa.z.18)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({

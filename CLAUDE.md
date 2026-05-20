@@ -21,15 +21,42 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,365 tests**,
-all green, no type errors. M2.X.5.aa.z.18 ships
+**55 packages + 1 app, 120 meta-schema tables, 7,376 tests**,
+all green, no type errors. M2.X.5.aa.z.19 ships
+`BedrockProvider.stopModelCustomizationJob(jobIdentifier)` —
+the operator-initiated abort surface paired with
+M2.X.5.aa.z.17/.18's read pair (the Stopping/Stopped statuses
+in the 5-value tuple now have a programmatic trigger). Pure
+reuse of established rails — POST endpoint via
+signedControlPlanePost (M2.X.5.aa.z.5) with empty body;
+URI-encoded path /model-customization-jobs/{encoded}/stop;
+returns void on success. No new types / modules / transport.
+Error mapping: 200 → resolve, 400 ValidationException →
+invalid_request_error, 403 AccessDeniedException →
+permission_error, 404 ResourceNotFoundException →
+not_found_error, 409 ConflictException → conflict_error
+(via M2.X.12's CODE_TO_KIND mapping; THIRD Bedrock endpoint
+emitting 409 — isConflictError classifier is now load-bearing
+across stopBatch + createBatch + stopModelCustomizationJob),
+429 ThrottlingException → rate_limit_error. Three operational
+workflows unblocked: cost-runaway kill switches for fine-tunes
+(detect long-running InProgress → stop), tenant-offboarding
+fine-tune cancellation sweeps (paired with
+listModelCustomizationJobs({nameContains}) + status filter),
+compliance kill switches (new policy lands → stop in-flight
+fine-tunes that may violate it). Bedrock control-plane surface
+now has 17 of N operations. Customization-job read+write
+surface is feature-equivalent to batch surface (M2.X.5.aa.z.3
+shipped batch list/get/stop/create; this milestone closes the
+equivalent stop for customization jobs).
+M2.X.5.aa.z.18 ships
 `BedrockProvider.getModelCustomizationJob(jobIdentifier)` —
 the rich-detail companion to listModelCustomizationJobs
 (M2.X.5.aa.z.17). Fifth extended-shape detail instance after
@@ -2143,7 +2170,11 @@ including Stopping/Stopped), ADR-0123 covers M2.X.5.aa.z.18
 detail — fifth extended-shape detail instance; 8 new typed
 sub-shapes structurally mirroring getCustomModel; field-name
 asymmetry preserved verbatim; reproducibility / triage / cost
-/ distillation lineage workflows unblocked).
+/ distillation lineage workflows unblocked), ADR-0124 covers
+M2.X.5.aa.z.19 (Bedrock stopModelCustomizationJob — pure
+reuse of M2.X.5.aa.z.5's signedControlPlanePost rail;
+operator-initiated mid-training aborts; third 409-emitting
+Bedrock endpoint earning isConflictError its keep).
 
 ## Architecture in 90 seconds
 
@@ -2370,8 +2401,8 @@ re-exporting everything.
   getGuardrail + listInferenceProfiles + getInferenceProfile
   + listImportedModels + getImportedModel + listCustomModels +
   getCustomModel + listModelImportJobs + getModelImportJob +
-  listModelCustomizationJobs + getModelCustomizationJob —
-  embed dispatches on
+  listModelCustomizationJobs + getModelCustomizationJob +
+  stopModelCustomizationJob — embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -3314,7 +3345,14 @@ DistillationConfig / CustomizationConfig structurally
 mirroring getCustomModel but typed independently per
 AWS-contract preservation; field-naming asymmetry vs summary
 preserved verbatim — detail uses outputModelName/outputModelArn,
-summary uses customModelName/customModelArn).
+summary uses customModelName/customModelArn), ADR-0124 covers
+Phase 2 M2.X.5.aa.z.19 (Bedrock stopModelCustomizationJob —
+operator-initiated mid-training abort companion to the
+Stopping/Stopped statuses from M2.X.5.aa.z.17; pure reuse of
+the M2.X.5.aa.z.5 signedControlPlanePost rail; third Bedrock
+endpoint emitting 409 ConflictException — isConflictError
+classifier (M2.X.12) now load-bearing across stopBatch +
+createBatch + stopModelCustomizationJob).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
