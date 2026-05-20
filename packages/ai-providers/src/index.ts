@@ -10,3 +10,4 @@ export * from "./conflict.js";
 export * from "./not-found.js";
 export * from "./authentication.js";
 export * from "./permission.js";
+export * from "./invalid-request.js";

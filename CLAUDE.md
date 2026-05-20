@@ -21,15 +21,43 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,479 tests**,
-all green, no type errors. M2.X.15 lifts the SEVENTH
+**55 packages + 1 app, 120 meta-schema tables, 7,503 tests**,
+all green, no type errors. M2.X.16 lifts the EIGHTH
+cross-provider error classifier and COMPLETES the canonical
+4xx/5xx classifier sweep — `isInvalidRequestError(err)` in
+`@crossengin/ai-providers/invalid-request.ts`. Closes ADR-0129
+Q1 mechanically. All three providers emit
+`invalid_request_error` from classifyHttpStatus(400); Bedrock
+additionally maps `ValidationException` via CODE_TO_KIND;
+OpenAI maps via TYPE_TO_KIND. Zero provider changes.
+Structurally identical to permission.ts (M2.X.15). Single-kind
+tuple. Explicitly distinct from request_too_large: 400 =
+structural problem (missing field, bad type, out-of-range) →
+fix shape; 413 = correct shape but oversized payload → reduce
+input. Canonical 4xx sweep coverage map: 400 invalid_request
++ 401 authentication + 403 permission + 404 not_found + 408
+timeout (via retryable) + 409 conflict + 413 request_too_large
++ 429 rate_limit (via retryable) + 503/529 overloaded (via
+retryable) + ≥500 api_error (via retryable). Moderation
+kinds + network errors covered by their dedicated
+classifiers. Coverage is COMPLETE — every documented kernel
+error kind across all three providers maps to at least one of
+the eight classifiers. New mutual-exclusivity test asserts an
+`invalid_request_error` matches exactly ONE classifier
+(itself) — verifying the suite remains partitioned. Three
+workflow patterns enabled: CI kernel-validation tests
+(assert isInvalidRequestError on malformed requests),
+auto-fix workflows for LLM-generated requests (re-prompt with
+error feedback when isInvalidRequestError fires), user-facing
+error translation (8-way dispatch documented in ADR-0130).
+M2.X.15 lifts the SEVENTH
 cross-provider error classifier — `isPermissionError(err)`
 in `@crossengin/ai-providers/permission.ts`. Closes ADR-0128
 Q1 mechanically. All three providers emit `permission_error`
@@ -1064,18 +1092,22 @@ kind via their classifyHttpStatus paths),
 `InputTooLargeErrorKind` type, `isInputTooLargeErrorKind`
 discriminator, `InputTooLargeDiscriminator` interface, and the
 headline predicate. The kernel surface now partitions the
-error space into eight buckets: retryable (try again with
-backoff), moderation (terminal; audit), input-too-large
-(terminal; reduce input), conflict (terminal; reconcile
-state — M2.X.12), not-found (terminal; resource absence —
-M2.X.13), authentication (terminal; rotate credentials —
-M2.X.14), permission (terminal; grant access or switch
-principal — M2.X.15), other (invalid_request / unknown —
-terminal; surface to user). Operators classifying errors
-across providers use seven parallel discriminators with no
-provider-package imports: isModerationError +
-isRetryableError + isInputTooLargeError + isConflictError +
-isNotFoundError + isAuthenticationError + isPermissionError.
+error space into eight COMPLETE buckets: retryable (try again
+with backoff), moderation (terminal; audit), input-too-large
+(terminal; reduce input — 413), conflict (terminal;
+reconcile state — 409 / M2.X.12), not-found (terminal;
+resource absence — 404 / M2.X.13), authentication (terminal;
+rotate credentials — 401 / M2.X.14), permission (terminal;
+grant access or switch principal — 403 / M2.X.15),
+invalid-request (terminal; fix request shape — 400 /
+M2.X.16). Canonical 4xx/5xx sweep complete — every documented
+kernel error kind across all three providers has a kernel
+classifier. Operators classifying errors across providers use
+eight parallel discriminators with no provider-package
+imports: isModerationError + isRetryableError +
+isInputTooLargeError + isConflictError + isNotFoundError +
+isAuthenticationError + isPermissionError +
+isInvalidRequestError.
 Mutual exclusivity verified by tests: a request_too_large
 error is NOT retryable + NOT a moderation event.
 Cross-package integration tests in all three providers verify
@@ -2325,7 +2357,12 @@ remediation paths), ADR-0129 covers M2.X.15 (permission_error
 kernel kind + isPermissionError cross-provider classifier —
 seventh kernel classifier closing ADR-0128 Q1; pairs with
 isAuthenticationError; cross-account / cross-tenant /
-cross-region access denial workflows now documented).
+cross-region access denial workflows now documented),
+ADR-0130 covers M2.X.16 (invalid_request_error kernel kind +
+isInvalidRequestError cross-provider classifier — eighth
+kernel classifier completing the canonical 4xx/5xx sweep;
+closes ADR-0129 Q1; user-facing error translation pattern
+documented).
 
 ## Architecture in 90 seconds
 
@@ -3544,7 +3581,16 @@ Anthropic + OpenAI emit permission_error from
 classifyHttpStatus(403), Bedrock via
 CODE_TO_KIND["AccessDeniedException"]; pairs with
 isAuthenticationError for "any auth-related issue" composite
-via inline OR).
+via inline OR), ADR-0130 covers Phase 2 M2.X.16
+(invalid_request_error kernel kind + isInvalidRequestError
+cross-provider classifier — EIGHTH AND FINAL kernel
+classifier; closes ADR-0129 Q1 mechanically; completes the
+canonical 4xx/5xx sweep — every documented kernel error kind
+across all three providers now has a kernel classifier;
+mutual-exclusivity test asserts an invalid_request_error
+matches exactly ONE classifier; CI kernel-validation + LLM
+auto-fix + user-facing error translation workflows have
+documented patterns).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
