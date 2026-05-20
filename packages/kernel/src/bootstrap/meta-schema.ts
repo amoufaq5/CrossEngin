@@ -9341,7 +9341,7 @@ export const META_LLM_CALL_TRACES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "kind IN ('llm_call_started', 'llm_call_completed', 'llm_call_failed')",
+        "kind IN ('llm_call_started', 'llm_call_completed', 'llm_call_failed', 'embed_call_started', 'embed_call_completed', 'embed_call_failed')",
     },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
     {

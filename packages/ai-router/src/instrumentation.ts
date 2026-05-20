@@ -2,6 +2,9 @@ export const ROUTER_INSTRUMENTATION_KINDS = [
   "llm_call_started",
   "llm_call_completed",
   "llm_call_failed",
+  "embed_call_started",
+  "embed_call_completed",
+  "embed_call_failed",
 ] as const;
 export type RouterInstrumentationKind =
   (typeof ROUTER_INSTRUMENTATION_KINDS)[number];

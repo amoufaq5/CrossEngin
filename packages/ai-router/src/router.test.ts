@@ -13,7 +13,10 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import { CostCeilingExceededError, InMemoryCostTracker } from "./cost-tracker.js";
-import { captureRouterInstrumentation } from "./instrumentation.js";
+import {
+  ROUTER_INSTRUMENTATION_KINDS,
+  captureRouterInstrumentation,
+} from "./instrumentation.js";
 import { InMemoryLatencyTracker } from "./latency-tracker.js";
 import { ProviderResolutionError } from "./resolve.js";
 import {
@@ -921,5 +924,156 @@ describe("DefaultLlmRouter.complete — RouterInstrumentation (M6.7.z)", () => {
     expect(failed).toHaveLength(1);
     expect(failed[0]?.providerId).toBe("anthropic");
     expect(failed[0]?.attributes["willFallback"]).toBe(false);
+  });
+});
+
+describe("DefaultLlmRouter.embed — RouterInstrumentation (M6.7.z.embed)", () => {
+  it("emits embed_call_started then embed_call_completed on happy path", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({ texts: ["hello"], tenantId: TENANT, sessionId: "sess-1" });
+    const kinds = cap.events.map((e) => e.kind);
+    expect(kinds).toEqual(["embed_call_started", "embed_call_completed"]);
+  });
+
+  it("threads tenantId + sessionId + task='embedding' + providerId + modelId", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({ texts: ["hello"], tenantId: TENANT, sessionId: "sess-1" });
+    for (const event of cap.events) {
+      expect(event.tenantId).toBe(TENANT);
+      expect(event.sessionId).toBe("sess-1");
+      expect(event.task).toBe("embedding");
+      expect(event.providerId).toBe("openai");
+      expect(event.modelId).toBe("openai-model-1");
+    }
+  });
+
+  it("defaults sessionId to empty string when not provided (embed sessionId is optional)", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({ texts: ["hi"], tenantId: TENANT });
+    expect(cap.events[0]?.sessionId).toBe("");
+  });
+
+  it("populates embed_call_started with attemptIndex + totalChoices + inputTextCount", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({
+      texts: ["one", "two", "three"],
+      tenantId: TENANT,
+      sessionId: "sess-1",
+    });
+    const started = cap.events.find((e) => e.kind === "embed_call_started")!;
+    expect(started.attributes["attemptIndex"]).toBe(0);
+    expect(started.attributes["totalChoices"]).toBe(1);
+    expect(started.attributes["inputTextCount"]).toBe(3);
+  });
+
+  it("populates embed_call_completed with costUsd / tokens / vectorCount / attempts", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({ texts: ["hi"], tenantId: TENANT, sessionId: "sess-1" });
+    const completed = cap.events.find((e) => e.kind === "embed_call_completed")!;
+    expect(completed.attributes["costUsd"]).toBeDefined();
+    expect(completed.attributes["inputTokens"]).toBeDefined();
+    expect(completed.attributes["vectorCount"]).toBe(1);
+    expect(completed.attributes["attempts"]).toBe(1);
+  });
+
+  it("includes durationMs on completed but null on started", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({ texts: ["hi"], tenantId: TENANT, sessionId: "sess-1" });
+    const started = cap.events.find((e) => e.kind === "embed_call_started")!;
+    const completed = cap.events.find((e) => e.kind === "embed_call_completed")!;
+    expect(started.durationMs).toBeNull();
+    expect(completed.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("emits embed_call_failed when a provider throws non-retryably (no fallback issued)", async () => {
+    const fatal = new StubProvider("openai", "fatal");
+    const providers = new Map<string, LlmProvider>([["openai", fatal]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await expect(
+      router.embed({ texts: ["hi"], tenantId: TENANT, sessionId: "sess-1" }),
+    ).rejects.toThrow();
+    const failed = cap.events.find((e) => e.kind === "embed_call_failed");
+    expect(failed).toBeDefined();
+    expect(failed?.attributes["willFallback"]).toBe(false);
+    expect(failed?.attributes["errorKind"]).toBeDefined();
+  });
+
+  it("noop default = no observable behavior change", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const router = buildRouter({ providers });
+    const result = await router.embed({
+      texts: ["hi"],
+      tenantId: TENANT,
+      sessionId: "sess-1",
+    });
+    expect(result.vectors).toEqual([[1, 2, 3]]);
+  });
+
+  it("event sessionId reflects the provided embed sessionId (when set)", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({
+      texts: ["hi"],
+      tenantId: TENANT,
+      sessionId: "explicit-session",
+    });
+    expect(cap.events[0]?.sessionId).toBe("explicit-session");
+  });
+
+  it("emits ISO 8601 occurredAt on every embed event", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const providers = new Map<string, LlmProvider>([["openai", openai]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await router.embed({ texts: ["hi"], tenantId: TENANT, sessionId: "sess-1" });
+    for (const event of cap.events) {
+      expect(event.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    }
+  });
+
+  it("does NOT emit completion events on failure (the failure event covers the outcome)", async () => {
+    const fatal = new StubProvider("openai", "fatal");
+    const providers = new Map<string, LlmProvider>([["openai", fatal]]);
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({ providers, instrumentation: cap.instrumentation });
+    await expect(
+      router.embed({ texts: ["hi"], tenantId: TENANT, sessionId: "sess-1" }),
+    ).rejects.toThrow();
+    const completed = cap.events.filter((e) => e.kind === "embed_call_completed");
+    expect(completed).toHaveLength(0);
+  });
+});
+
+describe("ROUTER_INSTRUMENTATION_KINDS — embed kinds (M6.7.z.embed)", () => {
+  it("includes the 3 new embed kinds additively (original 3 llm kinds preserved)", () => {
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("embed_call_started");
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("embed_call_completed");
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("embed_call_failed");
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("llm_call_started");
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("llm_call_completed");
+    expect(ROUTER_INSTRUMENTATION_KINDS).toContain("llm_call_failed");
+    expect(ROUTER_INSTRUMENTATION_KINDS.length).toBe(6);
   });
 });

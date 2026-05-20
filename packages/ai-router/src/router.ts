@@ -302,12 +302,69 @@ export class DefaultLlmRouter implements LlmRouter {
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const choices = await this.chooseProviders("embedding", req.tenantId);
+    const sessionId = req.sessionId ?? "";
     let lastError: unknown;
-    for (const choice of choices) {
+    for (let i = 0; i < choices.length; i++) {
+      const choice = choices[i]!;
+      const startMs = this.clock();
+      const occurredAt = new Date(startMs).toISOString();
+      await this.instrumentation.onEvent({
+        kind: "embed_call_started",
+        tenantId: req.tenantId,
+        sessionId,
+        task: "embedding",
+        providerId: choice.providerId,
+        modelId: choice.modelId,
+        occurredAt,
+        durationMs: null,
+        attributes: {
+          attemptIndex: i,
+          totalChoices: choices.length,
+          inputTextCount: req.texts.length,
+        },
+      });
       try {
-        return await choice.provider.embed(req);
+        const response = await choice.provider.embed(req);
+        const latencyMs = this.clock() - startMs;
+        await this.instrumentation.onEvent({
+          kind: "embed_call_completed",
+          tenantId: req.tenantId,
+          sessionId,
+          task: "embedding",
+          providerId: choice.providerId,
+          modelId: choice.modelId,
+          occurredAt,
+          durationMs: latencyMs,
+          attributes: {
+            costUsd: response.usage.cost,
+            inputTokens: response.usage.inputTokens,
+            outputTokens: response.usage.outputTokens,
+            cachedInputTokens: response.usage.cachedInputTokens ?? 0,
+            vectorCount: response.vectors.length,
+            dim: response.dim,
+            attempts: 1,
+          },
+        });
+        return response;
       } catch (err) {
         lastError = err;
+        const latencyMs = this.clock() - startMs;
+        const willFallback = isRouterRetryable(err) && i < choices.length - 1;
+        await this.instrumentation.onEvent({
+          kind: "embed_call_failed",
+          tenantId: req.tenantId,
+          sessionId,
+          task: "embedding",
+          providerId: choice.providerId,
+          modelId: choice.modelId,
+          occurredAt,
+          durationMs: latencyMs,
+          attributes: {
+            errorKind: errorKind(err),
+            errorMessage: err instanceof Error ? err.message : String(err),
+            willFallback,
+          },
+        });
         if (!isRouterRetryable(err)) throw err;
       }
     }

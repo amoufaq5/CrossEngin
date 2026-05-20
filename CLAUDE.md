@@ -21,15 +21,70 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,991 tests**,
-all green, no type errors. M2.X.5.aa.z.30 adds Bedrock
+**56 packages + 1 app, 127 meta-schema tables, 8,003 tests**,
+all green, no type errors. M6.7.z.embed closes ADR-0141 Q2
+by extending RouterInstrumentation to the embed() path. The
+complete() path already emitted llm_call_started/completed/
+failed events (M6.7.z / ADR-0141); the embed() path was
+deferred. Three additive changes: (1)
+ROUTER_INSTRUMENTATION_KINDS grows 3 → 6 with
+embed_call_started + embed_call_completed +
+embed_call_failed. (2) DefaultLlmRouter.embed() wires three
+onEvent calls per provider attempt, mirroring complete()
+lifecycle: started before fetch with attemptIndex +
+totalChoices + inputTextCount attributes; completed on
+success with costUsd + tokens + cachedInputTokens +
+vectorCount + dim + attempts=1; failed per-provider with
+errorKind + errorMessage + willFallback (derived from
+remaining choice index). (3) META_LLM_CALL_TRACES.kind CHECK
+constraint extended additively to allow the new kinds —
+no migration story needed for pre-existing data.
+sessionId handling: EmbeddingRequest.sessionId is OPTIONAL
+(unlike CompletionRequest.sessionId which is required), so
+the embed instrumentation defaults to empty string `""`
+when not provided. Empty string is a valid NOT NULL value
+that passes PG cleanly and surfaces in audit queries as
+"no session set" — alternatives considered: nullable
+schema (requires migration), sentinel `<embed-no-session>`
+(less standard); chose empty string for migration-free
+default. task field is hardcoded to "embedding" on every
+embed event (operators filter by task to separate
+complete vs embed dashboards). attempts: 1 always since
+embed doesn't retry-within-provider (unlike complete()
+which wraps in withRetry); fallover produces additional
+embed_call_started events for the next provider. Operators
+counting "how many providers did this embed call try" count
+embed_call_started events with the same (tenantId,
+sessionId, occurredAt) correlation window. Same interface
+as llm_call_* events (RouterInstrumentationEvent shape
+unchanged) — discriminated via the kind enum. PG instrumentation
+adapter (PostgresRouterInstrumentation from M6.7.z) handles
+the new kinds transparently since the wire format is
+unchanged. Three operator workflows unblocked: cost
+attribution for embedding-heavy applications (RAG ingest,
+semantic search), failure diagnosis for embedding rollouts,
+provider comparison for embedding latency. No breaking
+change: existing complete-only callers unaffected; new
+embed events only flow when operators use embed(). 12 new
+tests in router.test.ts: 11 in embed-instrumentation block
+(started→completed sequence, field threading, sessionId
+fallback to empty string for missing case + reflects
+explicit value when provided, started attributes
+(attemptIndex/totalChoices/inputTextCount), completed
+attributes (costUsd/tokens/vectorCount/attempts),
+durationMs null-on-started + non-null-on-completed,
+embed_call_failed on non-retryable with willFallback=false,
+noop default unchanged, ISO 8601 occurredAt, no-completion-
+event-on-failure invariant), 1 in ROUTER_INSTRUMENTATION_KINDS
+covering all 6 kinds present + count=6. Crossed the 8K-test
+threshold (8003 total). M2.X.5.aa.z.30 adds Bedrock
 foundation-model discovery: `getFoundationModel(modelIdentifier)`
 + `listFoundationModels(options?)`. Operators feeding the
 CREATE endpoints (inferenceProfile.copyFrom, PT.modelId,
@@ -3347,7 +3402,15 @@ capabilities (modalities + customizations + inference types)
 + legacy-model awareness before committing to CREATEs;
 type-alias Detail=Summary pattern since AWS returns same
 fields; defensive modelDetails envelope unwrap; 4 enums
-strictly validated on responses).
+strictly validated on responses), ADR-0152 covers
+M6.7.z.embed (RouterInstrumentation extends to embed() —
+closes ADR-0141 Q2 — three new kinds embed_call_started/
+completed/failed added additively to ROUTER_INSTRUMENTATION_KINDS;
+META_LLM_CALL_TRACES.kind CHECK constraint extended without
+migration; empty-string sessionId as the canonical "embed
+without session" marker; cost attribution + failure
+diagnosis + provider comparison for embedding workloads
+unblocked).
 
 ## Architecture in 90 seconds
 
@@ -4765,7 +4828,39 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0151 covers Phase 2 M2.X.5.aa.z.30 (Bedrock foundation
+operations), ADR-0152 covers Phase 2 M6.7.z.embed (RouterInstrumentation
+extends to embed() path — closes ADR-0141 Q2; the
+complete() path already emitted llm_call_started/completed/
+failed (M6.7.z / ADR-0141); this milestone adds the symmetric
+three embed_call_* kinds; ROUTER_INSTRUMENTATION_KINDS grows
+3 → 6 additively (existing kinds preserved);
+META_LLM_CALL_TRACES.kind CHECK constraint extended to allow
+the new values with NO migration needed for pre-existing data;
+DefaultLlmRouter.embed() now wires onEvent calls per
+attempt mirroring complete() lifecycle — started before
+fetch with attemptIndex/totalChoices/inputTextCount,
+completed on success with costUsd/tokens/vectorCount/dim/
+attempts=1, failed per-provider with errorKind/errorMessage/
+willFallback; attempts always 1 because embed() doesn't
+retry-within-provider unlike complete() which wraps in
+withRetry; fallover produces additional embed_call_started
+events for the next provider so operators count attempts
+via embed_call_started count with correlation window;
+sessionId handling — EmbeddingRequest.sessionId is optional
+unlike CompletionRequest so embed events default to empty
+string when not provided (alternatives nullable-schema +
+sentinel rejected for migration-free simplicity); task
+hardcoded to "embedding" on every embed event for dashboard
+filtering separation from complete; same interface as
+llm_call_* events with kind-discriminator — PG adapter
+handles new kinds transparently since wire format unchanged;
+three operator workflows unblocked: cost attribution for
+embedding-heavy apps (RAG ingest, semantic search), failure
+diagnosis for embedding model rollouts, provider comparison
+for embedding latency; no breaking change — existing
+complete-only callers unaffected, new embed events only
+flow when embed() is called).
+ADR-0151 covers Phase 2 M2.X.5.aa.z.30 (Bedrock foundation
 model discovery — getFoundationModel + listFoundationModels
 read-only surfaces; operators feeding CREATE endpoints need
 to know which foundation models are available, what they
