@@ -21,15 +21,34 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,541 tests**,
-all green, no type errors. M8.1 adds activity execution
+**55 packages + 1 app, 120 meta-schema tables, 7,546 tests**,
+all green, no type errors. M6.6.x extends the ai-router's
+retry / fallback short-circuit list with isConflictError —
+closes ADR-0118 Q2, the deferred Q from M2.X.12. One-line
+change in `isRouterRetryable` (router.ts): conflict errors
+(HTTP 409) join moderation errors as terminal — no
+provider-level retry, no fallback-provider attempt. Semantic:
+conflict means "resource is in incompatible state"; retrying
+with the same input always fails the same way; switching to
+a different provider doesn't help (the conflict lives on the
+operator's resource state, not the provider's availability).
+Preserves the original error verbatim (kind +
+status === 409 + code === "ConflictException"). Existing
+behavior on every other error class unchanged — rate_limit
+still falls over, moderation still early-exits separately,
+invalid_request still propagates as before. Pattern set for
+future classifier short-circuits: each future short-circuit
+(isNotFoundError, isInvalidRequestError, etc.) gets its own
+ADR with documented semantics — no lump-add. 5 new tests in
+router.test.ts validate the conflict early-exit + preserve
+the rate_limit fallback path. M8.1 adds activity execution
 instrumentation to the workflow runtime — closes ADR-0120
 Q3, the longest-outstanding deferred Q from the M8 milestone.
 WORKFLOW_INSTRUMENTATION_KINDS grows from 11 → 14 with three
@@ -2432,7 +2451,11 @@ validation rules; AWS contract preserved verbatim including
 customModelKmsKeyId vs KmsKeyArn asymmetry), ADR-0132 covers
 M8.1 (workflow runtime activity execution instrumentation —
 closes ADR-0120 Q3 — adds activity_started / activity_completed
-/ activity_failed kinds with durationMs + error context).
+/ activity_failed kinds with durationMs + error context),
+ADR-0133 covers M6.6.x (ai-router special-cases
+isConflictError for retry chain short-circuit — closes
+ADR-0118 Q2 — conflict errors join moderation as terminal in
+the isRouterRetryable gate).
 
 ## Architecture in 90 seconds
 
@@ -3685,7 +3708,14 @@ META_WORKFLOW_TRACES.kind CHECK constraint widened
 additively; three operator workflows enabled: latency
 dashboards via durationMs aggregation, failure alerting on
 the indexed kind column, per-activity-kind cost attribution
-rail ready for future M6.7 PostgresCostTracker).
+rail ready for future M6.7 PostgresCostTracker), ADR-0133
+covers Phase 2 M6.6.x (ai-router special-cases isConflictError
+for retry chain short-circuit — closes ADR-0118 Q2 from the
+M2.X.12 conflict_error classifier milestone; one-line gate
+extension in isRouterRetryable; conflict errors join
+moderation as terminal; rate_limit / moderation / other paths
+unchanged; pattern set for future per-classifier short-circuit
+ADRs).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

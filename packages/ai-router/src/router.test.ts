@@ -360,6 +360,148 @@ describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
   });
 });
 
+describe("DefaultLlmRouter.complete — conflict early-exit (M6.6.x)", () => {
+  class ConflictProvider extends StubProvider {
+    constructor(id: string) {
+      super(id, "ok");
+    }
+    async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      void _req;
+      throw Object.assign(new Error("resource state conflict"), {
+        kind: "conflict_error",
+        status: 409,
+        code: "ConflictException",
+      });
+    }
+  }
+
+  it("does NOT fall over to the fallback when the primary throws conflict_error", async () => {
+    let openaiAttempts = 0;
+    class CountingOpenAI extends StubProvider {
+      constructor() {
+        super("openai", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        openaiAttempts += 1;
+        yield { kind: "text", text: "fallback" };
+        yield {
+          kind: "usage_final",
+          usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+        };
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new ConflictProvider("anthropic")],
+      ["openai", new CountingOpenAI()],
+    ]);
+    const router = buildRouter({ providers });
+    await expect(async () => {
+      for await (const _c of router.complete(fakeReq())) {
+        void _c;
+      }
+    }).rejects.toMatchObject({ kind: "conflict_error" });
+    expect(openaiAttempts).toBe(0);
+  });
+
+  it("does NOT retry within the same provider on conflict_error", async () => {
+    let attempts = 0;
+    class CountingConflict extends StubProvider {
+      constructor() {
+        super("anthropic", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        attempts += 1;
+        throw Object.assign(new Error("conflict"), { kind: "conflict_error" });
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new CountingConflict()],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    const router = buildRouter({ providers });
+    await expect(async () => {
+      for await (const _c of router.complete(fakeReq())) {
+        void _c;
+      }
+    }).rejects.toMatchObject({ kind: "conflict_error" });
+    expect(attempts).toBe(1);
+  });
+
+  it("propagates the original conflict_error (preserves status + code)", async () => {
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new ConflictProvider("anthropic")],
+    ]);
+    const router = buildRouter({ providers });
+    await expect(async () => {
+      for await (const _c of router.complete(fakeReq())) {
+        void _c;
+      }
+    }).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("conflict_error is distinct from moderation early-exit (different kind, same terminal behavior)", async () => {
+    let fallbackAttempts = 0;
+    class CountingFallback extends StubProvider {
+      constructor() {
+        super("openai", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        fallbackAttempts += 1;
+        yield { kind: "text", text: "fallback" };
+        yield {
+          kind: "usage_final",
+          usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+        };
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new ConflictProvider("anthropic")],
+      ["openai", new CountingFallback()],
+    ]);
+    const router = buildRouter({ providers });
+    await expect(async () => {
+      for await (const _c of router.complete(fakeReq())) {
+        void _c;
+      }
+    }).rejects.toMatchObject({ kind: "conflict_error" });
+    expect(fallbackAttempts).toBe(0);
+  });
+
+  it("rate_limit_error still falls over (conflict short-circuit doesn't break retryable path)", async () => {
+    let openaiAttempts = 0;
+    class CountingOpenAI extends StubProvider {
+      constructor() {
+        super("openai", "ok");
+      }
+      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+        void _req;
+        openaiAttempts += 1;
+        yield { kind: "text", text: "fallback ok" };
+        yield {
+          kind: "usage_final",
+          usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+        };
+      }
+    }
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new CountingOpenAI()],
+    ]);
+    const router = buildRouter({ providers });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of router.complete(fakeReq())) chunks.push(c);
+    expect(openaiAttempts).toBe(1);
+    expect(chunks).toContainEqual({ kind: "text", text: "fallback ok" });
+  });
+});
+
 describe("DefaultLlmRouter.complete — array content cost estimation (M6.6)", () => {
   it("estimates tokens from array content (was broken pre-M6.6 — used array.length)", async () => {
     const providers = new Map<string, LlmProvider>([

@@ -12,7 +12,7 @@ import type {
   TaskPolicyMap,
   TenantResidency,
 } from "@crossengin/ai-providers";
-import { contentToText, isModerationError } from "@crossengin/ai-providers";
+import { contentToText, isConflictError, isModerationError } from "@crossengin/ai-providers";
 
 import {
   CostCeilingExceededError,
@@ -311,6 +311,11 @@ function isRouterRetryable(err: unknown): boolean {
   // providers (the input itself triggered the moderation; switching providers
   // won't help).
   if (isModerationError(err)) return false;
+  // Conflict errors (HTTP 409) are terminal — the resource is in a state
+  // that's incompatible with the request. Retrying with the same input always
+  // fails the same way. Switching providers won't help either (the conflict
+  // is on the operator's resource state, not the provider's availability).
+  if (isConflictError(err)) return false;
   return isRetryableError(err);
 }
 
