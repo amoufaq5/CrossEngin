@@ -34,6 +34,19 @@ export interface RetentionRunResult {
   readonly cutoffMs: number | null;
 }
 
+export type RetentionPreviewStatus =
+  | "previewed"
+  | "skipped_disabled"
+  | "skipped_unknown_table";
+
+export interface RetentionPreviewResult {
+  readonly tableName: string;
+  readonly status: RetentionPreviewStatus;
+  readonly retentionDays: number;
+  readonly wouldDeleteCount: number;
+  readonly cutoffMs: number | null;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -107,6 +120,51 @@ export class PostgresTraceRetention {
         status: "pruned",
         retentionDays: policy.retentionDays,
         deletedCount: deleteResult.rowCount,
+        cutoffMs,
+      });
+    }
+    return results;
+  }
+
+  async previewPrune(): Promise<ReadonlyArray<RetentionPreviewResult>> {
+    const policies = await this.listPolicies();
+    const results: RetentionPreviewResult[] = [];
+    const now = this.clock();
+    for (const policy of policies) {
+      if (!policy.enabled) {
+        results.push({
+          tableName: policy.tableName,
+          status: "skipped_disabled",
+          retentionDays: policy.retentionDays,
+          wouldDeleteCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
+      const timeColumn = PRUNABLE_TABLES[policy.tableName];
+      if (timeColumn === undefined) {
+        results.push({
+          tableName: policy.tableName,
+          status: "skipped_unknown_table",
+          retentionDays: policy.retentionDays,
+          wouldDeleteCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
+      const cutoffMs = now - policy.retentionDays * 86_400 * 1_000;
+      const countResult = await this.conn.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count
+         FROM ${SCHEMA}.${policy.tableName}
+         WHERE ${timeColumn} < to_timestamp($1 / 1000.0)`,
+        [cutoffMs],
+      );
+      const count = Number(countResult.rows[0]?.count ?? 0);
+      results.push({
+        tableName: policy.tableName,
+        status: "previewed",
+        retentionDays: policy.retentionDays,
+        wouldDeleteCount: count,
         cutoffMs,
       });
     }

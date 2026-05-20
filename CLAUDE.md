@@ -21,16 +21,52 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 8,003 tests**,
-all green, no type errors. M6.7.z.embed closes ADR-0141 Q2
-by extending RouterInstrumentation to the embed() path. The
+**56 packages + 1 app, 127 meta-schema tables, 8,016 tests**,
+all green, no type errors. M6.7.zz.dry-run closes ADR-0143 Q4
+by adding `previewPrune()` to PostgresTraceRetention. Operator
+workflow `preview → review → prune` is now first-class.
+Operator pain solved: first-run trepidation (millions of
+accumulated rows being deleted cold), policy verification
+(did I set the threshold right?), dashboard reporting (how
+many rows are pending deletion), CI safety gates (refuse
+prune if would-delete-count exceeds a bound). Implementation
+mirrors prune() step-by-step but: (a) uses SELECT COUNT(*)
+instead of DELETE — read-only; (b) does NOT update
+last_pruned_at — preview leaves audit state untouched;
+(c) returns distinct RetentionPreviewResult type with
+wouldDeleteCount field (not deletedCount) and "previewed"
+status enum value (not "pruned") — TypeScript prevents
+"meant to prune but called preview" mix-ups at compile
+time. Same allowlist + skip semantics as prune (skipped_disabled
++ skipped_unknown_table). Same cutoff computation so
+operators sequencing preview → prune get matching counts
+(modulo sub-second clock drift in production). PG COUNT(*)
+returns BIGINT cast to ::TEXT then parsed via Number()
+— same precision pattern as PostgresCostCeilingResolver
++ PostgresLatencyTracker; safely under 2^53-1 for ~285
+years at 1M rows/day per table. No schema change, no new
+dependencies, pure code addition. Reused REJECTED
+alternatives: dryRun: boolean parameter on prune (code
+smell + name confusion); reusing RetentionRunResult with
+new status (deletedCount field wrong on a preview);
+returning actual rows (memory + transport cost); EXPLAIN
+estimates (inaccurate). 13 new tests in
+trace-retention.test.ts: SELECT COUNT(*) shape for each
+of the 3 prunable tables with correct time-column, cutoffMs
+threading, NO DELETE issued, NO UPDATE issued,
+skip-disabled with status + wouldDeleteCount=0,
+skip-unknown-table defensive path, multi-policy preview,
+PG BIGINT precision via ::TEXT cast (9_876_543_210 round-
+trip), zero-count edge case, empty-policy-list path,
+preview+prune same cutoff invariant for same clock. M6.7.z.embed
+closes ADR-0141 Q2 by extending RouterInstrumentation to the embed() path. The
 complete() path already emitted llm_call_started/completed/
 failed events (M6.7.z / ADR-0141); the embed() path was
 deferred. Three additive changes: (1)
@@ -3410,7 +3446,14 @@ META_LLM_CALL_TRACES.kind CHECK constraint extended without
 migration; empty-string sessionId as the canonical "embed
 without session" marker; cost attribution + failure
 diagnosis + provider comparison for embedding workloads
-unblocked).
+unblocked), ADR-0153 covers M6.7.zz.dry-run
+(PostgresTraceRetention.previewPrune — closes ADR-0143 Q4 —
+read-only SELECT COUNT(*) per policy returning a distinct
+RetentionPreviewResult shape so TypeScript catches "meant
+to prune but called preview" mix-ups; same cutoff +
+allowlist + skip semantics as prune; doesn't update
+last_pruned_at; PG BIGINT precision via ::TEXT cast;
+operator workflow preview → review → prune now first-class).
 
 ## Architecture in 90 seconds
 
@@ -4828,7 +4871,27 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0152 covers Phase 2 M6.7.z.embed (RouterInstrumentation
+operations), ADR-0153 covers Phase 2 M6.7.zz.dry-run
+(PostgresTraceRetention.previewPrune — closes ADR-0143 Q4;
+adds previewPrune() to PostgresTraceRetention as the
+read-only counterpart of prune(); operator workflow
+preview → review → prune now first-class; pain solved:
+first-run trepidation over millions of accumulated rows,
+policy verification, dashboard reporting, CI safety gates;
+implementation mirrors prune() step-by-step but uses SELECT
+COUNT(*) instead of DELETE — read-only, no last_pruned_at
+mutation; distinct RetentionPreviewResult type with
+wouldDeleteCount field and "previewed" status enum value
+prevents TypeScript-side mix-ups with prune; same allowlist
++ skip semantics + cutoff computation as prune (modulo
+sub-second clock drift in production); PG BIGINT precision
+via ::TEXT cast + Number() — same pattern as cost-ceiling
+resolver + latency-tracker; alternatives rejected — dryRun
+boolean parameter (code smell), reusing RetentionRunResult
+(deletedCount field wrong on a preview), returning actual
+rows (memory cost), EXPLAIN estimates (inaccurate); no
+schema change, no new dependencies, pure code addition).
+ADR-0152 covers Phase 2 M6.7.z.embed (RouterInstrumentation
 extends to embed() path — closes ADR-0141 Q2; the
 complete() path already emitted llm_call_started/completed/
 failed (M6.7.z / ADR-0141); this milestone adds the symmetric
