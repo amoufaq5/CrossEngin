@@ -5880,6 +5880,204 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
   });
 });
 
+describe("BedrockProvider — updateProvisionedModelThroughput (M2.X.5.aa.z.28)", () => {
+  function validInput() {
+    return {
+      desiredProvisionedModelName: "tenant-a-pt-renamed",
+    };
+  }
+
+  it("PATCHes control-plane /provisioned-model-throughput/{id}", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: "" }),
+    });
+    await provider.updateProvisionedModelThroughput("pt-abc", validInput());
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/provisioned-model-throughput/pt-abc");
+    expect(capture.init?.method).toBe("PATCH");
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("URI-encodes ARN colons in the path", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: "" }),
+    });
+    await provider.updateProvisionedModelThroughput(
+      "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+      validInput(),
+    );
+    expect(capture.url).toContain("%3A");
+  });
+
+  it("includes desiredProvisionedModelName in the PATCH body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: "" }),
+    });
+    await provider.updateProvisionedModelThroughput("pt-abc", {
+      desiredProvisionedModelName: "tenant-a-pt-renamed",
+    });
+    const body = JSON.parse(new TextDecoder().decode(capture.init!.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body["desiredProvisionedModelName"]).toBe("tenant-a-pt-renamed");
+  });
+
+  it("includes desiredModelId for model migration", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: "" }),
+    });
+    await provider.updateProvisionedModelThroughput("pt-abc", {
+      desiredModelId:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+    });
+    const body = JSON.parse(new TextDecoder().decode(capture.init!.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body["desiredModelId"]).toContain("claude-3-haiku");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({ capture, ok: true, status: 200, text: "" }),
+    });
+    await provider.updateProvisionedModelThroughput("pt-abc", validInput());
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates identifier BEFORE body builder", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("", validInput()),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates input (empty body) BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("pt-abc", {}),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("resolves void on 200 success", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "" }),
+    });
+    const result = await provider.updateProvisionedModelThroughput(
+      "pt-abc",
+      validInput(),
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("propagates 404 as not_found_error (PT doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no",
+        }),
+      }),
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("pt-abc", validInput()),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 409 ConflictException as conflict_error (e.g., new name already exists)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "name already exists",
+        }),
+      }),
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("pt-abc", validInput()),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("pt-abc", validInput()),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("pt-abc", validInput()),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.updateProvisionedModelThroughput("pt-abc", validInput()),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

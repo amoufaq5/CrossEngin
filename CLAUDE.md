@@ -21,15 +21,58 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,899 tests**,
-all green, no type errors. M2.X.5.aa.z.27 closes ADR-0147 Q1
+**56 packages + 1 app, 127 meta-schema tables, 7,922 tests**,
+all green, no type errors. M2.X.5.aa.z.28 closes ADR-0147 Q2
++ ADR-0148 Q1 by adding
+`updateProvisionedModelThroughput(provisionedModelId, input)`.
+Mid-life PT mutation for model migration OR rename. AWS
+contract: PATCH /provisioned-model-throughput/{id} (singular
+path matching create); body has two optional fields —
+desiredModelId (length [1, 2048]) and desiredProvisionedModelName
+(length [1, 63] + slug pattern); at least one must be
+provided. Reuses signedControlPlanePatch transport from
+ADR-0146 (no new infrastructure). NO mandatory
+clientRequestToken — asymmetric from create (ADR-0148):
+update doesn't create new resources or extend commitments,
+PATCH is naturally idempotent (same body twice = same end
+state), and AWS doesn't expose clientRequestToken on this
+endpoint anyway. NO pre-flight GET guard: PTs are always
+operator-owned (no SYSTEM-vs-APPLICATION distinction like
+inference profiles). PATCH semantics — only provided fields
+update, omitted fields stay unchanged. Validation order:
+identifier blank check → input body builder rejecting empty
+input {} → PATCH wire request. After PATCH the PT enters
+Updating status with desiredModelArn = target model;
+modelArn continues to serve traffic until migration
+completes (typically minutes) when AWS atomically sets
+modelArn = desiredModelArn and returns the PT to InService.
+PT ARN is stable across migration — downstream InvokeModel
+calls continue transparently. modelUnits is NOT mutable via
+update (AWS doesn't expose it; operators scale via delete +
+recreate). commitmentDuration NOT mutable either — operators
+convert on-demand to committed via delete + recreate.
+Bedrock control plane: 20 read + 2 stop + 3 create + 4
+delete + 3 tag + 2 update = 34 operations. Two updates now
+on substrate: updateInferenceProfile (ADR-0146) +
+updateProvisionedModelThroughput (this). PT lifecycle is
+3/4 complete on substrate (create + read + update shipped;
+delete remains). 23 new tests: 9 in
+provisioned-throughput-api.test.ts (body builder happy paths
+for desiredModelId / desiredProvisionedModelName / both,
+empty-input rejection, blank/length/pattern rejections,
+selective field emission), 14 in provider.test.ts (PATCH
+URL + URI-encoding + Sig v4 headers + control-plane-not-
+runtime host + body threading for name + modelId +
+identifier-blank pre-flight before body builder + empty-
+input pre-flight + void on 200 + 404/409/403/429/network
+propagation). M2.X.5.aa.z.27 closes ADR-0147 Q1
 by adding `createProvisionedModelThroughput(input)` — the
 FIRST mutation on PT resources. PT cost weight is 100×-1000×
 higher than inference profiles: a one-month committed PT for
@@ -3194,7 +3237,15 @@ before each $5K+/op create call; substrate's first CREATE
 endpoint to mandate the token; modelUnits cap [1, 1000]
 defensive on top of AWS quota; no auto-token, no auto-
 commit, no dryRun, no status-polling — substrate is the
-raw transport).
+raw transport), ADR-0149 covers M2.X.5.aa.z.28 (Bedrock
+updateProvisionedModelThroughput — closes ADR-0147 Q2 +
+ADR-0148 Q1 — PATCH for model migration + rename;
+asymmetric from create (no mandatory clientRequestToken)
+because update doesn't multiply cost; reuses
+signedControlPlanePatch from ADR-0146; at-least-one-field
+rule rejects empty input; PT ARN stable across migration
+so downstream InvokeModel calls continue transparently;
+PT lifecycle 3/4 complete on substrate).
 
 ## Architecture in 90 seconds
 
@@ -4612,7 +4663,33 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0148 covers Phase 2 M2.X.5.aa.z.27 (Bedrock
+operations), ADR-0149 covers Phase 2 M2.X.5.aa.z.28 (Bedrock
+updateProvisionedModelThroughput — closes ADR-0147 Q2 +
+ADR-0148 Q1; mid-life PT mutation for model migration OR
+rename; AWS contract PATCH /provisioned-model-throughput/{id}
+with optional desiredModelId + desiredProvisionedModelName,
+at least one must be provided; reuses signedControlPlanePatch
+transport from ADR-0146 — no new infrastructure;
+ASYMMETRIC from create (ADR-0148) on clientRequestToken —
+update doesn't mandate one because update doesn't create
+new resources or extend commitments, PATCH is naturally
+idempotent (same body twice = same end state), and AWS
+doesn't expose the token on this endpoint anyway; NO
+pre-flight GET guard since PTs are always operator-owned
+(no SYSTEM-vs-APPLICATION distinction); PATCH semantics —
+only provided fields update; modelUnits + commitmentDuration
+NOT mutable via update (AWS doesn't expose them — operators
+scale or convert commitment via delete + recreate); PT ARN
+stable across migration so downstream InvokeModel calls
+continue transparently; after PATCH the PT enters Updating
+status with desiredModelArn = target while modelArn keeps
+serving traffic until AWS atomically swaps; Bedrock control
+plane now has 20 read + 2 stop + 3 create + 4 delete + 3
+tag + 2 update = 34 operations; two updates on substrate
+now: updateInferenceProfile + updateProvisionedModelThroughput;
+PT lifecycle 3/4 complete — create + read + update shipped,
+delete remains).
+ADR-0148 covers Phase 2 M2.X.5.aa.z.27 (Bedrock
 createProvisionedModelThroughput — closes ADR-0147 Q1; the
 FIRST mutation on PT resources; clientRequestToken REQUIRED
 in the substrate input type even though AWS docs make it

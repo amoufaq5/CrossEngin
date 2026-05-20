@@ -406,6 +406,60 @@ export function buildCreateProvisionedModelThroughputBody(
   return JSON.stringify(body);
 }
 
+export interface BedrockUpdateProvisionedModelThroughputInput {
+  readonly desiredModelId?: string;
+  readonly desiredProvisionedModelName?: string;
+}
+
+export function buildUpdateProvisionedModelThroughputBody(
+  input: BedrockUpdateProvisionedModelThroughputInput,
+): string {
+  if (
+    input.desiredModelId === undefined &&
+    input.desiredProvisionedModelName === undefined
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message:
+        "updateProvisionedModelThroughput: at least one mutable field must be provided (desiredModelId or desiredProvisionedModelName)",
+    });
+  }
+  if (input.desiredModelId !== undefined) {
+    if (
+      input.desiredModelId.length < 1 ||
+      input.desiredModelId.length > BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `updateProvisionedModelThroughput: desiredModelId length must be in [1, ${BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN.toString()}], got ${input.desiredModelId.length.toString()}`,
+      });
+    }
+  }
+  if (input.desiredProvisionedModelName !== undefined) {
+    if (
+      input.desiredProvisionedModelName.length < 1 ||
+      input.desiredProvisionedModelName.length >
+        BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN ||
+      !BEDROCK_PROVISIONED_MODEL_NAME_PATTERN.test(
+        input.desiredProvisionedModelName,
+      )
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `updateProvisionedModelThroughput: invalid desiredProvisionedModelName '${input.desiredProvisionedModelName}'`,
+      });
+    }
+  }
+  const body: Record<string, unknown> = {};
+  if (input.desiredModelId !== undefined) {
+    body["desiredModelId"] = input.desiredModelId;
+  }
+  if (input.desiredProvisionedModelName !== undefined) {
+    body["desiredProvisionedModelName"] = input.desiredProvisionedModelName;
+  }
+  return JSON.stringify(body);
+}
+
 export function parseCreateProvisionedModelThroughputResponse(
   raw: unknown,
 ): BedrockCreateProvisionedModelThroughputResponse {

@@ -127,6 +127,7 @@ import {
 import {
   buildCreateProvisionedModelThroughputBody,
   buildProvisionedThroughputListQuery,
+  buildUpdateProvisionedModelThroughputBody,
   parseCreateProvisionedModelThroughputResponse,
   parseProvisionedModelDetail,
   parseProvisionedModelListResponse,
@@ -135,6 +136,7 @@ import {
   type BedrockListProvisionedModelThroughputsOptions,
   type BedrockProvisionedModelDetail,
   type BedrockProvisionedModelListResponse,
+  type BedrockUpdateProvisionedModelThroughputInput,
 } from "./provisioned-throughput-api.js";
 import { signRequest, type AwsCredentials } from "./signing.js";
 import {
@@ -1002,6 +1004,23 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseProvisionedModelDetail(raw);
+  }
+
+  async updateProvisionedModelThroughput(
+    provisionedModelId: string,
+    input: BedrockUpdateProvisionedModelThroughputInput,
+  ): Promise<void> {
+    if (provisionedModelId.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "updateProvisionedModelThroughput: provisionedModelId must be a non-empty string",
+      });
+    }
+    const bodyStr = buildUpdateProvisionedModelThroughputBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const path = `/provisioned-model-throughput/${encodeURIComponent(provisionedModelId)}`;
+    await this.signedControlPlanePatch({ path, body });
   }
 
   async createProvisionedModelThroughput(

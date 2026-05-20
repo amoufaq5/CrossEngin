@@ -12,6 +12,7 @@ import {
   BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MIN,
   buildCreateProvisionedModelThroughputBody,
   buildProvisionedThroughputListQuery,
+  buildUpdateProvisionedModelThroughputBody,
   isBedrockProvisionedModelCommitmentDuration,
   isBedrockProvisionedModelStatus,
   parseCreateProvisionedModelThroughputResponse,
@@ -532,5 +533,90 @@ describe("parseCreateProvisionedModelThroughputResponse (M2.X.5.aa.z.27)", () =>
     expect(() => parseCreateProvisionedModelThroughputResponse(null)).toThrow(
       /not a JSON object/,
     );
+  });
+});
+
+describe("buildUpdateProvisionedModelThroughputBody (M2.X.5.aa.z.28)", () => {
+  it("emits desiredModelId when provided", () => {
+    const body = JSON.parse(
+      buildUpdateProvisionedModelThroughputBody({
+        desiredModelId:
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+      }),
+    ) as Record<string, unknown>;
+    expect(body["desiredModelId"]).toContain("claude-3-haiku");
+  });
+
+  it("emits desiredProvisionedModelName when provided", () => {
+    const body = JSON.parse(
+      buildUpdateProvisionedModelThroughputBody({
+        desiredProvisionedModelName: "tenant-a-pt-renamed",
+      }),
+    ) as Record<string, unknown>;
+    expect(body["desiredProvisionedModelName"]).toBe("tenant-a-pt-renamed");
+  });
+
+  it("emits both fields when both provided", () => {
+    const body = JSON.parse(
+      buildUpdateProvisionedModelThroughputBody({
+        desiredModelId: "arn:aws:bedrock:us-east-1::foundation-model/x",
+        desiredProvisionedModelName: "new-name",
+      }),
+    ) as Record<string, unknown>;
+    expect(body["desiredModelId"]).toBeDefined();
+    expect(body["desiredProvisionedModelName"]).toBe("new-name");
+  });
+
+  it("rejects empty input (no mutable fields)", () => {
+    expect(() => buildUpdateProvisionedModelThroughputBody({})).toThrow(
+      /at least one mutable field must be provided/,
+    );
+  });
+
+  it("rejects blank desiredModelId", () => {
+    expect(() =>
+      buildUpdateProvisionedModelThroughputBody({ desiredModelId: "" }),
+    ).toThrow(/desiredModelId length/);
+  });
+
+  it("rejects desiredModelId > 2048 chars", () => {
+    expect(() =>
+      buildUpdateProvisionedModelThroughputBody({
+        desiredModelId: "a".repeat(2049),
+      }),
+    ).toThrow(/desiredModelId length/);
+  });
+
+  it("rejects blank desiredProvisionedModelName", () => {
+    expect(() =>
+      buildUpdateProvisionedModelThroughputBody({
+        desiredProvisionedModelName: "",
+      }),
+    ).toThrow(/invalid desiredProvisionedModelName/);
+  });
+
+  it("rejects desiredProvisionedModelName > 63 chars", () => {
+    expect(() =>
+      buildUpdateProvisionedModelThroughputBody({
+        desiredProvisionedModelName: "a".repeat(64),
+      }),
+    ).toThrow(/invalid desiredProvisionedModelName/);
+  });
+
+  it("rejects desiredProvisionedModelName violating the slug pattern", () => {
+    expect(() =>
+      buildUpdateProvisionedModelThroughputBody({
+        desiredProvisionedModelName: "has spaces",
+      }),
+    ).toThrow(/invalid desiredProvisionedModelName/);
+  });
+
+  it("does NOT emit fields that weren't provided", () => {
+    const body = JSON.parse(
+      buildUpdateProvisionedModelThroughputBody({
+        desiredModelId: "arn:aws:bedrock:us-east-1::foundation-model/x",
+      }),
+    ) as Record<string, unknown>;
+    expect("desiredProvisionedModelName" in body).toBe(false);
   });
 });
