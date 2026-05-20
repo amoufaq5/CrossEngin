@@ -21,15 +21,49 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 121 meta-schema tables, 7,597 tests**,
-all green, no type errors. M2.X.5.aa.z.21 ships the FIRST
+**56 packages + 1 app, 122 meta-schema tables, 7,613 tests**,
+all green, no type errors. M6.7.x closes ADR-0135 Q1 + Q4 in
+one milestone: per-tenant cost ceiling configuration as data
+rather than code. Three additive changes: (1)
+META_LLM_COST_CEILINGS as the 122nd meta-schema table with
+columns (tenant_id, max_usd_per_request, max_usd_per_window,
+window_seconds, effective_from, updated_at) — one row per
+tenant, PK on tenant_id (UPSERT semantics matching
+META_LLM_COST_WINDOWS), policy columns NULLABLE so NULL
+means "no limit on this axis", NUMERIC(18,8) precision,
+positive-value CHECK constraints, RLS tenant-isolated; (2)
+new `getTenantCostCeiling?: (tenantId) =>
+Promise<CostCeiling | undefined>` field on
+DefaultLlmRouterOptions — when wired the router calls it
+per-request and uses the result if defined, falls back to
+the global `costCeiling` otherwise; resolution rule is
+WHOLE-OBJECT OVERRIDE (tenant ceiling REPLACES global, not
+merges — matches operator intent "this tenant's policy is
+P"); (3) PostgresCostCeilingResolver in
+`@crossengin/ai-router-pg` — drop-in for getTenantCostCeiling
+via `resolver.resolve`; single SELECT keyed by tenant_id;
+NULL columns map to omitted CostCeiling fields; ::TEXT cast
+preserves sub-cent NUMERIC precision. No breaking change:
+existing callers with global ceiling only continue working.
+Schema is forward-compatible with history-aware reads
+(effective_from already in place). 16 new tests: 7 in
+router.test.ts (tenant-scoped resolution, fallback to
+global, tighter override, looser override, tenantId
+threading, no-ceiling flow, asymmetric ceiling), 9 in
+cost-ceiling-resolver.test.ts (undefined on no row, full
+ceiling shape, individual NULL field omission for each of
+the three policy columns, all-NULL empty ceiling, SQL
+shape, NUMERIC precision preservation). Four operator pains
+closed: restart-required-to-change-ceiling, no-free-tier-vs-
+enterprise-gating, trial-customer-overspend, compliance-air-
+gap-by-budget. M2.X.5.aa.z.21 ships the FIRST
 DELETE write surfaces on the Bedrock control plane:
 `deleteCustomModel(modelIdentifier)`, `deleteImportedModel(
 modelIdentifier)`, `deleteGuardrail(guardrailIdentifier,
@@ -2557,7 +2591,13 @@ surfaces — FIRST DELETE write surfaces — deleteCustomModel
 signedControlPlaneDelete transport — propagates 404 as
 not_found_error so router short-circuit (M6.6.y) handles
 automated lifecycle pipelines and operators wanting silent
-idempotency wrap with isNotFoundError predicate).
+idempotency wrap with isNotFoundError predicate), ADR-0137
+covers M6.7.x (per-tenant cost ceiling — closes ADR-0135 Q1
++ Q4 — META_LLM_COST_CEILINGS 122nd table +
+getTenantCostCeiling resolver field on router +
+PostgresCostCeilingResolver — whole-object override
+semantic: tenant ceiling REPLACES global rather than
+merging; ceilings are now data, not code).
 
 ## Architecture in 90 seconds
 
@@ -3853,7 +3893,22 @@ preserves AWS asymmetric default — omit-version = delete all,
 provide-version = delete that one; transport rail reusable
 for future DELETE rollouts on inference-profiles / prompts /
 flows; Bedrock control plane now has 18 read + 2 stop + 1
-create + 3 delete = 24 operations).
+create + 3 delete = 24 operations), ADR-0137 covers Phase 2
+M6.7.x (per-tenant cost ceiling — closes ADR-0135 Q1 + Q4
+in one milestone; META_LLM_COST_CEILINGS as the 122nd meta-
+schema table with one row per tenant, NULLABLE policy
+columns where NULL = unbounded on that axis, NUMERIC(18,8)
+precision, RLS tenant-isolated; new `getTenantCostCeiling`
+field on DefaultLlmRouterOptions for resolver injection;
+PostgresCostCeilingResolver in `@crossengin/ai-router-pg`
+provides drop-in implementation; whole-object override
+semantic — tenant ceiling REPLACES the global rather than
+merging field-by-field; ceilings are now data not code so
+operators adjust without redeploying; schema forward-compat
+with future history-aware reads via effective_from column;
+zero data migration needed — pre-existing tenants get the
+global ceiling, new per-tenant rows opt-in via INSERT; per-
+tier pricing now expressible (free / pro / enterprise)).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

@@ -43,6 +43,7 @@ export interface RouterPolicy {
 export interface DefaultLlmRouterOptions extends RouterConfig {
   readonly retry?: RetryPolicy;
   readonly costCeiling?: CostCeiling;
+  readonly getTenantCostCeiling?: (tenantId: string) => Promise<CostCeiling | undefined>;
   readonly costTracker?: CostTracker;
   readonly latencyTracker?: LatencyTracker;
   readonly clock?: () => number;
@@ -85,6 +86,9 @@ export class DefaultLlmRouter implements LlmRouter {
     | undefined;
   private readonly retry: RetryPolicy;
   private readonly costCeiling: CostCeiling | undefined;
+  private readonly getTenantCostCeiling:
+    | ((tenantId: string) => Promise<CostCeiling | undefined>)
+    | undefined;
   private readonly costTracker: CostTracker;
   private readonly latencyTracker: LatencyTracker;
   private readonly clock: () => number;
@@ -96,6 +100,7 @@ export class DefaultLlmRouter implements LlmRouter {
     this.getTenantOverrides = opts.getTenantOverrides;
     this.retry = opts.retry ?? DEFAULT_RETRY_POLICY;
     this.costCeiling = opts.costCeiling;
+    this.getTenantCostCeiling = opts.getTenantCostCeiling;
     this.costTracker = opts.costTracker ?? new InMemoryCostTracker();
     this.latencyTracker = opts.latencyTracker ?? new InMemoryLatencyTracker();
     this.clock = opts.clock ?? (() => Date.now());
@@ -259,15 +264,24 @@ export class DefaultLlmRouter implements LlmRouter {
     tenantId: string,
     estimatedCostUsd: number,
   ): Promise<void> {
-    if (this.costCeiling === undefined) return;
+    const ceiling = await this.resolveCeiling(tenantId);
+    if (ceiling === undefined) return;
     const check = await this.costTracker.checkCeiling({
       tenantId,
       estimatedCostUsd,
-      ceiling: this.costCeiling,
+      ceiling,
     });
     if (!check.allowed) {
       throw new CostCeilingExceededError(check);
     }
+  }
+
+  private async resolveCeiling(tenantId: string): Promise<CostCeiling | undefined> {
+    if (this.getTenantCostCeiling !== undefined) {
+      const tenantCeiling = await this.getTenantCostCeiling(tenantId);
+      if (tenantCeiling !== undefined) return tenantCeiling;
+    }
+    return this.costCeiling;
   }
 
   private estimatePreflightCost(

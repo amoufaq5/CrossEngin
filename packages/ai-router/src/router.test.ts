@@ -108,6 +108,9 @@ function buildRouter(opts: {
   residency?: TenantResidency;
   overrides?: Partial<TaskPolicyMap>;
   costCeiling?: ConstructorParameters<typeof DefaultLlmRouter>[0]["costCeiling"];
+  getTenantCostCeiling?: ConstructorParameters<
+    typeof DefaultLlmRouter
+  >[0]["getTenantCostCeiling"];
   costTracker?: InMemoryCostTracker;
 }): DefaultLlmRouter {
   return new DefaultLlmRouter({
@@ -117,6 +120,7 @@ function buildRouter(opts: {
     getTenantOverrides: opts.overrides ? async () => opts.overrides! : undefined,
     retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0, jitter: false },
     costCeiling: opts.costCeiling,
+    getTenantCostCeiling: opts.getTenantCostCeiling,
     costTracker: opts.costTracker,
     latencyTracker: new InMemoryLatencyTracker(),
     clock: () => 0,
@@ -670,5 +674,98 @@ describe("DefaultLlmRouter.complete — array content cost estimation (M6.6)", (
       chunks.push(c);
     }
     expect(chunks.length).toBeGreaterThan(0);
+  });
+});
+
+describe("DefaultLlmRouter.complete — per-tenant cost ceiling (M6.7.x)", () => {
+  it("uses the tenant-scoped ceiling when getTenantCostCeiling returns one", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({
+      providers,
+      getTenantCostCeiling: async () => ({ maxUsdPerRequest: 0.0000001 }),
+    });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow(CostCeilingExceededError);
+  });
+
+  it("falls back to the global costCeiling when getTenantCostCeiling returns undefined", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerRequest: 0.0000001 },
+      getTenantCostCeiling: async () => undefined,
+    });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow(CostCeilingExceededError);
+  });
+
+  it("tenant-scoped ceiling overrides the global ceiling (tighter tenant ceiling wins)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerRequest: 1.0 },
+      getTenantCostCeiling: async () => ({ maxUsdPerRequest: 0.0000001 }),
+    });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow(CostCeilingExceededError);
+  });
+
+  it("tenant-scoped ceiling overrides the global ceiling (looser tenant ceiling wins)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({
+      providers,
+      costCeiling: { maxUsdPerRequest: 0.0000001 },
+      getTenantCostCeiling: async () => ({ maxUsdPerRequest: 1.0 }),
+    });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of router.complete(fakeReq())) chunks.push(c);
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
+  it("threads tenantId into the resolver call", async () => {
+    let seenTenant: string | null = null;
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({
+      providers,
+      getTenantCostCeiling: async (tid: string) => {
+        seenTenant = tid;
+        return undefined;
+      },
+    });
+    for await (const _ of router.complete(fakeReq())) void _;
+    expect(seenTenant).toBe(TENANT);
+  });
+
+  it("with no resolver and no global ceiling, the request flows through (no preflight check)", async () => {
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({ providers });
+    const chunks: CompletionChunk[] = [];
+    for await (const c of router.complete(fakeReq())) chunks.push(c);
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
+  it("supports asymmetric ceiling: tenant sets only maxUsdPerWindow, global sets only maxUsdPerRequest", async () => {
+    const tracker = new InMemoryCostTracker();
+    await tracker.recordUsage({ tenantId: TENANT, costUsd: 100 });
+    const provider = new StubProvider("anthropic", "ok");
+    const providers = new Map<string, LlmProvider>([["anthropic", provider]]);
+    const router = buildRouter({
+      providers,
+      costTracker: tracker,
+      costCeiling: { maxUsdPerRequest: 1.0 },
+      getTenantCostCeiling: async () => ({ maxUsdPerWindow: 50 }),
+    });
+    await expect(async () => {
+      for await (const _ of router.complete(fakeReq())) void _;
+    }).rejects.toThrow(CostCeilingExceededError);
   });
 });

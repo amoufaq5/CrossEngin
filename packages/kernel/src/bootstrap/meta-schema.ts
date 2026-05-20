@@ -9239,6 +9239,41 @@ export const META_LLM_COST_WINDOWS: TableDefinition = {
   },
 };
 
+export const META_LLM_COST_CEILINGS: TableDefinition = {
+  schema: "meta",
+  name: "llm_cost_ceilings",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "max_usd_per_request",
+      type: "NUMERIC(18,8)",
+      check: "max_usd_per_request IS NULL OR max_usd_per_request > 0",
+    },
+    {
+      name: "max_usd_per_window",
+      type: "NUMERIC(18,8)",
+      check: "max_usd_per_window IS NULL OR max_usd_per_window > 0",
+    },
+    {
+      name: "window_seconds",
+      type: "INTEGER",
+      check: "window_seconds IS NULL OR window_seconds > 0",
+    },
+    { name: "effective_from", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "llm_cost_ceilings_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9361,4 +9396,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_TOOL_INVOCATIONS,
   META_ARCHITECT_PROPOSALS,
   META_LLM_COST_WINDOWS,
+  META_LLM_COST_CEILINGS,
 ];
