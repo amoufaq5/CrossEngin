@@ -2,17 +2,25 @@ import { describe, expect, it } from "vitest";
 
 import { BedrockError } from "./errors.js";
 import {
+  BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN,
   BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MAX,
   BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MIN,
   BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_CONTAINS_MAX_LEN,
+  BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_MAX_LEN,
   BEDROCK_MODEL_CUSTOMIZATION_JOB_SORT_BY_VALUES,
   BEDROCK_MODEL_CUSTOMIZATION_JOB_SORT_ORDER_VALUES,
   BEDROCK_MODEL_CUSTOMIZATION_JOB_STATUSES,
+  BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS,
+  BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS,
+  BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES,
+  buildCreateModelCustomizationJobBody,
   buildModelCustomizationJobListQuery,
   isBedrockModelCustomizationJobStatus,
+  parseCreateModelCustomizationJobResponse,
   parseModelCustomizationJobDetail,
   parseModelCustomizationJobListResponse,
   parseModelCustomizationJobSummary,
+  type BedrockCreateModelCustomizationJobInput,
 } from "./model-customization-jobs-api.js";
 
 describe("BEDROCK_MODEL_CUSTOMIZATION_JOB constants", () => {
@@ -528,6 +536,341 @@ describe("parseModelCustomizationJobDetail", () => {
 
   it("rejects non-object response", () => {
     expect(() => parseModelCustomizationJobDetail(null)).toThrow(
+      /not a JSON object/,
+    );
+  });
+});
+
+describe("buildCreateModelCustomizationJobBody", () => {
+  function minimalInput(
+    overrides: Partial<BedrockCreateModelCustomizationJobInput> = {},
+  ): BedrockCreateModelCustomizationJobInput {
+    return {
+      jobName: "tenant-x-haiku-finetune-001",
+      customModelName: "tenant-x-haiku-v1",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockFineTuneRole",
+      baseModelIdentifier:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
+      trainingDataConfig: { s3Uri: "s3://tenant-x-data/train/" },
+      outputDataConfig: { s3Uri: "s3://tenant-x-data/output/" },
+      hyperParameters: { epochCount: "10", learningRate: "0.0001" },
+      ...overrides,
+    };
+  }
+
+  it("emits minimal required body without optional fields", () => {
+    const body = JSON.parse(
+      buildCreateModelCustomizationJobBody(minimalInput()),
+    ) as Record<string, unknown>;
+    expect(body["jobName"]).toBe("tenant-x-haiku-finetune-001");
+    expect(body["customModelName"]).toBe("tenant-x-haiku-v1");
+    expect(body["baseModelIdentifier"]).toMatch(/claude-3-haiku/);
+    expect(body["hyperParameters"]).toEqual({
+      epochCount: "10",
+      learningRate: "0.0001",
+    });
+    expect(body["clientRequestToken"]).toBeUndefined();
+    expect(body["customizationType"]).toBeUndefined();
+    expect(body["validationDataConfig"]).toBeUndefined();
+    expect(body["vpcConfig"]).toBeUndefined();
+    expect(body["customizationConfig"]).toBeUndefined();
+  });
+
+  it("emits full body when all optional fields supplied", () => {
+    const body = JSON.parse(
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          clientRequestToken: "req-uuid-abc",
+          customizationType: "FINE_TUNING",
+          customModelKmsKeyId: "arn:aws:kms:us-east-1:123:key/k1",
+          customModelTags: [{ key: "tenant", value: "x" }],
+          jobTags: [{ key: "purpose", value: "claims" }],
+          validationDataConfig: {
+            validators: [{ s3Uri: "s3://tenant-x-data/val/" }],
+          },
+          vpcConfig: {
+            subnetIds: ["subnet-1"],
+            securityGroupIds: ["sg-1"],
+          },
+        }),
+      ),
+    ) as Record<string, unknown>;
+    expect(body["clientRequestToken"]).toBe("req-uuid-abc");
+    expect(body["customizationType"]).toBe("FINE_TUNING");
+    expect(body["customModelKmsKeyId"]).toMatch(/^arn:aws:kms:/);
+    expect(body["customModelTags"]).toEqual([{ key: "tenant", value: "x" }]);
+    expect(body["jobTags"]).toEqual([{ key: "purpose", value: "claims" }]);
+  });
+
+  it("emits distillationConfig under customizationConfig", () => {
+    const body = JSON.parse(
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          customizationType: "DISTILLATION",
+          customizationConfig: {
+            distillationConfig: {
+              teacherModelConfig: {
+                teacherModelIdentifier:
+                  "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+                maxResponseLengthForInference: 4096,
+              },
+            },
+          },
+        }),
+      ),
+    ) as Record<string, unknown>;
+    const cc = body["customizationConfig"] as {
+      distillationConfig: {
+        teacherModelConfig: { teacherModelIdentifier: string };
+      };
+    };
+    expect(cc.distillationConfig.teacherModelConfig.teacherModelIdentifier).toMatch(
+      /claude-3-5-sonnet/,
+    );
+  });
+
+  it("rejects jobName pattern violations", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(minimalInput({ jobName: "" })),
+    ).toThrow(/jobName/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          jobName: "x".repeat(BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_MAX_LEN + 1),
+        }),
+      ),
+    ).toThrow(/jobName/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ jobName: "bad name" }),
+      ),
+    ).toThrow(/jobName/);
+  });
+
+  it("rejects customModelName pattern violations", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ customModelName: "" }),
+      ),
+    ).toThrow(/customModelName/);
+  });
+
+  it("rejects malformed roleArn (including non-IAM ARNs)", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ roleArn: "not-an-arn" }),
+      ),
+    ).toThrow(/roleArn/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ roleArn: "arn:aws:s3:::my-bucket" }),
+      ),
+    ).toThrow(/roleArn/);
+  });
+
+  it("accepts aws-us-gov / aws-cn IAM role ARNs", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          roleArn: "arn:aws-us-gov:iam::123456789012:role/r",
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          roleArn: "arn:aws-cn:iam::123456789012:role/r",
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects out-of-range baseModelIdentifier", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ baseModelIdentifier: "" }),
+      ),
+    ).toThrow(/baseModelIdentifier/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          baseModelIdentifier: "x".repeat(
+            BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN + 1,
+          ),
+        }),
+      ),
+    ).toThrow(/baseModelIdentifier/);
+  });
+
+  it("rejects non-s3 trainingDataConfig / outputDataConfig URIs", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          trainingDataConfig: { s3Uri: "https://example.com/data/" },
+        }),
+      ),
+    ).toThrow(/trainingDataConfig/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          outputDataConfig: { s3Uri: "/local/path" },
+        }),
+      ),
+    ).toThrow(/outputDataConfig/);
+  });
+
+  it("rejects non-string hyperParameter values", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          hyperParameters: { learningRate: 0.0001 } as never,
+        }),
+      ),
+    ).toThrow(/hyperParameters\.learningRate/);
+  });
+
+  it("rejects non-object hyperParameters (array, null)", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ hyperParameters: [] as never }),
+      ),
+    ).toThrow(/hyperParameters/);
+  });
+
+  it("rejects clientRequestToken length / pattern violations", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ clientRequestToken: "" }),
+      ),
+    ).toThrow(/clientRequestToken/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ clientRequestToken: "bad token" }),
+      ),
+    ).toThrow(/clientRequestToken/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ clientRequestToken: "x".repeat(257) }),
+      ),
+    ).toThrow(/clientRequestToken/);
+  });
+
+  it("rejects empty customModelKmsKeyId when provided", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ customModelKmsKeyId: "" }),
+      ),
+    ).toThrow(/customModelKmsKeyId/);
+  });
+
+  it("rejects too many tags on either jobTags or customModelTags", () => {
+    const tooMany = Array.from(
+      { length: BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS + 1 },
+      (_, i) => ({ key: `k${i.toString()}`, value: "v" }),
+    );
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ jobTags: tooMany }),
+      ),
+    ).toThrow(/jobTags/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ customModelTags: tooMany }),
+      ),
+    ).toThrow(/customModelTags/);
+  });
+
+  it("rejects tag key/value length violations", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ jobTags: [{ key: "", value: "v" }] }),
+      ),
+    ).toThrow(/jobTags key/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          customModelTags: [{ key: "k", value: "x".repeat(257) }],
+        }),
+      ),
+    ).toThrow(/customModelTags value/);
+  });
+
+  it("rejects too many validators", () => {
+    const tooMany = Array.from(
+      { length: BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS + 1 },
+      () => ({ s3Uri: "s3://b/v/" }),
+    );
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({ validationDataConfig: { validators: tooMany } }),
+      ),
+    ).toThrow(/validators count/);
+  });
+
+  it("rejects malformed validator s3Uri", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          validationDataConfig: { validators: [{ s3Uri: "https://example.com/v/" }] },
+        }),
+      ),
+    ).toThrow(/validators\[0\]\.s3Uri/);
+  });
+
+  it("rejects vpcConfig with empty / oversized lists", () => {
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          vpcConfig: { subnetIds: [], securityGroupIds: ["sg-1"] },
+        }),
+      ),
+    ).toThrow(/subnetIds/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          vpcConfig: {
+            subnetIds: Array.from(
+              { length: BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES + 1 },
+              (_, i) => `s${i.toString()}`,
+            ),
+            securityGroupIds: ["sg-1"],
+          },
+        }),
+      ),
+    ).toThrow(/subnetIds/);
+    expect(() =>
+      buildCreateModelCustomizationJobBody(
+        minimalInput({
+          vpcConfig: { subnetIds: ["s-1"], securityGroupIds: [] },
+        }),
+      ),
+    ).toThrow(/securityGroupIds/);
+  });
+});
+
+describe("parseCreateModelCustomizationJobResponse", () => {
+  it("parses a {jobArn} response", () => {
+    const out = parseCreateModelCustomizationJobResponse({
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+    });
+    expect(out.jobArn).toMatch(/abc$/);
+  });
+
+  it("rejects missing or non-string jobArn", () => {
+    expect(() => parseCreateModelCustomizationJobResponse({})).toThrow(
+      /jobArn/,
+    );
+    expect(() =>
+      parseCreateModelCustomizationJobResponse({ jobArn: 42 }),
+    ).toThrow(/jobArn/);
+    expect(() =>
+      parseCreateModelCustomizationJobResponse({ jobArn: "" }),
+    ).toThrow(/jobArn/);
+  });
+
+  it("rejects non-object response", () => {
+    expect(() => parseCreateModelCustomizationJobResponse(null)).toThrow(
       /not a JSON object/,
     );
   });

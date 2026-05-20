@@ -689,3 +689,270 @@ function isIso8601(value: string): boolean {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed);
 }
+
+export const BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_PATTERN =
+  /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_MAX_LEN = 63;
+export const BEDROCK_MODEL_CUSTOMIZATION_CLIENT_REQUEST_TOKEN_PATTERN =
+  /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_MODEL_CUSTOMIZATION_CLIENT_REQUEST_TOKEN_MAX_LEN = 256;
+export const BEDROCK_MODEL_CUSTOMIZATION_ROLE_ARN_PATTERN =
+  /^arn:aws(?:-[^:]+)?:iam::[0-9]{12}:role\/.+$/;
+export const BEDROCK_MODEL_CUSTOMIZATION_S3_URI_PATTERN =
+  /^s3:\/\/[a-z0-9.\-_]{1,255}\/.*$/;
+export const BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN = 2048;
+export const BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS = 10;
+export const BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS = 200;
+export const BEDROCK_MODEL_CUSTOMIZATION_TAG_KEY_MAX_LEN = 128;
+export const BEDROCK_MODEL_CUSTOMIZATION_TAG_VALUE_MAX_LEN = 256;
+export const BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES = 16;
+
+export interface BedrockModelCustomizationJobTag {
+  readonly key: string;
+  readonly value: string;
+}
+
+export interface BedrockCreateModelCustomizationJobInput {
+  readonly jobName: string;
+  readonly customModelName: string;
+  readonly roleArn: string;
+  readonly baseModelIdentifier: string;
+  readonly trainingDataConfig: BedrockModelCustomizationJobS3Config;
+  readonly outputDataConfig: BedrockModelCustomizationJobS3Config;
+  readonly hyperParameters: Readonly<Record<string, string>>;
+  readonly clientRequestToken?: string;
+  readonly customizationType?: string;
+  readonly customModelKmsKeyId?: string;
+  readonly customModelTags?: ReadonlyArray<BedrockModelCustomizationJobTag>;
+  readonly jobTags?: ReadonlyArray<BedrockModelCustomizationJobTag>;
+  readonly validationDataConfig?: BedrockModelCustomizationJobValidationDataConfig;
+  readonly vpcConfig?: BedrockModelCustomizationJobVpcConfig;
+  readonly customizationConfig?: BedrockModelCustomizationJobCustomizationConfig;
+}
+
+export interface BedrockCreateModelCustomizationJobResponse {
+  readonly jobArn: string;
+}
+
+export function buildCreateModelCustomizationJobBody(
+  input: BedrockCreateModelCustomizationJobInput,
+): string {
+  validateName(input.jobName, "jobName");
+  validateName(input.customModelName, "customModelName");
+  if (!BEDROCK_MODEL_CUSTOMIZATION_ROLE_ARN_PATTERN.test(input.roleArn)) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: invalid roleArn '${input.roleArn}'`,
+    });
+  }
+  if (
+    input.baseModelIdentifier.length < 1 ||
+    input.baseModelIdentifier.length >
+      BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: baseModelIdentifier length must be in [1, ${BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN.toString()}], got ${input.baseModelIdentifier.length.toString()}`,
+    });
+  }
+  validateS3Config(input.trainingDataConfig, "trainingDataConfig");
+  validateS3Config(input.outputDataConfig, "outputDataConfig");
+  if (
+    typeof input.hyperParameters !== "object" ||
+    input.hyperParameters === null ||
+    Array.isArray(input.hyperParameters)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: "createModelCustomizationJob: hyperParameters must be an object",
+    });
+  }
+  for (const [k, v] of Object.entries(input.hyperParameters)) {
+    if (typeof v !== "string") {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createModelCustomizationJob: hyperParameters.${k} must be a string`,
+      });
+    }
+  }
+  if (input.clientRequestToken !== undefined) {
+    if (
+      input.clientRequestToken.length < 1 ||
+      input.clientRequestToken.length >
+        BEDROCK_MODEL_CUSTOMIZATION_CLIENT_REQUEST_TOKEN_MAX_LEN ||
+      !BEDROCK_MODEL_CUSTOMIZATION_CLIENT_REQUEST_TOKEN_PATTERN.test(
+        input.clientRequestToken,
+      )
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: "createModelCustomizationJob: invalid clientRequestToken",
+      });
+    }
+  }
+  if (input.customModelKmsKeyId !== undefined) {
+    if (input.customModelKmsKeyId.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "createModelCustomizationJob: customModelKmsKeyId must be a non-empty string when provided",
+      });
+    }
+  }
+  if (input.customModelTags !== undefined) {
+    validateTags(input.customModelTags, "customModelTags");
+  }
+  if (input.jobTags !== undefined) {
+    validateTags(input.jobTags, "jobTags");
+  }
+  if (input.validationDataConfig !== undefined) {
+    validateValidationDataConfig(input.validationDataConfig);
+  }
+  if (input.vpcConfig !== undefined) {
+    validateVpcConfig(input.vpcConfig);
+  }
+  const body: Record<string, unknown> = {
+    jobName: input.jobName,
+    customModelName: input.customModelName,
+    roleArn: input.roleArn,
+    baseModelIdentifier: input.baseModelIdentifier,
+    trainingDataConfig: input.trainingDataConfig,
+    outputDataConfig: input.outputDataConfig,
+    hyperParameters: input.hyperParameters,
+  };
+  if (input.clientRequestToken !== undefined) {
+    body["clientRequestToken"] = input.clientRequestToken;
+  }
+  if (input.customizationType !== undefined) {
+    body["customizationType"] = input.customizationType;
+  }
+  if (input.customModelKmsKeyId !== undefined) {
+    body["customModelKmsKeyId"] = input.customModelKmsKeyId;
+  }
+  if (input.customModelTags !== undefined) {
+    body["customModelTags"] = input.customModelTags;
+  }
+  if (input.jobTags !== undefined) body["jobTags"] = input.jobTags;
+  if (input.validationDataConfig !== undefined) {
+    body["validationDataConfig"] = input.validationDataConfig;
+  }
+  if (input.vpcConfig !== undefined) body["vpcConfig"] = input.vpcConfig;
+  if (input.customizationConfig !== undefined) {
+    body["customizationConfig"] = input.customizationConfig;
+  }
+  return JSON.stringify(body);
+}
+
+function validateName(value: string, field: string): void {
+  if (
+    value.length < 1 ||
+    value.length > BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_MAX_LEN ||
+    !BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_PATTERN.test(value)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: invalid ${field} '${value}'`,
+    });
+  }
+}
+
+function validateS3Config(
+  config: BedrockModelCustomizationJobS3Config,
+  field: string,
+): void {
+  if (!BEDROCK_MODEL_CUSTOMIZATION_S3_URI_PATTERN.test(config.s3Uri)) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: invalid ${field}.s3Uri '${config.s3Uri}'`,
+    });
+  }
+}
+
+function validateTags(
+  tags: ReadonlyArray<BedrockModelCustomizationJobTag>,
+  field: string,
+): void {
+  if (tags.length > BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: ${field} count must be ≤ ${BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS.toString()}, got ${tags.length.toString()}`,
+    });
+  }
+  for (const tag of tags) {
+    if (
+      tag.key.length < 1 ||
+      tag.key.length > BEDROCK_MODEL_CUSTOMIZATION_TAG_KEY_MAX_LEN
+    ) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createModelCustomizationJob: ${field} key length must be in [1, ${BEDROCK_MODEL_CUSTOMIZATION_TAG_KEY_MAX_LEN.toString()}]`,
+      });
+    }
+    if (tag.value.length > BEDROCK_MODEL_CUSTOMIZATION_TAG_VALUE_MAX_LEN) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createModelCustomizationJob: ${field} value length must be ≤ ${BEDROCK_MODEL_CUSTOMIZATION_TAG_VALUE_MAX_LEN.toString()}`,
+      });
+    }
+  }
+}
+
+function validateValidationDataConfig(
+  config: BedrockModelCustomizationJobValidationDataConfig,
+): void {
+  if (config.validators.length > BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: validationDataConfig.validators count must be ≤ ${BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS.toString()}, got ${config.validators.length.toString()}`,
+    });
+  }
+  for (let i = 0; i < config.validators.length; i++) {
+    const v = config.validators[i]!;
+    if (!BEDROCK_MODEL_CUSTOMIZATION_S3_URI_PATTERN.test(v.s3Uri)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createModelCustomizationJob: invalid validationDataConfig.validators[${i.toString()}].s3Uri`,
+      });
+    }
+  }
+}
+
+function validateVpcConfig(config: BedrockModelCustomizationJobVpcConfig): void {
+  if (
+    config.subnetIds.length === 0 ||
+    config.subnetIds.length > BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: vpcConfig.subnetIds count must be in [1, ${BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES.toString()}]`,
+    });
+  }
+  if (
+    config.securityGroupIds.length === 0 ||
+    config.securityGroupIds.length > BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createModelCustomizationJob: vpcConfig.securityGroupIds count must be in [1, ${BEDROCK_MODEL_CUSTOMIZATION_VPC_MAX_ENTRIES.toString()}]`,
+    });
+  }
+}
+
+export function parseCreateModelCustomizationJobResponse(
+  raw: unknown,
+): BedrockCreateModelCustomizationJobResponse {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "createModelCustomizationJob: response is not a JSON object",
+    });
+  }
+  const obj = raw as { jobArn?: unknown };
+  if (typeof obj.jobArn !== "string" || obj.jobArn.length === 0) {
+    throw new BedrockError({
+      kind: "api_error",
+      message: "createModelCustomizationJob: response missing jobArn",
+    });
+  }
+  return { jobArn: obj.jobArn };
+}

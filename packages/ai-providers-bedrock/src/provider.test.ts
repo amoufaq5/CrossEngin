@@ -1418,6 +1418,221 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   });
 });
 
+describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () => {
+  function minimalCreate() {
+    return {
+      jobName: "tenant-x-haiku-finetune-001",
+      customModelName: "tenant-x-haiku-v1",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockFineTuneRole",
+      baseModelIdentifier:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
+      trainingDataConfig: { s3Uri: "s3://tenant-x-data/train/" },
+      outputDataConfig: { s3Uri: "s3://tenant-x-data/output/" },
+      hyperParameters: { epochCount: "10", learningRate: "0.0001" },
+    };
+  }
+
+  it("POSTs to control-plane /model-customization-jobs with JSON body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          jobArn:
+            "arn:aws:bedrock:us-east-1:123:model-customization-job/abc",
+        }),
+      }),
+    });
+    const out = await provider.createModelCustomizationJob(minimalCreate());
+    expect(capture.url).toBe(
+      "https://bedrock.us-east-1.amazonaws.com/model-customization-jobs",
+    );
+    expect(capture.init?.method).toBe("POST");
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+    const sentBody = JSON.parse(
+      new TextDecoder().decode(capture.init?.body),
+    ) as Record<string, unknown>;
+    expect(sentBody["jobName"]).toBe("tenant-x-haiku-finetune-001");
+    expect(sentBody["customModelName"]).toBe("tenant-x-haiku-v1");
+    expect(sentBody["baseModelIdentifier"]).toMatch(/claude-3-haiku/);
+    expect(sentBody["hyperParameters"]).toEqual({
+      epochCount: "10",
+      learningRate: "0.0001",
+    });
+    expect(out.jobArn).toMatch(/abc$/);
+  });
+
+  it("validates input BEFORE fetch — bad jobName never burns a request", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createModelCustomizationJob({
+        ...minimalCreate(),
+        jobName: "bad name",
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates input BEFORE fetch — bad hyperParameter type", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createModelCustomizationJob({
+        ...minimalCreate(),
+        hyperParameters: { learningRate: 0.0001 } as never,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("threads optional fields into the body (clientRequestToken + tags + KMS + VPC)", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          jobArn:
+            "arn:aws:bedrock:us-east-1:123:model-customization-job/abc",
+        }),
+      }),
+    });
+    await provider.createModelCustomizationJob({
+      ...minimalCreate(),
+      clientRequestToken: "req-uuid-abc",
+      customizationType: "FINE_TUNING",
+      customModelKmsKeyId: "arn:aws:kms:us-east-1:123:key/k1",
+      jobTags: [{ key: "purpose", value: "claims" }],
+      vpcConfig: { subnetIds: ["s-1"], securityGroupIds: ["sg-1"] },
+    });
+    const sent = JSON.parse(
+      new TextDecoder().decode(capture.init?.body),
+    ) as Record<string, unknown>;
+    expect(sent["clientRequestToken"]).toBe("req-uuid-abc");
+    expect(sent["customizationType"]).toBe("FINE_TUNING");
+    expect(sent["customModelKmsKeyId"]).toMatch(/^arn:aws:kms:/);
+    expect(sent["jobTags"]).toEqual([{ key: "purpose", value: "claims" }]);
+  });
+
+  it("threads distillationConfig.teacherModelConfig in the body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({
+      fetch: buildFetch({
+        capture,
+        text: JSON.stringify({
+          jobArn:
+            "arn:aws:bedrock:us-east-1:123:model-customization-job/dst",
+        }),
+      }),
+    });
+    await provider.createModelCustomizationJob({
+      ...minimalCreate(),
+      customizationType: "DISTILLATION",
+      customizationConfig: {
+        distillationConfig: {
+          teacherModelConfig: {
+            teacherModelIdentifier:
+              "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            maxResponseLengthForInference: 4096,
+          },
+        },
+      },
+    });
+    const sent = JSON.parse(
+      new TextDecoder().decode(capture.init?.body),
+    ) as { customizationConfig: { distillationConfig: { teacherModelConfig: { teacherModelIdentifier: string; maxResponseLengthForInference: number } } } };
+    expect(
+      sent.customizationConfig.distillationConfig.teacherModelConfig
+        .maxResponseLengthForInference,
+    ).toBe(4096);
+  });
+
+  it("propagates 409 ConflictException as conflict_error (idempotency reuse with different body)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "jobName already exists",
+        }),
+      }),
+    });
+    await expect(
+      provider.createModelCustomizationJob(minimalCreate()),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+    });
+  });
+
+  it("propagates 400 ValidationException as invalid_request_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 400,
+        text: JSON.stringify({
+          __type: "ValidationException",
+          message: "role missing s3:GetObject",
+        }),
+      }),
+    });
+    await expect(
+      provider.createModelCustomizationJob(minimalCreate()),
+    ).rejects.toMatchObject({ kind: "invalid_request_error", status: 400 });
+  });
+
+  it("throws api_error when response has no jobArn", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: JSON.stringify({ ok: true }) }),
+    });
+    await expect(
+      provider.createModelCustomizationJob(minimalCreate()),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("throws api_error on non-JSON body", async () => {
+    const provider = build({
+      fetch: buildFetch({ text: "<html>oops</html>" }),
+    });
+    await expect(
+      provider.createModelCustomizationJob(minimalCreate()),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.createModelCustomizationJob(minimalCreate()),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+});
+
 describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () => {
   it("POSTs control-plane /model-customization-jobs/{id}/stop with empty body", async () => {
     const capture: FetchCapture = { url: null, init: null };

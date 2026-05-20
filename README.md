@@ -1,6 +1,6 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 + M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa + M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z + M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 + M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 + M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 + M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 + M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.6.x + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
+> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 + M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa + M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z + M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 + M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 + M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 + M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 + M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.6.x + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 > M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 +
 > M2.8.5 + M5.7 + M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed. The four runtime pillars (DDL + crypto
 > + workflows + gateway) are in place; both impure runtimes
@@ -17,8 +17,8 @@
 > bridge; M7 shipped the first vertical pack
 > (`@crossengin/pack-erp-core`) proving the substrate holds up
 > under a real schema.
-> **55 packages + 1 app, 120 meta-schema tables, 7,503 tests**,
-> all green, zero type errors. ADRs 0001–0130 fully drafted.
+> **55 packages + 1 app, 120 meta-schema tables, 7,534 tests**,
+> all green, zero type errors. ADRs 0001–0131 fully drafted.
 > `crossengin apply --dry-run --pack=operate-erp/payments`
 > produces the META bootstrap SQL + 4 ERP entity tables + the
 > Payment table (cross-pack composition, all tenant-scoped) in
@@ -108,7 +108,7 @@ Three compliance triangles closed at the contract layer:
 CrossEngin/
 ├── docs/             architecture decisions + vision  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0130
+│   └── adr/          ADRs 0001-0131
 ├── apps/             1 workspace app  (architect-cli)
 ├── packages/         53 workspace packages
 ├── apps/             user-facing applications          [pending]

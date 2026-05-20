@@ -21,15 +21,50 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,503 tests**,
-all green, no type errors. M2.X.16 lifts the EIGHTH
+**55 packages + 1 app, 120 meta-schema tables, 7,534 tests**,
+all green, no type errors. M2.X.5.aa.z.20 closes the
+customization-job CRUD with
+`BedrockProvider.createModelCustomizationJob(input)` —
+LARGEST write surface remaining on Bedrock's control plane.
+After M2.X.5.aa.z.17/.18/.19 shipped list + get + stop, this
+milestone adds programmatic fine-tune submission. New
+`buildCreateModelCustomizationJobBody(input)` pure boundary-
+validator enforces 12+ documented AWS constraints BEFORE any
+fetch: jobName + customModelName pattern + length [1, 63];
+roleArn AWS-partition-aware IAM regex; baseModelIdentifier
+length [1, 2048] (no pattern — AWS accepts foundation model
+IDs / ARNs / inference profile IDs); s3Uri scheme
+^s3://[a-z0-9.\-_]{1,255}/.* on both training + output +
+validator URIs; hyperParameters object of string→string
+(per-value typeof check); clientRequestToken shape + length
+[1, 256]; customModelTags + jobTags count ≤ 200 + key length
+[1, 128] + value length [0, 256]; validationDataConfig.
+validators count ≤ 10; vpcConfig.subnetIds +
+securityGroupIds counts in [1, 16]. All ARN patterns
+AWS-partition-aware (aws, aws-us-gov, aws-cn).
+`parseCreateModelCustomizationJobResponse(raw)` is strict —
+{jobArn} only; missing / empty / non-string throws api_error.
+AWS contract preservation: `customModelKmsKeyId` (NOT
+KmsKeyArn) per CreateModelCustomizationJob docs; field-naming
+asymmetry vs get (outputModelName ≠ customModelName)
+preserved verbatim from M2.X.5.aa.z.18. Reuses 5 sub-types
+from M2.X.5.aa.z.18 (S3Config / ValidationDataConfig /
+VpcConfig / CustomizationConfig / Validator) + adds new
+BedrockModelCustomizationJobTag = {key, value}. Bedrock
+control-plane surface now has 18 of N operations
+(customization CRUD complete). Three workflows unblocked:
+programmatic fine-tune submission (CI-driven training
+pipelines), automated retry-on-failure flows (catch +
+re-submit with adjusted hyperparameters), distillation
+lineage capture (teacher model + max response length
+recorded with the job). M2.X.16 lifts the EIGHTH
 cross-provider error classifier and COMPLETES the canonical
 4xx/5xx classifier sweep — `isInvalidRequestError(err)` in
 `@crossengin/ai-providers/invalid-request.ts`. Closes ADR-0129
@@ -2362,7 +2397,11 @@ ADR-0130 covers M2.X.16 (invalid_request_error kernel kind +
 isInvalidRequestError cross-provider classifier — eighth
 kernel classifier completing the canonical 4xx/5xx sweep;
 closes ADR-0129 Q1; user-facing error translation pattern
-documented).
+documented), ADR-0131 covers M2.X.5.aa.z.20 (Bedrock
+createModelCustomizationJob — largest write surface remaining
+on Bedrock; customization-job CRUD now complete; 12+ boundary-
+validation rules; AWS contract preserved verbatim including
+customModelKmsKeyId vs KmsKeyArn asymmetry).
 
 ## Architecture in 90 seconds
 
@@ -2590,7 +2629,8 @@ re-exporting everything.
   + listImportedModels + getImportedModel + listCustomModels +
   getCustomModel + listModelImportJobs + getModelImportJob +
   listModelCustomizationJobs + getModelCustomizationJob +
-  stopModelCustomizationJob — embed dispatches on
+  stopModelCustomizationJob + createModelCustomizationJob —
+  embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -3590,7 +3630,18 @@ across all three providers now has a kernel classifier;
 mutual-exclusivity test asserts an invalid_request_error
 matches exactly ONE classifier; CI kernel-validation + LLM
 auto-fix + user-facing error translation workflows have
-documented patterns).
+documented patterns), ADR-0131 covers Phase 2 M2.X.5.aa.z.20
+(Bedrock createModelCustomizationJob — largest write surface
+remaining on Bedrock's control plane; customization-job CRUD
+now complete after M2.X.5.aa.z.17/.18/.19; 7 required + 8
+optional fields with 12+ boundary-validation rules; reuses 5
+sub-types from M2.X.5.aa.z.18 + adds
+BedrockModelCustomizationJobTag; AWS contract preservation
+includes customModelKmsKeyId (not KmsKeyArn — preserved
+verbatim) and create-vs-get field-naming asymmetry per
+ADR-0123; three workflows unblocked: programmatic fine-tune
+submission, automated retry-on-failure with adjusted
+hyperparameters, distillation lineage capture).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
