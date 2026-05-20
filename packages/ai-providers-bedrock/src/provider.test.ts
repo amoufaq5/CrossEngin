@@ -4961,6 +4961,339 @@ describe("BedrockProvider — listTagsForResource (M2.X.5.aa.z.24)", () => {
   });
 });
 
+describe("BedrockProvider — updateInferenceProfile (M2.X.5.aa.z.25)", () => {
+  interface MethodCall {
+    method: string;
+    url: string;
+    body: Uint8Array;
+  }
+
+  function applicationProfileJson(id = "ip-application-1"): string {
+    return JSON.stringify({
+      inferenceProfileId: id,
+      inferenceProfileName: "test",
+      inferenceProfileArn: `arn:aws:bedrock:us-east-1:123:application-inference-profile/${id}`,
+      models: [
+        { modelArn: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet" },
+      ],
+      status: "ACTIVE",
+      type: "APPLICATION",
+      createdAt: "2026-05-19T12:00:00.000Z",
+      updatedAt: "2026-05-19T12:00:00.000Z",
+    });
+  }
+
+  function systemProfileJson(id = "ip-system-1"): string {
+    return JSON.stringify({
+      inferenceProfileId: id,
+      inferenceProfileName: "anthropic.claude-3-sonnet",
+      inferenceProfileArn: `arn:aws:bedrock:us-east-1::inference-profile/${id}`,
+      models: [
+        { modelArn: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet" },
+      ],
+      status: "ACTIVE",
+      type: "SYSTEM_DEFINED",
+      createdAt: "2026-05-19T12:00:00.000Z",
+      updatedAt: "2026-05-19T12:00:00.000Z",
+    });
+  }
+
+  function sequencedFetch(opts: {
+    calls: MethodCall[];
+    onGet: () => { ok: boolean; status: number; text: string };
+    onPatch?: () => { ok: boolean; status: number; text: string };
+  }): FetchLike {
+    return async (url, init) => {
+      opts.calls.push({ method: init.method, url, body: init.body });
+      const resp =
+        init.method === "PATCH"
+          ? (opts.onPatch ?? (() => ({ ok: true, status: 200, text: "" })))()
+          : opts.onGet();
+      return {
+        ok: resp.ok,
+        status: resp.status,
+        text: async () => resp.text,
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+  }
+
+  it("pre-flights GET, then PATCHes when type === APPLICATION", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+      }),
+    });
+    await provider.updateInferenceProfile("ip-application-1", {
+      description: "new desc",
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.method).toBe("GET");
+    expect(calls[0]?.url).toContain("/inference-profiles/ip-application-1");
+    expect(calls[1]?.method).toBe("PATCH");
+    expect(calls[1]?.url).toContain("/inference-profiles/ip-application-1");
+  });
+
+  it("threads the description into the PATCH body", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+      }),
+    });
+    await provider.updateInferenceProfile("ip-application-1", {
+      description: "new desc",
+    });
+    const patchCall = calls.find((c) => c.method === "PATCH");
+    const bodyStr = new TextDecoder().decode(patchCall!.body);
+    const body = JSON.parse(bodyStr) as Record<string, unknown>;
+    expect(body["description"]).toBe("new desc");
+  });
+
+  it("refuses to update SYSTEM_DEFINED profiles and NEVER issues PATCH", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: systemProfileJson() }),
+      }),
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-system-1", { description: "new desc" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("GET");
+  });
+
+  it("system-profile guard error message names the profile and type", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: systemProfileJson("ip-system-1") }),
+      }),
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-system-1", { description: "x" }),
+    ).rejects.toThrow(/SYSTEM_DEFINED/);
+    await expect(
+      provider.updateInferenceProfile("ip-system-1", { description: "x" }),
+    ).rejects.toThrow(/ip-system-1/);
+  });
+
+  it("validates description BEFORE pre-flight GET (saves a round-trip)", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-application-1", { description: "" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates empty input BEFORE pre-flight (must include at least one mutable field)", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-application-1", {}),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates identifier BEFORE input checks", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.updateInferenceProfile("", { description: "valid" }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("URI-encodes ARN colons on both GET and PATCH", async () => {
+    const calls: MethodCall[] = [];
+    const arn = "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc";
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson(arn) }),
+      }),
+    });
+    await provider.updateInferenceProfile(arn, { description: "x" });
+    expect(calls[0]?.url).toContain("%3A");
+    expect(calls[1]?.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+      }),
+    });
+    await provider.updateInferenceProfile("ip-application-1", {
+      description: "new",
+    });
+    for (const call of calls) {
+      expect(call.url).not.toContain("bedrock-runtime.");
+    }
+  });
+
+  it("propagates 404 from the pre-flight GET (profile doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such profile",
+        }),
+      }),
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-missing", { description: "x" }),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 404 from the PATCH (race: profile deleted between GET and PATCH)", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+        onPatch: () => ({
+          ok: false,
+          status: 404,
+          text: JSON.stringify({
+            __type: "ResourceNotFoundException",
+            message: "deleted already",
+          }),
+        }),
+      }),
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-application-1", { description: "x" }),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("propagates 403 from the PATCH (have GET but not UpdateInferenceProfile permission)", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+        onPatch: () => ({
+          ok: false,
+          status: 403,
+          text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+        }),
+      }),
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-application-1", { description: "x" }),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 from the PATCH", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+        onPatch: () => ({
+          ok: false,
+          status: 429,
+          text: JSON.stringify({
+            __type: "ThrottlingException",
+            message: "slow down",
+          }),
+        }),
+      }),
+    });
+    await expect(
+      provider.updateInferenceProfile("ip-application-1", { description: "x" }),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("resolves void on 200 from the PATCH", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+        onPatch: () => ({ ok: true, status: 200, text: "" }),
+      }),
+    });
+    const result = await provider.updateInferenceProfile("ip-application-1", {
+      description: "new",
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("PATCH request has content-type application/json header", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: async (url, init) => {
+        calls.push({ method: init.method, url, body: init.body });
+        if (init.method === "PATCH") {
+          capture.url = url;
+          capture.init = init;
+        }
+        const body =
+          init.method === "PATCH"
+            ? { ok: true, status: 200, text: "" }
+            : { ok: true, status: 200, text: applicationProfileJson() };
+        return {
+          ok: body.ok,
+          status: body.status,
+          text: async () => body.text,
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await provider.updateInferenceProfile("ip-application-1", {
+      description: "x",
+    });
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

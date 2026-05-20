@@ -79,6 +79,7 @@ import {
 import {
   buildCreateInferenceProfileBody,
   buildInferenceProfileListQuery,
+  buildUpdateInferenceProfileBody,
   parseCreateInferenceProfileResponse,
   parseInferenceProfileDetail,
   parseInferenceProfileListResponse,
@@ -87,6 +88,7 @@ import {
   type BedrockInferenceProfileDetail,
   type BedrockInferenceProfileListResponse,
   type BedrockListInferenceProfilesOptions,
+  type BedrockUpdateInferenceProfileInput,
 } from "./inference-profiles-api.js";
 import {
   buildCreateModelCustomizationJobBody,
@@ -901,6 +903,30 @@ export class BedrockProvider implements LlmProvider {
     await this.signedControlPlaneDelete({ path });
   }
 
+  async updateInferenceProfile(
+    profileIdentifier: string,
+    input: BedrockUpdateInferenceProfileInput,
+  ): Promise<void> {
+    if (profileIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "updateInferenceProfile: profileIdentifier must be a non-empty string",
+      });
+    }
+    const bodyStr = buildUpdateInferenceProfileBody(input);
+    const detail = await this.getInferenceProfile(profileIdentifier);
+    if (detail.type !== "APPLICATION") {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `updateInferenceProfile: cannot update ${detail.type} profile '${profileIdentifier}'. Only APPLICATION-type profiles are operator-owned and mutable.`,
+      });
+    }
+    const body = new TextEncoder().encode(bodyStr);
+    const path = `/inference-profiles/${encodeURIComponent(profileIdentifier)}`;
+    await this.signedControlPlanePatch({ path, body });
+  }
+
   async createInferenceProfile(
     input: BedrockCreateInferenceProfileInput,
   ): Promise<BedrockCreateInferenceProfileResponse> {
@@ -1242,6 +1268,52 @@ export class BedrockProvider implements LlmProvider {
         method: "DELETE",
         headers,
         body,
+      });
+    } catch (err) {
+      throw fromNetworkError(err);
+    }
+    if (!response.ok) {
+      throw fromHttpResponse({ status: response.status, body: await response.text() });
+    }
+  }
+
+  private async signedControlPlanePatch(input: {
+    readonly path: string;
+    readonly body: Uint8Array;
+  }): Promise<void> {
+    const host = new URL(this.controlPlaneBaseUrl).host;
+    const signed = signRequest({
+      method: "PATCH",
+      host,
+      path: input.path,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: input.body,
+      region: this.region,
+      service: SERVICE,
+      credentials: this.credentials,
+      now: this.clock(),
+    });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+      host,
+      "x-amz-date": signed.amzDate,
+      "x-amz-content-sha256": signed.contentSha256,
+      authorization: signed.authorization,
+    };
+    if (this.credentials.sessionToken !== undefined) {
+      headers["x-amz-security-token"] = this.credentials.sessionToken;
+    }
+    const url = `${this.controlPlaneBaseUrl}${input.path}`;
+    let response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "PATCH",
+        headers,
+        body: input.body,
       });
     } catch (err) {
       throw fromNetworkError(err);

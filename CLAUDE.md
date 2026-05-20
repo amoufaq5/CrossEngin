@@ -21,15 +21,61 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,781 tests**,
-all green, no type errors. M2.X.5.aa.z.24 closes ADR-0142 Q2
+**56 packages + 1 app, 127 meta-schema tables, 7,802 tests**,
+all green, no type errors. M2.X.5.aa.z.25 closes ADR-0142 Q1
+by adding `updateInferenceProfile(profileIdentifier, input)`
+— the FIRST PATCH operation on the Bedrock control plane.
+Operator pain it closes: description drift on existing
+APPLICATION profiles. Previously the only path to update
+description was delete + recreate, which destroyed the ARN
+and broke every downstream reference. Now description is
+mutable in-place. AWS contract: PATCH /inference-profiles/{id}
+with body {description?: string}. New signedControlPlanePatch
+transport mirrors signedControlPlanePost — Sig v4 signing,
+content-type application/json, body bytes via TextEncoder.
+Validation order (defensive, fail-fast): identifier blank
+check → input body builder (rejects empty input `{}` since
+"at least one mutable field" must be provided) → pre-flight
+GET to verify existence + read type field → APPLICATION-only
+guard (mirrors deleteInferenceProfile from ADR-0138; if
+type !== "APPLICATION" throws invalid_request_error naming
+the profile + type, NEVER issues PATCH) → PATCH wire request.
+Description-only by deliberate design (tags have their own
+canonical surface from M2.X.5.aa.z.24's tagResource /
+untagResource; wiring tags into UpdateInferenceProfile too
+would create two paths to the same outcome). PATCH semantics
+not PUT (only provided fields update; omitted stays
+unchanged). No bypass flag — mandatory guard. No cache —
+re-read profile type on every update. Pre-flight cost = 1
+extra GET per update; acceptable for operator workflow not
+hot path. Race window between GET and PATCH (profile deleted
+by another caller): PATCH returns 404, propagated verbatim
+as not_found_error — same idempotency-via-isNotFoundError
+wrap pattern as ADR-0138 applies. Bedrock control plane: 18
+read + 2 stop + 2 create + 4 delete + 3 tag + 1 update = 30
+operations. Operator now has FULL APPLICATION lifecycle on
+the substrate (create + list + get + update + delete + tag).
+PATCH transport reusable for future mutation surfaces
+(updateGuardrail if AWS adds one, etc.). 21 new tests: 6 in
+inference-profiles-api.test.ts (body builder happy path,
+empty-input rejection, blank/length/pattern description
+rejection, only-description field emitted), 15 in
+provider.test.ts (pre-flight GET then PATCH on APPLICATION,
+description threaded into PATCH body, SYSTEM_DEFINED refusal
+with NO PATCH issued, guard error message names profile +
+type, identifier-blank pre-flight before any GET, empty-input
+pre-flight before any GET, identifier-before-input ordering,
+ARN URI-encoding both calls, control-plane-not-runtime host,
+404 from pre-flight, 404 from PATCH race, 403 from PATCH,
+429 from PATCH, void on 200, PATCH content-type +
+authorization headers). M2.X.5.aa.z.24 closes ADR-0142 Q2
 by adding `tagResource(input)` + `untagResource(input)` +
 `listTagsForResource(input)` — the FIRST multi-resource
 operations on the Bedrock control plane. Previously every
@@ -3024,7 +3070,14 @@ covers M2.X.5.aa.z.24 (Bedrock cross-resource tagging —
 closes ADR-0142 Q2 — first multi-resource Bedrock operations;
 tagResource + untagResource + listTagsForResource work
 across every Bedrock ARN; AWS wire-shape asymmetry preserved
-verbatim — query on tag/untag, body on list).
+verbatim — query on tag/untag, body on list), ADR-0146 covers
+M2.X.5.aa.z.25 (Bedrock updateInferenceProfile PATCH —
+closes ADR-0142 Q1 — first PATCH on the Bedrock control plane;
+new signedControlPlanePatch transport; APPLICATION-only
+mandatory pre-flight guard mirroring deleteInferenceProfile;
+description-only mutation since tags have their own canonical
+M2.X.5.aa.z.24 surface; race-deleted 404 propagates verbatim;
+full APPLICATION lifecycle now on the substrate).
 
 ## Architecture in 90 seconds
 
@@ -4442,7 +4495,31 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0145 covers Phase 2 M2.X.5.aa.z.24 (Bedrock cross-
+operations), ADR-0146 covers Phase 2 M2.X.5.aa.z.25 (Bedrock
+updateInferenceProfile PATCH with APPLICATION-only guard —
+closes ADR-0142 Q1; first PATCH operation on the Bedrock
+control plane; new signedControlPlanePatch transport mirrors
+signedControlPlanePost with content-type application/json +
+Sig v4 signing; updateInferenceProfile uses 4-step defensive
+validation order — identifier-blank → input body builder
+rejecting empty-input → pre-flight GET to read type field →
+APPLICATION-only guard (NEVER issues PATCH on SYSTEM_DEFINED;
+mirrors deleteInferenceProfile from ADR-0138); description-
+only by design — tags have their own M2.X.5.aa.z.24 canonical
+surface and wiring them here would create two paths to the
+same outcome confusing operators; PATCH semantics not PUT —
+only provided fields update; pre-flight cost 1 extra GET per
+update acceptable for operator-workflow not hot-path; race
+window between GET and PATCH propagates the PATCH-side 404
+verbatim — same idempotency-via-isNotFoundError pattern as
+delete; pattern reusable for future mutation surfaces;
+operator gain: description drift on existing APPLICATION
+profiles is now fixable in-place without delete-recreate
+destroying the ARN and breaking downstream references; Bedrock
+control plane now has 18 read + 2 stop + 2 create + 4 delete
++ 3 tag + 1 update = 30 operations; FULL APPLICATION
+lifecycle on the substrate). ADR-0145 covers Phase 2
+M2.X.5.aa.z.24 (Bedrock cross-
 resource tagging — closes ADR-0142 Q2; first multi-resource
 operations on the Bedrock substrate — tagResource +
 untagResource + listTagsForResource work across every

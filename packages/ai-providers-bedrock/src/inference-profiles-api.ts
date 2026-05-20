@@ -338,6 +338,33 @@ export function buildCreateInferenceProfileBody(
   return JSON.stringify(body);
 }
 
+export interface BedrockUpdateInferenceProfileInput {
+  readonly description?: string;
+}
+
+export function buildUpdateInferenceProfileBody(
+  input: BedrockUpdateInferenceProfileInput,
+): string {
+  if (input.description === undefined) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message:
+        "updateInferenceProfile: at least one mutable field must be provided (description)",
+    });
+  }
+  if (
+    input.description.length < 1 ||
+    input.description.length > BEDROCK_INFERENCE_PROFILE_DESCRIPTION_MAX_LEN ||
+    !BEDROCK_INFERENCE_PROFILE_DESCRIPTION_PATTERN.test(input.description)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `updateInferenceProfile: invalid description`,
+    });
+  }
+  return JSON.stringify({ description: input.description });
+}
+
 export function parseCreateInferenceProfileResponse(
   raw: unknown,
 ): BedrockCreateInferenceProfileResponse {

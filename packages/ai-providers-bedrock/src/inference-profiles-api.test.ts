@@ -8,6 +8,7 @@ import {
   BEDROCK_INFERENCE_PROFILE_TYPES,
   buildCreateInferenceProfileBody,
   buildInferenceProfileListQuery,
+  buildUpdateInferenceProfileBody,
   isBedrockInferenceProfileStatus,
   isBedrockInferenceProfileType,
   parseCreateInferenceProfileResponse,
@@ -495,5 +496,45 @@ describe("parseCreateInferenceProfileResponse (M2.X.5.aa.z.23)", () => {
     expect(() => parseCreateInferenceProfileResponse(null)).toThrow(
       /not a JSON object/,
     );
+  });
+});
+
+describe("buildUpdateInferenceProfileBody (M2.X.5.aa.z.25)", () => {
+  it("emits description into JSON when provided", () => {
+    const body = JSON.parse(
+      buildUpdateInferenceProfileBody({ description: "for tenant A" }),
+    ) as Record<string, unknown>;
+    expect(body["description"]).toBe("for tenant A");
+  });
+
+  it("rejects empty input (no mutable fields)", () => {
+    expect(() => buildUpdateInferenceProfileBody({})).toThrow(
+      /at least one mutable field must be provided/,
+    );
+  });
+
+  it("rejects blank description", () => {
+    expect(() => buildUpdateInferenceProfileBody({ description: "" })).toThrow(
+      /invalid description/,
+    );
+  });
+
+  it("rejects description > 200 chars", () => {
+    expect(() =>
+      buildUpdateInferenceProfileBody({ description: "a".repeat(201) }),
+    ).toThrow(/invalid description/);
+  });
+
+  it("rejects description violating the pattern", () => {
+    expect(() =>
+      buildUpdateInferenceProfileBody({ description: "has, comma" }),
+    ).toThrow(/invalid description/);
+  });
+
+  it("does NOT emit any field besides description", () => {
+    const body = JSON.parse(
+      buildUpdateInferenceProfileBody({ description: "valid" }),
+    ) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["description"]);
   });
 });
