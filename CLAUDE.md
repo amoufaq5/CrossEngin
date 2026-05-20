@@ -21,15 +21,58 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M6.8.x.trace + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,054 tests**,
-all green, no type errors. M6.8.x.trace closes ADR-0154 Q1
+**56 packages + 1 app, 128 meta-schema tables, 8,068 tests**,
+all green, no type errors. M6.8.y closes ADR-0145 Q5 by
+adding the `setExactTags` operator helper to
+`@crossengin/ai-providers-bedrock`. New tagging-helpers.ts
+file hosts a standalone exported function (not a
+BedrockProvider method — preserves the substrate's three-
+tier layering: tagging-api.ts pure code, provider.ts raw
+transport, tagging-helpers.ts operator composition).
+Signature: setExactTags(provider, {resourceArn,
+desiredTags}) returns {added, removed, unchanged}.
+Algorithm: pre-flight validation (non-empty arn + no
+duplicate desired keys) → listTagsForResource → diff
+(added/removed/unchanged) → tagResource (additions) →
+untagResource (removals). Minimum API calls based on
+diff: 1 call (list-only when converged), 2 (add-only or
+remove-only), 3 (mixed). AWS's tagResource OVERWRITES
+existing values — no untag-then-tag round-trip needed for
+value updates. Tag-then-untag ordering preserves operator
+mental model "add what I want, then prune what I don't" +
+gives clearer audit on partial failures. Idempotent: re-
+running with same desired set is a 1-call list-only no-op
+returning unchanged=desired. Operator pain solved:
+convergence to desired state without diff logic, minimum
+API calls vs naïve tag-all + untag-all, idempotent CI/
+workflow integration, audit trail via the result object.
+Substrate layering preserved — BedrockProvider stays a
+1:1 wrapper of AWS endpoints; helpers compose above; if
+helpers proliferate (>5 functions) could split into
+@crossengin/bedrock-helpers package. Index exports
+cleanup as a side effect: previously-missing exports
+(tagging-api, provisioned-throughput-api,
+foundation-models-api) added alongside tagging-helpers
+so operators importing from @crossengin/ai-providers-bedrock
+now see the full type surface. 14 new tests in
+tagging-helpers.test.ts: empty-current+non-empty-desired
+(all additions), non-empty-current+empty-desired (all
+removals), exact-match noop (1 API call), value-update on
+existing key (treated as add since value differs),
+mixed add/remove/unchanged, tag-then-untag ordering,
+resourceArn-blank pre-flight (no list issued), duplicate-
+desired-key rejection pre-flight, value-update single-call
+(no untag), idempotent two-run convergence, error
+propagation (404 from list), empty-value support (AWS
+allows empty values), result audit shape, BedrockError
+class identity. M6.8.x.trace closes ADR-0154 Q1
 by emitting a new `ceiling_resolved` RouterInstrumentation
 event automatically from DefaultLlmRouter.enforceCeilingPreflight.
 ROUTER_INSTRUMENTATION_KINDS grows 6 → 7 with ceiling_resolved
@@ -3699,7 +3742,12 @@ new getTenantCostCeilingDetailed?: callback for full source
 attribution (override|tier|global|none); legacy
 getTenantCostCeiling callback continues working with
 degraded "override" source; PostgresCostCeilingResolver.resolveDetailed
-is now first-class operator wiring).
+is now first-class operator wiring), ADR-0158 covers M6.8.y
+(setExactTags Bedrock operator helper — closes ADR-0145 Q5
+— standalone function in tagging-helpers.ts preserves
+substrate's three-tier layering; idempotent diff-then-apply
+with minimum API calls; convergence to desired state
+without operators writing diff logic).
 
 ## Architecture in 90 seconds
 
@@ -5117,7 +5165,33 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0157 covers Phase 2 M6.8.x.trace
+operations), ADR-0158 covers Phase 2 M6.8.y (Bedrock setExactTags
+operator helper — closes ADR-0145 Q5; new
+tagging-helpers.ts in @crossengin/ai-providers-bedrock hosts
+standalone exported function setExactTags(provider,
+{resourceArn, desiredTags}) returning {added, removed,
+unchanged}; preserves substrate's three-tier layering with
+tagging-api.ts pure code + provider.ts raw transport +
+tagging-helpers.ts operator composition; algorithm
+pre-flight validation → listTagsForResource → diff →
+tagResource then untagResource → return audit; minimum
+API calls based on diff with idempotent re-runs becoming
+1-call list-only no-ops; AWS tagResource OVERWRITES
+existing values so no untag-then-tag round-trip needed for
+value updates; tag-then-untag ordering matches operator
+mental model "add what I want then prune what I don't";
+operator pain solved — convergence to desired state without
+operators writing diff logic, minimum API calls vs naïve
+tag-all+untag-all, idempotent CI/workflow integration, audit
+trail via result object; index exports cleanup side effect
+— previously-missing exports tagging-api +
+provisioned-throughput-api + foundation-models-api added
+alongside tagging-helpers so external consumers see the full
+type surface; substrate layering preserved — BedrockProvider
+stays 1:1 wrapper of AWS endpoints; if helpers proliferate
+above 5 functions split into @crossengin/bedrock-helpers
+package).
+ADR-0157 covers Phase 2 M6.8.x.trace
 (`ceiling_resolved` RouterInstrumentation event +
 getTenantCostCeilingDetailed callback — closes ADR-0154 Q1;
 ROUTER_INSTRUMENTATION_KINDS grows 6→7 with ceiling_resolved
