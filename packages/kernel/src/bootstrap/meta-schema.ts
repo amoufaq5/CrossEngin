@@ -9239,6 +9239,30 @@ export const META_LLM_COST_WINDOWS: TableDefinition = {
   },
 };
 
+export const META_LLM_LATENCY_SAMPLES: TableDefinition = {
+  schema: "meta",
+  name: "llm_latency_samples",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "provider_id", type: "TEXT", notNull: true },
+    {
+      name: "latency_ms",
+      type: "INTEGER",
+      notNull: true,
+      check: "latency_ms >= 0",
+    },
+    { name: "success", type: "BOOLEAN", notNull: true },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_llm_latency_samples_provider_recorded",
+      columns: ["provider_id", "recorded_at"],
+    },
+  ],
+};
+
 export const META_LLM_COST_CEILINGS: TableDefinition = {
   schema: "meta",
   name: "llm_cost_ceilings",
@@ -9397,4 +9421,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_PROPOSALS,
   META_LLM_COST_WINDOWS,
   META_LLM_COST_CEILINGS,
+  META_LLM_LATENCY_SAMPLES,
 ];

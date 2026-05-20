@@ -1,6 +1,10 @@
 export interface LatencyTracker {
-  record(input: { providerId: string; latencyMs: number; success: boolean }): void;
-  stats(providerId: string): LatencyStats;
+  record(input: {
+    providerId: string;
+    latencyMs: number;
+    success: boolean;
+  }): Promise<void>;
+  stats(providerId: string): Promise<LatencyStats>;
 }
 
 export interface LatencyStats {
@@ -28,14 +32,18 @@ export class InMemoryLatencyTracker implements LatencyTracker {
     this.windowSize = opts.windowSize ?? 100;
   }
 
-  record(input: { providerId: string; latencyMs: number; success: boolean }): void {
+  async record(input: {
+    providerId: string;
+    latencyMs: number;
+    success: boolean;
+  }): Promise<void> {
     const entries = this.windows.get(input.providerId) ?? [];
     entries.push({ latencyMs: input.latencyMs, success: input.success });
     if (entries.length > this.windowSize) entries.shift();
     this.windows.set(input.providerId, entries);
   }
 
-  stats(providerId: string): LatencyStats {
+  async stats(providerId: string): Promise<LatencyStats> {
     const entries = this.windows.get(providerId) ?? [];
     if (entries.length === 0) {
       return { samples: 0, successes: 0, failures: 0, p50Ms: 0, p95Ms: 0 };

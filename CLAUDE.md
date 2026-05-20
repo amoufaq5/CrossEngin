@@ -21,15 +21,61 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 122 meta-schema tables, 7,637 tests**,
-all green, no type errors. M5.11 adds `--max-cost-usd $X` to
+**56 packages + 1 app, 123 meta-schema tables, 7,649 tests**,
+all green, no type errors. M6.7.y completes the ai-router-pg
+adapter set by adding `PostgresLatencyTracker` — the third
+and final persistable tracker (after PostgresCostTracker
+from M6.7 and PostgresCostCeilingResolver from M6.7.x).
+Three changes: (1) `LatencyTracker` interface becomes
+async — both `record()` and `stats()` now return Promises.
+Internal-only breaking change since the only consumer is
+DefaultLlmRouter (two await sites added) plus
+InMemoryLatencyTracker (mechanical async signature
+upgrade). Fire-and-forget alternative was considered but
+rejected: silent failures, unbounded queue if PG degraded,
+inconsistency with the already-async CostTracker contract.
+1ms PG INSERT overhead per LLM request is negligible
+compared to LLM call duration. (2) META_LLM_LATENCY_SAMPLES
+as the 123rd meta-schema table — append-only sample log,
+PK on uuid_generate_v7() id, indexed (provider_id,
+recorded_at), latency_ms >= 0 CHECK, NO tenant scoping
+(provider-level observability, not per-tenant) and NO RLS
+(platform-wide table same pattern as META_TENANTS).
+(3) PostgresLatencyTracker in `@crossengin/ai-router-pg` —
+record() does single INSERT; stats() does single windowed
+SELECT with a CTE limiting to N most recent samples then
+aggregating via PG's native percentile_cont. Index-only
+scans handle "last 100 anthropic samples" in microseconds
+even at millions of rows. Returns same LatencyStats shape
+as InMemoryLatencyTracker. percentile_cont is continuous
+interpolation; differs from in-memory's floor-index
+selection only at tiny window sizes (observably nil at
+window>=20). The ai-router-pg adapter set is now complete:
+3 substrates (cost-windows from M6.7, cost-ceilings from
+M6.7.x, latency-samples from M6.7.y). Operators wiring an
+ai-router for multi-replica deployments have a fully-
+persistent stack. Operator dashboards can answer "what's
+anthropic's p95 over the last hour?" with a single SELECT
+on meta.llm_latency_samples — `SELECT provider_id,
+percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms)
+AS p50, percentile_cont(0.95) WITHIN GROUP (ORDER BY
+latency_ms) AS p95 FROM meta.llm_latency_samples WHERE
+recorded_at > now() - INTERVAL '1 hour' GROUP BY
+provider_id;`. 12 new tests in latency-tracker.test.ts
+covering record (INSERT shape + params + success boolean),
+stats (zero on empty, parsed when populated, windowed
+SELECT shape, default windowSize=100, percentile_cont
+syntax, NULL-percentile handling, provider filter, FILTER
+aggregates, provider isolation), and LatencyTracker
+contract compat (drop-in for the async ai-router
+interface). M5.11 adds `--max-cost-usd $X` to
 `crossengin chat` — a session-scoped post-hoc cumulative
 budget cap. Independent from `--cost-ceiling-usd` (which
 remains the per-request gate via router preflight); both
@@ -2688,7 +2734,14 @@ future two-typed resources), ADR-0139 covers M5.11
 side post-hoc cumulative cap independent of and orthogonal
 to --cost-ceiling-usd; enforcement in REPL loop not router
 since session budget needs REAL not estimated cost;
-operators can run bounded interactive + loop scripts).
+operators can run bounded interactive + loop scripts),
+ADR-0140 covers M6.7.y (PostgresLatencyTracker — completes
+the ai-router-pg adapter set after M6.7 cost-tracker +
+M6.7.x ceilings; LatencyTracker interface async-ified
+(internal-only breaking change); META_LLM_LATENCY_SAMPLES
+as the 123rd table; record = single INSERT, stats = single
+windowed SELECT with PG percentile_cont aggregate; provider-
+level not tenant-scoped; no RLS).
 
 ## Architecture in 90 seconds
 
@@ -4037,7 +4090,33 @@ parity; no breaking change — existing callers see identical
 behavior without the flag; CLI client-side budget is the
 complement to M6.7 server-side multi-replica enforcement,
 not a duplicate; operators can run bounded interactive
-sessions or batch loops with budget guard rails).
+sessions or batch loops with budget guard rails), ADR-0140
+covers Phase 2 M6.7.y (PostgresLatencyTracker + LatencyTracker
+contract async-ification — completes the ai-router-pg
+adapter set with 3 substrates (PostgresCostTracker M6.7,
+PostgresCostCeilingResolver M6.7.x, PostgresLatencyTracker
+M6.7.y); LatencyTracker interface becomes async — both
+record() and stats() return Promises; internal-only
+breaking change since only the router calls record (two
+new awaits) plus InMemoryLatencyTracker upgraded
+mechanically; fire-and-forget alternative rejected for
+silent-failure + unbounded-queue concerns + contract-
+inconsistency with already-async CostTracker; 1ms PG INSERT
+overhead per LLM request is negligible vs LLM call
+duration; META_LLM_LATENCY_SAMPLES as 123rd meta-schema
+table — append-only sample log with composite (provider_id,
+recorded_at) index, latency_ms >= 0 CHECK, NO tenant
+scoping (provider-level observability not per-tenant) NO
+RLS (platform-wide same pattern as META_TENANTS);
+PostgresLatencyTracker.record = single INSERT,
+.stats = single windowed SELECT with CTE LIMIT N then
+PG native percentile_cont aggregate — microseconds even at
+millions of rows via index-only scans; continuous
+percentile_cont interpolation differs from in-memory's
+floor-index only at tiny window sizes (nil at window>=20);
+operators can answer "anthropic p95 last hour?" with a
+single SELECT; future Q1 retention policy, Q2 per-tenant
+extension via additive ALTER TABLE).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

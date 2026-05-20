@@ -159,7 +159,7 @@ export class DefaultLlmRouter implements LlmRouter {
           errorKind: errorKind(err),
         };
         attempts.push(attempt);
-        this.latencyTracker.record({
+        await this.latencyTracker.record({
           providerId: choice.providerId,
           latencyMs,
           success: false,
@@ -175,7 +175,7 @@ export class DefaultLlmRouter implements LlmRouter {
         success: true,
         latencyMs,
       });
-      this.latencyTracker.record({
+      await this.latencyTracker.record({
         providerId: choice.providerId,
         latencyMs,
         success: true,
