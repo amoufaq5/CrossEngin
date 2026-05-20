@@ -86,7 +86,9 @@ import {
 } from "./inference-profiles-api.js";
 import {
   buildModelCustomizationJobListQuery,
+  parseModelCustomizationJobDetail,
   parseModelCustomizationJobListResponse,
+  type BedrockModelCustomizationJobDetail,
   type BedrockModelCustomizationJobListResponse,
   type BedrockListModelCustomizationJobsOptions,
 } from "./model-customization-jobs-api.js";
@@ -607,6 +609,30 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseBatchJobDetail(raw);
+  }
+
+  async getModelCustomizationJob(
+    jobIdentifier: string,
+  ): Promise<BedrockModelCustomizationJobDetail> {
+    if (jobIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "getModelCustomizationJob: jobIdentifier must be a non-empty string",
+      });
+    }
+    const path = `/model-customization-jobs/${encodeURIComponent(jobIdentifier)}`;
+    const text = await this.signedControlPlaneGet({ path, query: {} });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `getModelCustomizationJob: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseModelCustomizationJobDetail(raw);
   }
 
   async listModelCustomizationJobs(

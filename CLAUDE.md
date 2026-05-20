@@ -21,15 +21,52 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,339 tests**,
-all green, no type errors. M2.X.5.aa.z.17 ships
+**55 packages + 1 app, 120 meta-schema tables, 7,365 tests**,
+all green, no type errors. M2.X.5.aa.z.18 ships
+`BedrockProvider.getModelCustomizationJob(jobIdentifier)` —
+the rich-detail companion to listModelCustomizationJobs
+(M2.X.5.aa.z.17). Fifth extended-shape detail instance after
+Guardrail (M2.X.5.aa.z.8) / ImportedModel (M2.X.5.aa.z.12) /
+CustomModel (M2.X.5.aa.z.14) / ModelImportJob
+(M2.X.5.aa.z.16). Pattern now fully mature across 5 AWS
+resource types. Structurally analogous to getCustomModel:
+9 required top-level fields (jobArn / jobName /
+outputModelName / roleArn / status / creationTime /
+baseModelArn / trainingDataConfig / outputDataConfig) +
+13 optional. Eight new typed sub-shapes in
+`model-customization-jobs-api.ts`:
+BedrockModelCustomizationJobS3Config, Validator,
+ValidationDataConfig, TrainingMetrics, ValidationMetric,
+VpcConfig, TeacherModelConfig, DistillationConfig,
+CustomizationConfig — structurally mirror the
+BedrockCustomModel* types from M2.X.5.aa.z.14 but typed
+under their own prefix (AWS-contract preservation; if AWS
+diverges them later, no shared-type refactor needed).
+parseModelCustomizationJobDetail validates 9 required fields,
+reuses isBedrockModelCustomizationJobStatus discriminator
+from M2.X.5.aa.z.17 (5-value tuple including Stopping /
+Stopped), enforces hyperParameters as Record<string, string>
+matching AWS wire contract, validates trainingLoss +
+validationLoss as finite numbers (NaN/Infinity throw),
+validates VPC arrays of strings. Field-naming asymmetry vs
+summary preserved verbatim: summary uses customModelArn /
+customModelName (populated post-success); detail uses
+outputModelName (required — operator's requested name) +
+outputModelArn (optional — populated post-success).
+Operators map between them at the application layer.
+Provider validates identifier non-empty BEFORE fetch,
+URI-encodes path, reuses signedControlPlaneGet rail. Bedrock
+control-plane surface now has 16 of N operations; module
+count unchanged at 16. Customization-job read story complete
+(list + get). Five extended-shape detail instances now in
+place — pattern is extremely stable. M2.X.5.aa.z.17 ships
 `BedrockProvider.listModelCustomizationJobs(options?)` against
 AWS's `ListModelCustomizationJobs` endpoint — the seventh
 paginated control-plane enumeration. Parallels
@@ -2101,7 +2138,12 @@ failureMessage / modelDataSource.s3DataSource.s3Uri / roleArn
 M2.X.5.aa.z.17 (Bedrock listModelCustomizationJobs — seventh
 paginated enumeration; parallels listModelImportJobs but for
 AWS-native fine-tunes with a richer 5-value status vocabulary
-including Stopping/Stopped).
+including Stopping/Stopped), ADR-0123 covers M2.X.5.aa.z.18
+(Bedrock getModelCustomizationJob with training/validation
+detail — fifth extended-shape detail instance; 8 new typed
+sub-shapes structurally mirroring getCustomModel; field-name
+asymmetry preserved verbatim; reproducibility / triage / cost
+/ distillation lineage workflows unblocked).
 
 ## Architecture in 90 seconds
 
@@ -2328,7 +2370,8 @@ re-exporting everything.
   getGuardrail + listInferenceProfiles + getInferenceProfile
   + listImportedModels + getImportedModel + listCustomModels +
   getCustomModel + listModelImportJobs + getModelImportJob +
-  listModelCustomizationJobs — embed dispatches on
+  listModelCustomizationJobs + getModelCustomizationJob —
+  embed dispatches on
   family, loops over Titan or batches Cohere; listBatches GETs
   the control-plane host with sig v4 + sorted query string via
   signedControlPlaneGet helper; getBatch validates jobIdentifier
@@ -3261,7 +3304,17 @@ seventh paginated control-plane enumeration; AWS-native
 fine-tune surface paralleling listModelImportJobs but with a
 richer 5-value status vocabulary including Stopping/Stopped
 for operator-issued mid-training aborts; customizationType
-preserved as string for forward-compat).
+preserved as string for forward-compat), ADR-0123 covers
+Phase 2 M2.X.5.aa.z.18 (Bedrock getModelCustomizationJob with
+training/validation detail — fifth extended-shape detail
+instance; 9 required + 13 optional fields; 8 typed sub-shapes
+including S3Config / Validator / ValidationDataConfig /
+TrainingMetrics / ValidationMetric / TeacherModelConfig /
+DistillationConfig / CustomizationConfig structurally
+mirroring getCustomModel but typed independently per
+AWS-contract preservation; field-naming asymmetry vs summary
+preserved verbatim — detail uses outputModelName/outputModelArn,
+summary uses customModelName/customModelArn).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

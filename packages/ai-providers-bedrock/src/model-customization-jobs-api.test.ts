@@ -10,6 +10,7 @@ import {
   BEDROCK_MODEL_CUSTOMIZATION_JOB_STATUSES,
   buildModelCustomizationJobListQuery,
   isBedrockModelCustomizationJobStatus,
+  parseModelCustomizationJobDetail,
   parseModelCustomizationJobListResponse,
   parseModelCustomizationJobSummary,
 } from "./model-customization-jobs-api.js";
@@ -330,5 +331,204 @@ describe("parseModelCustomizationJobListResponse", () => {
         modelCustomizationJobSummaries: "oops",
       }),
     ).toThrow(/not an array/);
+  });
+});
+
+describe("parseModelCustomizationJobDetail", () => {
+  function minimal(): Record<string, unknown> {
+    return {
+      jobArn:
+        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+      jobName: "tenant-x-haiku-finetune",
+      outputModelName: "tenant-x-haiku-v1",
+      roleArn: "arn:aws:iam::123456789012:role/BedrockFineTuneRole",
+      status: "InProgress",
+      creationTime: "2026-04-15T12:00:00Z",
+      baseModelArn:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
+      trainingDataConfig: { s3Uri: "s3://tenant-x-data/train/" },
+      outputDataConfig: { s3Uri: "s3://tenant-x-data/output/" },
+    };
+  }
+
+  it("parses minimal required fields", () => {
+    const d = parseModelCustomizationJobDetail(minimal());
+    expect(d.outputModelName).toBe("tenant-x-haiku-v1");
+    expect(d.roleArn).toMatch(/^arn:aws:iam::/);
+    expect(d.baseModelArn).toMatch(/claude-3-haiku/);
+    expect(d.trainingDataConfig.s3Uri).toBe("s3://tenant-x-data/train/");
+    expect(d.outputDataConfig.s3Uri).toBe("s3://tenant-x-data/output/");
+    expect(d.outputModelArn).toBeUndefined();
+    expect(d.hyperParameters).toBeUndefined();
+  });
+
+  it("parses all optional fields when present (completed fine-tune)", () => {
+    const d = parseModelCustomizationJobDetail({
+      ...minimal(),
+      status: "Completed",
+      outputModelArn:
+        "arn:aws:bedrock:us-east-1:123:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/xyz",
+      clientRequestToken: "req-fine-tune-001",
+      lastModifiedTime: "2026-04-15T13:00:00Z",
+      endTime: "2026-04-15T13:00:00Z",
+      customizationType: "FINE_TUNING",
+      outputModelKmsKeyArn: "arn:aws:kms:us-east-1:123:key/k1",
+      hyperParameters: {
+        epochCount: "10",
+        learningRate: "0.0001",
+      },
+      validationDataConfig: {
+        validators: [{ s3Uri: "s3://tenant-x-data/val/" }],
+      },
+      trainingMetrics: { trainingLoss: 0.42 },
+      validationMetrics: [{ validationLoss: 0.51 }],
+    });
+    expect(d.status).toBe("Completed");
+    expect(d.outputModelArn).toMatch(/custom-model/);
+    expect(d.customizationType).toBe("FINE_TUNING");
+    expect(d.hyperParameters?.["epochCount"]).toBe("10");
+    expect(d.trainingMetrics?.trainingLoss).toBe(0.42);
+    expect(d.validationMetrics?.[0]!.validationLoss).toBe(0.51);
+  });
+
+  it("parses a Failed-job detail with failureMessage", () => {
+    const d = parseModelCustomizationJobDetail({
+      ...minimal(),
+      status: "Failed",
+      failureMessage: "training data validation failed",
+    });
+    expect(d.status).toBe("Failed");
+    expect(d.failureMessage).toMatch(/training data/);
+  });
+
+  it("parses a Stopped-job detail (operator-initiated abort)", () => {
+    const d = parseModelCustomizationJobDetail({
+      ...minimal(),
+      status: "Stopped",
+      lastModifiedTime: "2026-04-15T12:30:00Z",
+      endTime: "2026-04-15T12:30:00Z",
+    });
+    expect(d.status).toBe("Stopped");
+    expect(d.endTime).toBe("2026-04-15T12:30:00Z");
+  });
+
+  it("parses vpcConfig + customizationConfig.distillationConfig", () => {
+    const d = parseModelCustomizationJobDetail({
+      ...minimal(),
+      customizationType: "DISTILLATION",
+      vpcConfig: {
+        subnetIds: ["subnet-1"],
+        securityGroupIds: ["sg-1"],
+      },
+      customizationConfig: {
+        distillationConfig: {
+          teacherModelConfig: {
+            teacherModelIdentifier:
+              "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            maxResponseLengthForInference: 4096,
+          },
+        },
+      },
+    });
+    expect(d.vpcConfig?.subnetIds).toEqual(["subnet-1"]);
+    expect(
+      d.customizationConfig?.distillationConfig?.teacherModelConfig
+        .teacherModelIdentifier,
+    ).toMatch(/claude-3-5-sonnet/);
+    expect(
+      d.customizationConfig?.distillationConfig?.teacherModelConfig
+        .maxResponseLengthForInference,
+    ).toBe(4096);
+  });
+
+  it("rejects missing required field", () => {
+    const bad = minimal();
+    delete bad["outputModelName"];
+    expect(() => parseModelCustomizationJobDetail(bad)).toThrow(
+      /outputModelName/,
+    );
+  });
+
+  it("rejects unknown status", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({ ...minimal(), status: "Pending" }),
+    ).toThrow(/unknown job status/);
+  });
+
+  it("rejects missing trainingDataConfig", () => {
+    const bad = minimal();
+    delete bad["trainingDataConfig"];
+    expect(() => parseModelCustomizationJobDetail(bad)).toThrow(
+      /trainingDataConfig/,
+    );
+  });
+
+  it("rejects trainingDataConfig without s3Uri", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        trainingDataConfig: {},
+      }),
+    ).toThrow(/trainingDataConfig\.s3Uri/);
+  });
+
+  it("rejects non-string hyperParameters value", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        hyperParameters: { learningRate: 0.0001 },
+      }),
+    ).toThrow(/hyperParameters\.learningRate/);
+  });
+
+  it("rejects validationDataConfig without validators array", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        validationDataConfig: {},
+      }),
+    ).toThrow(/validators/);
+  });
+
+  it("rejects non-finite trainingLoss", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        trainingMetrics: { trainingLoss: Number.POSITIVE_INFINITY },
+      }),
+    ).toThrow(/trainingLoss/);
+  });
+
+  it("rejects non-array validationMetrics", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        validationMetrics: { validationLoss: 0.5 },
+      }),
+    ).toThrow(/validationMetrics is not an array/);
+  });
+
+  it("rejects vpcConfig with non-string entries", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        vpcConfig: { subnetIds: [42], securityGroupIds: ["sg-1"] },
+      }),
+    ).toThrow(/subnetIds/);
+  });
+
+  it("rejects distillationConfig without teacherModelConfig", () => {
+    expect(() =>
+      parseModelCustomizationJobDetail({
+        ...minimal(),
+        customizationConfig: { distillationConfig: {} },
+      }),
+    ).toThrow(/teacherModelConfig/);
+  });
+
+  it("rejects non-object response", () => {
+    expect(() => parseModelCustomizationJobDetail(null)).toThrow(
+      /not a JSON object/,
+    );
   });
 });
