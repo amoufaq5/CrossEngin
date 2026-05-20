@@ -4159,6 +4159,288 @@ describe("BedrockProvider — deleteGuardrail (M2.X.5.aa.z.21)", () => {
   });
 });
 
+describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
+  interface MethodCall {
+    method: string;
+    url: string;
+  }
+
+  function applicationProfileJson(
+    id: string = "ip-application-1",
+    extras: Record<string, unknown> = {},
+  ): string {
+    return JSON.stringify({
+      inferenceProfileId: id,
+      inferenceProfileName: "test",
+      inferenceProfileArn: `arn:aws:bedrock:us-east-1:123:application-inference-profile/${id}`,
+      models: [
+        { modelArn: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet" },
+      ],
+      status: "ACTIVE",
+      type: "APPLICATION",
+      createdAt: "2026-05-19T12:00:00.000Z",
+      updatedAt: "2026-05-19T12:00:00.000Z",
+      ...extras,
+    });
+  }
+
+  function systemProfileJson(
+    id: string = "ip-system-1",
+  ): string {
+    return JSON.stringify({
+      inferenceProfileId: id,
+      inferenceProfileName: "anthropic.claude-3-sonnet",
+      inferenceProfileArn: `arn:aws:bedrock:us-east-1::inference-profile/${id}`,
+      models: [
+        { modelArn: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet" },
+      ],
+      status: "ACTIVE",
+      type: "SYSTEM_DEFINED",
+      createdAt: "2026-05-19T12:00:00.000Z",
+      updatedAt: "2026-05-19T12:00:00.000Z",
+    });
+  }
+
+  function sequencedFetch(opts: {
+    calls: MethodCall[];
+    onGet: () => { ok: boolean; status: number; text: string };
+    onDelete?: () => { ok: boolean; status: number; text: string };
+  }): FetchLike {
+    return async (url, init) => {
+      opts.calls.push({ method: init.method, url });
+      const resp =
+        init.method === "DELETE"
+          ? (opts.onDelete ?? (() => ({ ok: true, status: 204, text: "" })))()
+          : opts.onGet();
+      return {
+        ok: resp.ok,
+        status: resp.status,
+        text: async () => resp.text,
+        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
+      };
+    };
+  }
+
+  it("pre-flights GET, then DELETEs when type === APPLICATION", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson("ip-application-1") }),
+      }),
+    });
+    await provider.deleteInferenceProfile("ip-application-1");
+    expect(calls.length).toBe(2);
+    expect(calls[0]?.method).toBe("GET");
+    expect(calls[0]?.url).toContain("/inference-profiles/ip-application-1");
+    expect(calls[1]?.method).toBe("DELETE");
+    expect(calls[1]?.url).toContain("/inference-profiles/ip-application-1");
+  });
+
+  it("refuses to delete SYSTEM_DEFINED profiles and NEVER issues DELETE", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: systemProfileJson("ip-system-1") }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-system-1"),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.method).toBe("GET");
+  });
+
+  it("system-profile guard error message names the profile and type", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: systemProfileJson("ip-system-1") }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-system-1"),
+    ).rejects.toThrow(/SYSTEM_DEFINED/);
+    await expect(
+      provider.deleteInferenceProfile("ip-system-1"),
+    ).rejects.toThrow(/ip-system-1/);
+  });
+
+  it("URI-encodes ARN colons on both GET and DELETE", async () => {
+    const calls: MethodCall[] = [];
+    const arn = "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc";
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson(arn) }),
+      }),
+    });
+    await provider.deleteInferenceProfile(arn);
+    expect(calls[0]?.url).toContain("%3A");
+    expect(calls[1]?.url).toContain("%3A");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson() }),
+      }),
+    });
+    await provider.deleteInferenceProfile("ip-application-1");
+    for (const call of calls) {
+      expect(call.url).not.toContain("bedrock-runtime.");
+    }
+  });
+
+  it("validates identifier BEFORE pre-flight GET", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(provider.deleteInferenceProfile("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
+    expect(called).toBe(0);
+  });
+
+  it("propagates 404 from the pre-flight GET (profile doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such profile",
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-missing"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 from the pre-flight GET (no GetInferenceProfile permission)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-application-1"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 404 from the DELETE (race: profile deleted between GET and DELETE)", async () => {
+    const calls: MethodCall[] = [];
+    const provider = build({
+      fetch: sequencedFetch({
+        calls,
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson("ip-application-1") }),
+        onDelete: () => ({
+          ok: false,
+          status: 404,
+          text: JSON.stringify({
+            __type: "ResourceNotFoundException",
+            message: "deleted already",
+          }),
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-application-1"),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    expect(calls.length).toBe(2);
+  });
+
+  it("propagates 403 from the DELETE (have GET but not DeleteInferenceProfile permission)", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson("ip-application-1") }),
+        onDelete: () => ({
+          ok: false,
+          status: 403,
+          text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-application-1"),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 from the DELETE", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson("ip-application-1") }),
+        onDelete: () => ({
+          ok: false,
+          status: 429,
+          text: JSON.stringify({
+            __type: "ThrottlingException",
+            message: "slow down",
+          }),
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-application-1"),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("classifies 409 ConflictException on DELETE as conflict_error (profile in use)", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson("ip-application-1") }),
+        onDelete: () => ({
+          ok: false,
+          status: 409,
+          text: JSON.stringify({
+            __type: "ConflictException",
+            message: "profile is in use by an active deployment",
+          }),
+        }),
+      }),
+    });
+    await expect(
+      provider.deleteInferenceProfile("ip-application-1"),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("resolves void on 204 from the DELETE", async () => {
+    const provider = build({
+      fetch: sequencedFetch({
+        calls: [],
+        onGet: () => ({ ok: true, status: 200, text: applicationProfileJson("ip-application-1") }),
+        onDelete: () => ({ ok: true, status: 204, text: "" }),
+      }),
+    });
+    const result = await provider.deleteInferenceProfile("ip-application-1");
+    expect(result).toBeUndefined();
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

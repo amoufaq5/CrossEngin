@@ -866,6 +866,25 @@ export class BedrockProvider implements LlmProvider {
     return parseInferenceProfileDetail(raw);
   }
 
+  async deleteInferenceProfile(profileIdentifier: string): Promise<void> {
+    if (profileIdentifier.length === 0) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message:
+          "deleteInferenceProfile: profileIdentifier must be a non-empty string",
+      });
+    }
+    const detail = await this.getInferenceProfile(profileIdentifier);
+    if (detail.type !== "APPLICATION") {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `deleteInferenceProfile: cannot delete ${detail.type} profile '${profileIdentifier}'. Only APPLICATION-type profiles are operator-owned and deletable.`,
+      });
+    }
+    const path = `/inference-profiles/${encodeURIComponent(profileIdentifier)}`;
+    await this.signedControlPlaneDelete({ path });
+  }
+
   async listInferenceProfiles(
     options: BedrockListInferenceProfilesOptions = {},
   ): Promise<BedrockInferenceProfileListResponse> {

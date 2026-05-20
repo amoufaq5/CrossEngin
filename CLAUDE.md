@@ -21,15 +21,54 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 122 meta-schema tables, 7,613 tests**,
-all green, no type errors. M6.7.x closes ADR-0135 Q1 + Q4 in
+**56 packages + 1 app, 122 meta-schema tables, 7,626 tests**,
+all green, no type errors. M2.X.5.aa.z.22 closes ADR-0136 Q2
+by adding `deleteInferenceProfile(profileIdentifier)` to
+BedrockProvider — the 4th DELETE on the Bedrock control
+plane and the first "smart" delete with a mandatory pre-
+flight guard. The Bedrock `inference-profiles` namespace
+contains TWO kinds of resources sharing the same URI path:
+type=APPLICATION (operator-created + operator-deletable) and
+type=SYSTEM_DEFINED (AWS-owned + immutable). A blind DELETE
+on a system profile yields an opaque ValidationException
+from AWS. The substrate does better: deleteInferenceProfile
+runs a mandatory pre-flight `getInferenceProfile` (serving
+three purposes simultaneously: existence check via 404 →
+not_found_error, GET-permission check via 403 →
+permission_error, and reading the `type` field for the
+guard). If type !== "APPLICATION", throws
+invalid_request_error with a message naming the profile +
+type — NEVER issues DELETE. If type === "APPLICATION",
+issues DELETE via the shared signedControlPlaneDelete
+(ADR-0136). No bypass flag (substrate can't override AWS;
+mandatory guard is contract). No type-from-caller (would be
+a footgun — pre-flight reads ground truth). No cache (rare
+operation; PG-style read every time). Pre-flight cost: 1
+extra GET per delete — acceptable on a DELETE operator
+action, would be expensive in a hot path. Race window
+between GET and DELETE (profile deleted by another caller):
+DELETE returns 404 → propagates verbatim as
+not_found_error; same idempotency-via-isNotFoundError wrap
+pattern as ADR-0136 applies. Bedrock control plane now has
+18 read + 2 stop + 1 create + 4 delete = 25 operations.
+Pre-flight-guard pattern established for future "two-typed"
+resources where the same URI handles AWS-owned and
+operator-owned resources. 13 new tests in provider.test.ts:
+APPLICATION happy path (GET then DELETE), SYSTEM_DEFINED
+refusal (NO DELETE issued), guard error message names
+profile + type, ARN URI-encoding on both calls, control-
+plane host, identifier-blank pre-flight (before any GET),
+404 / 403 from pre-flight GET, 404 / 403 / 429 / 409 from
+DELETE, 204 success. Uses a new sequencedFetch test helper
+that discriminates on init.method. M6.7.x closes ADR-0135
+Q1 + Q4 in
 one milestone: per-tenant cost ceiling configuration as data
 rather than code. Three additive changes: (1)
 META_LLM_COST_CEILINGS as the 122nd meta-schema table with
@@ -2597,7 +2636,13 @@ covers M6.7.x (per-tenant cost ceiling — closes ADR-0135 Q1
 getTenantCostCeiling resolver field on router +
 PostgresCostCeilingResolver — whole-object override
 semantic: tenant ceiling REPLACES global rather than
-merging; ceilings are now data, not code).
+merging; ceilings are now data, not code), ADR-0138 covers
+M2.X.5.aa.z.22 (Bedrock deleteInferenceProfile — closes
+ADR-0136 Q2 — first "smart" delete with mandatory pre-
+flight GET that reads `type` and refuses SYSTEM_DEFINED
+profiles before any DELETE is issued; 4th DELETE on the
+Bedrock control plane; pre-flight-guard pattern set for
+future two-typed resources).
 
 ## Architecture in 90 seconds
 
@@ -3908,7 +3953,29 @@ operators adjust without redeploying; schema forward-compat
 with future history-aware reads via effective_from column;
 zero data migration needed — pre-existing tenants get the
 global ceiling, new per-tenant rows opt-in via INSERT; per-
-tier pricing now expressible (free / pro / enterprise)).
+tier pricing now expressible (free / pro / enterprise)),
+ADR-0138 covers Phase 2 M2.X.5.aa.z.22 (Bedrock
+deleteInferenceProfile with system-profile guard — closes
+ADR-0136 Q2; 4th DELETE on the Bedrock control plane and
+the first "smart" delete with mandatory pre-flight; the
+inference-profiles namespace contains two kinds of
+resources sharing the same URI — APPLICATION (operator-
+deletable) vs SYSTEM_DEFINED (AWS-owned + immutable); a
+blind DELETE on a system profile yields opaque AWS
+ValidationException so the substrate runs a mandatory pre-
+flight `getInferenceProfile` serving three purposes
+simultaneously (existence check via 404 → not_found_error,
+GET-permission check via 403 → permission_error, type
+field read for guard); type !== "APPLICATION" → throw
+invalid_request_error with profile + type in message + NO
+DELETE issued; type === "APPLICATION" → DELETE via
+signedControlPlaneDelete; no bypass flag, no type-from-
+caller, no cache; race window between GET and DELETE
+propagates the DELETE-side 404 verbatim — same idempotency-
+via-isNotFoundError pattern as ADR-0136 applies; pre-flight-
+guard pattern established for future two-typed resources;
+Bedrock control plane now has 18 read + 2 stop + 1 create +
+4 delete = 25 operations).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
