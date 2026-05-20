@@ -21,15 +21,72 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,068 tests**,
-all green, no type errors. M6.8.y closes ADR-0145 Q5 by
+**56 packages + 1 app, 128 meta-schema tables, 8,079 tests**,
+all green, no type errors. M6.7.zz.tenant.dashboard closes
+ADR-0155 Q6 by adding `effectiveRetention(tenantId,
+tableName)` to PostgresTraceRetention — single resolver
+method returning a discriminated-union
+EffectiveRetentionResolution with three variants: tenant
+(source="tenant" + retentionDays + enabled=true + tenantId),
+platform (source="platform" + retentionDays + enabled),
+none (source="none" + retentionDays=null + enabled=false).
+Operator pain solved: dashboard "show retention by tenant",
+compliance audit "is tenant X compliant?", GDPR Article 15
+"include retention policy in evidence pack", admin UI
+"badge tenant as Custom Policy vs Platform Default vs No
+Policy". Resolution algorithm: query
+meta.tenant_retention_policies WHERE tenant_id = $1 AND
+table_name = $2; if row exists AND enabled = true → return
+source="tenant" + skip platform query (single round-trip
+happy path); else query meta.retention_policies WHERE
+table_name = $1; if row exists → return source="platform"
++ enabled reflects platform row (operators distinguish
+platform-policy-disabled from no-policy-at-all); else
+return source="none". Semantic alignment with prune:
+enabled=true requirement on per-tenant policy matches
+ADR-0155's prune semantics where disabled per-tenant
+policies fall back to platform-default. Discriminated
+union over flat shape because: (1) source="tenant"
+guarantees tenantId is present — TypeScript narrowing
+gives type-safety, flat shape forces optional handling;
+(2) source="tenant" guarantees retentionDays is number not
+null — flat shape forces nullable handling everywhere;
+(3) future variants (e.g., compliance_override for
+HIPAA-strict overriding tenant policies) extend the union
+additively without breaking forward-compat for narrowing
+consumers. Method on PostgresTraceRetention (not separate
+class) because retention has no router-side hot path —
+this is a CLI/dashboard concern; co-locating keeps SQL
+parameterization (SCHEMA + table names) consistent and
+avoids per-call class instantiation. Two PG round-trips
+worst case; one best case. Works for llm_latency_samples
+even though no tenant override possible (DB CHECK
+constraint excludes that table) — resolver naturally
+returns source="platform" or "none" since tenant query
+finds nothing. Returns source="none" for unknown table
+names — operators see "this isn't a prunable table"
+distinctly from "no policy configured". No schema change,
+no new dependencies, pure code addition.
+11 new tests in trace-retention.test.ts: tenant-source
+happy path with enabled override, fallback to platform
+when per-tenant disabled, fallback when no per-tenant
+exists, platform-source with disabled flag preserved,
+none-source on neither, llm_latency_samples works (no
+tenant possible — always platform or none), unknown
+table returns none, query parameters threaded correctly
+((tenant_id, table_name) PK lookup), single-round-trip
+on happy path (platform query skipped), two-round-trips
+on disabled-tenant fallback, TypeScript discriminated
+union narrowing test asserts source="tenant" branch
+gives tenantId: string + retentionDays: number +
+enabled: true. M6.8.y closes ADR-0145 Q5 by
 adding the `setExactTags` operator helper to
 `@crossengin/ai-providers-bedrock`. New tagging-helpers.ts
 file hosts a standalone exported function (not a
@@ -3747,7 +3804,18 @@ is now first-class operator wiring), ADR-0158 covers M6.8.y
 — standalone function in tagging-helpers.ts preserves
 substrate's three-tier layering; idempotent diff-then-apply
 with minimum API calls; convergence to desired state
-without operators writing diff logic).
+without operators writing diff logic), ADR-0159 covers
+M6.7.zz.tenant.dashboard (effectiveRetention resolver on
+PostgresTraceRetention — closes ADR-0155 Q6 — single
+method returning EffectiveRetentionResolution discriminated
+union with three variants tenant/platform/none; resolution
+algorithm matches prune semantics — enabled per-tenant
+policy wins, disabled falls back to platform-default;
+single round-trip happy path when enabled per-tenant policy
+exists; method on PostgresTraceRetention not separate
+class since retention has no router-side hot path; admin
+dashboard + compliance audit + GDPR Article 15 + admin UI
+workflows unblocked).
 
 ## Architecture in 90 seconds
 
@@ -5191,6 +5259,51 @@ type surface; substrate layering preserved — BedrockProvider
 stays 1:1 wrapper of AWS endpoints; if helpers proliferate
 above 5 functions split into @crossengin/bedrock-helpers
 package).
+ADR-0159 covers Phase 2 M6.7.zz.tenant.dashboard
+(`effectiveRetention(tenantId, tableName)` resolver on
+PostgresTraceRetention — closes ADR-0155 Q6; single method
+returns a discriminated-union EffectiveRetentionResolution
+with three variants: tenant (source="tenant" + retentionDays
++ enabled=true + tenantId), platform (source="platform" +
+retentionDays + enabled where boolean reflects platform row
+state), none (source="none" + retentionDays=null +
+enabled=false); resolution algorithm queries
+meta.tenant_retention_policies WHERE tenant_id = $1 AND
+table_name = $2 first; if row exists AND enabled=true →
+return source="tenant" + SKIP platform query (single
+round-trip happy path); else query meta.retention_policies
+WHERE table_name = $1; if row exists → return
+source="platform" with enabled reflecting platform row;
+else return source="none"; semantic alignment with prune —
+enabled=true requirement matches ADR-0155 where disabled
+per-tenant policies fall back to platform-default;
+discriminated union over flat shape because narrowing on
+source gives type-safe field access (tenant guarantees
+tenantId is present, platform guarantees retentionDays is
+number not null, future variants like compliance_override
+extend additively); method on PostgresTraceRetention not
+separate class since retention has no router-side hot path
+— this is CLI/dashboard concern, co-locating keeps SQL
+parameterization consistent; two PG round-trips worst case,
+one best case; works for llm_latency_samples (always
+platform or none since no tenant override possible);
+unknown tables return source="none" — operators see
+"this isn't a prunable table" distinctly from "no policy
+configured"; no schema change, no new dependencies, pure
+code addition; operator workflows unblocked — admin
+dashboards via "retention by tenant", compliance audits
+via "is tenant X compliant?", GDPR Article 15 evidence
+packs include retention policy attribution, admin UIs
+badge tenants as Custom Policy / Platform Default /
+DISABLED / No Policy; rejected alternatives — reuse
+listTenantPolicies + listPolicies operator-side (replicates
+resolution logic, two full SELECTs), return raw rows in
+tuple (consumer still writes resolution), materialized
+view (premature; operator-side caching sufficient), PG
+function for resolution (deploys server-side functions
+unnecessarily), resolve via previewPrune (semantics drift),
+split getTenantPolicy + getPlatformPolicy methods (leaks
+resolution to caller).
 ADR-0157 covers Phase 2 M6.8.x.trace
 (`ceiling_resolved` RouterInstrumentation event +
 getTenantCostCeilingDetailed callback — closes ADR-0154 Q1;

@@ -63,6 +63,24 @@ export interface RetentionPreviewResult {
   readonly cutoffMs: number | null;
 }
 
+export type EffectiveRetentionResolution =
+  | {
+      readonly source: "tenant";
+      readonly retentionDays: number;
+      readonly enabled: true;
+      readonly tenantId: string;
+    }
+  | {
+      readonly source: "platform";
+      readonly retentionDays: number;
+      readonly enabled: boolean;
+    }
+  | {
+      readonly source: "none";
+      readonly retentionDays: null;
+      readonly enabled: false;
+    };
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -321,6 +339,48 @@ export class PostgresTraceRetention {
     }
 
     return results;
+  }
+
+  async effectiveRetention(
+    tenantId: string,
+    tableName: string,
+  ): Promise<EffectiveRetentionResolution> {
+    const tenantResult = await this.conn.query<RawTenantPolicyRow>(
+      `SELECT tenant_id, table_name, retention_days, enabled, last_pruned_at
+       FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+       WHERE tenant_id = $1 AND table_name = $2`,
+      [tenantId, tableName],
+    );
+    const tenantRow = tenantResult.rows[0];
+    if (tenantRow !== undefined && tenantRow.enabled) {
+      return {
+        source: "tenant",
+        retentionDays: tenantRow.retention_days,
+        enabled: true,
+        tenantId: tenantRow.tenant_id,
+      };
+    }
+
+    const platformResult = await this.conn.query<RawPolicyRow>(
+      `SELECT table_name, retention_days, enabled, last_pruned_at
+       FROM ${SCHEMA}.${POLICIES_TABLE}
+       WHERE table_name = $1`,
+      [tableName],
+    );
+    const platformRow = platformResult.rows[0];
+    if (platformRow !== undefined) {
+      return {
+        source: "platform",
+        retentionDays: platformRow.retention_days,
+        enabled: platformRow.enabled,
+      };
+    }
+
+    return {
+      source: "none",
+      retentionDays: null,
+      enabled: false,
+    };
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {

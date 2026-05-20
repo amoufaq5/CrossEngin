@@ -883,3 +883,256 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     expect(tables).not.toContain("llm_latency_samples");
   });
 });
+
+describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  function tenantPolicyRow(
+    tenantId: string,
+    tableName: string,
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      last_pruned_at: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id: tenantId,
+      table_name: tableName,
+      retention_days: 7,
+      enabled: true,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("returns source='tenant' when an enabled per-tenant policy exists", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              retention_days: 30,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result).toEqual({
+      source: "tenant",
+      retentionDays: 30,
+      enabled: true,
+      tenantId: TENANT_A,
+    });
+  });
+
+  it("falls back to platform policy when per-tenant policy is disabled", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              retention_days: 30,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 90 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result).toEqual({
+      source: "platform",
+      retentionDays: 90,
+      enabled: true,
+    });
+  });
+
+  it("falls back to platform policy when no per-tenant policy exists", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 90 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result).toEqual({
+      source: "platform",
+      retentionDays: 90,
+      enabled: true,
+    });
+  });
+
+  it("returns source='platform' with enabled=false when platform policy is disabled", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            policyRow("workflow_traces", {
+              enabled: false,
+              retention_days: 90,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result).toEqual({
+      source: "platform",
+      retentionDays: 90,
+      enabled: false,
+    });
+  });
+
+  it("returns source='none' when neither per-tenant nor platform policy exists", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    expect(result).toEqual({
+      source: "none",
+      retentionDays: null,
+      enabled: false,
+    });
+  });
+
+  it("works for llm_latency_samples (no tenant override possible — always platform or none)", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("llm_latency_samples", { retention_days: 30 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "llm_latency_samples");
+    expect(result).toEqual({
+      source: "platform",
+      retentionDays: 30,
+      enabled: true,
+    });
+  });
+
+  it("returns source='none' for unknown tables", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "unknown_table");
+    expect(result).toEqual({
+      source: "none",
+      retentionDays: null,
+      enabled: false,
+    });
+  });
+
+  it("queries tenant_retention_policies with the (tenant_id, table_name) PK lookup", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetention(TENANT_A, "workflow_traces");
+    const tenantCall = capture.find((c) =>
+      c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(tenantCall?.params).toEqual([TENANT_A, "workflow_traces"]);
+    expect(tenantCall?.sql).toContain("tenant_id = $1");
+    expect(tenantCall?.sql).toContain("table_name = $2");
+  });
+
+  it("skips the platform query when an enabled per-tenant policy exists (single round-trip happy path)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetention(TENANT_A, "workflow_traces");
+    const platformCall = capture.find(
+      (c) =>
+        c.sql.includes("FROM meta.retention_policies") &&
+        !c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(platformCall).toBeUndefined();
+  });
+
+  it("issues both queries when per-tenant policy is disabled (two round-trips for the fallback)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [tenantPolicyRow(TENANT_A, "workflow_traces", { enabled: false })],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetention(TENANT_A, "workflow_traces");
+    const tenantCall = capture.find((c) =>
+      c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    const platformCall = capture.find(
+      (c) =>
+        c.sql.includes("FROM meta.retention_policies") &&
+        !c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(tenantCall).toBeDefined();
+    expect(platformCall).toBeDefined();
+  });
+
+  it("TypeScript discriminated union: source='tenant' narrows to include tenantId field", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    if (result.source === "tenant") {
+      const tenantId: string = result.tenantId;
+      const retentionDays: number = result.retentionDays;
+      const enabled: true = result.enabled;
+      expect(tenantId).toBe(TENANT_A);
+      expect(retentionDays).toBe(7);
+      expect(enabled).toBe(true);
+    } else {
+      throw new Error("expected source='tenant'");
+    }
+  });
+});
