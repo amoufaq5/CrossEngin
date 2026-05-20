@@ -21,15 +21,76 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,088 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out closes
+**56 packages + 1 app, 128 meta-schema tables, 8,096 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.reason
+closes ADR-0160 Q1 by adding `opt_out_reason TEXT` NULLABLE
+column to META_TENANT_RETENTION_POLICIES with length CHECK
+"opt_out_reason IS NULL OR (char_length(opt_out_reason)
+BETWEEN 1 AND 256)". The opt_out flag from M6.7.zz.tenant.opt-out
+marks tenants as exempt from retention pruning but operators
+had no first-class place to record WHY — audit blind spot
+("why is tenant X opted out?" required hunting tickets/
+Slack/lawyer emails), onboarding handoff problem (institutional
+knowledge leaves with departing operators), compliance
+dashboards (SOC 2 / HIPAA / 21 CFR 11 audits ask "show every
+deviation and the documented reason"), per-reason metrics
+("how many legal holds active?"). NULLABLE not NOT NULL
+because most rows (opt_out=false majority) don't need a
+reason, operators backfilling pre-M6.7.zz.tenant.opt-out.reason
+rows can leave NULL, and forward-compat — tightening to
+NOT NULL after backfill period is easier than relaxing.
+No CHECK tying reason to opt_out state — operators may
+preserve reason as historical context when lifting opt-out
+("this tenant WAS opted out due to X"), may pre-stage
+reason before flipping opt_out=true (legal team writes
+reason during contract review, ops flips flag after sign-
+off), and substrate keeps the columns independent
+informationally. Length [1, 256] — lower 1 prevents empty
+strings (ambiguous: no-reason vs empty-string-reason),
+upper 256 caps storage + forces concise classifiers
+(long-form context belongs in linked ticket systems).
+No pattern constraint — operator taxonomies vary
+(structured "legal_hold:case#42" vs free-form "Subpoena
+from SEC, see ticket #12345"), substrate doesn't prescribe.
+Threading: TenantRetentionPolicyRow gains optOutReason:
+string | null surfaced on listTenantPolicies;
+RetentionRunResult + RetentionPreviewResult gain optional
+optOutReason populated when status === "skipped_opt_out";
+EffectiveRetentionResolution tenant_opt_out variant gains
+required optOutReason: string | null field — resolver
+populates from the row's opt_out_reason column;
+listTenantPolicies + effectiveRetention SELECTs both
+include opt_out_reason column. No changes to DELETE/UPDATE/
+COUNT — reason is purely informational read-path.
+Use cases unblocked: compliance dashboard "opt-outs by
+category" via CASE WHEN LIKE 'legal_hold:%' THEN 'Legal
+Hold' grouping; audit report "every opt-out with documented
+reason" via WHERE opt_out=true ORDER BY opt_out_reason
+NULLS LAST; dashboard tooltip enrichment showing reason
+on badge hover; prune-run audit trail with reason at the
+event source. Rejected alternatives: separate audit table
+meta.tenant_retention_opt_out_history (cleaner but invasive
+trigger-based; defer to unified policy-change audit log
+milestone), JSONB reason column (overkill, harder to query),
+NOT NULL with empty-string default (semantic ambiguity),
+pattern enforcement slug-only (prescribes structure),
+typed enum opt_out_kind (same prescription problem).
+8 new tests: listTenantPolicies SELECT includes
+opt_out_reason column, listTenantPolicies maps to
+optOutReason camelCase field, prune threads optOutReason
+into skipped_opt_out result, prune threads null when no
+reason set, previewPrune threads optOutReason,
+effectiveRetention threads into tenant_opt_out variant,
+effectiveRetention returns null when no reason,
+effectiveRetention SELECT includes opt_out_reason.
+M6.7.zz.tenant.opt-out closes
 ADR-0159 Q1 by adding `opt_out BOOLEAN NOT NULL DEFAULT false`
 column to META_TENANT_RETENTION_POLICIES with cross-column
 CHECK `NOT (enabled = true AND opt_out = true)`. The
@@ -3875,7 +3936,18 @@ column CHECK rejecting (enabled=true AND opt_out=true);
 EffectiveRetentionResolution gains tenant_opt_out variant;
 prune + previewPrune extended with skipped_opt_out status
 + NOT IN subquery widened to (enabled OR opt_out); legal
-hold + 21 CFR Part 11 + VIP contract workflows unblocked).
+hold + 21 CFR Part 11 + VIP contract workflows unblocked),
+ADR-0161 covers M6.7.zz.tenant.opt-out.reason
+(opt_out_reason TEXT NULLABLE column with length CHECK
+[1, 256] — closes ADR-0160 Q1 — surfaced through
+listTenantPolicies + effectiveRetention.tenant_opt_out +
+prune/previewPrune skipped_opt_out results; nullable not
+NOT NULL since most rows opt_out=false; no CHECK tying
+reason to opt_out state — preserves historical context
+on lift-off + supports pre-staged opt-outs; no pattern
+constraint — operator taxonomies vary; informational
+audit context for compliance dashboards + onboarding
+handoff + per-reason metrics).
 
 ## Architecture in 90 seconds
 
@@ -5364,6 +5436,66 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0161 covers Phase 2 M6.7.zz.tenant.opt-out.reason
+(opt_out_reason TEXT NULLABLE audit context column —
+closes ADR-0160 Q1; adds opt_out_reason TEXT to
+META_TENANT_RETENTION_POLICIES with length CHECK
+"opt_out_reason IS NULL OR (char_length(opt_out_reason)
+BETWEEN 1 AND 256)" — nullable not NOT NULL since most
+rows have opt_out=false and need no reason, operators
+backfilling pre-existing rows leave NULL, forward-compat
+tightening to NOT NULL after backfill period is easier
+than relaxing; pain solved — audit blind spot "why is
+tenant X opted out?" without hunting tickets/Slack/lawyer
+emails, onboarding handoff (institutional knowledge
+leaves with departing ops), compliance dashboards
+asking "show every deviation with documented reason",
+per-reason metrics "how many legal holds active?";
+threading — TenantRetentionPolicyRow gains optOutReason
+on listTenantPolicies, RetentionRunResult +
+RetentionPreviewResult gain optional optOutReason
+populated when status="skipped_opt_out",
+EffectiveRetentionResolution.tenant_opt_out variant
+gains required optOutReason: string | null field;
+listTenantPolicies + effectiveRetention SELECTs both
+include opt_out_reason column; DELETE/UPDATE/COUNT
+queries unchanged — reason is purely informational
+read-path; no CHECK tying reason to opt_out state because
+historical context preservation (operators may keep
+reason after lifting opt_out as "this tenant WAS opted
+out due to X" audit history), staged opt-outs (legal
+team writes reason during contract review, ops flips
+opt_out after sign-off), simplicity — substrate doesn't
+enforce semantic alignment between informational columns;
+length [1, 256] — lower 1 prevents empty strings
+(ambiguous no-reason vs empty-string-reason), upper 256
+caps storage + forces concise classifiers; no pattern
+constraint — operator-defined taxonomies vary (structured
+"legal_hold:case#42" vs free-form "Subpoena from SEC,
+see ticket #12345"), adding pattern later is non-
+breaking but removing is breaking; rejected alternatives
+— separate audit table meta.tenant_retention_opt_out_history
+(invasive trigger-based, defer to unified policy-change
+audit log milestone), JSONB reason for structured
+metadata (overkill, harder simple-category queries),
+NOT NULL with empty-string default (semantic ambiguity),
+pattern enforcement slug-only (prescribes structure
+operators may not want), typed enum opt_out_kind
+(taxonomies vary by company); 8 new tests:
+listTenantPolicies SELECT includes opt_out_reason column,
+listTenantPolicies maps to optOutReason camelCase field,
+prune threads optOutReason into skipped_opt_out result,
+prune threads null when no reason set, previewPrune
+threads optOutReason, effectiveRetention threads into
+tenant_opt_out variant, effectiveRetention returns null
+when no reason set, effectiveRetention SELECT includes
+opt_out_reason; future Qs cover reason expiry/freshness
+tracking via opt_out_reason_set_at column, actor
+attribution via opt_out_set_by UUID, reason categories
+companion table for taxonomies, CLI exposure via
+--reason flag, i18n translation in reporting layer,
+constraint tightening to require reason when
+opt_out=true after backfill period).
 ADR-0160 covers Phase 2 M6.7.zz.tenant.opt-out
 (per-tenant retention opt_out flag — closes ADR-0159 Q1;
 adds opt_out BOOLEAN NOT NULL DEFAULT false column to

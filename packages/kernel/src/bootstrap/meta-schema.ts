@@ -9351,6 +9351,12 @@ export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
       default: "false",
       check: "NOT (enabled = true AND opt_out = true)",
     },
+    {
+      name: "opt_out_reason",
+      type: "TEXT",
+      check:
+        "opt_out_reason IS NULL OR (char_length(opt_out_reason) BETWEEN 1 AND 256)",
+    },
     { name: "last_pruned_at", type: "TIMESTAMPTZ" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],

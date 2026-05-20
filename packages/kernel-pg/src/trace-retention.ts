@@ -33,6 +33,7 @@ export interface TenantRetentionPolicyRow {
   readonly retentionDays: number;
   readonly enabled: boolean;
   readonly optOut: boolean;
+  readonly optOutReason: string | null;
   readonly lastPrunedAt: string | null;
 }
 
@@ -49,6 +50,7 @@ export interface RetentionRunResult {
   readonly retentionDays: number;
   readonly deletedCount: number;
   readonly cutoffMs: number | null;
+  readonly optOutReason?: string | null;
 }
 
 export type RetentionPreviewStatus =
@@ -64,6 +66,7 @@ export interface RetentionPreviewResult {
   readonly retentionDays: number;
   readonly wouldDeleteCount: number;
   readonly cutoffMs: number | null;
+  readonly optOutReason?: string | null;
 }
 
 export type EffectiveRetentionResolution =
@@ -78,6 +81,7 @@ export type EffectiveRetentionResolution =
       readonly retentionDays: null;
       readonly enabled: false;
       readonly tenantId: string;
+      readonly optOutReason: string | null;
     }
   | {
       readonly source: "platform";
@@ -100,6 +104,7 @@ interface RawPolicyRow {
 interface RawTenantPolicyRow extends RawPolicyRow {
   readonly tenant_id: string;
   readonly opt_out: boolean;
+  readonly opt_out_reason: string | null;
 }
 
 export class PostgresTraceRetention {
@@ -127,7 +132,7 @@ export class PostgresTraceRetention {
 
   async listTenantPolicies(): Promise<ReadonlyArray<TenantRetentionPolicyRow>> {
     const result = await this.conn.query<RawTenantPolicyRow>(
-      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, last_pruned_at
+      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, last_pruned_at
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        ORDER BY table_name ASC, tenant_id ASC`,
     );
@@ -137,6 +142,7 @@ export class PostgresTraceRetention {
       retentionDays: r.retention_days,
       enabled: r.enabled,
       optOut: r.opt_out,
+      optOutReason: r.opt_out_reason,
       lastPrunedAt: r.last_pruned_at,
     }));
   }
@@ -156,6 +162,7 @@ export class PostgresTraceRetention {
           retentionDays: policy.retentionDays,
           deletedCount: 0,
           cutoffMs: null,
+          optOutReason: policy.optOutReason,
         });
         continue;
       }
@@ -276,6 +283,7 @@ export class PostgresTraceRetention {
           retentionDays: policy.retentionDays,
           wouldDeleteCount: 0,
           cutoffMs: null,
+          optOutReason: policy.optOutReason,
         });
         continue;
       }
@@ -379,7 +387,7 @@ export class PostgresTraceRetention {
     tableName: string,
   ): Promise<EffectiveRetentionResolution> {
     const tenantResult = await this.conn.query<RawTenantPolicyRow>(
-      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, last_pruned_at
+      `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, last_pruned_at
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        WHERE tenant_id = $1 AND table_name = $2`,
       [tenantId, tableName],
@@ -392,6 +400,7 @@ export class PostgresTraceRetention {
           retentionDays: null,
           enabled: false,
           tenantId: tenantRow.tenant_id,
+          optOutReason: tenantRow.opt_out_reason,
         };
       }
       if (tenantRow.enabled) {

@@ -627,6 +627,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       retention_days: number;
       enabled: boolean;
       opt_out: boolean;
+      opt_out_reason: string | null;
       last_pruned_at: string | null;
     }> = {},
   ): Record<string, unknown> {
@@ -636,6 +637,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       retention_days: 7,
       enabled: true,
       opt_out: false,
+      opt_out_reason: null,
       last_pruned_at: null,
       ...overrides,
     };
@@ -676,6 +678,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       retentionDays: 14,
       enabled: false,
       optOut: false,
+      optOutReason: null,
       lastPrunedAt: "2026-05-20T12:00:00.000Z",
     });
   });
@@ -1067,6 +1070,111 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     const tenantResult = results.find((x) => x.tenantId === TENANT_A);
     expect(tenantResult?.status).toBe("skipped_disabled");
   });
+
+  it("listTenantPolicies SELECT includes opt_out_reason column", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listTenantPolicies();
+    expect(capture[0]?.sql).toContain("opt_out_reason");
+  });
+
+  it("listTenantPolicies maps opt_out_reason to optOutReason field", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        tenantPolicyRow(TENANT_A, "workflow_traces", {
+          opt_out: true,
+          enabled: false,
+          opt_out_reason: "legal_hold:case#42",
+        }),
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const policies = await r.listTenantPolicies();
+    expect(policies[0]?.optOutReason).toBe("legal_hold:case#42");
+  });
+
+  it("prune threads optOutReason into the skipped_opt_out result", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              opt_out: true,
+              enabled: false,
+              opt_out_reason: "21cfr11:trial-9",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_opt_out");
+    expect(tenantResult?.optOutReason).toBe("21cfr11:trial-9");
+  });
+
+  it("prune threads NULL optOutReason when opt-out has no reason set", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              opt_out: true,
+              enabled: false,
+              opt_out_reason: null,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_opt_out");
+    expect(tenantResult?.optOutReason).toBeNull();
+  });
+
+  it("previewPrune threads optOutReason into the skipped_opt_out result", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              opt_out: true,
+              enabled: false,
+              opt_out_reason: "vip_contract:tenant-xyz",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.previewPrune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_opt_out");
+    expect(tenantResult?.optOutReason).toBe("vip_contract:tenant-xyz");
+  });
 });
 
 describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)", () => {
@@ -1079,6 +1187,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       retention_days: number;
       enabled: boolean;
       opt_out: boolean;
+      opt_out_reason: string | null;
       last_pruned_at: string | null;
     }> = {},
   ): Record<string, unknown> {
@@ -1088,6 +1197,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       retention_days: 7,
       enabled: true,
       opt_out: false,
+      opt_out_reason: null,
       last_pruned_at: null,
       ...overrides,
     };
@@ -1345,6 +1455,7 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
       retentionDays: null,
       enabled: false,
       tenantId: TENANT_A,
+      optOutReason: null,
     });
   });
 
@@ -1411,5 +1522,69 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
     } else {
       throw new Error("expected source='tenant_opt_out'");
     }
+  });
+
+  it("effectiveRetention threads optOutReason into the tenant_opt_out variant", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+              opt_out_reason: "legal_hold:case#42",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    if (result.source === "tenant_opt_out") {
+      expect(result.optOutReason).toBe("legal_hold:case#42");
+    } else {
+      throw new Error("expected source='tenant_opt_out'");
+    }
+  });
+
+  it("effectiveRetention returns null optOutReason when no reason set on opt-out row", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+              opt_out_reason: null,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
+    if (result.source === "tenant_opt_out") {
+      expect(result.optOutReason).toBeNull();
+    } else {
+      throw new Error("expected source='tenant_opt_out'");
+    }
+  });
+
+  it("effectiveRetention SELECT includes opt_out_reason column", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetention(TENANT_A, "workflow_traces");
+    const tenantCall = capture.find((c) =>
+      c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(tenantCall?.sql).toContain("opt_out_reason");
   });
 });
