@@ -99,7 +99,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { retention_days: 30 })],
             rowCount: 1,
@@ -123,7 +123,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("llm_latency_samples")],
             rowCount: 1,
@@ -145,7 +145,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("llm_call_traces")], rowCount: 1 };
         }
         return { rows: [], rowCount: 0 };
@@ -163,7 +163,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { retention_days: 7 })],
             rowCount: 1,
@@ -179,14 +179,16 @@ describe("PostgresTraceRetention.prune", () => {
     const expectedCutoff = NOW - 7 * 86_400 * 1_000;
     expect(results[0]?.cutoffMs).toBe(expectedCutoff);
     const deleteCall = capture.find((c) => c.sql.includes("DELETE"));
-    expect(deleteCall?.params).toEqual([expectedCutoff]);
+    // Platform-default DELETE on tables with tenant_id includes the
+    // tenant_retention_policies NOT IN subquery, so params are [cutoffMs, table_name].
+    expect(deleteCall?.params).toEqual([expectedCutoff, "workflow_traces"]);
   });
 
   it("updates last_pruned_at on the policy row after a successful prune", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("workflow_traces")], rowCount: 1 };
         }
         return { rows: [], rowCount: 0 };
@@ -205,7 +207,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { enabled: false })],
             rowCount: 1,
@@ -228,7 +230,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("unknown_table_name")],
             rowCount: 1,
@@ -251,7 +253,7 @@ describe("PostgresTraceRetention.prune", () => {
     let deleteCount = 0;
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [
               policyRow("workflow_traces"),
@@ -279,7 +281,7 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("returns 0 deletedCount when no rows match the cutoff", async () => {
     const conn = mockConnection((sql) => {
-      if (sql.startsWith("SELECT")) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
         return { rows: [policyRow("workflow_traces")], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
@@ -294,7 +296,7 @@ describe("PostgresTraceRetention.prune", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { retention_days: 1 })],
             rowCount: 1,
@@ -341,7 +343,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { retention_days: 30 })],
             rowCount: 1,
@@ -368,7 +370,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("llm_latency_samples")], rowCount: 1 };
         }
         return { rows: [{ count: "100" }], rowCount: 1 };
@@ -387,7 +389,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("llm_call_traces")], rowCount: 1 };
         }
         return { rows: [{ count: "5" }], rowCount: 1 };
@@ -405,13 +407,16 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: "10" }], rowCount: 1 };
+        }
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { retention_days: 7 })],
             rowCount: 1,
           };
         }
-        return { rows: [{ count: "10" }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
       },
       capture,
     );
@@ -421,14 +426,15 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const expectedCutoff = NOW - 7 * 86_400 * 1_000;
     expect(results[0]?.cutoffMs).toBe(expectedCutoff);
     const countCall = capture.find((c) => c.sql.includes("COUNT(*)"));
-    expect(countCall?.params).toEqual([expectedCutoff]);
+    // platform-default COUNT for tables with tenant_id includes the NOT IN subquery + table_name param
+    expect(countCall?.params).toEqual([expectedCutoff, "workflow_traces"]);
   });
 
   it("does NOT issue any DELETE statement (read-only)", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("workflow_traces")], rowCount: 1 };
         }
         return { rows: [{ count: "42" }], rowCount: 1 };
@@ -445,7 +451,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("workflow_traces")], rowCount: 1 };
         }
         return { rows: [{ count: "42" }], rowCount: 1 };
@@ -462,7 +468,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [policyRow("workflow_traces", { enabled: false })],
             rowCount: 1,
@@ -485,7 +491,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: [policyRow("unknown_future_table")], rowCount: 1 };
         }
         return { rows: [], rowCount: 0 };
@@ -505,7 +511,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     let nextCount = 5;
     const conn = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return {
             rows: [
               policyRow("workflow_traces"),
@@ -533,11 +539,14 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("parses PG's BIGINT COUNT result via ::TEXT cast (handles large counts)", async () => {
     const conn = mockConnection((sql) => {
-      if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+      if (sql.includes("COUNT(*)")) {
+        // PG COUNT(*) returns BIGINT — large values come back as strings via ::TEXT.
+        return { rows: [{ count: "9876543210" }], rowCount: 1 };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
         return { rows: [policyRow("workflow_traces")], rowCount: 1 };
       }
-      // PG COUNT(*) returns BIGINT — large values come back as strings via ::TEXT.
-      return { rows: [{ count: "9876543210" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
     });
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
@@ -546,8 +555,11 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("returns 0 wouldDeleteCount when no rows match the cutoff", async () => {
     const conn = mockConnection((sql) => {
-      if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
         return { rows: [policyRow("workflow_traces")], rowCount: 1 };
+      }
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return { rows: [], rowCount: 0 };
       }
       return { rows: [{ count: "0" }], rowCount: 1 };
     });
@@ -572,8 +584,11 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const captureP: Capture[] = [];
     const connPreview = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: policies, rowCount: 1 };
+        }
+        if (sql.includes("FROM meta.tenant_retention_policies")) {
+          return { rows: [], rowCount: 0 };
         }
         return { rows: [{ count: "0" }], rowCount: 1 };
       },
@@ -582,7 +597,7 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const captureR: Capture[] = [];
     const connRun = mockConnection(
       (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("retention_policies")) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
           return { rows: policies, rowCount: 1 };
         }
         return { rows: [], rowCount: 0 };
@@ -598,5 +613,273 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
       clock: () => NOW,
     }).prune();
     expect(previewResults[0]?.cutoffMs).toBe(runResults[0]?.cutoffMs);
+  });
+});
+
+describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+
+  function tenantPolicyRow(
+    tenantId: string,
+    tableName: string,
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      last_pruned_at: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id: tenantId,
+      table_name: tableName,
+      retention_days: 7,
+      enabled: true,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("listTenantPolicies SELECTs from meta.tenant_retention_policies ordered by table + tenant", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({
+        rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+        rowCount: 1,
+      }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const policies = await r.listTenantPolicies();
+    expect(policies).toHaveLength(1);
+    expect(capture[0]?.sql).toContain("FROM meta.tenant_retention_policies");
+    expect(capture[0]?.sql).toContain("ORDER BY table_name ASC, tenant_id ASC");
+  });
+
+  it("listTenantPolicies maps snake_case row fields to camelCase API", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        tenantPolicyRow(TENANT_A, "workflow_traces", {
+          retention_days: 14,
+          enabled: false,
+          last_pruned_at: "2026-05-20T12:00:00.000Z",
+        }),
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const policies = await r.listTenantPolicies();
+    expect(policies[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 14,
+      enabled: false,
+      lastPrunedAt: "2026-05-20T12:00:00.000Z",
+    });
+  });
+
+  it("prune issues per-tenant DELETE with tenant_id = $1 AND time_column < cutoff", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", { retention_days: 7 }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 5 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => 1_000_000_000_000 });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("pruned");
+    expect(tenantResult?.tableName).toBe("workflow_traces");
+    expect(tenantResult?.deletedCount).toBe(5);
+
+    const deleteCall = capture.find(
+      (c) => c.sql.includes("DELETE FROM meta.workflow_traces") && c.sql.includes("tenant_id = $1"),
+    );
+    expect(deleteCall).toBeDefined();
+    expect(deleteCall?.params?.[0]).toBe(TENANT_A);
+  });
+
+  it("platform-default DELETE excludes tenants with enabled per-tenant policies (NOT IN subquery)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+          return {
+            rows: [policyRow("workflow_traces", { retention_days: 30 })],
+            rowCount: 1,
+          };
+        }
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 5 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const platformDelete = capture.find(
+      (c) => c.sql.startsWith("DELETE FROM meta.workflow_traces"),
+    );
+    expect(platformDelete?.sql).toContain(
+      "tenant_id NOT IN",
+    );
+    expect(platformDelete?.sql).toContain("FROM meta.tenant_retention_policies");
+    expect(platformDelete?.sql).toContain("enabled = true");
+  });
+
+  it("updates last_pruned_at on the tenant_retention_policies row after a successful per-tenant prune", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const updateCall = capture.find((c) =>
+      c.sql.includes("UPDATE meta.tenant_retention_policies"),
+    );
+    expect(updateCall?.sql).toContain("SET last_pruned_at = now()");
+    expect(updateCall?.sql).toContain(
+      "WHERE tenant_id = $1 AND table_name = $2",
+    );
+    expect(updateCall?.params).toEqual([TENANT_A, "workflow_traces"]);
+  });
+
+  it("skips disabled tenant policies with status=skipped_disabled", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", { enabled: false }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_disabled");
+    expect(tenantResult?.deletedCount).toBe(0);
+  });
+
+  it("skips tenant policies for tables without tenant_id (defensive — CHECK constraint catches first)", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        // Hypothetical bad row that bypassed the CHECK constraint.
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "llm_latency_samples")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    expect(tenantResult?.status).toBe("skipped_unknown_table");
+  });
+
+  it("previewPrune reports per-tenant + platform-default counts independently", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.includes("COUNT(*)")) {
+          // per-tenant COUNT returns 3; platform COUNT returns 7
+          if (sql.includes("tenant_id = $1")) {
+            return { rows: [{ count: "3" }], rowCount: 1 };
+          }
+          return { rows: [{ count: "7" }], rowCount: 1 };
+        }
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+          return { rows: [policyRow("workflow_traces")], rowCount: 1 };
+        }
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.previewPrune();
+    const tenantResult = results.find((x) => x.tenantId === TENANT_A);
+    const platformResult = results.find((x) => x.tenantId === undefined);
+    expect(tenantResult?.wouldDeleteCount).toBe(3);
+    expect(platformResult?.wouldDeleteCount).toBe(7);
+    expect(platformResult?.tableName).toBe("workflow_traces");
+  });
+
+  it("multiple tenants on the same table each get their own prune result", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.startsWith("SELECT") &&
+        sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", { retention_days: 7 }),
+            tenantPolicyRow(TENANT_B, "workflow_traces", { retention_days: 14 }),
+          ],
+          rowCount: 2,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantA = results.find((x) => x.tenantId === TENANT_A);
+    const tenantB = results.find((x) => x.tenantId === TENANT_B);
+    expect(tenantA?.retentionDays).toBe(7);
+    expect(tenantB?.retentionDays).toBe(14);
+    expect(tenantA?.status).toBe("pruned");
+    expect(tenantB?.status).toBe("pruned");
+  });
+
+  it("tablesWithTenantId exposes the prunable tables that can have per-tenant policies", () => {
+    const tables = PostgresTraceRetention.tablesWithTenantId();
+    expect(new Set(tables)).toEqual(
+      new Set(["workflow_traces", "llm_call_traces"]),
+    );
+    expect(tables).not.toContain("llm_latency_samples");
   });
 });

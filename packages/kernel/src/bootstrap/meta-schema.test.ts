@@ -117,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 127 tables", () => {
-    expect(META_TABLES).toHaveLength(127);
+  it("contains 128 tables", () => {
+    expect(META_TABLES).toHaveLength(128);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -243,6 +243,7 @@ describe("META_TABLES", () => {
       "tenant_credits",
       "tenant_data_exports",
       "tenant_lifecycle_events",
+      "tenant_retention_policies",
       "tenant_storage_usage",
       "tenant_tombstones",
       "tenant_unit_economics",

@@ -21,15 +21,72 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.8 + M6.8.x + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 8,026 tests**,
-all green, no type errors. M6.8.x closes ADR-0144 Q2 +
+**56 packages + 1 app, 128 meta-schema tables, 8,036 tests**,
+all green, no type errors. M6.7.zz.tenant closes ADR-0143 Q1
+by adding META_TENANT_RETENTION_POLICIES (128th table) for
+per-tenant retention overrides. Operator workflows unlocked:
+long-tail customer compliance (7-year retention for a
+regulated tenant while platform default stays 90 days),
+cost-shaping per tenant (free-tier 7d / pro 90d / enterprise
+365d), GDPR Article 17 (right to erasure) accelerated for
+opt-in tenants, A/B testing retention policies before
+rolling them platform-wide. Two-table design chosen over
+the NULLABLE-tenant_id alternative from the ADR-0143 Q1
+sketch — PG-version-portable (no NULLS NOT DISTINCT
+requirement), matches META_LLM_TENANT_TIER_MEMBERSHIPS
+pattern, cleaner PK semantics. Schema: tenant_id UUID
+NOT NULL REFERENCES tenants, table_name TEXT with CHECK
+limited to ('workflow_traces', 'llm_call_traces') — NOT
+llm_latency_samples since that table has no tenant_id
+column per ADR-0140 and per-tenant retention is mechanically
+impossible there. PK = (tenant_id, table_name); RLS enabled
+with standard TENANT_ISOLATION_USING; FK ensures deleted
+tenants don't orphan policies. Adapter changes:
+listTenantPolicies() new method, prune() refactored to
+iterate tenant policies FIRST then platform-default;
+previewPrune() mirrors the same structure; result types
+gain optional tenantId field — present on per-tenant
+results, absent on platform-default; PRUNABLE_TABLES map
+upgraded to {timeColumn, hasTenantId} keeping the schema-
+aware allowlist; new static tablesWithTenantId() helper
+exposes which tables support per-tenant policies. The
+interesting SQL: platform-default DELETE on tables WITH
+tenant_id includes a `tenant_id NOT IN (SELECT tenant_id
+FROM meta.tenant_retention_policies WHERE table_name = $X
+AND enabled = true)` subquery to skip tenants with
+overrides — this correctly handles BOTH directions of
+tenant-vs-default deviation: tenants with SHORTER
+retention (per-tenant DELETE runs first; platform-default
+excludes them so newer rows survive) AND tenants with
+LONGER retention (platform-default excludes them entirely
+so rows aged between platform-cutoff and tenant-cutoff are
+PRESERVED — critical for compliance scenarios). Disabled
+per-tenant policies fall back to platform-default via the
+`enabled = true` subquery filter. Ordering: tenant policies
+first, then platform-default — doesn't affect correctness
+(NOT IN scopes correctly regardless) but is more intuitive
+in the adapter code. No data migration: existing
+META_RETENTION_POLICIES rows continue working as platform-
+default policies, NOT IN subquery returns empty when no
+per-tenant policies exist. 10 new tests in
+trace-retention.test.ts: listTenantPolicies SQL shape +
+snake-to-camelCase mapping, per-tenant DELETE with
+tenant_id+time filter, platform-default DELETE NOT IN
+subquery shape, UPDATE on tenant_retention_policies after
+prune, skip-disabled, skip-unknown-table for hypothetical
+bad row (DB CHECK + adapter both block llm_latency_samples),
+previewPrune reports per-tenant + platform counts
+independently with NOT IN subquery filtering, multi-tenant
+prune with different retention_days, tablesWithTenantId
+exposes 2-of-3 (workflow_traces + llm_call_traces, NOT
+llm_latency_samples). M6.8.x closes ADR-0144 Q2 +
 ADR-0137 Q3+Q4 + ADR-0141 Q3 (four deferred Qs in one
 milestone) by adding `resolveDetailed()` to
 PostgresCostCeilingResolver. Operators previously saw WHAT
@@ -3505,7 +3562,16 @@ discriminated union "override"|"tier"|"none" and tierId is
 conditional on source==="tier"; resolve() delegates to
 resolveDetailed() — zero duplication, identical behavior;
 audit dashboards now show WHY tenants are capped not just
-WHAT they're capped at).
+WHAT they're capped at), ADR-0155 covers M6.7.zz.tenant
+(META_TENANT_RETENTION_POLICIES — closes ADR-0143 Q1 —
+128th table for per-tenant retention overrides; two-table
+design preserves PG-version portability over the NULLABLE-
+tenant_id alternative from the original sketch; tenant
+policies first then platform-default with NOT IN subquery
+exclusion correctly handles both shorter- and longer-than-
+default per-tenant retention; llm_latency_samples
+mechanically excluded via DB CHECK + adapter allowlist
+since the table has no tenant_id column).
 
 ## Architecture in 90 seconds
 
@@ -4923,7 +4989,33 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0154 covers Phase 2 M6.8.x
+operations), ADR-0155 covers Phase 2 M6.7.zz.tenant
+(META_TENANT_RETENTION_POLICIES per-tenant retention
+overrides — closes ADR-0143 Q1; 128th meta-schema table
+with PK on (tenant_id, table_name) + RLS + table_name
+CHECK limited to workflow_traces + llm_call_traces (NOT
+llm_latency_samples since that table has no tenant_id
+column); two-table design chosen over the NULLABLE-tenant_id
+alternative from the original ADR-0143 Q1 sketch — PG-
+version-portable without NULLS NOT DISTINCT requirement,
+matches META_LLM_TENANT_TIER_MEMBERSHIPS pattern, cleaner
+PK semantics; PostgresTraceRetention extended with
+listTenantPolicies + refactored prune/previewPrune that
+iterate tenant policies FIRST then platform-default with
+NOT IN subquery exclusion in the platform-default DELETE
+to skip tenants with overrides; correctly handles BOTH
+SHORTER and LONGER per-tenant retention (critical for
+compliance scenarios where tenants need to retain longer
+than platform default); disabled per-tenant policies fall
+back to platform-default via the enabled=true subquery
+filter; result types gain optional tenantId field —
+operators discriminate per-tenant from platform results;
+no data migration — existing META_RETENTION_POLICIES rows
+continue working unchanged with empty NOT IN subquery;
+operator workflows unlocked: long-tail compliance, cost-
+shaping per tenant, GDPR Article 17 acceleration, A/B
+retention testing).
+ADR-0154 covers Phase 2 M6.8.x
 (PostgresCostCeilingResolver.resolveDetailed source attribution
 — closes ADR-0144 Q2 + ADR-0137 Q3+Q4 + ADR-0141 Q3 in one
 milestone — four deferred Qs resolved by adding a structured

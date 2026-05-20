@@ -1,6 +1,6 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 + M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa + M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z + M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 + M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 + M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 + M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 + M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.6.x + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.8 + M6.8.x + M8 + M8.1 + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
+> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M2.8.5 + M2.8.6 + M2.9 + M2.9.5 + M2.9.6 + M2.9.7 + M2.9.8 + M2.9.8.x + M2.X + M2.X.5 + M2.X.5.x + M2.X.5.y + M2.X.5.z + M2.X.5.aa + M2.X.5.aa.x + M2.X.5.aa.x.1 + M2.X.5.aa.y + M2.X.5.aa.z + M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 + M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 + M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 + M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 + M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.6.x + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M8 + M8.1 + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 > M3.5 + M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 + M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 +
 > M2.8.5 + M5.7 + M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed. The four runtime pillars (DDL + crypto
 > + workflows + gateway) are in place; both impure runtimes
@@ -17,8 +17,8 @@
 > bridge; M7 shipped the first vertical pack
 > (`@crossengin/pack-erp-core`) proving the substrate holds up
 > under a real schema.
-> **56 packages + 1 app, 127 meta-schema tables, 8,026 tests**,
-> all green, zero type errors. ADRs 0001–0154 fully drafted.
+> **56 packages + 1 app, 128 meta-schema tables, 8,036 tests**,
+> all green, zero type errors. ADRs 0001–0155 fully drafted.
 > `crossengin apply --dry-run --pack=operate-erp/payments`
 > produces the META bootstrap SQL + 4 ERP entity tables + the
 > Payment table (cross-pack composition, all tenant-scoped) in

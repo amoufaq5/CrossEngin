@@ -2,11 +2,17 @@ import type { PgConnection } from "./connection.js";
 
 const SCHEMA = "meta";
 const POLICIES_TABLE = "retention_policies";
+const TENANT_POLICIES_TABLE = "tenant_retention_policies";
 
-const PRUNABLE_TABLES: Readonly<Record<string, string>> = {
-  workflow_traces: "occurred_at",
-  llm_latency_samples: "recorded_at",
-  llm_call_traces: "occurred_at",
+interface PrunableTableSpec {
+  readonly timeColumn: string;
+  readonly hasTenantId: boolean;
+}
+
+const PRUNABLE_TABLES: Readonly<Record<string, PrunableTableSpec>> = {
+  workflow_traces: { timeColumn: "occurred_at", hasTenantId: true },
+  llm_latency_samples: { timeColumn: "recorded_at", hasTenantId: false },
+  llm_call_traces: { timeColumn: "occurred_at", hasTenantId: true },
 };
 
 export interface PostgresTraceRetentionOptions {
@@ -21,6 +27,14 @@ export interface RetentionPolicyRow {
   readonly lastPrunedAt: string | null;
 }
 
+export interface TenantRetentionPolicyRow {
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly retentionDays: number;
+  readonly enabled: boolean;
+  readonly lastPrunedAt: string | null;
+}
+
 export type RetentionRunStatus =
   | "pruned"
   | "skipped_disabled"
@@ -28,6 +42,7 @@ export type RetentionRunStatus =
 
 export interface RetentionRunResult {
   readonly tableName: string;
+  readonly tenantId?: string;
   readonly status: RetentionRunStatus;
   readonly retentionDays: number;
   readonly deletedCount: number;
@@ -41,6 +56,7 @@ export type RetentionPreviewStatus =
 
 export interface RetentionPreviewResult {
   readonly tableName: string;
+  readonly tenantId?: string;
   readonly status: RetentionPreviewStatus;
   readonly retentionDays: number;
   readonly wouldDeleteCount: number;
@@ -52,6 +68,10 @@ interface RawPolicyRow {
   readonly retention_days: number;
   readonly enabled: boolean;
   readonly last_pruned_at: string | null;
+}
+
+interface RawTenantPolicyRow extends RawPolicyRow {
+  readonly tenant_id: string;
 }
 
 export class PostgresTraceRetention {
@@ -77,14 +97,32 @@ export class PostgresTraceRetention {
     }));
   }
 
+  async listTenantPolicies(): Promise<ReadonlyArray<TenantRetentionPolicyRow>> {
+    const result = await this.conn.query<RawTenantPolicyRow>(
+      `SELECT tenant_id, table_name, retention_days, enabled, last_pruned_at
+       FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+       ORDER BY table_name ASC, tenant_id ASC`,
+    );
+    return result.rows.map((r) => ({
+      tenantId: r.tenant_id,
+      tableName: r.table_name,
+      retentionDays: r.retention_days,
+      enabled: r.enabled,
+      lastPrunedAt: r.last_pruned_at,
+    }));
+  }
+
   async prune(): Promise<ReadonlyArray<RetentionRunResult>> {
-    const policies = await this.listPolicies();
+    const tenantPolicies = await this.listTenantPolicies();
+    const platformPolicies = await this.listPolicies();
     const results: RetentionRunResult[] = [];
     const now = this.clock();
-    for (const policy of policies) {
+
+    for (const policy of tenantPolicies) {
       if (!policy.enabled) {
         results.push({
           tableName: policy.tableName,
+          tenantId: policy.tenantId,
           status: "skipped_disabled",
           retentionDays: policy.retentionDays,
           deletedCount: 0,
@@ -92,10 +130,11 @@ export class PostgresTraceRetention {
         });
         continue;
       }
-      const timeColumn = PRUNABLE_TABLES[policy.tableName];
-      if (timeColumn === undefined) {
+      const spec = PRUNABLE_TABLES[policy.tableName];
+      if (spec === undefined || !spec.hasTenantId) {
         results.push({
           tableName: policy.tableName,
+          tenantId: policy.tenantId,
           status: "skipped_unknown_table",
           retentionDays: policy.retentionDays,
           deletedCount: 0,
@@ -106,9 +145,64 @@ export class PostgresTraceRetention {
       const cutoffMs = now - policy.retentionDays * 86_400 * 1_000;
       const deleteResult = await this.conn.query(
         `DELETE FROM ${SCHEMA}.${policy.tableName}
-         WHERE ${timeColumn} < to_timestamp($1 / 1000.0)`,
-        [cutoffMs],
+         WHERE tenant_id = $1
+           AND ${spec.timeColumn} < to_timestamp($2 / 1000.0)`,
+        [policy.tenantId, cutoffMs],
       );
+      await this.conn.query(
+        `UPDATE ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         SET last_pruned_at = now()
+         WHERE tenant_id = $1 AND table_name = $2`,
+        [policy.tenantId, policy.tableName],
+      );
+      results.push({
+        tableName: policy.tableName,
+        tenantId: policy.tenantId,
+        status: "pruned",
+        retentionDays: policy.retentionDays,
+        deletedCount: deleteResult.rowCount,
+        cutoffMs,
+      });
+    }
+
+    for (const policy of platformPolicies) {
+      if (!policy.enabled) {
+        results.push({
+          tableName: policy.tableName,
+          status: "skipped_disabled",
+          retentionDays: policy.retentionDays,
+          deletedCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
+      const spec = PRUNABLE_TABLES[policy.tableName];
+      if (spec === undefined) {
+        results.push({
+          tableName: policy.tableName,
+          status: "skipped_unknown_table",
+          retentionDays: policy.retentionDays,
+          deletedCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
+      const cutoffMs = now - policy.retentionDays * 86_400 * 1_000;
+      const deleteResult = spec.hasTenantId
+        ? await this.conn.query(
+            `DELETE FROM ${SCHEMA}.${policy.tableName}
+             WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
+               AND tenant_id NOT IN (
+                 SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+                 WHERE table_name = $2 AND enabled = true
+               )`,
+            [cutoffMs, policy.tableName],
+          )
+        : await this.conn.query(
+            `DELETE FROM ${SCHEMA}.${policy.tableName}
+             WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)`,
+            [cutoffMs],
+          );
       await this.conn.query(
         `UPDATE ${SCHEMA}.${POLICIES_TABLE}
          SET last_pruned_at = now()
@@ -123,17 +217,21 @@ export class PostgresTraceRetention {
         cutoffMs,
       });
     }
+
     return results;
   }
 
   async previewPrune(): Promise<ReadonlyArray<RetentionPreviewResult>> {
-    const policies = await this.listPolicies();
+    const tenantPolicies = await this.listTenantPolicies();
+    const platformPolicies = await this.listPolicies();
     const results: RetentionPreviewResult[] = [];
     const now = this.clock();
-    for (const policy of policies) {
+
+    for (const policy of tenantPolicies) {
       if (!policy.enabled) {
         results.push({
           tableName: policy.tableName,
+          tenantId: policy.tenantId,
           status: "skipped_disabled",
           retentionDays: policy.retentionDays,
           wouldDeleteCount: 0,
@@ -141,10 +239,11 @@ export class PostgresTraceRetention {
         });
         continue;
       }
-      const timeColumn = PRUNABLE_TABLES[policy.tableName];
-      if (timeColumn === undefined) {
+      const spec = PRUNABLE_TABLES[policy.tableName];
+      if (spec === undefined || !spec.hasTenantId) {
         results.push({
           tableName: policy.tableName,
+          tenantId: policy.tenantId,
           status: "skipped_unknown_table",
           retentionDays: policy.retentionDays,
           wouldDeleteCount: 0,
@@ -156,9 +255,61 @@ export class PostgresTraceRetention {
       const countResult = await this.conn.query<{ count: string }>(
         `SELECT COUNT(*)::TEXT AS count
          FROM ${SCHEMA}.${policy.tableName}
-         WHERE ${timeColumn} < to_timestamp($1 / 1000.0)`,
-        [cutoffMs],
+         WHERE tenant_id = $1
+           AND ${spec.timeColumn} < to_timestamp($2 / 1000.0)`,
+        [policy.tenantId, cutoffMs],
       );
+      const count = Number(countResult.rows[0]?.count ?? 0);
+      results.push({
+        tableName: policy.tableName,
+        tenantId: policy.tenantId,
+        status: "previewed",
+        retentionDays: policy.retentionDays,
+        wouldDeleteCount: count,
+        cutoffMs,
+      });
+    }
+
+    for (const policy of platformPolicies) {
+      if (!policy.enabled) {
+        results.push({
+          tableName: policy.tableName,
+          status: "skipped_disabled",
+          retentionDays: policy.retentionDays,
+          wouldDeleteCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
+      const spec = PRUNABLE_TABLES[policy.tableName];
+      if (spec === undefined) {
+        results.push({
+          tableName: policy.tableName,
+          status: "skipped_unknown_table",
+          retentionDays: policy.retentionDays,
+          wouldDeleteCount: 0,
+          cutoffMs: null,
+        });
+        continue;
+      }
+      const cutoffMs = now - policy.retentionDays * 86_400 * 1_000;
+      const countResult = spec.hasTenantId
+        ? await this.conn.query<{ count: string }>(
+            `SELECT COUNT(*)::TEXT AS count
+             FROM ${SCHEMA}.${policy.tableName}
+             WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
+               AND tenant_id NOT IN (
+                 SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+                 WHERE table_name = $2 AND enabled = true
+               )`,
+            [cutoffMs, policy.tableName],
+          )
+        : await this.conn.query<{ count: string }>(
+            `SELECT COUNT(*)::TEXT AS count
+             FROM ${SCHEMA}.${policy.tableName}
+             WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)`,
+            [cutoffMs],
+          );
       const count = Number(countResult.rows[0]?.count ?? 0);
       results.push({
         tableName: policy.tableName,
@@ -168,10 +319,17 @@ export class PostgresTraceRetention {
         cutoffMs,
       });
     }
+
     return results;
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {
     return Object.keys(PRUNABLE_TABLES);
+  }
+
+  static tablesWithTenantId(): ReadonlyArray<string> {
+    return Object.entries(PRUNABLE_TABLES)
+      .filter(([, spec]) => spec.hasTenantId)
+      .map(([name]) => name);
   }
 }

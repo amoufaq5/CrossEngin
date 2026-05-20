@@ -9326,6 +9326,39 @@ export const META_RETENTION_POLICIES: TableDefinition = {
   primaryKey: ["table_name"],
 };
 
+export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
+  schema: "meta",
+  name: "tenant_retention_policies",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "table_name",
+      type: "TEXT",
+      notNull: true,
+      check: "table_name IN ('workflow_traces', 'llm_call_traces')",
+    },
+    {
+      name: "retention_days",
+      type: "INTEGER",
+      notNull: true,
+      check: "retention_days >= 1",
+    },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "last_pruned_at", type: "TIMESTAMPTZ" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id", "table_name"],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_retention_policies_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_LLM_CALL_TRACES: TableDefinition = {
   schema: "meta",
   name: "llm_call_traces",
@@ -9567,4 +9600,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_LLM_LATENCY_SAMPLES,
   META_LLM_CALL_TRACES,
   META_RETENTION_POLICIES,
+  META_TENANT_RETENTION_POLICIES,
 ];
