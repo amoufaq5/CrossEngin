@@ -9239,6 +9239,30 @@ export const META_LLM_COST_WINDOWS: TableDefinition = {
   },
 };
 
+export const META_RETENTION_POLICIES: TableDefinition = {
+  schema: "meta",
+  name: "retention_policies",
+  columns: [
+    {
+      name: "table_name",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "table_name IN ('workflow_traces', 'llm_latency_samples', 'llm_call_traces')",
+    },
+    {
+      name: "retention_days",
+      type: "INTEGER",
+      notNull: true,
+      check: "retention_days >= 1",
+    },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    { name: "last_pruned_at", type: "TIMESTAMPTZ" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["table_name"],
+};
+
 export const META_LLM_CALL_TRACES: TableDefinition = {
   schema: "meta",
   name: "llm_call_traces",
@@ -9477,4 +9501,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_LLM_COST_CEILINGS,
   META_LLM_LATENCY_SAMPLES,
   META_LLM_CALL_TRACES,
+  META_RETENTION_POLICIES,
 ];

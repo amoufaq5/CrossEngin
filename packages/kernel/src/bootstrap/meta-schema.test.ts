@@ -117,8 +117,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 124 tables", () => {
-    expect(META_TABLES).toHaveLength(124);
+  it("contains 125 tables", () => {
+    expect(META_TABLES).toHaveLength(125);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -225,6 +225,7 @@ describe("META_TABLES", () => {
       "rate_limit_policies",
       "regions",
       "report_runs",
+      "retention_policies",
       "scheduled_exports",
       "scim_clients",
       "scim_provisioning",

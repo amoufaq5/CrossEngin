@@ -21,15 +21,70 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 124 meta-schema tables, 7,704 tests**,
-all green, no type errors. M2.X.5.aa.z.23 closes ADR-0138 Q3
+**56 packages + 1 app, 125 meta-schema tables, 7,720 tests**,
+all green, no type errors. M6.7.zz closes ADR-0120 Q5 +
+ADR-0140 Q1 + ADR-0141 Q1 in one cross-cutting substrate:
+META_RETENTION_POLICIES table (125th) + PostgresTraceRetention
+adapter in `@crossengin/kernel-pg`. The three append-only
+trace tables shipped over recent milestones —
+META_WORKFLOW_TRACES (M8), META_LLM_LATENCY_SAMPLES
+(M6.7.y), META_LLM_CALL_TRACES (M6.7.z) — now have a unified
+retention story. At 1M LLM calls/day, llm_call_traces adds
+~600MB/day after indexes; without retention the substrate
+becomes unworkable within months. META_RETENTION_POLICIES
+columns: table_name TEXT PK (CHECK IN
+('workflow_traces','llm_latency_samples','llm_call_traces')
+— the DB rejects unknown values at INSERT time + the
+allowlist is the source of truth), retention_days INTEGER
+NOT NULL CHECK >= 1 (zero would delete everything immediately
+— operators wanting "no retention" disable via enabled
+column), enabled BOOLEAN NOT NULL DEFAULT true (kill switch
+without losing configured retention), last_pruned_at
+TIMESTAMPTZ NULLABLE (NULL = never pruned; audit value),
+updated_at TIMESTAMPTZ. No tenant_id, no RLS — retention is
+a platform-policy concern (per-tenant retention is a future
+Q). PostgresTraceRetention adapter in kernel-pg (most general
+home since it operates on meta-schema tables; ai-router-pg
+would have created a cross-package dependency for
+workflow_traces): listPolicies() returns alphabetically-
+ordered policy rows mapped to camelCase API; prune() iterates
+policies and for each enabled+known row computes cutoffMs =
+clock() - retention_days*86400_000, issues `DELETE FROM
+meta.{tableName} WHERE {timeColumn} < to_timestamp($1 /
+1000.0)` then updates last_pruned_at; per-policy result
+returned with status enum (pruned / skipped_disabled /
+skipped_unknown_table) + deletedCount + cutoffMs.
+PRUNABLE_TABLES is HARDCODED in the adapter: workflow_traces
+→ occurred_at, llm_latency_samples → recorded_at,
+llm_call_traces → occurred_at. The hardcoded approach wins on
+safety: no SQL injection (table name + column name come from
+static map not row data), schema knowledge stays in code
+(operators don't need to know `recorded_at` vs `occurred_at`),
+defense-in-depth via DB CHECK + adapter allowlist. Adding a
+new trace table = update CHECK constraint + add PRUNABLE_TABLES
+entry. Adapter is idempotent (re-running prune() finds fewer
+rows). Static SQL string assembly even though interpolated —
+both table name + column name come from the static map. Clock
+injection for testability. No outer transaction across
+policies — per-policy autonomy (one prune can succeed while
+another fails). 16 new tests in trace-retention.test.ts:
+knownPrunableTables exposes the 3 trace tables;
+listPolicies SELECTs alphabetically + maps snake-case →
+camelCase + empty-array on no rows; prune issues DELETE
+against workflow_traces with occurred_at + recorded_at for
+latency_samples (not occurred_at) + occurred_at for
+call_traces + cutoffMs computed correctly + UPDATE
+last_pruned_at + skip-disabled + skip-unknown-table +
+multi-policy + zero-deleted-count + default Date.now clock +
+no-DELETE-on-no-policies + safety properties (allowlist is
+hardcoded). M2.X.5.aa.z.23 closes ADR-0138 Q3
 by adding `createInferenceProfile(input)` to BedrockProvider
 — the 2nd CREATE on the Bedrock control plane (after
 createBatch from M2.X.5.aa.z.6 / ADR-0108 and
@@ -2857,7 +2912,15 @@ samples + call-traces), ADR-0142 covers M2.X.5.aa.z.23
 APPLICATION lifecycle on the substrate (create + list + get
 + delete); pure boundary validation for 8 documented
 constraints; modelSource discriminated union forward-compat;
-clientRequestToken hooks AWS's idempotency contract).
+clientRequestToken hooks AWS's idempotency contract),
+ADR-0143 covers M6.7.zz (META_RETENTION_POLICIES +
+PostgresTraceRetention — closes ADR-0120 Q5 + ADR-0140 Q1 +
+ADR-0141 Q1 in one cross-cutting substrate; 125th meta-schema
+table with hardcoded CHECK allowlist for the 3 trace tables;
+adapter in kernel-pg with hardcoded PRUNABLE_TABLES map
+preventing SQL injection; per-policy autonomy + idempotent
+prune + clock injection; future trace surfaces add via 2-edit
+mechanical change).
 
 ## Architecture in 90 seconds
 
@@ -4275,7 +4338,38 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations).
+operations), ADR-0143 covers Phase 2 M6.7.zz
+(META_RETENTION_POLICIES + PostgresTraceRetention cross-
+cutting retention substrate — closes ADR-0120 Q5 + ADR-0140
+Q1 + ADR-0141 Q1 in one milestone; the three append-only
+trace tables shipped over M8 + M6.7.y + M6.7.z now have a
+unified retention story preventing unbounded growth at
+~600MB/day per million LLM calls; META_RETENTION_POLICIES
+as 125th meta-schema table — table_name PK with hardcoded
+CHECK constraint enforcing allowlist (workflow_traces,
+llm_latency_samples, llm_call_traces), retention_days CHECK
+>= 1 (zero blocked since it would delete everything
+immediately — disable via enabled column instead), enabled
+kill switch, last_pruned_at NULLABLE audit field; platform-
+wide table no tenant scoping no RLS — retention is platform-
+policy concern (per-tenant retention listed as future Q);
+PostgresTraceRetention adapter in `@crossengin/kernel-pg`
+(most general home since it operates on meta-schema tables;
+ai-router-pg would have created cross-package dependency for
+workflow_traces); HARDCODED PRUNABLE_TABLES map in the
+adapter prevents SQL injection (table+column names from
+static map not row data) + keeps schema knowledge in code
+(operators don't need to know recorded_at vs occurred_at) +
+defense-in-depth via DB CHECK + adapter allowlist; prune()
+is idempotent — re-runs find fewer rows; per-policy
+autonomy — no outer transaction so one prune can succeed
+while another fails; clock injection for testability;
+adding a new trace table is a 2-edit mechanical change —
+update CHECK constraint + add PRUNABLE_TABLES entry; per-
+policy result returned with status enum (pruned /
+skipped_disabled / skipped_unknown_table) + deletedCount +
+cutoffMs; the three trace substrates are now operationally
+sustainable).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

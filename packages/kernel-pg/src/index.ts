@@ -6,3 +6,4 @@ export * from "./migration-log.js";
 export * from "./node-pg.js";
 export * from "./preconditions.js";
 export * from "./statement-hash.js";
+export * from "./trace-retention.js";
