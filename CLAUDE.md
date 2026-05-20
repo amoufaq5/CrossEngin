@@ -21,15 +21,43 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.12 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,376 tests**,
-all green, no type errors. M2.X.5.aa.z.19 ships
+**55 packages + 1 app, 120 meta-schema tables, 7,399 tests**,
+all green, no type errors. M2.X.11 adds a `cacheBreakpoint?:
+LlmCacheBreakpoint` optional field on every LlmContentBlock
+variant (text / image / image_url / document / document_url /
+file_id / tool_use / tool_result — all 8 schemas extended).
+`LlmCacheBreakpoint` is a `{type: "ephemeral"}` shape;
+LLM_CACHE_BREAKPOINT_TYPES is a single-value const tuple
+(future Anthropic extensions like persistent or named-key
+caching extend the tuple without breaking call sites). Wired
+through the Anthropic translator: `translateKernelBlock`
+refactored to call `translateKernelBlockShape` then
+post-process via `withCacheControl` that shallow-spreads
+`cache_control: {type: "ephemeral"}` when the kernel field
+is present. AnthropicContentBlock union widened — every
+variant gains an optional cache_control field; new
+AnthropicCacheControl type alias exported. OpenAI translators
+(chat-api + responses-api) silently drop the field (OpenAI
+handles caching implicitly via prefix-stability heuristics;
+no per-block knob). Bedrock translator silently drops for
+now (Bedrock Converse uses a SEPARATE `{cachePoint: {type:
+"default"}}` BLOCK type — structurally different wire shape;
+future M2.X.11.x can wire). Token economics: operators with
+long-context chat workloads (10k+ tokens repeated across
+turns) see ~10x input-cost reduction on cache hits via
+Anthropic. Three patterns enabled: long static context
+(document block at start of every turn marked cached),
+multi-turn tool sessions (tool_result of expensive search
+cached for subsequent turns), few-shot prefixes (final
+example block cached so variant inputs hit cache). All
+existing tests pass without modification. M2.X.5.aa.z.19 ships
 `BedrockProvider.stopModelCustomizationJob(jobIdentifier)` —
 the operator-initiated abort surface paired with
 M2.X.5.aa.z.17/.18's read pair (the Stopping/Stopped statuses
@@ -2174,7 +2202,12 @@ asymmetry preserved verbatim; reproducibility / triage / cost
 M2.X.5.aa.z.19 (Bedrock stopModelCustomizationJob — pure
 reuse of M2.X.5.aa.z.5's signedControlPlanePost rail;
 operator-initiated mid-training aborts; third 409-emitting
-Bedrock endpoint earning isConflictError its keep).
+Bedrock endpoint earning isConflictError its keep), ADR-0125
+covers M2.X.11 (cacheBreakpoint field on LlmContentBlock +
+Anthropic prompt caching — additive optional field on all
+8 block variants; Anthropic translator emits
+cache_control:{type:"ephemeral"}; OpenAI + Bedrock silently
+drop for tight scope).
 
 ## Architecture in 90 seconds
 
@@ -3352,7 +3385,16 @@ Stopping/Stopped statuses from M2.X.5.aa.z.17; pure reuse of
 the M2.X.5.aa.z.5 signedControlPlanePost rail; third Bedrock
 endpoint emitting 409 ConflictException — isConflictError
 classifier (M2.X.12) now load-bearing across stopBatch +
-createBatch + stopModelCustomizationJob).
+createBatch + stopModelCustomizationJob), ADR-0125 covers
+Phase 2 M2.X.11 (cacheBreakpoint field on LlmContentBlock +
+Anthropic prompt caching — additive optional field on all 8
+block variants; Anthropic translator emits cache_control:
+{type: "ephemeral"} via the new withCacheControl post-process
+wrapper; AnthropicContentBlock union widened; AWS Bedrock's
+separate cachePoint BLOCK type wire shape deferred to a
+follow-up; OpenAI implicit-caching path silently drops the
+field; long-context chat workloads see ~10x input-cost
+reduction on cache hits).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.

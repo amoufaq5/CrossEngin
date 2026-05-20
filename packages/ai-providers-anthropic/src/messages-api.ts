@@ -31,8 +31,14 @@ export interface AnthropicMessage {
   readonly content: string | readonly AnthropicContentBlock[];
 }
 
+export type AnthropicCacheControl = { readonly type: "ephemeral" };
+
 export type AnthropicContentBlock =
-  | { readonly type: "text"; readonly text: string }
+  | {
+      readonly type: "text";
+      readonly text: string;
+      readonly cache_control?: AnthropicCacheControl;
+    }
   | {
       readonly type: "image";
       readonly source:
@@ -42,6 +48,7 @@ export type AnthropicContentBlock =
             readonly data: string;
           }
         | { readonly type: "url"; readonly url: string };
+      readonly cache_control?: AnthropicCacheControl;
     }
   | {
       readonly type: "document";
@@ -59,17 +66,20 @@ export type AnthropicContentBlock =
           }
         | { readonly type: "file"; readonly file_id: string };
       readonly title?: string;
+      readonly cache_control?: AnthropicCacheControl;
     }
   | {
       readonly type: "tool_use";
       readonly id: string;
       readonly name: string;
       readonly input: unknown;
+      readonly cache_control?: AnthropicCacheControl;
     }
   | {
       readonly type: "tool_result";
       readonly tool_use_id: string;
       readonly content: string;
+      readonly cache_control?: AnthropicCacheControl;
     };
 
 export interface AnthropicTool {
@@ -219,6 +229,18 @@ function appendKernelBlocks(
 }
 
 function translateKernelBlock(block: LlmContentBlock): AnthropicContentBlock {
+  return withCacheControl(block, translateKernelBlockShape(block));
+}
+
+function withCacheControl(
+  block: LlmContentBlock,
+  shaped: AnthropicContentBlock,
+): AnthropicContentBlock {
+  if (block.cacheBreakpoint === undefined) return shaped;
+  return { ...shaped, cache_control: { type: block.cacheBreakpoint.type } };
+}
+
+function translateKernelBlockShape(block: LlmContentBlock): AnthropicContentBlock {
   if (block.type === "text") {
     return { type: "text", text: block.text };
   }

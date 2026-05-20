@@ -5,11 +5,16 @@ import {
   CostTelemetryRecordSchema,
   EmbeddingRequestSchema,
   EmbeddingResponseSchema,
+  FileReferenceContentBlockSchema,
   ImageAttachmentSchema,
   ImageContentBlockSchema,
   DocumentContentBlockSchema,
   DocumentUrlContentBlockSchema,
+  LLM_CACHE_BREAKPOINT_TYPES,
+  LlmCacheBreakpointSchema,
   OFFICE_DOCUMENT_FORMATS,
+  ToolResultContentBlockSchema,
+  ToolUseContentBlockSchema,
   documentMediaType,
   isOfficeDocumentFormat,
   isTextDocumentFormat,
@@ -1209,5 +1214,142 @@ describe("LlmMessageSchema role-validation for tool blocks (M2.X.5.x)", () => {
         content: [{ type: "image", format: "png", bytes: "x" }],
       }),
     ).toThrow(/image content blocks are not allowed on tool/);
+  });
+});
+
+describe("LlmCacheBreakpoint (M2.X.11)", () => {
+  it("exposes the 1 documented type tuple", () => {
+    expect(LLM_CACHE_BREAKPOINT_TYPES).toEqual(["ephemeral"]);
+  });
+
+  it("LlmCacheBreakpointSchema accepts ephemeral", () => {
+    expect(LlmCacheBreakpointSchema.parse({ type: "ephemeral" })).toEqual({
+      type: "ephemeral",
+    });
+  });
+
+  it("LlmCacheBreakpointSchema rejects unknown types", () => {
+    expect(() => LlmCacheBreakpointSchema.parse({ type: "persistent" })).toThrow();
+    expect(() => LlmCacheBreakpointSchema.parse({})).toThrow();
+  });
+});
+
+describe("LlmContentBlock cacheBreakpoint field (M2.X.11)", () => {
+  it("TextContentBlockSchema accepts cacheBreakpoint", () => {
+    expect(
+      TextContentBlockSchema.parse({
+        type: "text",
+        text: "context",
+        cacheBreakpoint: { type: "ephemeral" },
+      }),
+    ).toEqual({
+      type: "text",
+      text: "context",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+  });
+
+  it("TextContentBlockSchema cacheBreakpoint is optional", () => {
+    expect(TextContentBlockSchema.parse({ type: "text", text: "hi" })).toEqual({
+      type: "text",
+      text: "hi",
+    });
+  });
+
+  it("ImageContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = ImageContentBlockSchema.parse({
+      type: "image",
+      format: "png",
+      bytes: "iVBOR",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("ImageUrlContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = ImageUrlContentBlockSchema.parse({
+      type: "image_url",
+      url: "https://example.com/img.png",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("DocumentContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = DocumentContentBlockSchema.parse({
+      type: "document",
+      format: "pdf",
+      bytes: "JVBER",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("DocumentUrlContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = DocumentUrlContentBlockSchema.parse({
+      type: "document_url",
+      url: "https://example.com/doc.pdf",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("FileReferenceContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = FileReferenceContentBlockSchema.parse({
+      type: "file_id",
+      fileId: "file-abc",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("ToolUseContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = ToolUseContentBlockSchema.parse({
+      type: "tool_use",
+      id: "tu_1",
+      name: "search",
+      input: { q: "x" },
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("ToolResultContentBlockSchema accepts cacheBreakpoint", () => {
+    const out = ToolResultContentBlockSchema.parse({
+      type: "tool_result",
+      toolUseId: "tu_1",
+      content: "result",
+      cacheBreakpoint: { type: "ephemeral" },
+    });
+    expect(out.cacheBreakpoint).toEqual({ type: "ephemeral" });
+  });
+
+  it("LlmContentBlockSchema discriminated union accepts cacheBreakpoint on each branch", () => {
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "text",
+        text: "x",
+        cacheBreakpoint: { type: "ephemeral" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      LlmContentBlockSchema.parse({
+        type: "tool_use",
+        id: "tu_1",
+        name: "fn",
+        input: {},
+        cacheBreakpoint: { type: "ephemeral" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects unknown cacheBreakpoint.type values across all block schemas", () => {
+    expect(() =>
+      TextContentBlockSchema.parse({
+        type: "text",
+        text: "x",
+        cacheBreakpoint: { type: "persistent" },
+      }),
+    ).toThrow();
   });
 });

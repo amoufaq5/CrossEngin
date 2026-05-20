@@ -74,9 +74,19 @@ export const MessageAttachmentSchema = z.discriminatedUnion("kind", [
 ]);
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 
+export const LLM_CACHE_BREAKPOINT_TYPES = ["ephemeral"] as const;
+export const LlmCacheBreakpointTypeSchema = z.enum(LLM_CACHE_BREAKPOINT_TYPES);
+export type LlmCacheBreakpointType = z.infer<typeof LlmCacheBreakpointTypeSchema>;
+
+export const LlmCacheBreakpointSchema = z.object({
+  type: LlmCacheBreakpointTypeSchema,
+});
+export type LlmCacheBreakpoint = z.infer<typeof LlmCacheBreakpointSchema>;
+
 export const TextContentBlockSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type TextContentBlock = z.infer<typeof TextContentBlockSchema>;
 
@@ -84,6 +94,7 @@ export const ImageContentBlockSchema = z.object({
   type: z.literal("image"),
   format: ImageAttachmentFormatSchema,
   bytes: z.string().min(1),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type ImageContentBlock = z.infer<typeof ImageContentBlockSchema>;
 
@@ -91,6 +102,7 @@ export const ImageUrlContentBlockSchema = z.object({
   type: z.literal("image_url"),
   url: z.string().url(),
   format: ImageAttachmentFormatSchema.optional(),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type ImageUrlContentBlock = z.infer<typeof ImageUrlContentBlockSchema>;
 
@@ -142,6 +154,7 @@ export const DocumentContentBlockSchema = z.object({
   format: DocumentFormatSchema,
   bytes: z.string().min(1),
   name: z.string().max(120).optional(),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type DocumentContentBlock = z.infer<typeof DocumentContentBlockSchema>;
 
@@ -150,12 +163,14 @@ export const DocumentUrlContentBlockSchema = z.object({
   url: z.string().url(),
   format: DocumentFormatSchema.optional(),
   name: z.string().max(120).optional(),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type DocumentUrlContentBlock = z.infer<typeof DocumentUrlContentBlockSchema>;
 
 export const FileReferenceContentBlockSchema = z.object({
   type: z.literal("file_id"),
   fileId: z.string().min(1).max(120),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type FileReferenceContentBlock = z.infer<typeof FileReferenceContentBlockSchema>;
 
@@ -164,6 +179,7 @@ export const ToolUseContentBlockSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   input: z.unknown(),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type ToolUseContentBlock = z.infer<typeof ToolUseContentBlockSchema>;
 
@@ -176,6 +192,7 @@ export const ToolResultContentBlockSchema = z.object({
   toolUseId: z.string().min(1),
   content: z.string(),
   status: ToolResultStatusSchema.optional(),
+  cacheBreakpoint: LlmCacheBreakpointSchema.optional(),
 });
 export type ToolResultContentBlock = z.infer<typeof ToolResultContentBlockSchema>;
 

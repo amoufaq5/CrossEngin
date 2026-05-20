@@ -819,3 +819,177 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
     });
   });
 });
+
+describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
+  function base(content: CompletionRequest["messages"][number]["content"]): CompletionRequest {
+    return {
+      task: "executor",
+      messages: [{ role: "user", content }],
+      tenantId: TENANT,
+      sessionId: "sess-cache",
+    };
+  }
+
+  it("emits cache_control on a text block when cacheBreakpoint=ephemeral", () => {
+    const req = buildAnthropicRequest(
+      base([
+        { type: "text", text: "very long context here", cacheBreakpoint: { type: "ephemeral" } },
+      ]),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("omits cache_control when cacheBreakpoint is absent", () => {
+    const req = buildAnthropicRequest(
+      base([{ type: "text", text: "no caching" }]),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.cache_control).toBeUndefined();
+  });
+
+  it("emits cache_control on an image_url block", () => {
+    const req = buildAnthropicRequest(
+      base([
+        {
+          type: "image_url",
+          url: "https://example.com/img.png",
+          cacheBreakpoint: { type: "ephemeral" },
+        },
+      ]),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.type).toBe("image");
+    expect(blocks[0]!.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("emits cache_control on a PDF document block", () => {
+    const req = buildAnthropicRequest(
+      base([
+        {
+          type: "document",
+          format: "pdf",
+          bytes: "JVBER",
+          cacheBreakpoint: { type: "ephemeral" },
+        },
+      ]),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.type).toBe("document");
+    expect(blocks[0]!.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("emits cache_control on a file_id block", () => {
+    const req = buildAnthropicRequest(
+      base([
+        { type: "file_id", fileId: "file-abc", cacheBreakpoint: { type: "ephemeral" } },
+      ]),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("emits cache_control on a tool_use block (assistant message)", () => {
+    const req = buildAnthropicRequest(
+      {
+        task: "executor",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "search",
+                input: { q: "x" },
+                cacheBreakpoint: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+        tenantId: TENANT,
+        sessionId: "sess-cache",
+      },
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.type).toBe("tool_use");
+    expect(blocks[0]!.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("emits cache_control on a tool_result block", () => {
+    const req = buildAnthropicRequest(
+      {
+        task: "executor",
+        messages: [
+          {
+            role: "tool",
+            toolCallId: "tu_1",
+            content: "result body",
+            cacheBreakpoint: { type: "ephemeral" } as never,
+          } as never,
+        ],
+        tenantId: TENANT,
+        sessionId: "sess-cache",
+      },
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    // Anthropic puts tool messages as user-role with tool_result block.
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.type).toBe("tool_result");
+  });
+
+  it("emits cache_control on multiple blocks independently (partial cache prefix)", () => {
+    const req = buildAnthropicRequest(
+      base([
+        {
+          type: "text",
+          text: "long context A",
+          cacheBreakpoint: { type: "ephemeral" },
+        },
+        { type: "text", text: "fresh question" }, // no cache breakpoint
+      ]),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    const blocks = req.messages[0]!.content as Array<{
+      type: string;
+      cache_control?: { type: string };
+    }>;
+    expect(blocks[0]!.cache_control).toEqual({ type: "ephemeral" });
+    expect(blocks[1]!.cache_control).toBeUndefined();
+  });
+
+  it("plain-string user message has no cache_control (kernel field is per-block)", () => {
+    const req = buildAnthropicRequest(
+      base("hello"),
+      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
+    );
+    expect(typeof req.messages[0]!.content).toBe("string");
+  });
+});
