@@ -21,15 +21,71 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.zz + M6.8 + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 7,860 tests**,
-all green, no type errors. M2.X.5.aa.z.26 adds Bedrock
+**56 packages + 1 app, 127 meta-schema tables, 7,899 tests**,
+all green, no type errors. M2.X.5.aa.z.27 closes ADR-0147 Q1
+by adding `createProvisionedModelThroughput(input)` — the
+FIRST mutation on PT resources. PT cost weight is 100×-1000×
+higher than inference profiles: a one-month committed PT for
+claude-3-5-sonnet at 1 model-unit runs ~$5,000/month minimum;
+six-month commits lock ~$30K non-cancellable; on-demand PTs
+accumulate ~$100/hour. Casual API calls cost more than most
+operators' entire monthly LLM bill. The substrate's
+guardrail: clientRequestToken is REQUIRED in the input type
+(even though AWS docs make it optional). This contract upgrade
+forces operators to deliberately mint a token (typically
+crypto.randomUUID()) before each create call — trivial for
+intentional creates (one-line), prohibitive for casual ones
+(typescript error if omitted). Naturally retry-safe: operators
+store the token alongside the intent (workflow row, DB record);
+retry on failure reuses the same token; AWS dedupes server-
+side. This is the FIRST CREATE endpoint in the substrate to
+require the token — createBatch (ADR-0108),
+createModelCustomizationJob (ADR-0131),
+createInferenceProfile (ADR-0142) all leave it optional
+because their cost weight is much lower. Boundary validation
+in pure buildCreateProvisionedModelThroughputBody enforces 6
+documented constraints BEFORE fetch: clientRequestToken
+length [1, 256] + pattern ^[a-zA-Z0-9](-*[a-zA-Z0-9])*$,
+modelUnits integer [1, 1000] (substrate cap on top of AWS's
+higher quota — operators wanting >1000 file a separate
+substrate change), provisionedModelName length [1, 63] +
+slug pattern, modelId length [1, 2048] (accepts foundation/
+custom/imported ARNs or IDs), commitmentDuration must be
+"OneMonth" | "SixMonths" if provided (undefined = on-demand
+no commit), tags max 200 with per-tag key/value length
+checks and index-aware error messages. POST to
+/provisioned-model-throughput (singular path; LIST/GET use
+plural). Response minimal (provisionedModelArn only);
+operators wanting full detail call getProvisionedModelThroughput
+next since PT starts in Creating status and reaches InService
+after minutes. No auto-token generation (defeats idempotency).
+No substrate-side dedup (trust AWS server-side). No commitment
+auto-default (operators must explicitly choose). No dryRun /
+cost-projection (operators wrap above; AWS doesn't expose it
++ pricing tables drift). No status-polling (operator workflow
+concern). Symmetric error propagation 404/409/403/429/402.
+Bedrock control plane: 20 read + 2 stop + 3 create + 4 delete
++ 3 tag + 1 update = 33 operations. PT mutation half-done —
+create shipped; update + delete remain (easier to add now
+that safety pattern is established). 39 new tests: 23 in
+provisioned-throughput-api.test.ts (body builder happy path +
+optional field threading + 14 boundary-validation rejections
+across token/modelUnits/name/modelId/commitmentDuration/tags
++ index-aware tag error messages + response parser), 16 in
+provider.test.ts (POST URL + JSON body + Sig v4 headers +
+control-plane-not-runtime host + token-blank pre-flight +
+modelUnits-zero pre-flight + commitment/tags threading +
+404/409/403/429/402 propagation + parse failures + network
+errors + idempotent retry semantic where substrate makes
+both API calls and AWS dedupes server-side returning the
+same ARN). M2.X.5.aa.z.26 adds Bedrock
 provisioned-throughput (PT) INSPECTION surfaces:
 `getProvisionedModelThroughput(provisionedModelId)` +
 `listProvisionedModelThroughputs(options?)`. PTs are paid
@@ -3129,7 +3185,16 @@ desiredModelArn vs foundationModelArn) — operators detect
 mid-migration; mutation deferred since PT cost is 100×-1000×
 higher than inference profiles needing careful design;
 operator wins on cost visibility + orphan reconciliation +
-incident-response failure messages).
+incident-response failure messages), ADR-0148 covers
+M2.X.5.aa.z.27 (Bedrock createProvisionedModelThroughput —
+closes ADR-0147 Q1 — first PT mutation; clientRequestToken
+REQUIRED in substrate input (AWS makes it optional) as
+cost-safety guardrail forcing deliberate token-minting
+before each $5K+/op create call; substrate's first CREATE
+endpoint to mandate the token; modelUnits cap [1, 1000]
+defensive on top of AWS quota; no auto-token, no auto-
+commit, no dryRun, no status-polling — substrate is the
+raw transport).
 
 ## Architecture in 90 seconds
 
@@ -4547,7 +4612,35 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0147 covers Phase 2 M2.X.5.aa.z.26 (Bedrock
+operations), ADR-0148 covers Phase 2 M2.X.5.aa.z.27 (Bedrock
+createProvisionedModelThroughput — closes ADR-0147 Q1; the
+FIRST mutation on PT resources; clientRequestToken REQUIRED
+in the substrate input type even though AWS docs make it
+optional — contract upgrade asymmetric from the other CREATE
+endpoints which keep it optional because PT cost weight is
+100×-1000× higher (one-month committed PT ~$5K/month, six-
+month committed ~$30K non-cancellable, on-demand ~$100/hour);
+mandatory-token rule forces deliberate operator gesture
+before AWS call — trivial for intentional creates (one-line
+crypto.randomUUID()) prohibitive for casual ones (typescript
+error if omitted); naturally retry-safe — operators store
+token alongside intent and reuse on failure with AWS dedupe
+server-side; no auto-token generation (defeats idempotency),
+no substrate-side local dedup (trust AWS), no commitment
+auto-default (operators must explicitly choose); pure
+boundary validation across 6 documented constraints; modelUnits
+substrate cap at 1000 defensive on top of AWS quota — operators
+wanting more file a separate substrate change; tags work
+cross-resource with M2.X.5.aa.z.24 post-creation; minimal
+response (provisionedModelArn only) — operators wanting full
+detail call getProvisionedModelThroughput next; no dryRun /
+no status-polling — substrate is raw transport, polling
+belongs in operator code; Bedrock control plane now has 20
+read + 2 stop + 3 create + 4 delete + 3 tag + 1 update = 33
+operations; PT mutation half-done — create shipped, update +
+delete pair-able more easily now that safety pattern is
+established).
+ADR-0147 covers Phase 2 M2.X.5.aa.z.26 (Bedrock
 provisioned-throughput inspection — getProvisionedModelThroughput
 + listProvisionedModelThroughputs read-only surfaces; PTs are
 paid dedicated capacity (one-month ~$5K, six-month committed)

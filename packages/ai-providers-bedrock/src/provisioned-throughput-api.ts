@@ -284,6 +284,143 @@ export function parseProvisionedModelListResponse(
   return out;
 }
 
+export const BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN = 63;
+export const BEDROCK_PROVISIONED_MODEL_NAME_PATTERN = /^([0-9a-zA-Z][_-]?)+$/;
+export const BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN = 2048;
+export const BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN = 256;
+export const BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_PATTERN =
+  /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MIN = 1;
+export const BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MAX = 1000;
+export const BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS = 200;
+export const BEDROCK_PROVISIONED_THROUGHPUT_TAG_KEY_MAX_LEN = 128;
+export const BEDROCK_PROVISIONED_THROUGHPUT_TAG_VALUE_MAX_LEN = 256;
+
+export interface BedrockProvisionedThroughputTag {
+  readonly key: string;
+  readonly value: string;
+}
+
+export interface BedrockCreateProvisionedModelThroughputInput {
+  readonly clientRequestToken: string;
+  readonly modelUnits: number;
+  readonly provisionedModelName: string;
+  readonly modelId: string;
+  readonly commitmentDuration?: BedrockProvisionedModelCommitmentDuration;
+  readonly tags?: ReadonlyArray<BedrockProvisionedThroughputTag>;
+}
+
+export interface BedrockCreateProvisionedModelThroughputResponse {
+  readonly provisionedModelArn: string;
+}
+
+export function buildCreateProvisionedModelThroughputBody(
+  input: BedrockCreateProvisionedModelThroughputInput,
+): string {
+  if (
+    input.clientRequestToken.length < 1 ||
+    input.clientRequestToken.length >
+      BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN ||
+    !BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_PATTERN.test(
+      input.clientRequestToken,
+    )
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createProvisionedModelThroughput: invalid clientRequestToken`,
+    });
+  }
+  if (
+    !Number.isInteger(input.modelUnits) ||
+    input.modelUnits < BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MIN ||
+    input.modelUnits > BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MAX
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createProvisionedModelThroughput: modelUnits must be an integer in [${BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MIN.toString()}, ${BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MAX.toString()}], got ${input.modelUnits.toString()}`,
+    });
+  }
+  if (
+    input.provisionedModelName.length < 1 ||
+    input.provisionedModelName.length > BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN ||
+    !BEDROCK_PROVISIONED_MODEL_NAME_PATTERN.test(input.provisionedModelName)
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createProvisionedModelThroughput: invalid provisionedModelName '${input.provisionedModelName}'`,
+    });
+  }
+  if (
+    input.modelId.length < 1 ||
+    input.modelId.length > BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN
+  ) {
+    throw new BedrockError({
+      kind: "invalid_request_error",
+      message: `createProvisionedModelThroughput: modelId length must be in [1, ${BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN.toString()}], got ${input.modelId.length.toString()}`,
+    });
+  }
+  if (input.commitmentDuration !== undefined) {
+    if (!isBedrockProvisionedModelCommitmentDuration(input.commitmentDuration)) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createProvisionedModelThroughput: invalid commitmentDuration '${String(input.commitmentDuration)}'`,
+      });
+    }
+  }
+  if (input.tags !== undefined) {
+    if (input.tags.length > BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS) {
+      throw new BedrockError({
+        kind: "invalid_request_error",
+        message: `createProvisionedModelThroughput: tags count must be ≤ ${BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS.toString()}, got ${input.tags.length.toString()}`,
+      });
+    }
+    for (let i = 0; i < input.tags.length; i++) {
+      const tag = input.tags[i]!;
+      if (
+        tag.key.length < 1 ||
+        tag.key.length > BEDROCK_PROVISIONED_THROUGHPUT_TAG_KEY_MAX_LEN
+      ) {
+        throw new BedrockError({
+          kind: "invalid_request_error",
+          message: `createProvisionedModelThroughput: tag key length must be in [1, ${BEDROCK_PROVISIONED_THROUGHPUT_TAG_KEY_MAX_LEN.toString()}] at index ${i.toString()}`,
+        });
+      }
+      if (tag.value.length > BEDROCK_PROVISIONED_THROUGHPUT_TAG_VALUE_MAX_LEN) {
+        throw new BedrockError({
+          kind: "invalid_request_error",
+          message: `createProvisionedModelThroughput: tag value length must be ≤ ${BEDROCK_PROVISIONED_THROUGHPUT_TAG_VALUE_MAX_LEN.toString()} at index ${i.toString()}`,
+        });
+      }
+    }
+  }
+  const body: Record<string, unknown> = {
+    clientRequestToken: input.clientRequestToken,
+    modelUnits: input.modelUnits,
+    provisionedModelName: input.provisionedModelName,
+    modelId: input.modelId,
+  };
+  if (input.commitmentDuration !== undefined) {
+    body["commitmentDuration"] = input.commitmentDuration;
+  }
+  if (input.tags !== undefined) body["tags"] = input.tags;
+  return JSON.stringify(body);
+}
+
+export function parseCreateProvisionedModelThroughputResponse(
+  raw: unknown,
+): BedrockCreateProvisionedModelThroughputResponse {
+  if (raw === null || typeof raw !== "object") {
+    throw new BedrockError({
+      kind: "api_error",
+      message:
+        "createProvisionedModelThroughput: response is not a JSON object",
+    });
+  }
+  const j = raw as Record<string, unknown>;
+  const provisionedModelArn = expectString(j, "provisionedModelArn");
+  return { provisionedModelArn };
+}
+
 function expectString(obj: Record<string, unknown>, key: string): string {
   const v = obj[key];
   if (typeof v !== "string" || v.length === 0) {

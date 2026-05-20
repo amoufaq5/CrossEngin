@@ -5614,6 +5614,272 @@ describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)",
   });
 });
 
+describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)", () => {
+  function validInput() {
+    return {
+      clientRequestToken: "req-abc-123",
+      modelUnits: 1,
+      provisionedModelName: "tenant-a-pt",
+      modelId:
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+    };
+  }
+
+  function buildSuccessFetch(capture?: FetchCapture): FetchLike {
+    return buildFetch({
+      capture,
+      ok: true,
+      status: 200,
+      text: JSON.stringify({
+        provisionedModelArn:
+          "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+      }),
+    });
+  }
+
+  it("POSTs control-plane /provisioned-model-throughput with the JSON body", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createProvisionedModelThroughput(validInput());
+    expect(capture.url).toContain("bedrock.us-east-1.amazonaws.com");
+    expect(capture.url).toContain("/provisioned-model-throughput");
+    expect(capture.init?.method).toBe("POST");
+    expect(capture.init?.headers["content-type"]).toBe("application/json");
+    expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
+  });
+
+  it("includes clientRequestToken + modelUnits + name + modelId in the body bytes", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createProvisionedModelThroughput(validInput());
+    const bodyStr = new TextDecoder().decode(capture.init!.body);
+    const body = JSON.parse(bodyStr) as Record<string, unknown>;
+    expect(body["clientRequestToken"]).toBe("req-abc-123");
+    expect(body["modelUnits"]).toBe(1);
+    expect(body["provisionedModelName"]).toBe("tenant-a-pt");
+    expect(body["modelId"]).toContain("claude-3-sonnet");
+  });
+
+  it("returns the parsed provisionedModelArn on success", async () => {
+    const provider = build({ fetch: buildSuccessFetch() });
+    const result = await provider.createProvisionedModelThroughput(validInput());
+    expect(result.provisionedModelArn).toContain("provisioned-model/abc");
+  });
+
+  it("does not run against the runtime host", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createProvisionedModelThroughput(validInput());
+    expect(capture.url).not.toContain("bedrock-runtime.");
+  });
+
+  it("validates clientRequestToken BEFORE fetch (mandatory for cost-safety)", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createProvisionedModelThroughput({
+        ...validInput(),
+        clientRequestToken: "",
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("validates modelUnits BEFORE fetch", async () => {
+    let called = 0;
+    const provider = build({
+      fetch: async () => {
+        called += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    await expect(
+      provider.createProvisionedModelThroughput({
+        ...validInput(),
+        modelUnits: 0,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    expect(called).toBe(0);
+  });
+
+  it("threads commitmentDuration into the body when provided", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createProvisionedModelThroughput({
+      ...validInput(),
+      commitmentDuration: "SixMonths",
+    });
+    const body = JSON.parse(new TextDecoder().decode(capture.init!.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body["commitmentDuration"]).toBe("SixMonths");
+  });
+
+  it("threads tags into the body when provided", async () => {
+    const capture: FetchCapture = { url: null, init: null };
+    const provider = build({ fetch: buildSuccessFetch(capture) });
+    await provider.createProvisionedModelThroughput({
+      ...validInput(),
+      tags: [
+        { key: "tenant", value: "a" },
+        { key: "env", value: "prod" },
+      ],
+    });
+    const body = JSON.parse(new TextDecoder().decode(capture.init!.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body["tags"]).toEqual([
+      { key: "tenant", value: "a" },
+      { key: "env", value: "prod" },
+    ]);
+  });
+
+  it("propagates 409 ConflictException as conflict_error (name already exists)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 409,
+        text: JSON.stringify({
+          __type: "ConflictException",
+          message: "PT with this name already exists",
+        }),
+      }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toMatchObject({
+      kind: "conflict_error",
+      status: 409,
+      code: "ConflictException",
+    });
+  });
+
+  it("propagates 404 as not_found_error (modelId doesn't exist)", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 404,
+        text: JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "no such model",
+        }),
+      }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+  });
+
+  it("propagates 403 as permission_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 403,
+        text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
+      }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+  });
+
+  it("propagates 429 as rate_limit_error", async () => {
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 429,
+        text: JSON.stringify({
+          __type: "ThrottlingException",
+          message: "slow down",
+        }),
+      }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+  });
+
+  it("propagates 402 ServiceQuotaExceeded as quota-style error (over PT capacity)", async () => {
+    // AWS surfaces capacity issues as 402 ServiceQuotaExceededException
+    const provider = build({
+      fetch: buildFetch({
+        ok: false,
+        status: 402,
+        text: JSON.stringify({
+          __type: "ServiceQuotaExceededException",
+          message: "PT quota exceeded",
+        }),
+      }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toBeDefined();
+  });
+
+  it("propagates parse failures as api_error", async () => {
+    const provider = build({
+      fetch: buildFetch({ ok: true, status: 200, text: "not json" }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toMatchObject({ kind: "api_error" });
+  });
+
+  it("propagates network errors", async () => {
+    const provider = build({
+      fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
+    });
+    await expect(
+      provider.createProvisionedModelThroughput(validInput()),
+    ).rejects.toMatchObject({ kind: "network_error" });
+  });
+
+  it("idempotent retry with same token: substrate makes the API call (AWS handles dedup server-side)", async () => {
+    // Substrate doesn't dedupe locally — AWS guarantees idempotency via clientRequestToken.
+    // Repeated calls with the same token go through to AWS each time; AWS returns the same ARN.
+    let calls = 0;
+    const provider = build({
+      fetch: async () => {
+        calls += 1;
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              provisionedModelArn:
+                "arn:aws:bedrock:us-east-1:123:provisioned-model/same-arn",
+            }),
+          arrayBuffer: async () => new ArrayBuffer(0),
+          body: null,
+        };
+      },
+    });
+    const r1 = await provider.createProvisionedModelThroughput(validInput());
+    const r2 = await provider.createProvisionedModelThroughput(validInput());
+    expect(r1.provisionedModelArn).toBe(r2.provisionedModelArn);
+    expect(calls).toBe(2);
+  });
+});
+
 function emptyStream(): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {

@@ -125,9 +125,13 @@ import {
   type BedrockMultimodalEmbeddingModel,
 } from "./pricing.js";
 import {
+  buildCreateProvisionedModelThroughputBody,
   buildProvisionedThroughputListQuery,
+  parseCreateProvisionedModelThroughputResponse,
   parseProvisionedModelDetail,
   parseProvisionedModelListResponse,
+  type BedrockCreateProvisionedModelThroughputInput,
+  type BedrockCreateProvisionedModelThroughputResponse,
   type BedrockListProvisionedModelThroughputsOptions,
   type BedrockProvisionedModelDetail,
   type BedrockProvisionedModelListResponse,
@@ -998,6 +1002,27 @@ export class BedrockProvider implements LlmProvider {
       });
     }
     return parseProvisionedModelDetail(raw);
+  }
+
+  async createProvisionedModelThroughput(
+    input: BedrockCreateProvisionedModelThroughputInput,
+  ): Promise<BedrockCreateProvisionedModelThroughputResponse> {
+    const bodyStr = buildCreateProvisionedModelThroughputBody(input);
+    const body = new TextEncoder().encode(bodyStr);
+    const text = await this.signedControlPlanePost({
+      path: "/provisioned-model-throughput",
+      body,
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new BedrockError({
+        kind: "api_error",
+        message: `createProvisionedModelThroughput: failed to parse response: ${err instanceof Error ? err.message : "unknown"}`,
+      });
+    }
+    return parseCreateProvisionedModelThroughputResponse(raw);
   }
 
   async listProvisionedModelThroughputs(
