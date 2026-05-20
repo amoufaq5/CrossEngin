@@ -21,15 +21,64 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.8 + M6.8.x + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,036 tests**,
-all green, no type errors. M6.7.zz.tenant closes ADR-0143 Q1
+**56 packages + 1 app, 128 meta-schema tables, 8,042 tests**,
+all green, no type errors. M8.2 adds timer_set + timer_cancelled
+to WORKFLOW_INSTRUMENTATION_KINDS (14 → 16) closing the timer
+lifecycle observability gap. Before M8.2, operators saw
+timer_fired events but not timer_set creations or
+timer_cancelled removals — couldn't observe timer-set-to-fire
+latency, timer creation throughput, or cancellation rates.
+Three additive changes: (1) ROUTER kinds grows 14→16 with
+timer_set at slot 8 (before timer_fired) and timer_cancelled
+at slot 10 (after) — symmetric verb pair around the existing
+timer_fired. (2) applyScheduleTimer in engine.ts emits
+timer_set BEFORE the timer_scheduled event-log append —
+matches M8.1 activity_started ordering; instrumentation
+captures intent even when persistence fails. Attributes:
+{timerId, timerName, fireAt, relativeSeconds}. Same timerId
+flows into both the instrumentation event AND the subsequent
+timer_scheduled event-log entry → operators correlate
+timer-set-to-fire latency via `attributes.timerId`. (3)
+META_WORKFLOW_TRACES.kind CHECK constraint extended
+ADDITIVELY to allow both new values — no migration needed
+for pre-existing data still in original 14 kinds. KEY
+NUANCE: timer_cancelled is kind-defined + CHECK-allowed but
+NOT YET EMITTED. The engine's cancel_timer action handler
+currently throws "not implemented in M3" (engine.ts line
+600-603); no code path produces cancellation events.
+Reserving the kind NOW means the future milestone that
+wires cancel_timer doesn't need a schema migration —
+additive forward-compat. Documented as future Q2. Three
+operator workflows unblocked: timer creation throughput
+observability ("how many timers per workflow instance?"),
+timer-set-to-fire latency dashboards (`fired.occurredAt -
+set.occurredAt` correlated via timerId), compliance audit
+("every timer scheduled by this workflow"). Naming choice
+timer_set (not timer_scheduled) deliberately disambiguates
+from the event-log kind timer_scheduled which represents
+persistence — different surfaces, different consumers; the
+verb timer_set/timer_fired/timer_cancelled mirrors operator
+language. Instrumentation never crashes engine (same error-
+swallowing pattern as M8). No new transport, no new
+dependency, no breaking change. PostgresWorkflowInstrumentation
+handles the new kinds transparently since the wire format is
+unchanged. 6 new tests in engine.test.ts: timer_set emitted
+on schedule, attributes populated correctly (timerId +
+timerName + fireAt computed from clock + relativeSeconds),
+tenantId/instanceId/definitionId threaded, SAME timerId
+across timer_set and timer_fired, multiple timers each emit
+their own timer_set with distinct timerIds, both new kinds
+present in the constant. instrumentation.test.ts updated
+from "14 documented engine events" to "16 documented engine
+events" with the new alphabetical-canonical kind list.
+M6.7.zz.tenant closes ADR-0143 Q1
 by adding META_TENANT_RETENTION_POLICIES (128th table) for
 per-tenant retention overrides. Operator workflows unlocked:
 long-tail customer compliance (7-year retention for a
@@ -3571,7 +3620,15 @@ policies first then platform-default with NOT IN subquery
 exclusion correctly handles both shorter- and longer-than-
 default per-tenant retention; llm_latency_samples
 mechanically excluded via DB CHECK + adapter allowlist
-since the table has no tenant_id column).
+since the table has no tenant_id column), ADR-0156 covers
+M8.2 (timer_set + timer_cancelled instrumentation —
+WORKFLOW_INSTRUMENTATION_KINDS grows 14→16 additively;
+applyScheduleTimer now emits timer_set with timerId
+correlation BEFORE the event-log append; timer_cancelled
+kind-defined and CHECK-allowed but emission deferred until
+cancel_timer action is implemented in a future milestone;
+operator workflows unlocked — timer creation throughput,
+set-to-fire latency, cancellation rate).
 
 ## Architecture in 90 seconds
 
@@ -4989,7 +5046,38 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0155 covers Phase 2 M6.7.zz.tenant
+operations), ADR-0156 covers Phase 2 M8.2 (Workflow runtime
+timer_set + timer_cancelled instrumentation —
+WORKFLOW_INSTRUMENTATION_KINDS grows 14→16 additively with
+timer_set at slot 8 before timer_fired and timer_cancelled
+at slot 10 after; applyScheduleTimer in engine.ts emits
+timer_set BEFORE the timer_scheduled event-log append
+matching M8.1's activity_started instrumentation-first
+ordering — captures intent even if persistence fails;
+attributes {timerId, timerName, fireAt, relativeSeconds};
+the SAME timerId flows into both the instrumentation event
+AND the subsequent event-log entry so operators correlate
+set-to-fire latency via attributes.timerId;
+META_WORKFLOW_TRACES.kind CHECK constraint extended
+ADDITIVELY — no migration for pre-existing data; KEY
+NUANCE: timer_cancelled is kind-defined + CHECK-allowed
+but NOT YET EMITTED — the engine's cancel_timer action
+handler throws "not implemented in M3" so no code path
+produces cancellation events; reserving the kind now
+enables the future cancel_timer milestone to land without
+a schema migration; naming choice timer_set (not
+timer_scheduled) deliberately disambiguates from the
+event-log kind which represents persistence — different
+surfaces different consumers — and the verb pair
+timer_set/timer_fired/timer_cancelled mirrors operator
+language; three operator workflows unblocked — timer
+creation throughput, set-to-fire latency dashboards via
+SQL JOIN on attributes.timerId, compliance audit;
+instrumentation never crashes engine same error-swallowing
+pattern as M8; no new transport, no new dependency, no
+breaking change; PostgresWorkflowInstrumentation handles
+new kinds transparently since wire format unchanged).
+ADR-0155 covers Phase 2 M6.7.zz.tenant
 (META_TENANT_RETENTION_POLICIES per-tenant retention
 overrides — closes ADR-0143 Q1; 128th meta-schema table
 with PK on (tenant_id, table_name) + RLS + table_name

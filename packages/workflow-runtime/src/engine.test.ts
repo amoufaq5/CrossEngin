@@ -10,6 +10,7 @@ import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
 import { WorkflowEngine } from "./engine.js";
 import {
+  WORKFLOW_INSTRUMENTATION_KINDS,
   captureInstrumentation,
   type WorkflowInstrumentation,
 } from "./instrumentation.js";
@@ -1076,5 +1077,234 @@ describe("WorkflowEngine — activity execution instrumentation (M8.1)", () => {
     for (const e of activityEvents) {
       expect(e.correlationId).toBe("act-corr-xyz");
     }
+  });
+});
+
+describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
+  function timerSchedulingDefinition(): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "deadline", relativeSeconds: 60 },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "approved",
+          kind: "terminal_success",
+          label: "Approved",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+    };
+  }
+
+  it("emits timer_set when applyScheduleTimer runs", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({
+      definition: timerSchedulingDefinition(),
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: timerSchedulingDefinition().id,
+      correlationKey: "po-timer-set",
+    });
+    const set = cap.events.find((e) => e.kind === "timer_set");
+    expect(set).toBeDefined();
+  });
+
+  it("populates timer_set attributes (timerId + timerName + fireAt + relativeSeconds)", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({
+      definition: timerSchedulingDefinition(),
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: timerSchedulingDefinition().id,
+      correlationKey: "po-timer-attrs",
+    });
+    const set = cap.events.find((e) => e.kind === "timer_set");
+    expect(set!.attributes["timerName"]).toBe("deadline");
+    expect(set!.attributes["relativeSeconds"]).toBe(60);
+    expect(set!.attributes["timerId"]).toBeDefined();
+    expect(typeof set!.attributes["timerId"]).toBe("string");
+    // fireAt = clock.now() + relativeSeconds → 12:01:00
+    expect(set!.attributes["fireAt"]).toBe("2026-05-16T12:01:00.000Z");
+  });
+
+  it("threads tenantId + instanceId + definitionId into the timer_set event", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerSchedulingDefinition();
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    const { instanceId } = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-timer-ids",
+    });
+    const set = cap.events.find((e) => e.kind === "timer_set");
+    expect(set!.tenantId).toBe(TENANT);
+    expect(set!.instanceId).toBe(instanceId);
+    expect(set!.definitionId).toBe(def.id);
+  });
+
+  it("timer_set carries the SAME timerId that the subsequent timer_fired event reports", async () => {
+    const def: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "awaiting_approval",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "deadline", relativeSeconds: 60 },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "rejected",
+          kind: "terminal_failure",
+          label: "Rejected",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "submit",
+          fromState: "draft",
+          toState: "awaiting_approval",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "timeout",
+          fromState: "awaiting_approval",
+          toState: "rejected",
+          trigger: { kind: "timer_fired", timerName: "deadline" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    };
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-timer-id-link",
+    });
+    await engine.tickTimers(new Date("2026-05-16T12:05:00.000Z").getTime());
+    const set = cap.events.find((e) => e.kind === "timer_set");
+    const fired = cap.events.find((e) => e.kind === "timer_fired");
+    expect(set).toBeDefined();
+    expect(fired).toBeDefined();
+    expect(set!.attributes["timerId"]).toBe(fired!.attributes["timerId"]);
+  });
+
+  it("multiple timers in a single transition each emit their own timer_set", async () => {
+    const def: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "reminder", relativeSeconds: 30 },
+            },
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "deadline", relativeSeconds: 90 },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "Done",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+    };
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-multi-timers",
+    });
+    const sets = cap.events.filter((e) => e.kind === "timer_set");
+    expect(sets).toHaveLength(2);
+    expect(sets[0]!.attributes["timerName"]).toBe("reminder");
+    expect(sets[1]!.attributes["timerName"]).toBe("deadline");
+    expect(sets[0]!.attributes["timerId"]).not.toBe(
+      sets[1]!.attributes["timerId"],
+    );
+  });
+
+  it("includes timer_set + timer_cancelled in the kinds enum", () => {
+    // timer_cancelled is reserved for when the cancel_timer action is
+    // implemented in a future milestone; the CHECK constraint allows it
+    // so future emit sites can land without a schema migration.
+    const enabled = WORKFLOW_INSTRUMENTATION_KINDS as readonly string[];
+    expect(enabled).toContain("timer_set");
+    expect(enabled).toContain("timer_fired");
+    expect(enabled).toContain("timer_cancelled");
   });
 });

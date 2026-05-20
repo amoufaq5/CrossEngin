@@ -874,6 +874,18 @@ export class WorkflowEngine {
         : 60;
     const fireAt = new Date(this.clock.now().getTime() + relativeSeconds * 1000).toISOString();
     const timerId = this.ids.generate("wft");
+    await this.emitInstrumentation("timer_set", {
+      tenantId,
+      instanceId,
+      definitionId: this.instanceDefinition.get(instanceId) ?? null,
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+      attributes: {
+        timerId,
+        timerName,
+        fireAt,
+        relativeSeconds,
+      },
+    });
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
