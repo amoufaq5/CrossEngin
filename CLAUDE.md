@@ -21,15 +21,39 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M5.10.5 + M8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M5.10.5 + M8 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**55 packages + 1 app, 120 meta-schema tables, 7,407 tests**,
-all green, no type errors. M2.X.11.x wires `cacheBreakpoint`
+**55 packages + 1 app, 120 meta-schema tables, 7,430 tests**,
+all green, no type errors. M2.X.13 lifts the FIFTH
+cross-provider error classifier to the kernel —
+`isNotFoundError(err)` in
+`@crossengin/ai-providers/not-found.ts`. All three providers
+(Anthropic, OpenAI, Bedrock) already emit `not_found_error`
+from their `classifyHttpStatus(404)` paths; this milestone
+adds the kernel-level predicate so operators can write
+provider-agnostic `catch` blocks. Zero provider changes
+required — the kind was already wired everywhere; only the
+kernel module is new. Structurally identical to the prior
+four classifiers (`isModerationError` M2.X.6.x,
+`isRetryableError` M2.X.7, `isInputTooLargeError` M2.X.9,
+`isConflictError` M2.X.12): `NOT_FOUND_ERROR_KINDS` tuple +
+`isNotFoundErrorKind` predicate + `isNotFoundError(err)`
+duck-typed discriminator on `.kind`. Single-kind tuple
+(`not_found_error`); future variants extend additively. The
+kernel error-space partition now has five buckets: retryable
+(try again with backoff), moderation (terminal; audit),
+input-too-large (terminal; reduce input), conflict (terminal;
+reconcile state), not-found (terminal; resource absence —
+NEW), other (auth / permission / invalid_request / unknown).
+Pattern fully mature across five classifiers. Idempotent
+cleanup workflows now have a documented cross-provider
+pattern: `catch (err) { if (!isNotFoundError(err)) throw err }`.
+M2.X.11.x wires `cacheBreakpoint`
 through the Bedrock Converse translator (the deferred Q1 from
 ADR-0125). Single-line change in
 `@crossengin/ai-providers-bedrock/converse-api.ts`
@@ -989,15 +1013,16 @@ kind via their classifyHttpStatus paths),
 `InputTooLargeErrorKind` type, `isInputTooLargeErrorKind`
 discriminator, `InputTooLargeDiscriminator` interface, and the
 headline predicate. The kernel surface now partitions the
-error space into five buckets: retryable (try again with
+error space into six buckets: retryable (try again with
 backoff), moderation (terminal; audit), input-too-large
 (terminal; reduce input), conflict (terminal; reconcile
-state — M2.X.12), other (auth / permission /
-invalid_request / unknown — terminal; surface to user).
-Operators classifying errors across providers use four
-parallel discriminators with no provider-package imports:
-isModerationError + isRetryableError + isInputTooLargeError +
-isConflictError.
+state — M2.X.12), not-found (terminal; resource absence —
+M2.X.13), other (auth / permission / invalid_request /
+unknown — terminal; surface to user). Operators classifying
+errors across providers use five parallel discriminators with
+no provider-package imports: isModerationError +
+isRetryableError + isInputTooLargeError + isConflictError +
+isNotFoundError.
 Mutual exclusivity verified by tests: a request_too_large
 error is NOT retryable + NOT a moderation event.
 Cross-package integration tests in all three providers verify
@@ -2234,7 +2259,11 @@ drop for tight scope), ADR-0126 covers M2.X.11.x (Bedrock
 cachePoint translator wiring — single-line append in
 appendKernelBlocks loop; reuses M2.9's BEDROCK_CACHE_POINT
 infrastructure; cross-provider parity now on Anthropic +
-Bedrock).
+Bedrock), ADR-0127 covers M2.X.13 (not_found_error kernel
+kind + isNotFoundError cross-provider classifier — fifth
+kernel classifier; zero provider changes since the kind was
+already wired everywhere; idempotent cleanup workflows now
+have a documented cross-provider pattern).
 
 ## Architecture in 90 seconds
 
@@ -3428,7 +3457,15 @@ inserts the shared BEDROCK_CACHE_POINT constant after each
 kernel block with cacheBreakpoint; M2.9's pre-built
 cachePoint infrastructure earns its keep; cross-provider
 parity now on Anthropic + Bedrock for the kernel
-cacheBreakpoint field).
+cacheBreakpoint field), ADR-0127 covers Phase 2 M2.X.13
+(not_found_error kernel kind + isNotFoundError cross-provider
+classifier — fifth kernel classifier in the family following
+the established M2.X.6.x / M2.X.7 / M2.X.9 / M2.X.12 pattern;
+zero provider changes required since all three providers
+already emit not_found_error from classifyHttpStatus(404);
+kernel error-space partition now has six buckets;
+idempotent cleanup workflows have a documented cross-provider
+pattern).
 When you ship a new package, write the matching ADR in the same
 session, following `0000-template.md` and the style of the
 existing 0026-0037 batch.
