@@ -10,10 +10,22 @@ export interface PostgresCostCeilingResolverOptions {
   readonly conn: PgConnection;
 }
 
+export type CostCeilingSource = "override" | "tier" | "none";
+
+export interface CostCeilingResolution {
+  readonly ceiling: CostCeiling | undefined;
+  readonly source: CostCeilingSource;
+  readonly tierId?: string;
+}
+
 interface CeilingRow {
   readonly max_usd_per_request: string | null;
   readonly max_usd_per_window: string | null;
   readonly window_seconds: number | null;
+}
+
+interface TierRow extends CeilingRow {
+  readonly tier_id: string;
 }
 
 function composeCeiling(row: CeilingRow): CostCeiling {
@@ -40,6 +52,12 @@ export class PostgresCostCeilingResolver {
   }
 
   readonly resolve = async (tenantId: string): Promise<CostCeiling | undefined> => {
+    return (await this.resolveDetailed(tenantId)).ceiling;
+  };
+
+  readonly resolveDetailed = async (
+    tenantId: string,
+  ): Promise<CostCeilingResolution> => {
     const ceilingResult = await this.conn.query<CeilingRow>(
       `SELECT max_usd_per_request::TEXT AS max_usd_per_request,
               max_usd_per_window::TEXT AS max_usd_per_window,
@@ -49,10 +67,16 @@ export class PostgresCostCeilingResolver {
       [tenantId],
     );
     const ceilingRow = ceilingResult.rows[0];
-    if (ceilingRow !== undefined) return composeCeiling(ceilingRow);
+    if (ceilingRow !== undefined) {
+      return {
+        ceiling: composeCeiling(ceilingRow),
+        source: "override",
+      };
+    }
 
-    const tierResult = await this.conn.query<CeilingRow>(
-      `SELECT t.max_usd_per_request::TEXT AS max_usd_per_request,
+    const tierResult = await this.conn.query<TierRow>(
+      `SELECT t.tier_id,
+              t.max_usd_per_request::TEXT AS max_usd_per_request,
               t.max_usd_per_window::TEXT AS max_usd_per_window,
               t.window_seconds
        FROM ${SCHEMA}.${MEMBERSHIPS_TABLE} m
@@ -61,8 +85,17 @@ export class PostgresCostCeilingResolver {
       [tenantId],
     );
     const tierRow = tierResult.rows[0];
-    if (tierRow !== undefined) return composeCeiling(tierRow);
+    if (tierRow !== undefined) {
+      return {
+        ceiling: composeCeiling(tierRow),
+        source: "tier",
+        tierId: tierRow.tier_id,
+      };
+    }
 
-    return undefined;
+    return {
+      ceiling: undefined,
+      source: "none",
+    };
   };
 }

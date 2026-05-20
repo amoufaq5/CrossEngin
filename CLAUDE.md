@@ -21,15 +21,58 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.8 + M8 + M8.1 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.8 + M6.8.x + M8 + M8.1 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 127 meta-schema tables, 8,016 tests**,
-all green, no type errors. M6.7.zz.dry-run closes ADR-0143 Q4
+**56 packages + 1 app, 127 meta-schema tables, 8,026 tests**,
+all green, no type errors. M6.8.x closes ADR-0144 Q2 +
+ADR-0137 Q3+Q4 + ADR-0141 Q3 (four deferred Qs in one
+milestone) by adding `resolveDetailed()` to
+PostgresCostCeilingResolver. Operators previously saw WHAT
+the ceiling was via resolve() — now they see WHY via
+resolveDetailed(): the resolution attribution (source +
+matched tierId). Returns a structured
+CostCeilingResolution with three fields: ceiling
+(CostCeiling | undefined as before), source ("override" |
+"tier" | "none" — discriminated union), tierId (conditional
+string only when source === "tier"). resolve() refactored to
+delegate to resolveDetailed() — zero duplication, identical
+behavior, legacy callers unchanged. The tier query gains
+ONE column (t.tier_id) — additive query change, no schema
+change, no breaking change. TypeScript discriminated union
+pattern lets operators narrow on source === "tier" and get
+tierId as string (not string | undefined). source="none" is
+the canonical "no policy at any level" signal — operators
+know the router will fall back to its global config.
+Operator pain solved: audit clarity (is tenant X's cap from
+their tier or an override?), tier migration verification
+(did the new tier take effect?), per-tenant debugging (why
+is tenant Z still blocked?), dashboard reporting (tier
+distribution across tenants). Future enhancement: a
+RouterInstrumentation event kind="ceiling_resolved" emitted
+automatically from DefaultLlmRouter.enforceCeilingPreflight,
+building on this foundation. M6.8.x is the synchronous
+foundation; async tracing is additive on top. Rejected
+alternatives: emit event instead of method (builds on this),
+separate getSourceFor() method (two queries for one fallback
+walk), boolean flags (operators infer source), always-
+present tierId (redundant checks), include row updated_at
+(operator queries tables directly), separate
+resolveCeiling+resolveSource (two queries), "global" source
+value (resolver doesn't know about router-level config).
+10 new tests in cost-ceiling-resolver.test.ts: source=
+"override" with per-tenant ceiling, source="tier" with
+matched tierId, source="none" with undefined ceiling,
+empty-ceiling-object on all-NULL override row, override
+precedence (tier query NOT issued), tier query selects
+tier_id, NUMERIC precision preserved on tier-source ceiling,
+resolve() delegates to resolveDetailed() (same value),
+plumbing through resolve() unchanged for legacy callers,
+"none" canonical signal. M6.7.zz.dry-run closes ADR-0143 Q4
 by adding `previewPrune()` to PostgresTraceRetention. Operator
 workflow `preview → review → prune` is now first-class.
 Operator pain solved: first-run trepidation (millions of
@@ -3453,7 +3496,16 @@ RetentionPreviewResult shape so TypeScript catches "meant
 to prune but called preview" mix-ups; same cutoff +
 allowlist + skip semantics as prune; doesn't update
 last_pruned_at; PG BIGINT precision via ::TEXT cast;
-operator workflow preview → review → prune now first-class).
+operator workflow preview → review → prune now first-class),
+ADR-0154 covers M6.8.x (PostgresCostCeilingResolver.resolveDetailed
+— closes ADR-0144 Q2 + ADR-0137 Q3+Q4 + ADR-0141 Q3 in one
+milestone — adds source-attribution to ceiling resolution
+returning {ceiling, source, tierId?} where source is the
+discriminated union "override"|"tier"|"none" and tierId is
+conditional on source==="tier"; resolve() delegates to
+resolveDetailed() — zero duplication, identical behavior;
+audit dashboards now show WHY tenants are capped not just
+WHAT they're capped at).
 
 ## Architecture in 90 seconds
 
@@ -4871,7 +4923,33 @@ status}` — operators wanting full detail call getInferenceProfile
 next; clientRequestToken hooks AWS's idempotency contract;
 symmetric error propagation 404/409/403/429; Bedrock control
 plane now has 18 read + 2 stop + 2 create + 4 delete = 26
-operations), ADR-0153 covers Phase 2 M6.7.zz.dry-run
+operations), ADR-0154 covers Phase 2 M6.8.x
+(PostgresCostCeilingResolver.resolveDetailed source attribution
+— closes ADR-0144 Q2 + ADR-0137 Q3+Q4 + ADR-0141 Q3 in one
+milestone — four deferred Qs resolved by adding a structured
+attribution method; resolve() refactored to delegate to
+resolveDetailed() with zero duplication and identical behavior;
+returns CostCeilingResolution with three fields: ceiling
+(CostCeiling | undefined as before), source enum
+"override" | "tier" | "none" as discriminated union, tierId
+conditional string only when source === "tier"; tier query
+gains ONE additive column (t.tier_id) — no schema change;
+TypeScript discriminated union pattern lets operators
+narrow on source === "tier" and get tierId as string; future
+enhancement: a RouterInstrumentation event kind=
+"ceiling_resolved" emitted automatically from
+DefaultLlmRouter.enforceCeilingPreflight, building on this
+synchronous foundation; rejected alternatives — emit event
+instead of method (builds on this), separate getSourceFor
+method (two queries), boolean flags (operators infer),
+always-present tierId (redundant checks), include row
+updated_at (operator queries tables directly), "global"
+source value (resolver doesn't know router-level config);
+operator pain solved: audit clarity (is tenant X's cap from
+their tier or an override?), tier migration verification,
+per-tenant policy debugging, dashboard reporting on tier
+distribution).
+ADR-0153 covers Phase 2 M6.7.zz.dry-run
 (PostgresTraceRetention.previewPrune — closes ADR-0143 Q4;
 adds previewPrune() to PostgresTraceRetention as the
 read-only counterpart of prune(); operator workflow
