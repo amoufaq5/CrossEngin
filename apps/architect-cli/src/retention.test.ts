@@ -1,5 +1,6 @@
 import type {
   ClearTenantOptOutInput,
+  DeleteTenantPolicyInput,
   EffectiveRetentionResolution,
   ExpiringOptOut,
   ExpiringOptOutsInput,
@@ -61,6 +62,8 @@ function fakeRetention(opts: {
   tenantPolicies?: readonly TenantRetentionPolicyRow[];
   setRetentionResult?: TenantRetentionPolicyRow;
   setRetentionCapture?: SetTenantRetentionInput[];
+  deleteResult?: boolean;
+  deleteCapture?: DeleteTenantPolicyInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -134,6 +137,11 @@ function fakeRetention(opts: {
           lastPrunedAt: null,
         }
       );
+    },
+    deleteTenantPolicy: async (input: DeleteTenantPolicyInput) => {
+      opts.deleteCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.deleteResult ?? true;
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -1738,5 +1746,149 @@ describe("runRetention set", () => {
     );
     expect(code).toBe(1);
     expect(err()).toContain("FK constraint violated");
+  });
+});
+
+describe("runRetention delete", () => {
+  it("returns exit 2 when tenant arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "delete"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when table arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "delete", TENANT_A),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("threads tenantId + tableName to adapter", async () => {
+    const { ctx } = buffers();
+    const deleteCapture: DeleteTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "delete", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(deleteCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+  });
+
+  it("human-format prints 'deleted per-tenant policy' when row removed", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "delete", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteResult: true }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("deleted per-tenant policy");
+    expect(out()).toContain(TENANT_A);
+    expect(out()).toContain("workflow_traces");
+  });
+
+  it("human-format prints 'idempotent no-op' when no row matched", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "delete", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteResult: false }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("idempotent no-op");
+    expect(out()).toContain("no per-tenant policy");
+  });
+
+  it("json-format emits envelope {action, deleted, tenantId, tableName} when row removed", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "delete",
+        TENANT_A,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteResult: true }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("delete");
+    expect(parsedJson.deleted).toBe(true);
+    expect(parsedJson.tenantId).toBe(TENANT_A);
+    expect(parsedJson.tableName).toBe("workflow_traces");
+  });
+
+  it("json-format emits envelope with deleted=false on no-op", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "delete",
+        TENANT_A,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteResult: false }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("delete");
+    expect(parsedJson.deleted).toBe(false);
+    expect(parsedJson.tenantId).toBe(TENANT_A);
+    expect(parsedJson.tableName).toBe("workflow_traces");
+  });
+
+  it("returns exit 0 on idempotent no-op (re-runnable)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "delete", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteResult: false }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "delete", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
   });
 });

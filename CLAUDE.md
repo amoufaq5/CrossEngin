@@ -21,15 +21,96 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,242 tests**,
-all green, no type errors. M6.7.zz.tenant.retention-set
+**56 packages + 1 app, 128 meta-schema tables, 8,256 tests**,
+all green, no type errors. M6.7.zz.tenant.retention-delete
+closes ADR-0168 Q1 by adding `crossengin retention delete
+<tenant> <table>` action + deleteTenantPolicy adapter
+method. The retention CLI is now CRUD-complete on per-
+tenant policies: opt-out/opt-in flip the opt_out flag, set
+configures active per-tenant override, list-policies +
+effective + expiring inspect, and now delete removes the
+row entirely. Operators wanting a tenant to inherit
+platform-default with no historical baggage previously had
+to write raw DELETE SQL. Adapter is the mechanically
+simplest method in the substrate: single `DELETE FROM
+meta.tenant_retention_policies WHERE tenant_id = $1 AND
+table_name = $2` using PG's native rowCount (no RETURNING
+since operators inspect pre-deletion state via
+effective/list-policies before deleting); returns boolean
+where true=row deleted, false=no matching row (idempotent
+no-op). No opt_out filter in WHERE clause — distinct from
+clearTenantOptOut (which deliberately filters `AND opt_out
+= true` to avoid clearing fields on non-opt-out rows);
+delete is the hard-delete path with no flag-state filter,
+operator's intent is "remove this row regardless of its
+state." CLI takes positional tenant + table args only (no
+extra flags beyond --format); validates missing args with
+exit 2; passes through to adapter. Idempotent — `deleted:
+false` is success exit 0, operators safely re-run scripts.
+Human output: "deleted per-tenant policy: <uuid> /
+<table>" or "no per-tenant policy for tenant <uuid> on
+<table> (idempotent no-op)". JSON output emits envelope
+{action, deleted, tenantId, tableName} where deleted
+boolean discriminates actual deletion from no-op and the
+queried tenantId+tableName echo allows correlation across
+multiple invocations. No --confirm flag (matches sessions
++ gateway-routes mutation pattern; bounded blast radius —
+single policy row, recoverable via retention set or
+retention opt-out; operators wanting safety run effective
+first). Boolean return chosen over TenantRetentionPolicyRow|null
+(deleted row no longer exists post-mutation — returning
+pre-deletion state via RETURNING is semantically odd;
+boolean sufficient for if-then-log audit scripts).
+Use cases unblocked: reset tenant to platform-default
+(one command, no audit baggage), tier-migration cleanup
+(shell loop over JSON tenant list), compliance audit
+closure (jq list-policies | filter | delete stand-by
+rows), end-of-engagement offboarding, CI test-tenant
+cleanup (idempotent teardown). Rejected alternatives:
+DELETE with RETURNING (adds adapter complexity for
+boolean question), soft-delete via enabled=false (covered
+by retention set --enabled=false), refuse delete on
+opt_out=true row (operators explicitly running delete
+know intent; substrate doesn't gate on flag states
+mirroring set's willingness to overwrite opted-out rows),
+--confirm prompt this milestone (defer pattern), bulk
+--bulk file.csv (shell loops cover), --all-tables flag
+(defer), retention purge naming (implies sweep across
+many; delete matches single-row scope),
+Promise<TenantRetentionPolicyRow|null> return (semantically
+odd), filter on opt_out to mirror clearTenantOptOut (
+intentional hard-delete semantic). 5 new adapter tests
+covering DELETE WHERE shape, params threading, returns
+true when rowCount > 0, returns false when rowCount = 0,
+NO opt_out filter (distinct from clearTenantOptOut). 9
+new CLI tests covering missing tenant/table exit 2,
+threads to adapter, human output "deleted" when removed,
+human output "idempotent no-op" when no row, JSON envelope
+shape with deleted=true and deleted=false, exit 0 on
+idempotent no-op (re-runnable), adapter errors propagate
+exit 1. cli.ts helpText extended with retention delete
+usage line. The retention CLI surface now has 8 actions
+covering full CRUD lifecycle: expiring (list opt-outs
+within window) + effective (resolve single pair) +
+list-policies (broad audit) on read; opt-out + opt-in
++ set + delete on write; with the retention-set milestone
+closing the active-override gap and retention-delete
+closing the row-removal gap. ADR-0169 documents the
+design + 9 rejected alternatives + future Qs (--confirm
+flag matching apply --confirm pattern, --all-tables for
+tenant offboarding, REJECT permanently --include-platform
+(too dangerous), --exit-on no-op for CI gates,
+audit-log integration pairing with deferred history-table
+milestone, --before <date> bulk cleanup for time-bound
+purge, retention restore <backup-id> requiring deferred
+history-table for undo). M6.7.zz.tenant.retention-set
 closes ADR-0166 Q7 by adding `crossengin retention set
 <tenant-id> <table-name> --days N [--enabled true|false]`
 action + setTenantRetention adapter method. Operators
@@ -4597,7 +4678,19 @@ opt_out_until on UPDATE but preserves opt_out_reason
 per ADR-0161; --days required + --enabled defaults true;
 shared formatPolicyChange helper renders 'Tenant
 retention set:' header; tier-upgrade / tier-downgrade /
-stand-by / end-of-legal-hold workflows now CLI-native).
+stand-by / end-of-legal-hold workflows now CLI-native),
+ADR-0169 covers M6.7.zz.tenant.retention-delete
+(`crossengin retention delete <tenant> <table>` action +
+deleteTenantPolicy adapter method — closes ADR-0168 Q1 —
+mechanically simplest substrate method; single DELETE
+WHERE tenant_id + table_name using PG's rowCount returns
+boolean (true=deleted, false=no-op); no opt_out filter
+(hard-delete semantic distinct from clearTenantOptOut's
+preservation pattern); idempotent — false is success
+exit 0 so scripts safely re-run; JSON envelope {action,
+deleted, tenantId, tableName} echoes queried fields for
+correlation; retention CLI surface now CRUD-complete
+on per-tenant policies).
 
 ## Architecture in 90 seconds
 
@@ -6086,6 +6179,96 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0169 covers Phase 2 M6.7.zz.tenant.retention-delete
+(`crossengin retention delete <tenant-id> <table-name>`
+CLI action + deleteTenantPolicy adapter method on
+PostgresTraceRetention — closes ADR-0168 Q1; the
+mechanically simplest substrate method in the retention
+family — single `DELETE FROM
+meta.tenant_retention_policies WHERE tenant_id = $1 AND
+table_name = $2` using PG's native rowCount; returns
+boolean where true=row deleted, false=no matching row;
+idempotent no-op semantic (deleted=false is success exit
+0); CLI takes positional tenant + table args only (no
+flags beyond --format); validates missing args with exit
+2; no --confirm flag (matches sessions + gateway-routes
+mutation pattern, bounded blast radius — single policy
+row, recoverable via retention set or opt-out; operators
+wanting safety run effective first); boolean return chosen
+over TenantRetentionPolicyRow | null because deleted row
+no longer exists post-mutation — returning pre-deletion
+state via RETURNING is semantically odd; boolean
+sufficient for if-then-log audit scripts; uses rowCount
+rather than RETURNING since operators inspect pre-
+deletion state via effective/list-policies before
+deleting; no opt_out filter in WHERE clause — distinct
+from clearTenantOptOut which deliberately filters AND
+opt_out = true to avoid clearing fields on non-opt-out
+rows; delete is the hard-delete path with no flag-state
+filter, operator's intent is 'remove this row regardless
+of its state'; human output 'deleted per-tenant policy:
+<uuid> / <table>' or 'no per-tenant policy for tenant
+<uuid> on <table> (idempotent no-op)' with printSuccess
+in both cases; JSON output emits envelope {action,
+deleted, tenantId, tableName} where deleted boolean
+discriminates actual deletion from no-op and the queried
+tenantId+tableName echo allows correlation across
+multiple invocations in cron logs / audit trails; use
+cases unblocked — reset tenant to platform-default in
+one command (no audit baggage), tier-migration cleanup
+via shell loop, compliance audit closure (jq list-
+policies | filter | delete stand-by rows), end-of-
+engagement tenant offboarding, CI test-tenant cleanup
+(idempotent teardown), JSON pipeline for bulk reverts;
+rejected alternatives — DELETE with RETURNING for the
+deleted row (adds complexity for boolean question;
+operators inspect via effective/list-policies first),
+soft-delete via enabled=false (already covered by
+retention set --enabled=false), refuse delete on
+opt_out=true row (operators explicitly running delete
+know intent; substrate doesn't gate destructive actions
+on flag states mirroring set's willingness to overwrite
+opted-out rows), --confirm prompt this milestone (defer
+to future M; established CLI pattern doesn't prompt;
+bounded blast radius; chains in scripts), bulk --bulk
+file.csv (shell loops cover), --all-tables flag (defer
+to future tenant-offboarding milestone), retention purge
+naming (implies destructive sweep across many rows;
+delete matches single-row scope), Promise<TenantRetentionPolicyRow
+| null> return (semantically odd), filter on opt_out to
+mirror clearTenantOptOut (intentional semantic — hard-
+delete has no flag-state filter); 5 new adapter tests
+in trace-retention.test.ts: DELETE WHERE shape verified,
+threads tenantId+tableName as params, returns true when
+rowCount > 0, returns false when rowCount = 0, NO
+opt_out filter (verified absent from SQL, distinct from
+clearTenantOptOut); 9 new CLI tests in retention.test.ts:
+missing tenant returns exit 2, missing table returns exit
+2, threads tenantId+tableName to adapter, human-format
+prints 'deleted per-tenant policy' when row removed,
+human-format prints 'idempotent no-op' when no row,
+JSON envelope structure with deleted=true on actual
+removal, JSON envelope structure with deleted=false on
+no-op, exit 0 on idempotent no-op (re-runnable),
+adapter errors propagate as exit 1; cli.ts helpText
+extended with retention delete usage line; future Qs
+cover --confirm flag matching apply --confirm if
+operators report accidents, --all-tables for tenant
+offboarding (single command across all prunable tables
+for a tenant), --include-platform REJECTED PERMANENTLY
+(too dangerous — platform defaults are operator-curated,
+CLI shouldn't make accidental deletion easy), --exit-on
+no-op for CI gates ("fail build if expected row was
+already missing"), audit-log integration pairing with
+deferred history-table milestone, retention purge --before
+<date> bulk cleanup for time-bound row removal, retention
+restore <backup-id> for undo pairing with deferred
+history-table milestone for restore-from-snapshot
+workflows). The retention CLI surface is now CRUD-complete
+on per-tenant policies — 8 actions covering full
+lifecycle (3 read: expiring/effective/list-policies; 4
+write: opt-out/opt-in/set/delete; plus the foundational
+list).
 ADR-0168 covers Phase 2 M6.7.zz.tenant.retention-set
 (`crossengin retention set <tenant-id> <table-name>
 --days N [--enabled true|false]` CLI action +

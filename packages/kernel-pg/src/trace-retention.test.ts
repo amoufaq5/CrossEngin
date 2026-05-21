@@ -2635,3 +2635,73 @@ describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-se
     ).rejects.toThrow(/returned no rows/);
   });
 });
+
+describe("PostgresTraceRetention.deleteTenantPolicy (M6.7.zz.tenant.retention-delete)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  it("issues DELETE WHERE tenant_id = $1 AND table_name = $2", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.deleteTenantPolicy({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain(
+      "DELETE FROM meta.tenant_retention_policies",
+    );
+    expect(capture[0]?.sql).toContain("tenant_id = $1");
+    expect(capture[0]?.sql).toContain("table_name = $2");
+  });
+
+  it("threads tenantId + tableName as params", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.deleteTenantPolicy({
+      tenantId: TENANT_A,
+      tableName: "llm_call_traces",
+    });
+    expect(capture[0]?.params).toEqual([TENANT_A, "llm_call_traces"]);
+  });
+
+  it("returns true when a row was deleted (rowCount > 0)", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }));
+    const r = new PostgresTraceRetention({ conn });
+    const deleted = await r.deleteTenantPolicy({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(deleted).toBe(true);
+  });
+
+  it("returns false when no row matched (rowCount === 0)", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const deleted = await r.deleteTenantPolicy({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(deleted).toBe(false);
+  });
+
+  it("does NOT use opt_out filter — deletes any matching row including non-opt-outs", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.deleteTenantPolicy({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).not.toContain("opt_out");
+  });
+});

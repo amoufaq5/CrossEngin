@@ -33,7 +33,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|list-policies> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies> [args]",
     );
     return 2;
   }
@@ -51,12 +51,14 @@ export async function runRetention(
         return await runRetentionOptIn(command, ctx, handle.retention);
       case "set":
         return await runRetentionSet(command, ctx, handle.retention);
+      case "delete":
+        return await runRetentionDelete(command, ctx, handle.retention);
       case "list-policies":
         return await runRetentionListPolicies(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, list-policies`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies`,
         );
         return 2;
     }
@@ -566,5 +568,54 @@ async function runRetentionSet(
     return 0;
   }
   ctx.io.stdout.write(formatPolicyChange("retention set", policy));
+  return 0;
+}
+
+async function runRetentionDelete(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantId = command.positional[1];
+  const tableName = command.positional[2];
+  if (tenantId === undefined || tableName === undefined) {
+    printError(
+      ctx.io,
+      "retention delete: missing arguments. usage: crossengin retention delete <tenant-id> <table-name>",
+    );
+    return 2;
+  }
+
+  let deleted: boolean;
+  try {
+    deleted = await retention.deleteTenantPolicy({ tenantId, tableName });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention delete: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "delete",
+      deleted,
+      tenantId,
+      tableName,
+    });
+    return 0;
+  }
+  if (deleted) {
+    printSuccess(
+      ctx.io,
+      `deleted per-tenant policy: ${tenantId} / ${tableName}`,
+    );
+  } else {
+    printSuccess(
+      ctx.io,
+      `no per-tenant policy for tenant ${tenantId} on ${tableName} (idempotent no-op)`,
+    );
+  }
   return 0;
 }

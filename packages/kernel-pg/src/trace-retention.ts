@@ -133,6 +133,11 @@ export interface SetTenantRetentionInput {
   readonly enabled?: boolean;
 }
 
+export interface DeleteTenantPolicyInput {
+  readonly tenantId: string;
+  readonly tableName: string;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -610,6 +615,15 @@ export class PostgresTraceRetention {
       optOutUntil: r.opt_out_until,
       lastPrunedAt: r.last_pruned_at,
     };
+  }
+
+  async deleteTenantPolicy(input: DeleteTenantPolicyInput): Promise<boolean> {
+    const result = await this.conn.query(
+      `DELETE FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+       WHERE tenant_id = $1 AND table_name = $2`,
+      [input.tenantId, input.tableName],
+    );
+    return result.rowCount > 0;
   }
 
   async setTenantRetention(
