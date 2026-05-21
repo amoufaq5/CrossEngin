@@ -21,15 +21,103 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,203 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.mutate
+**56 packages + 1 app, 128 meta-schema tables, 8,220 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.list
+adds `crossengin retention list-policies [--tenant <uuid>]
+[--table <name>]` action filling the broad-audit gap left
+by the four prior CLI actions (expiring/effective/opt-out/
+opt-in). The action wraps the existing PostgresTraceRetention.listPolicies
++ listTenantPolicies methods (no new adapter surface needed),
+emitting both platform-defaults and per-tenant-policies in
+one shot. Compliance audits answering "show me every
+retention policy on the platform" no longer need three SQL
+queries + manual stitching. Output always renders both
+sections with explicit count headers (Platform defaults
+(N total) + Per-tenant policies (N total)) — even when
+empty (rendered as '(none configured)') giving operators
+complete context including the negative space "no platform
+default for table X means platform pruning is off". Per-
+tenant rows show one of three opt-out states: opt-out=no
+(normal per-tenant override), opt-out=yes (until <iso>,
+reason: <reason>) (active time-bound opt-out), opt-out=yes
+(until indefinite, reason: <reason>) (active indefinite
+opt-out). Null optOutReason renders as <no reason>
+consistent with the other actions. Two filter flags:
+--tenant <uuid> scopes the per-tenant section only (platform
+defaults stay visible so tenant audits keep context they
+fall back to for unconfigured tables), --table <name>
+scopes BOTH sections to one table, both flags AND
+together. Filter values appear in (filtered: tenant=...,
+table=...) suffix on each section header so saved output
+remembers the query parameters. No filter-value
+validation against an allowlist — operators passing
+--table=typo see empty results and notice (matches
+substrate's "doesn't prescribe" stance). JSON output emits
+structured envelope {tenantFilter, tableFilter, platform,
+tenantPolicies} echoing filter values (or null for unset)
+so downstream consumers confirm parameters without
+re-parsing command line. Parallel adapter calls via
+Promise.all — independent queries, one wall-clock round-
+trip. Client-side filtering preferred over adapter-side
+WHERE clauses for this milestone since policy table sizes
+are bounded (max 3 platform rows + ~2N tenant rows where
+N=tenant count; 20K rows at 10K-tenant scale returns in
+milliseconds); adapter signatures stay simple. Action name
+`list-policies` (hyphenated) chosen over plain `list`
+(ambiguous: list what — tenants? opt-outs?) reserving
+namespace for future siblings; matches verb-object naming
+of `gateway routes register-pack`/`unregister-pack`/`sync-
+pack` conventions. Use cases unblocked: one-command
+compliance audit (SOC 2 / HIPAA / 21 CFR 11 auditor sees
+complete picture in one screenshot), per-tenant retention
+summary (customer-success "what's tenant X's retention?"),
+per-table compliance check (audit one table's deviations
+across tenants), JSON export for quarterly compliance
+reports (lastPrunedAt timestamp gives auditors a "was
+pruning actually running?" signal), CI sanity check
+(crossengin retention list-policies --format json | jq
+'.platform | map(select(.enabled == false)) | length'
+fails CI when count > 0). Rejected alternatives: single
+flat list mixing both row types (mental segmentation
+burden; two-section design matches table topology),
+`retention list` plain (too generic), `retention
+policies` noun-only (inconsistent with action-verb
+pattern), adapter-side WHERE filtering (policy tables
+are small; client filtering simpler — add if measured),
+JSON-only output (ad-hoc terminal use wants readable),
+built-in --limit/--offset pagination (bounded data;
+pipe through head/jq), single JOIN/UNION query
+(orthogonal shapes — preserves typed discriminated
+structure), sort flags (jq covers). 17 new tests in
+retention.test.ts covering: both sections returned with
+no filters, --tenant scopes per-tenant only, --table
+scopes both sections, --tenant + --table AND together,
+empty platform renders (none configured), empty per-
+tenant renders (none configured), filter suffix on
+header when flags set, JSON emits structured envelope
+with all sections + filters, JSON reflects filter values,
+adapter errors propagate as exit 1, formatPoliciesList
+renders opt-out=no for normal per-tenant, opt-out=yes
+with until + reason for active opt-outs, opt-out=yes
+(until indefinite ...) for null optOutUntil, '<no
+reason>' for null optOutReason, enabled/disabled flag,
+'last pruned <iso>' / 'last pruned never' rendering,
+omits filter suffix when both filters null. cli.ts
+helpText extended with retention list-policies usage
+line + --tenant / --table flag docs. ADR-0167 documents
+the design + 8 rejected alternatives + future Qs
+(--stale-days N filter, --opt-out-only filter, --include-
+history pairing with deferred history table, adapter-
+side filtering, sort flags, column-selection flag,
+aggregation --summary flag, --format csv).
+M6.7.zz.tenant.opt-out.cli.mutate
 closes ADR-0160 Q5 + ADR-0161 Q4 + ADR-0162 Q4 by adding
 two mutation actions to the retention CLI:
 `crossengin retention opt-out <tenant> <table> [--until DATE]
@@ -4411,7 +4499,20 @@ ISO 8601 normalisation on --until; idempotent opt-in
 returns null policy on no-op; shared formatPolicyChange
 helper renders both action outputs; completes the
 end-to-end CLI retention workflow operators previously
-needed raw SQL for).
+needed raw SQL for),
+ADR-0167 covers M6.7.zz.tenant.opt-out.cli.list
+(`crossengin retention list-policies [--tenant <uuid>]
+[--table <name>]` broad-audit action — wraps existing
+listPolicies + listTenantPolicies adapter methods with no
+new substrate surface; emits both platform-defaults and
+per-tenant-policies sections in one shot; --tenant scopes
+per-tenant only (platform stays visible for context),
+--table scopes both; filter suffix in headers preserves
+query parameters in saved output; JSON envelope {tenantFilter,
+tableFilter, platform, tenantPolicies} for downstream jq;
+parallel Promise.all adapter calls; closes the
+compliance-audit gap left by the four targeted CLI
+actions).
 
 ## Architecture in 90 seconds
 
@@ -5900,6 +6001,88 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0167 covers Phase 2 M6.7.zz.tenant.opt-out.cli.list
+(`crossengin retention list-policies [--tenant <uuid>]
+[--table <name>]` broad-audit CLI action — fills the
+audit gap left by the four targeted actions; wraps
+existing PostgresTraceRetention.listPolicies +
+listTenantPolicies methods with NO new adapter surface —
+the substrate-side query methods already existed since
+M6.7.zz / M6.7.zz.tenant; emits both platform-defaults
+and per-tenant-policies sections in one shot — compliance
+audits no longer need three SQL queries + manual
+stitching; output always renders both sections with
+explicit count headers including empty state '(none
+configured)' giving operators complete context for the
+negative space; per-tenant rows show one of three opt-out
+states (opt-out=no for normal per-tenant override,
+opt-out=yes (until <iso>, reason: <reason>) for active
+time-bound, opt-out=yes (until indefinite, reason:
+<reason>) for indefinite); null optOutReason renders as
+'<no reason>' consistent with other actions;
+--tenant <uuid> scopes per-tenant section only (platform
+defaults stay visible so tenant audits keep fallback
+context for unconfigured tables), --table <name> scopes
+BOTH sections to one table, both flags AND together;
+filter suffix in section headers '(filtered: tenant=...,
+table=...)' preserves query parameters in saved output;
+no filter-value validation (--table=typo returns empty,
+operator notices — matches substrate's doesn't-prescribe
+stance); JSON output emits structured envelope
+{tenantFilter, tableFilter, platform, tenantPolicies}
+echoing filter values for downstream jq pipes; parallel
+adapter calls via Promise.all (independent queries,
+single wall-clock round-trip); client-side filtering
+preferred over adapter-side WHERE clauses for this
+milestone since policy tables are bounded (max 3 platform
+rows + ~2N tenant rows where N=tenant count; ~20K rows
+at 10K-tenant scale returns in milliseconds) — adapter
+signatures stay simple; action name list-policies
+(hyphenated) chosen over plain `list` (ambiguous: list
+what?) reserving namespace for future siblings; matches
+verb-object naming of gateway routes register-pack /
+unregister-pack / sync-pack conventions; use cases
+unblocked — one-command compliance audit (SOC 2 / HIPAA
+/ 21 CFR 11 auditor sees complete picture in one screenshot),
+per-tenant retention summary (customer-success answering
+"what's tenant X's retention?"), per-table compliance
+check (audit one table's deviations across all tenants),
+JSON export for quarterly compliance reports (lastPrunedAt
+gives "was pruning actually running?" signal), CI sanity
+check (jq counts disabled platforms, fails build > 0);
+rejected alternatives — single flat list mixing both
+row types (mental segmentation burden; two-section
+matches table topology), `retention list` plain (too
+generic), `retention policies` noun-only (inconsistent
+with action-verb pattern), adapter-side WHERE filtering
+(policy tables are small; add if measured), JSON-only
+output (terminal use wants readable), built-in
+--limit/--offset pagination (bounded data; head/jq
+covers), single JOIN/UNION query (orthogonal shapes —
+two parallel preserves discriminated structure), sort
+flags --sort table|tenant|days|pruned (jq covers); 17
+new tests in retention.test.ts — both sections returned
+with no filters, --tenant scopes per-tenant only,
+--table scopes both sections, --tenant + --table apply
+both filters, empty platform renders (none configured),
+empty per-tenant renders (none configured), filter
+suffix on header when flags set, JSON emits structured
+envelope with all sections + filters, JSON reflects
+filter values, adapter errors propagate as exit 1,
+formatPoliciesList renders opt-out=no for normal per-
+tenant, opt-out=yes with until + reason for active,
+opt-out=yes (until indefinite ...) for null optOutUntil,
+'<no reason>' for null optOutReason, enabled/disabled
+flag, 'last pruned <iso>' / 'last pruned never' rendering,
+omits filter suffix when both filters null; cli.ts
+helpText extended with retention list-policies usage
+line + --tenant / --table flag docs; future Qs cover
+--stale-days N filter for "policies not pruned in N+
+days" CI gates, --opt-out-only filter (jq covers),
+--include-history pairing with deferred ADR-0161-alt-1
+history table milestone, adapter-side filtering if
+measured slow, sort flags, column-selection flag,
+aggregation --summary flag, --format csv).
 ADR-0166 covers Phase 2 M6.7.zz.tenant.opt-out.cli.mutate
 (`crossengin retention opt-out` / `opt-in` mutation
 actions — closes ADR-0160 Q5 + ADR-0161 Q4 + ADR-0162 Q4;

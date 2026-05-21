@@ -4,6 +4,7 @@ import type {
   ExpiringOptOut,
   ExpiringOptOutsInput,
   PostgresTraceRetention,
+  RetentionPolicyRow,
   SetTenantOptOutInput,
   TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
@@ -14,6 +15,7 @@ import type { RunContext } from "./commands.js";
 import {
   formatEffectiveResolution,
   formatExpiringTable,
+  formatPoliciesList,
   formatPolicyChange,
   runRetention,
   type RetentionContext,
@@ -54,6 +56,8 @@ function fakeRetention(opts: {
   setOptOutCapture?: SetTenantOptOutInput[];
   clearOptOutResult?: TenantRetentionPolicyRow | null;
   clearOptOutCapture?: ClearTenantOptOutInput[];
+  platformPolicies?: readonly RetentionPolicyRow[];
+  tenantPolicies?: readonly TenantRetentionPolicyRow[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -103,6 +107,14 @@ function fakeRetention(opts: {
             lastPrunedAt: null,
           }
         : opts.clearOptOutResult;
+    },
+    listPolicies: async () => {
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.platformPolicies ?? [];
+    },
+    listTenantPolicies: async () => {
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.tenantPolicies ?? [];
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -1084,5 +1096,391 @@ describe("formatPolicyChange", () => {
   it("omits the Reason line when null", () => {
     const out = formatPolicyChange("opted out", policy({ optOutReason: null }));
     expect(out).not.toContain("Reason:");
+  });
+});
+
+describe("runRetention list-policies", () => {
+  function platformPolicy(
+    overrides: Partial<RetentionPolicyRow> = {},
+  ): RetentionPolicyRow {
+    return {
+      tableName: "workflow_traces",
+      retentionDays: 90,
+      enabled: true,
+      lastPrunedAt: null,
+      ...overrides,
+    };
+  }
+
+  function tenantPolicy(
+    overrides: Partial<TenantRetentionPolicyRow> = {},
+  ): TenantRetentionPolicyRow {
+    return {
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 365,
+      enabled: false,
+      optOut: true,
+      optOutReason: null,
+      optOutUntil: null,
+      lastPrunedAt: null,
+      ...overrides,
+    };
+  }
+
+  it("returns both platform + tenant sections with no filters", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "list-policies"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [platformPolicy()],
+          tenantPolicies: [tenantPolicy()],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Platform defaults");
+    expect(out()).toContain("Per-tenant policies");
+  });
+
+  it("--tenant scopes per-tenant section but not platform section", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", TENANT_A),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [platformPolicy()],
+          tenantPolicies: [
+            tenantPolicy({ tenantId: TENANT_A }),
+            tenantPolicy({ tenantId: TENANT_B }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Per-tenant policies (1 total)");
+    expect(out()).toContain("Platform defaults (1 total)");
+    expect(out()).toContain(TENANT_A);
+    expect(out()).not.toContain(TENANT_B);
+  });
+
+  it("--table scopes both platform + per-tenant sections", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--table", "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [
+            platformPolicy({ tableName: "workflow_traces" }),
+            platformPolicy({ tableName: "llm_call_traces" }),
+          ],
+          tenantPolicies: [
+            tenantPolicy({ tableName: "workflow_traces" }),
+            tenantPolicy({ tableName: "llm_call_traces" }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Platform defaults (1 total)");
+    expect(out()).toContain("Per-tenant policies (1 total)");
+    expect(out()).not.toContain("llm_call_traces");
+  });
+
+  it("--tenant + --table apply both filters", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "list-policies",
+        "--tenant",
+        TENANT_A,
+        "--table",
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [
+            platformPolicy({ tableName: "workflow_traces" }),
+            platformPolicy({ tableName: "llm_call_traces" }),
+          ],
+          tenantPolicies: [
+            tenantPolicy({
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+            }),
+            tenantPolicy({
+              tenantId: TENANT_B,
+              tableName: "workflow_traces",
+            }),
+            tenantPolicy({
+              tenantId: TENANT_A,
+              tableName: "llm_call_traces",
+            }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Platform defaults (1 total)");
+    expect(out()).toContain("Per-tenant policies (1 total)");
+    expect(out()).toContain(TENANT_A);
+    expect(out()).not.toContain(TENANT_B);
+    expect(out()).not.toContain("llm_call_traces");
+  });
+
+  it("empty platform section renders '(none configured)'", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "list-policies"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        platformPolicies: [],
+        tenantPolicies: [tenantPolicy()],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("Platform defaults (0 total)");
+    expect(out()).toMatch(/Platform defaults \(0 total\):\s*\n  \(none configured\)/);
+  });
+
+  it("empty per-tenant section renders '(none configured)'", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "list-policies"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        platformPolicies: [platformPolicy()],
+        tenantPolicies: [],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("Per-tenant policies (0 total)");
+    expect(out()).toMatch(/Per-tenant policies \(0 total\):\s*\n  \(none configured\)/);
+  });
+
+  it("renders the filter suffix when --tenant or --table is set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "list-policies",
+        "--tenant",
+        TENANT_A,
+        "--table",
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [platformPolicy()],
+          tenantPolicies: [tenantPolicy()],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`filtered: tenant=${TENANT_A}, table=workflow_traces`);
+  });
+
+  it("json-format emits structured envelope with all sections + filters", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [platformPolicy()],
+          tenantPolicies: [tenantPolicy()],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.tenantFilter).toBeNull();
+    expect(parsedJson.tableFilter).toBeNull();
+    expect(parsedJson.platform).toHaveLength(1);
+    expect(parsedJson.tenantPolicies).toHaveLength(1);
+  });
+
+  it("json-format reflects --tenant + --table filter values", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "list-policies",
+        "--tenant",
+        TENANT_A,
+        "--table",
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          platformPolicies: [],
+          tenantPolicies: [],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.tenantFilter).toBe(TENANT_A);
+    expect(parsedJson.tableFilter).toBe("workflow_traces");
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "list-policies"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("PG connection refused"),
+      }),
+    } as RetentionContext);
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatPoliciesList", () => {
+  it("renders 'opt-out=no' for per-tenant policies without opt-out", () => {
+    const out = formatPoliciesList(
+      [],
+      [
+        {
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).toContain("opt-out=no");
+  });
+
+  it("renders 'opt-out=yes' with until + reason for active opt-outs", () => {
+    const out = formatPoliciesList(
+      [],
+      [
+        {
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: false,
+          optOut: true,
+          optOutReason: "legal_hold:case#42",
+          optOutUntil: "2027-01-01T00:00:00.000Z",
+          lastPrunedAt: null,
+        },
+      ],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).toContain(
+      "opt-out=yes (until 2027-01-01T00:00:00.000Z, reason: legal_hold:case#42)",
+    );
+  });
+
+  it("renders 'opt-out=yes (until indefinite ...)' for null optOutUntil", () => {
+    const out = formatPoliciesList(
+      [],
+      [
+        {
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: false,
+          optOut: true,
+          optOutReason: "legal_hold:case#42",
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).toContain("until indefinite");
+  });
+
+  it("renders '<no reason>' for null optOutReason", () => {
+    const out = formatPoliciesList(
+      [],
+      [
+        {
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: false,
+          optOut: true,
+          optOutReason: null,
+          optOutUntil: "2027-01-01T00:00:00.000Z",
+          lastPrunedAt: null,
+        },
+      ],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).toContain("reason: <no reason>");
+  });
+
+  it("renders 'enabled' / 'disabled' for platform policies based on the flag", () => {
+    const out = formatPoliciesList(
+      [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+        {
+          tableName: "llm_call_traces",
+          retentionDays: 180,
+          enabled: false,
+          lastPrunedAt: null,
+        },
+      ],
+      [],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).toContain("workflow_traces");
+    expect(out).toContain("enabled");
+    expect(out).toContain("llm_call_traces");
+    expect(out).toContain("disabled");
+  });
+
+  it("renders 'last pruned <iso>' when lastPrunedAt is set, 'never' otherwise", () => {
+    const out = formatPoliciesList(
+      [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          lastPrunedAt: "2026-05-20T10:00:00.000Z",
+        },
+        {
+          tableName: "llm_call_traces",
+          retentionDays: 180,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      [],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).toContain("last pruned 2026-05-20T10:00:00.000Z");
+    expect(out).toContain("last pruned never");
+  });
+
+  it("omits the filter suffix when both filters are null", () => {
+    const out = formatPoliciesList(
+      [],
+      [],
+      { tenantFilter: null, tableFilter: null },
+    );
+    expect(out).not.toContain("filtered:");
   });
 });

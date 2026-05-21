@@ -5,6 +5,7 @@ import {
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type PgConnection,
+  type RetentionPolicyRow,
   type TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 
@@ -32,7 +33,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|list-policies> [args]",
     );
     return 2;
   }
@@ -48,10 +49,12 @@ export async function runRetention(
         return await runRetentionOptOut(command, ctx, handle.retention);
       case "opt-in":
         return await runRetentionOptIn(command, ctx, handle.retention);
+      case "list-policies":
+        return await runRetentionListPolicies(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, list-policies`,
         );
         return 2;
     }
@@ -374,4 +377,120 @@ export function formatPolicyChange(
     lines.push(`  Reason:     ${policy.optOutReason}`);
   }
   return lines.join("\n") + "\n";
+}
+
+async function runRetentionListPolicies(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantFilter = getStringFlag(command, "tenant");
+  const tableFilter = getStringFlag(command, "table");
+
+  let platform: ReadonlyArray<RetentionPolicyRow>;
+  let tenantPolicies: ReadonlyArray<TenantRetentionPolicyRow>;
+  try {
+    [platform, tenantPolicies] = await Promise.all([
+      retention.listPolicies(),
+      retention.listTenantPolicies(),
+    ]);
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention list-policies: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  const filteredPlatform = platform.filter(
+    (p) => tableFilter === null || p.tableName === tableFilter,
+  );
+  const filteredTenant = tenantPolicies.filter(
+    (p) =>
+      (tenantFilter === null || p.tenantId === tenantFilter) &&
+      (tableFilter === null || p.tableName === tableFilter),
+  );
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      tenantFilter: tenantFilter ?? null,
+      tableFilter: tableFilter ?? null,
+      platform: filteredPlatform,
+      tenantPolicies: filteredTenant,
+    });
+    return 0;
+  }
+
+  ctx.io.stdout.write(
+    formatPoliciesList(filteredPlatform, filteredTenant, {
+      tenantFilter,
+      tableFilter,
+    }),
+  );
+  return 0;
+}
+
+export interface PoliciesListFilters {
+  readonly tenantFilter: string | null;
+  readonly tableFilter: string | null;
+}
+
+export function formatPoliciesList(
+  platform: ReadonlyArray<RetentionPolicyRow>,
+  tenantPolicies: ReadonlyArray<TenantRetentionPolicyRow>,
+  filters: PoliciesListFilters,
+): string {
+  const lines: string[] = [];
+
+  const filterDesc: string[] = [];
+  if (filters.tenantFilter !== null) {
+    filterDesc.push(`tenant=${filters.tenantFilter}`);
+  }
+  if (filters.tableFilter !== null) {
+    filterDesc.push(`table=${filters.tableFilter}`);
+  }
+  const filterSuffix =
+    filterDesc.length > 0 ? ` (filtered: ${filterDesc.join(", ")})` : "";
+
+  lines.push(`Platform defaults (${platform.length} total)${filterSuffix}:`);
+  if (platform.length === 0) {
+    lines.push("  (none configured)");
+  } else {
+    for (const p of platform) {
+      const last = p.lastPrunedAt ?? "never";
+      lines.push(
+        `  ${p.tableName.padEnd(24)} ${`${p.retentionDays}d`.padEnd(8)} ${
+          p.enabled ? "enabled " : "disabled"
+        }   last pruned ${last}`,
+      );
+    }
+  }
+
+  lines.push("");
+  lines.push(
+    `Per-tenant policies (${tenantPolicies.length} total)${filterSuffix}:`,
+  );
+  if (tenantPolicies.length === 0) {
+    lines.push("  (none configured)");
+  } else {
+    for (const p of tenantPolicies) {
+      const optOutDetail = formatTenantOptOutSummary(p);
+      lines.push(
+        `  ${p.tenantId}  ${p.tableName.padEnd(20)} ${`${p.retentionDays}d`.padEnd(8)} ${
+          p.enabled ? "enabled " : "disabled"
+        }  ${optOutDetail}`,
+      );
+    }
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+function formatTenantOptOutSummary(p: TenantRetentionPolicyRow): string {
+  if (!p.optOut) {
+    return "opt-out=no";
+  }
+  const until = p.optOutUntil ?? "indefinite";
+  const reason = p.optOutReason ?? "<no reason>";
+  return `opt-out=yes (until ${until}, reason: ${reason})`;
 }
