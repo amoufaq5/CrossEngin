@@ -21,15 +21,105 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,393 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.restore.dry-run
+**56 packages + 1 app, 129 meta-schema tables, 8,406 tests**,
+all green, no type errors. M6.7.zz.tenant.batch closes
+ADR-0159 Q2 by adding `effectiveRetentionBatch(pairs)`
+adapter method + exported effectiveRetentionKey helper.
+The existing single-pair effectiveRetention makes 2 PG
+round-trips per call; dashboards rendering 10K tenants ×
+3 prunable tables = 30K resolutions per page = 60K
+queries was prohibitive. New batch resolver runs exactly
+TWO queries total regardless of pair count: one against
+meta.tenant_retention_policies with `(tenant_id, table_name)
+IN ((..., ...), ...)` tuple-list WHERE clause, one against
+meta.retention_policies with `table_name IN (...)` (unique
+tables only). Promise.all parallelizes them for single
+wall-clock round-trip. Returns ReadonlyMap<string,
+EffectiveRetentionResolution> keyed by `${tenantId}:
+${tableName}` — exported effectiveRetentionKey(tenantId,
+tableName) helper so operators don't need to know the
+format; UUID tenant IDs contain hyphens but no colons and
+table names match [a-z_]+ per META CHECK constraints so
+collision-free. Resolution algorithm matches
+effectiveRetention exactly — tenant policy + opt_out=true
++ active (clock-aware) → tenant_opt_out, tenant + enabled
+→ tenant, platform → platform, else → none; expired
+opt-outs fall through to platform same as single-pair.
+Same this.clock() source as effectiveRetention for opt-out
+expiry boundary semantics. Algorithm: deduplicate input
+pairs by key, collect unique table names, run two queries
+in parallel, build lookup maps (by key for tenant policies,
+by tableName for platform policies), resolve in-memory per
+pair returning ReadonlyMap. Empty pairs returns empty Map
+without issuing queries (PG doesn't accept empty IN lists).
+Why Map vs Array of triplets — O(1) lookup by key for
+dashboard render rows, implicit deduplication, smaller
+wire format; Array derivable via [...result.values()].
+Why ReadonlyMap return type — prevents accidental mutation,
+matches defensive typing of resolution discriminated union.
+Why two non-transactional queries vs single UNION ALL —
+query plan harder to reason about, in-memory resolution
+faster than SQL-side conditional CASE WHEN, JOIN doesn't
+translate cleanly given different column shapes. Why no
+transaction wrapping both queries — overhead not warranted,
+policy tables change rarely (operator-driven), tenant +
+platform separate snapshots are fine, race window negligible.
+Why no CLI surface in v1 — operators wanting ad-hoc batch
+lookups write Node scripts; substrate is the meaningful
+win; CLI defer to future milestone if requested. Use cases
+unblocked — admin dashboard rendering 10K tenants × 3
+tables (30K resolutions → 2 queries instead of 60K),
+compliance bulk report (filter resolutions by source +
+retentionDays threshold), tier-migration validation
+(verify cohort matches expected resolution source),
+periodic SLO checks. Rejected alternatives: single query
+UNION ALL (plan harder, in-memory faster), per-pair
+effectiveRetention in Promise.all (still 2N queries),
+JOIN tenant + platform in SQL (column shapes differ),
+return Array of triplets (Map is O(1) lookup), wrap both
+queries in transaction (unnecessary overhead), stream
+results via async iterator (overkill for bounded sizes),
+batch resolver accepting tenant-only or table-only filters
+(use listPolicies/listTenantPolicies for that pattern),
+cache platform-policy lookup at adapter level (operators
+wrap caching at their layer, substrate stateless), exotic
+separator characters \x1F or :: (`:` is simple and UUIDs
+don't contain colons), return resolution + requested pair
+shape (Map by key is canonical, helper exists). 13 new
+tests covering: empty pairs returns empty Map, issues
+exactly 2 queries when pairs present (Promise.all parallel),
+tenant query uses (tenant_id, table_name) IN tuple list
+with params [tenantA, tableA, tenantB, tableB, ...],
+platform query uses table_name IN list with UNIQUE tables
+only (dedup verified for same-table different-tenant
+pairs), deduplicates input pairs in result Map (3 dup
+input → 1 result entry), resolves tenant variant when
+tenant policy exists + enabled, resolves tenant_opt_out
+when opt_out=true + active (clock-aware), expired opt_out
+falls through to platform, resolves platform when no
+tenant + platform exists, resolves none when neither
+exists, mixed variants in one batch correctly (tenant +
+platform + none in single call), Promise.all parallelism
+verified (both queries fired before either returns), key
+format `${tenantId}:${tableName}` exported helper test.
+ADR-0177 documents the design + 10 rejected alternatives
++ 7 future Qs (CLI retention effective-batch --pairs-file
+<file>, automatic chunking for >10K pairs, caching
+platform-policy table, bulk versions of expiringOptOuts
++ other readers, composable inspectBatch returning
+effective + expiring + history-snippets per pair, PG
+prepared statements for repeated batch calls, --maxConcurrent
+parameter for higher-level orchestration). Substrate-only
+milestone — no CLI surface; operators with dashboard
+needs write Node scripts calling the adapter directly.
+M6.7.zz.tenant.opt-out.cli.restore.dry-run
 closes ADR-0171 Q1 by adding `--dry-run` flag to retention
 restore + new previewRestoreTenantPolicy adapter method.
 Restore is destructive (overwrites current policy state
@@ -5406,7 +5496,21 @@ restoreTenantPolicy's dispatch branches; preview is purely
 read-only — no actorId/attributes; --actor silently ignored
 on --dry-run; JSON envelope dryRun:boolean discriminator
 parallel to retention prune; safety preview for the last
-remaining destructive retention action).
+remaining destructive retention action),
+ADR-0177 covers M6.7.zz.tenant.batch
+(`effectiveRetentionBatch(pairs)` adapter + exported
+effectiveRetentionKey helper — closes ADR-0159 Q2 —
+single-pair effectiveRetention made 2N round-trips for
+N pairs prohibitive for dashboard rendering 10K tenants ×
+3 tables = 30K calls; batch resolver runs exactly 2
+queries total regardless of pair count using (tenant_id,
+table_name) IN tuple-list for tenant lookup + table_name
+IN unique-list for platform lookup, Promise.all
+parallelizes; returns ReadonlyMap<string,
+EffectiveRetentionResolution> for O(1) dashboard render
+lookups; same resolution algorithm + clock-aware expiry
+semantics as single-pair version; substrate-only milestone
+no CLI surface).
 
 ## Architecture in 90 seconds
 
@@ -6895,6 +6999,107 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
+(`effectiveRetentionBatch(pairs)` adapter method on
+PostgresTraceRetention + exported effectiveRetentionKey
+helper — closes ADR-0159 Q2; single-pair effectiveRetention
+issues 2 PG round-trips per call so dashboards rendering
+10K tenants × 3 prunable tables = 30K resolutions per
+page = 60K queries was prohibitive; batch resolver runs
+exactly TWO queries total regardless of pair count using
+single tenant query with `(tenant_id, table_name) IN
+((..., ...), ...)` tuple-list WHERE clause + single
+platform query with `table_name IN (...)` containing only
+unique table names (deduplicated even when many pairs
+share same table); Promise.all parallelizes for single
+wall-clock round-trip; returns ReadonlyMap<string,
+EffectiveRetentionResolution> keyed by
+`${tenantId}:${tableName}`; exported
+effectiveRetentionKey(tenantId, tableName) helper so
+operators don't need to know format detail — UUID tenant
+IDs contain hyphens but no colons + table names match
+[a-z_]+ per META CHECK constraints so collision-free with
+':' separator; resolution algorithm matches
+effectiveRetention exactly — tenant policy + opt_out=true
++ active (clock-aware via this.clock()) → tenant_opt_out
+variant, tenant policy + enabled → tenant variant,
+platform policy exists → platform variant, else → none
+variant; expired opt-outs fall through to platform same
+as single-pair (boundary semantic preserved); algorithm
+— deduplicate input pairs by key (3 dup → 1 result entry),
+collect unique table names, run two queries in parallel,
+build lookup maps (by key for tenant policies + by
+tableName for platform policies), resolve in-memory per
+pair returning ReadonlyMap; empty pairs returns empty Map
+without issuing queries (PG doesn't accept empty IN
+lists); rejected alternatives — single query with UNION
+ALL (plan harder to reason about + JOIN doesn't translate
+cleanly given different column shapes + in-memory
+resolution is faster than SQL-side conditional CASE WHEN),
+per-pair effectiveRetention in Promise.all (still 2N
+queries defeating the point), JOIN tenant + platform in
+SQL (column shapes differ), return Array<{tenantId,
+tableName, resolution}> triplets (Map gives O(1) lookup
+for dashboard rows + implicit deduplication + smaller
+wire format; Array derivable from [...result.values()]
+cheaply), wrap both queries in transaction (overhead not
+warranted; policy tables change rarely operator-driven;
+race window negligible), stream results via async
+iterator (overkill for bounded result sizes; Map is right
+shape), batch resolver accepting tenant-only or table-
+only filters (operators with that pattern use
+listTenantPolicies/listPolicies directly), cache platform-
+policy table at adapter level since policies change
+rarely (operators wanting caching wrap at their layer;
+substrate stays stateless), exotic separator characters
+\x1F or :: (':' is simple and UUIDs don't contain colons),
+return resolution alongside requested pair shape so
+operators don't compute key (Map by key is the canonical
+pattern; exported helper exists); drawbacks — no CLI
+surface in v1 (operators wanting ad-hoc batch lookups
+write Node scripts; substrate is the meaningful win;
+CLI defer if requested), two non-transactional queries
+(tenant + platform see independent PG snapshots; race
+window negligible since policy tables change rarely),
+PG IN list size limits (very large batches >10K pairs
+may hit PG parser limits or query-plan inefficiencies;
+operators chunk input; future Q), no streaming (results
+returned as one Map; operators render all at once), same
+clock as effectiveRetention (opt-out expiry boundary
+shared), key format leakage (if operators construct keys
+manually rather than via helper, future separator changes
+silently break code; exported helper mitigates); 13 new
+adapter tests covering empty pairs returns empty Map,
+issues exactly 2 queries when pairs present (Promise.all
+parallel verified), tenant query uses (tenant_id,
+table_name) IN tuple list with params [A, tableA, B,
+tableB], platform query uses table_name IN list with
+UNIQUE tables only verified for same-table different-
+tenant pairs, deduplicates input pairs in result Map
+(3 dup input → 1 result entry), resolves tenant variant
+when tenant policy exists + enabled, resolves
+tenant_opt_out when opt_out=true + active (clock-aware),
+expired opt_out falls through to platform, resolves
+platform when no tenant + platform exists, resolves none
+when neither exists, mixed variants in one batch correctly
+(tenant + platform + none in single call), Promise.all
+parallelism verified (both queries fired in same tick),
+key format `${tenantId}:${tableName}` exported helper
+test; future Qs cover CLI retention effective-batch
+--pairs-file file for ad-hoc batch lookups reading
+CSV/JSON, automatic chunking for very large inputs >10K
+pairs hitting PG parser limits, caching platform-policy
+table to avoid second query on repeated calls (defer —
+substrate stateless), bulk versions of expiringOptOuts
+and other readers, composable inspectBatch returning
+effective + expiring + history-snippets per pair, PG
+prepared statements for repeated batch calls with same
+pair count, adapter-side --maxConcurrent parameter for
+higher-level orchestration). Substrate-only milestone
+— no CLI surface; the substrate gains a batch read API
+for dashboard performance; operators wanting CLI
+exposure write Node scripts calling the adapter directly
+or wait for the deferred CLI milestone.
 ADR-0176 covers Phase 2 M6.7.zz.tenant.opt-out.cli.restore.dry-run
 (`retention restore --dry-run` flag + previewRestoreTenantPolicy
 adapter method on PostgresTraceRetention — closes ADR-0171

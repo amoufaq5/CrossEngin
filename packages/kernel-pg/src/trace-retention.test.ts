@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
   computeFieldDiffs,
+  effectiveRetentionKey,
   isOptOutHistoryEventKind,
   OPT_OUT_HISTORY_EVENT_KINDS,
   PostgresTraceRetention,
@@ -4187,5 +4188,326 @@ describe("PostgresTraceRetention.previewRestoreTenantPolicy (M6.7.zz.tenant.opt-
     expect(a.kind).toBe("would_delete");
     expect(b.kind).toBe("would_set_opt_out");
     expect(c.kind).toBe("would_set_retention");
+  });
+});
+
+describe("PostgresTraceRetention.effectiveRetentionBatch (M6.7.zz.tenant.batch)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+
+  it("returns empty Map when pairs is empty", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetentionBatch({ pairs: [] });
+    expect(result.size).toBe(0);
+  });
+
+  it("issues exactly 2 queries (tenant + platform) when pairs are present", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_B, tableName: "llm_call_traces" },
+      ],
+    });
+    expect(capture).toHaveLength(2);
+  });
+
+  it("tenant query uses (tenant_id, table_name) IN tuple list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_B, tableName: "llm_call_traces" },
+      ],
+    });
+    const tenantCall = capture.find((c) =>
+      c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(tenantCall?.sql).toContain("(tenant_id, table_name) IN");
+    expect(tenantCall?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      TENANT_B,
+      "llm_call_traces",
+    ]);
+  });
+
+  it("platform query uses table_name IN list (unique tables only)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_B, tableName: "workflow_traces" }, // same table
+      ],
+    });
+    const platformCall = capture.find(
+      (c) =>
+        c.sql.includes("FROM meta.retention_policies") &&
+        !c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(platformCall?.sql).toContain("WHERE table_name IN");
+    expect(platformCall?.params).toEqual(["workflow_traces"]);
+  });
+
+  it("deduplicates input pairs in the result Map", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_A, tableName: "workflow_traces" }, // duplicate
+        { tenantId: TENANT_A, tableName: "workflow_traces" }, // duplicate
+      ],
+    });
+    expect(result.size).toBe(1);
+  });
+
+  it("resolves tenant variant when tenant policy exists + enabled", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "workflow_traces",
+              retention_days: 30,
+              enabled: true,
+              opt_out: false,
+              opt_out_reason: null,
+              opt_out_until: null,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [{ tenantId: TENANT_A, tableName: "workflow_traces" }],
+    });
+    const key = effectiveRetentionKey(TENANT_A, "workflow_traces");
+    expect(result.get(key)).toEqual({
+      source: "tenant",
+      retentionDays: 30,
+      enabled: true,
+      tenantId: TENANT_A,
+    });
+  });
+
+  it("resolves tenant_opt_out variant when opt_out=true + active", async () => {
+    const NOW = Date.parse("2026-05-20T12:00:00.000Z");
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "workflow_traces",
+              retention_days: 365,
+              enabled: false,
+              opt_out: true,
+              opt_out_reason: "legal_hold:case#42",
+              opt_out_until: "2027-01-01T00:00:00.000Z",
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({
+      conn,
+      clock: () => NOW,
+    });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [{ tenantId: TENANT_A, tableName: "workflow_traces" }],
+    });
+    const key = effectiveRetentionKey(TENANT_A, "workflow_traces");
+    const resolution = result.get(key);
+    expect(resolution?.source).toBe("tenant_opt_out");
+    if (resolution?.source === "tenant_opt_out") {
+      expect(resolution.optOutReason).toBe("legal_hold:case#42");
+    }
+  });
+
+  it("expired opt_out falls through to platform", async () => {
+    const NOW = Date.parse("2026-05-20T12:00:00.000Z");
+    const PAST = "2025-01-01T00:00:00.000Z";
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "workflow_traces",
+              retention_days: 365,
+              enabled: false,
+              opt_out: true,
+              opt_out_reason: null,
+              opt_out_until: PAST,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "workflow_traces",
+              retention_days: 90,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn, clock: () => NOW });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [{ tenantId: TENANT_A, tableName: "workflow_traces" }],
+    });
+    const key = effectiveRetentionKey(TENANT_A, "workflow_traces");
+    expect(result.get(key)?.source).toBe("platform");
+  });
+
+  it("resolves platform variant when no tenant policy + platform exists", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "workflow_traces",
+              retention_days: 90,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [{ tenantId: TENANT_A, tableName: "workflow_traces" }],
+    });
+    const key = effectiveRetentionKey(TENANT_A, "workflow_traces");
+    expect(result.get(key)).toEqual({
+      source: "platform",
+      retentionDays: 90,
+      enabled: true,
+    });
+  });
+
+  it("resolves none variant when neither tenant nor platform policy exists", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [{ tenantId: TENANT_A, tableName: "workflow_traces" }],
+    });
+    const key = effectiveRetentionKey(TENANT_A, "workflow_traces");
+    expect(result.get(key)).toEqual({
+      source: "none",
+      retentionDays: null,
+      enabled: false,
+    });
+  });
+
+  it("resolves mixed variants in one batch correctly", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "workflow_traces",
+              retention_days: 30,
+              enabled: true,
+              opt_out: false,
+              opt_out_reason: null,
+              opt_out_until: null,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "llm_call_traces",
+              retention_days: 180,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: TENANT_A, tableName: "workflow_traces" }, // tenant
+        { tenantId: TENANT_B, tableName: "llm_call_traces" }, // platform
+        { tenantId: TENANT_B, tableName: "workflow_traces" }, // none (no platform for workflow_traces, no tenant policy for B)
+      ],
+    });
+    expect(
+      result.get(effectiveRetentionKey(TENANT_A, "workflow_traces"))?.source,
+    ).toBe("tenant");
+    expect(
+      result.get(effectiveRetentionKey(TENANT_B, "llm_call_traces"))?.source,
+    ).toBe("platform");
+    expect(
+      result.get(effectiveRetentionKey(TENANT_B, "workflow_traces"))?.source,
+    ).toBe("none");
+  });
+
+  it("uses Promise.all for parallel adapter calls (single round-trip wall time)", async () => {
+    const callOrder: string[] = [];
+    const conn = mockConnection((sql) => {
+      callOrder.push(
+        sql.includes("tenant_retention_policies") ? "tenant" : "platform",
+      );
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    await r.effectiveRetentionBatch({
+      pairs: [{ tenantId: TENANT_A, tableName: "workflow_traces" }],
+    });
+    expect(callOrder).toHaveLength(2);
+    expect(new Set(callOrder)).toEqual(new Set(["tenant", "platform"]));
+  });
+
+  it("key format is `${tenantId}:${tableName}` (exported helper)", () => {
+    expect(effectiveRetentionKey(TENANT_A, "workflow_traces")).toBe(
+      `${TENANT_A}:workflow_traces`,
+    );
   });
 });

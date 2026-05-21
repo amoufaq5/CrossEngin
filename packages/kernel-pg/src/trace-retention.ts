@@ -199,6 +199,22 @@ export interface OptOutHistoryEntry {
   readonly attributes: Record<string, unknown>;
 }
 
+export interface EffectiveRetentionBatchPair {
+  readonly tenantId: string;
+  readonly tableName: string;
+}
+
+export interface EffectiveRetentionBatchInput {
+  readonly pairs: ReadonlyArray<EffectiveRetentionBatchPair>;
+}
+
+export function effectiveRetentionKey(
+  tenantId: string,
+  tableName: string,
+): string {
+  return `${tenantId}:${tableName}`;
+}
+
 export interface ListOptOutHistoryInput {
   readonly tenantId?: string;
   readonly tableName?: string;
@@ -641,6 +657,107 @@ export class PostgresTraceRetention {
       retentionDays: null,
       enabled: false,
     };
+  }
+
+  async effectiveRetentionBatch(
+    input: EffectiveRetentionBatchInput,
+  ): Promise<ReadonlyMap<string, EffectiveRetentionResolution>> {
+    const uniquePairs = new Map<string, EffectiveRetentionBatchPair>();
+    for (const pair of input.pairs) {
+      uniquePairs.set(
+        effectiveRetentionKey(pair.tenantId, pair.tableName),
+        pair,
+      );
+    }
+    if (uniquePairs.size === 0) {
+      return new Map();
+    }
+
+    const pairsArr = [...uniquePairs.values()];
+    const tableNames = [...new Set(pairsArr.map((p) => p.tableName))];
+
+    const tenantPolicyParams: unknown[] = [];
+    const tenantPairTuples = pairsArr.map((p) => {
+      tenantPolicyParams.push(p.tenantId, p.tableName);
+      return `($${tenantPolicyParams.length - 1}, $${tenantPolicyParams.length})`;
+    });
+    const tenantQuery = `SELECT tenant_id, table_name, retention_days, enabled,
+              opt_out, opt_out_reason, opt_out_until, last_pruned_at
+       FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+       WHERE (tenant_id, table_name) IN (${tenantPairTuples.join(", ")})`;
+
+    const platformPlaceholders = tableNames
+      .map((_, i) => `$${i + 1}`)
+      .join(", ");
+    const platformQuery = `SELECT table_name, retention_days, enabled, last_pruned_at
+       FROM ${SCHEMA}.${POLICIES_TABLE}
+       WHERE table_name IN (${platformPlaceholders})`;
+
+    const [tenantResult, platformResult] = await Promise.all([
+      this.conn.query<RawTenantPolicyRow>(tenantQuery, tenantPolicyParams),
+      this.conn.query<RawPolicyRow>(platformQuery, tableNames),
+    ]);
+
+    const tenantPolicyByKey = new Map<string, RawTenantPolicyRow>();
+    for (const row of tenantResult.rows) {
+      tenantPolicyByKey.set(
+        effectiveRetentionKey(row.tenant_id, row.table_name),
+        row,
+      );
+    }
+    const platformPolicyByTable = new Map<string, RawPolicyRow>();
+    for (const row of platformResult.rows) {
+      platformPolicyByTable.set(row.table_name, row);
+    }
+
+    const now = this.clock();
+    const result = new Map<string, EffectiveRetentionResolution>();
+    for (const pair of pairsArr) {
+      const key = effectiveRetentionKey(pair.tenantId, pair.tableName);
+      const tenantRow = tenantPolicyByKey.get(key);
+      if (tenantRow !== undefined) {
+        if (tenantRow.opt_out) {
+          const active =
+            tenantRow.opt_out_until === null ||
+            Date.parse(tenantRow.opt_out_until) > now;
+          if (active) {
+            result.set(key, {
+              source: "tenant_opt_out",
+              retentionDays: null,
+              enabled: false,
+              tenantId: tenantRow.tenant_id,
+              optOutReason: tenantRow.opt_out_reason,
+              optOutUntil: tenantRow.opt_out_until,
+            });
+            continue;
+          }
+        }
+        if (tenantRow.enabled) {
+          result.set(key, {
+            source: "tenant",
+            retentionDays: tenantRow.retention_days,
+            enabled: true,
+            tenantId: tenantRow.tenant_id,
+          });
+          continue;
+        }
+      }
+      const platformRow = platformPolicyByTable.get(pair.tableName);
+      if (platformRow !== undefined) {
+        result.set(key, {
+          source: "platform",
+          retentionDays: platformRow.retention_days,
+          enabled: platformRow.enabled,
+        });
+        continue;
+      }
+      result.set(key, {
+        source: "none",
+        retentionDays: null,
+        enabled: false,
+      });
+    }
+    return result;
   }
 
   async expiringOptOuts(
