@@ -401,6 +401,7 @@ export interface DiffHistoryTimelineInput {
   readonly joinActor?: boolean;
   readonly actorId?: string;
   readonly eventKind?: OptOutHistoryEventKind;
+  readonly afterId?: string;
 }
 
 export interface TimelineEntry {
@@ -434,6 +435,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly joinActor?: boolean;
   readonly actorId?: string;
   readonly eventKind?: OptOutHistoryEventKind;
+  readonly afterId?: string;
 }
 
 export interface NwayTimelineEntry {
@@ -466,6 +468,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly joinActor?: boolean;
   readonly actorId?: string;
   readonly eventKind?: OptOutHistoryEventKind;
+  readonly afterId?: string;
 }
 
 export interface CrossTableTimelineEntry {
@@ -1590,6 +1593,16 @@ export class PostgresTraceRetention {
       params.push(input.until);
       conditions.push(`h.occurred_at <= $${params.length}`);
     }
+    if (input.afterId !== undefined) {
+      params.push(input.afterId);
+      const afterIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) > (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
+           $${afterIdParam}
+         )`,
+      );
+    }
     params.push(limit);
     const joinActor = input.joinActor === true;
     const selectActorCols = joinActor
@@ -1692,6 +1705,16 @@ export class PostgresTraceRetention {
     if (input.until !== undefined) {
       params.push(input.until);
       conditions.push(`h.occurred_at <= $${params.length}`);
+    }
+    if (input.afterId !== undefined) {
+      params.push(input.afterId);
+      const afterIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) > (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
+           $${afterIdParam}
+         )`,
+      );
     }
     params.push(limit);
     const joinActor = input.joinActor === true;
@@ -1801,6 +1824,16 @@ export class PostgresTraceRetention {
     if (input.until !== undefined) {
       params.push(input.until);
       conditions.push(`h.occurred_at <= $${params.length}`);
+    }
+    if (input.afterId !== undefined) {
+      params.push(input.afterId);
+      const afterIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) > (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
+           $${afterIdParam}
+         )`,
+      );
     }
     params.push(limit);
     const joinActor = input.joinActor === true;

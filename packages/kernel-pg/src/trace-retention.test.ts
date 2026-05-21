@@ -4868,6 +4868,159 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
   });
 });
 
+describe("PostgresTraceRetention diff-timeline --after-id cursor pagination (M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+  const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+
+  it("pair-wise: --after-id threads as $N param into compound cursor with > operator (ASC walk-forward)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      afterId: AFTER_ID,
+    });
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.sql).toContain(
+      "SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $4",
+    );
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      AFTER_ID,
+      100,
+    ]);
+  });
+
+  it("pair-wise: same $N param reused for both subquery lookup and tiebreaker", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      afterId: AFTER_ID,
+    });
+    const sql = capture[0]?.sql ?? "";
+    const matches = sql.match(/\$4/g) ?? [];
+    expect(matches.length).toBe(2);
+  });
+
+  it("pair-wise: omits cursor WHERE clause when afterId not set (backward compat)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).not.toContain("(h.occurred_at, h.id) >");
+  });
+
+  it("N-way: --after-id threads positioned after tenant IN list + table param", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      afterId: AFTER_ID,
+    });
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      "workflow_traces",
+      AFTER_ID,
+      100,
+    ]);
+  });
+
+  it("cross-table: --after-id threads positioned after table IN list + tenant param", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
+      afterId: AFTER_ID,
+    });
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "llm_call_traces",
+      "llm_latency_samples",
+      AFTER_ID,
+      100,
+    ]);
+  });
+
+  it("pair-wise: composes afterId with actorId + eventKind + --since + --until + --limit", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorId: ACTOR_A,
+      eventKind: "opt_out_set",
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-06-01T00:00:00.000Z",
+      afterId: AFTER_ID,
+      limit: 50,
+    });
+    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.event_kind = $5");
+    expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
+    expect(capture[0]?.sql).toContain("h.occurred_at <= $7");
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      ACTOR_A,
+      "opt_out_set",
+      "2026-01-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+      AFTER_ID,
+      50,
+    ]);
+  });
+
+  it("N-way: omits cursor WHERE when afterId not set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).not.toContain("(h.occurred_at, h.id) >");
+  });
+
+  it("cross-table: omits cursor WHERE when afterId not set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+    });
+    expect(capture[0]?.sql).not.toContain("(h.occurred_at, h.id) >");
+  });
+});
+
 describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.tenant.opt-out.cli.history.cursor)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";

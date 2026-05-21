@@ -1435,6 +1435,9 @@ async function runRetentionDiffTimeline(
     eventKind = kindFlag;
   }
 
+  const afterIdFlag = getStringFlag(command, "after-id");
+  const afterId = afterIdFlag !== null ? afterIdFlag : undefined;
+
   if (crossTable) {
     const tenantId = positionalA;
     const tableNames = [positionalB, positionalC, ...addTables];
@@ -1449,6 +1452,7 @@ async function runRetentionDiffTimeline(
         joinActor: withActorNames || undefined,
         actorId,
         eventKind,
+        afterId,
       });
     } catch (err) {
       printError(
@@ -1457,6 +1461,11 @@ async function runRetentionDiffTimeline(
       );
       return 1;
     }
+
+    const nextAfterIdCross =
+      crossResult.entries.length === limit
+        ? (crossResult.entries[crossResult.entries.length - 1]?.id ?? null)
+        : null;
 
     if (command.format === "json") {
       printJson(ctx.io, {
@@ -1468,12 +1477,17 @@ async function runRetentionDiffTimeline(
         withActorNames,
         actorId: actorId ?? null,
         kind: eventKind ?? null,
+        afterId: afterId ?? null,
+        nextAfterId: nextAfterIdCross,
         result: crossResult,
       });
       return 0;
     }
     ctx.io.stdout.write(
-      formatTimelineCrossTableDiff(crossResult, { withActorNames }),
+      formatTimelineCrossTableDiff(crossResult, {
+        withActorNames,
+        nextAfterId: nextAfterIdCross,
+      }),
     );
     return 0;
   }
@@ -1495,6 +1509,7 @@ async function runRetentionDiffTimeline(
         joinActor: withActorNames || undefined,
         actorId,
         eventKind,
+        afterId,
       });
     } catch (err) {
       printError(
@@ -1503,6 +1518,11 @@ async function runRetentionDiffTimeline(
       );
       return 1;
     }
+
+    const nextAfterIdNway =
+      nwayResult.entries.length === limit
+        ? (nwayResult.entries[nwayResult.entries.length - 1]?.id ?? null)
+        : null;
 
     if (command.format === "json") {
       printJson(ctx.io, {
@@ -1514,11 +1534,18 @@ async function runRetentionDiffTimeline(
         withActorNames,
         actorId: actorId ?? null,
         kind: eventKind ?? null,
+        afterId: afterId ?? null,
+        nextAfterId: nextAfterIdNway,
         result: nwayResult,
       });
       return 0;
     }
-    ctx.io.stdout.write(formatTimelineNwayDiff(nwayResult, { withActorNames }));
+    ctx.io.stdout.write(
+      formatTimelineNwayDiff(nwayResult, {
+        withActorNames,
+        nextAfterId: nextAfterIdNway,
+      }),
+    );
     return 0;
   }
 
@@ -1534,6 +1561,7 @@ async function runRetentionDiffTimeline(
       joinActor: withActorNames || undefined,
       actorId,
       eventKind,
+      afterId,
     });
   } catch (err) {
     printError(
@@ -1542,6 +1570,11 @@ async function runRetentionDiffTimeline(
     );
     return 1;
   }
+
+  const nextAfterIdPair =
+    result.entries.length === limit
+      ? (result.entries[result.entries.length - 1]?.id ?? null)
+      : null;
 
   if (command.format === "json") {
     printJson(ctx.io, {
@@ -1552,17 +1585,27 @@ async function runRetentionDiffTimeline(
       withActorNames,
       actorId: actorId ?? null,
       kind: eventKind ?? null,
+      afterId: afterId ?? null,
+      nextAfterId: nextAfterIdPair,
       result,
     });
     return 0;
   }
-  ctx.io.stdout.write(formatTimelineDiff(result, { withActorNames }));
+  ctx.io.stdout.write(
+    formatTimelineDiff(result, {
+      withActorNames,
+      nextAfterId: nextAfterIdPair,
+    }),
+  );
   return 0;
 }
 
 export function formatTimelineDiff(
   result: DiffHistoryTimelineResult,
-  opts: { readonly withActorNames?: boolean } = {},
+  opts: {
+    readonly withActorNames?: boolean;
+    readonly nextAfterId?: string | null;
+  } = {},
 ): string {
   const lines: string[] = [];
   lines.push(`Timeline for tenants on ${result.tableName}:`);
@@ -1583,12 +1626,21 @@ export function formatTimelineDiff(
       `  ${e.occurredAt}  [${e.tenantSide}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
   }
+  if (opts.nextAfterId !== undefined && opts.nextAfterId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — next page: crossengin retention diff-timeline --after-id ${opts.nextAfterId} ...`,
+    );
+  }
   return lines.join("\n") + "\n";
 }
 
 export function formatTimelineNwayDiff(
   result: DiffHistoryTimelineNwayResult,
-  opts: { readonly withActorNames?: boolean } = {},
+  opts: {
+    readonly withActorNames?: boolean;
+    readonly nextAfterId?: string | null;
+  } = {},
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -1612,12 +1664,21 @@ export function formatTimelineNwayDiff(
       `  ${e.occurredAt}  [${e.tenantLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
   }
+  if (opts.nextAfterId !== undefined && opts.nextAfterId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — next page: crossengin retention diff-timeline --after-id ${opts.nextAfterId} ...`,
+    );
+  }
   return lines.join("\n") + "\n";
 }
 
 export function formatTimelineCrossTableDiff(
   result: DiffHistoryTimelineCrossTableResult,
-  opts: { readonly withActorNames?: boolean } = {},
+  opts: {
+    readonly withActorNames?: boolean;
+    readonly nextAfterId?: string | null;
+  } = {},
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -1639,6 +1700,12 @@ export function formatTimelineCrossTableDiff(
       : "";
     lines.push(
       `  ${e.occurredAt}  [${e.tableLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
+    );
+  }
+  if (opts.nextAfterId !== undefined && opts.nextAfterId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — next page: crossengin retention diff-timeline --after-id ${opts.nextAfterId} ...`,
     );
   }
   return lines.join("\n") + "\n";
