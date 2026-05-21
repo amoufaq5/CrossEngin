@@ -797,6 +797,7 @@ async function runRetentionHistory(
   const untilFlag = getStringFlag(command, "until");
   const limitFlag = getStringFlag(command, "limit");
   const afterIdFlag = getStringFlag(command, "after-id");
+  const withActorNames = getBooleanFlag(command, "with-actor-names");
 
   let kind: OptOutHistoryEventKind | undefined;
   if (kindFlag !== null) {
@@ -859,6 +860,7 @@ async function runRetentionHistory(
       until,
       limit,
       afterId: afterIdFlag ?? undefined,
+      joinActor: withActorNames || undefined,
     });
   } catch (err) {
     printError(
@@ -906,9 +908,8 @@ export function formatHistoryList(
     `Retention history (${entries.length} entries, limit ${limit}):`,
   );
   for (const e of entries) {
-    const actor = e.actorId ?? "<system>";
     lines.push(
-      `  ${e.occurredAt}  ${e.eventKind.padEnd(16)} tenant=${e.tenantId}  table=${e.tableName}  actor=${actor}`,
+      `  ${e.occurredAt}  ${e.eventKind.padEnd(16)} tenant=${e.tenantId}  table=${e.tableName}  actor=${formatActor(e)}`,
     );
   }
   if (nextAfterId !== undefined && nextAfterId !== null) {
@@ -918,6 +919,13 @@ export function formatHistoryList(
     );
   }
   return lines.join("\n") + "\n";
+}
+
+function formatActor(e: OptOutHistoryEntry): string {
+  if (e.actorId === null) return "<system>";
+  const name = e.actorDisplayName ?? e.actorEmail;
+  if (name === undefined || name === null) return e.actorId;
+  return `${name} (${e.actorId})`;
 }
 
 async function runRetentionDelete(

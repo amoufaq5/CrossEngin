@@ -39,6 +39,7 @@ import {
   formatEffectiveBatch,
   formatEffectiveResolution,
   formatExpiringTable,
+  formatHistoryList,
   formatPoliciesList,
   formatPolicyChange,
   formatPrunePreview,
@@ -2843,6 +2844,262 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const parsedJson = JSON.parse(out());
     expect(parsedJson.afterId).toBeNull();
     expect(parsedJson.nextAfterId).toBeNull();
+  });
+});
+
+describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.history.actor-join)", () => {
+  const ACTOR_A = "11111111-1111-4000-8000-111111111111";
+  const ACTOR_B = "22222222-2222-4000-8000-222222222222";
+
+  function historyEntry(
+    overrides: Partial<OptOutHistoryEntry> = {},
+  ): OptOutHistoryEntry {
+    return {
+      id: "h1",
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      eventKind: "opt_out_set",
+      actorId: ACTOR_A,
+      occurredAt: "2026-05-21T00:00:00.000Z",
+      prevState: null,
+      nextState: { opt_out: true },
+      attributes: {},
+      ...overrides,
+    };
+  }
+
+  it("threads joinActor=true to adapter when --with-actor-names is set", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--with-actor-names"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBe(true);
+  });
+
+  it("omits joinActor from adapter input when --with-actor-names is NOT set (backward compat)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBeUndefined();
+  });
+
+  it("human-format renders display_name (uuid) when actorDisplayName is populated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--with-actor-names"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            historyEntry({
+              actorId: ACTOR_A,
+              actorDisplayName: "Alice Smith",
+              actorEmail: "alice@example.com",
+            }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`actor=Alice Smith (${ACTOR_A})`);
+  });
+
+  it("human-format falls back to email when display_name is null", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--with-actor-names"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            historyEntry({
+              actorId: ACTOR_B,
+              actorDisplayName: null,
+              actorEmail: "bob@example.com",
+            }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`actor=bob@example.com (${ACTOR_B})`);
+  });
+
+  it("human-format falls back to raw UUID when both display_name and email are null (orphan FK)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--with-actor-names"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            historyEntry({
+              actorId: ACTOR_A,
+              actorDisplayName: null,
+              actorEmail: null,
+            }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`actor=${ACTOR_A}`);
+    expect(out()).not.toContain(`actor=null`);
+    expect(out()).not.toContain(`actor= (`);
+  });
+
+  it("human-format renders <system> for null actor_id regardless of --with-actor-names", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--with-actor-names"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            historyEntry({
+              actorId: null,
+              actorDisplayName: null,
+              actorEmail: null,
+            }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("actor=<system>");
+  });
+
+  it("human-format without --with-actor-names renders raw UUID (no display lookup)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [historyEntry({ actorId: ACTOR_A })],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain(`actor=${ACTOR_A}`);
+    expect(out()).not.toContain(`actor=${ACTOR_A} (`);
+  });
+
+  it("JSON envelope includes actorDisplayName + actorEmail fields when entries carry them", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--with-actor-names",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            historyEntry({
+              actorId: ACTOR_A,
+              actorDisplayName: "Alice",
+              actorEmail: "alice@example.com",
+            }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.entries[0].actorId).toBe(ACTOR_A);
+    expect(parsedOut.entries[0].actorDisplayName).toBe("Alice");
+    expect(parsedOut.entries[0].actorEmail).toBe("alice@example.com");
+  });
+
+  it("composes with other filters (--tenant + --kind + --with-actor-names)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT_A,
+        "--kind",
+        "opt_out_set",
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: undefined,
+      eventKind: "opt_out_set",
+      since: undefined,
+      until: undefined,
+      limit: 100,
+      afterId: undefined,
+      joinActor: true,
+    });
+  });
+});
+
+describe("formatActor (M6.7.zz.tenant.opt-out.history.actor-join)", () => {
+  const ACTOR = "11111111-1111-4000-8000-111111111111";
+
+  it("renders display_name (uuid) when both display_name and email are present", () => {
+    const out = formatHistoryList(
+      [
+        {
+          id: "h1",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          actorId: ACTOR,
+          actorDisplayName: "Alice Smith",
+          actorEmail: "alice@example.com",
+          occurredAt: "2026-05-21T00:00:00.000Z",
+          prevState: null,
+          nextState: { opt_out: true },
+          attributes: {},
+        },
+      ],
+      100,
+      null,
+    );
+    expect(out).toContain(`actor=Alice Smith (${ACTOR})`);
+  });
+
+  it("falls back to email when display_name is null", () => {
+    const out = formatHistoryList(
+      [
+        {
+          id: "h1",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          actorId: ACTOR,
+          actorDisplayName: null,
+          actorEmail: "alice@example.com",
+          occurredAt: "2026-05-21T00:00:00.000Z",
+          prevState: null,
+          nextState: { opt_out: true },
+          attributes: {},
+        },
+      ],
+      100,
+      null,
+    );
+    expect(out).toContain(`actor=alice@example.com (${ACTOR})`);
   });
 });
 

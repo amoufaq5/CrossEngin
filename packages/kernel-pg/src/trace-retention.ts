@@ -243,6 +243,8 @@ export interface OptOutHistoryEntry {
   readonly tableName: string;
   readonly eventKind: OptOutHistoryEventKind;
   readonly actorId: string | null;
+  readonly actorDisplayName?: string | null;
+  readonly actorEmail?: string | null;
   readonly occurredAt: string;
   readonly prevState: Record<string, unknown> | null;
   readonly nextState: Record<string, unknown> | null;
@@ -273,6 +275,7 @@ export interface ListOptOutHistoryInput {
   readonly until?: string;
   readonly limit?: number;
   readonly afterId?: string;
+  readonly joinActor?: boolean;
 }
 
 export interface RestoreTenantPolicyInput {
@@ -1146,29 +1149,29 @@ export class PostgresTraceRetention {
     const params: unknown[] = [];
     if (input.tenantId !== undefined) {
       params.push(input.tenantId);
-      conditions.push(`tenant_id = $${params.length}`);
+      conditions.push(`h.tenant_id = $${params.length}`);
     }
     if (input.tableName !== undefined) {
       params.push(input.tableName);
-      conditions.push(`table_name = $${params.length}`);
+      conditions.push(`h.table_name = $${params.length}`);
     }
     if (input.eventKind !== undefined) {
       params.push(input.eventKind);
-      conditions.push(`event_kind = $${params.length}`);
+      conditions.push(`h.event_kind = $${params.length}`);
     }
     if (input.since !== undefined) {
       params.push(input.since);
-      conditions.push(`occurred_at >= $${params.length}`);
+      conditions.push(`h.occurred_at >= $${params.length}`);
     }
     if (input.until !== undefined) {
       params.push(input.until);
-      conditions.push(`occurred_at <= $${params.length}`);
+      conditions.push(`h.occurred_at <= $${params.length}`);
     }
     if (input.afterId !== undefined) {
       params.push(input.afterId);
       const afterIdParam = params.length;
       conditions.push(
-        `(occurred_at, id) < (
+        `(h.occurred_at, h.id) < (
            (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
            $${afterIdParam}
          )`,
@@ -1181,22 +1184,32 @@ export class PostgresTraceRetention {
     params.push(limit);
     const where =
       conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const joinActor = input.joinActor === true;
+    const selectActorCols = joinActor
+      ? ", u.display_name AS actor_display_name, u.email AS actor_email"
+      : "";
+    const joinClause = joinActor
+      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
+      : "";
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
       table_name: string;
       event_kind: string;
       actor_id: string | null;
+      actor_display_name?: string | null;
+      actor_email?: string | null;
       occurred_at: string;
       prev_state: Record<string, unknown> | null;
       next_state: Record<string, unknown> | null;
       attributes: Record<string, unknown>;
     }>(
-      `SELECT id, tenant_id, table_name, event_kind, actor_id, occurred_at,
-              prev_state, next_state, attributes
-       FROM ${SCHEMA}.${HISTORY_TABLE}
+      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at,
+              h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
        ${where}
-       ORDER BY occurred_at DESC, id DESC
+       ORDER BY h.occurred_at DESC, h.id DESC
        LIMIT $${params.length}`,
       params,
     );
@@ -1206,7 +1219,7 @@ export class PostgresTraceRetention {
           `listOptOutHistory: unknown event_kind '${r.event_kind}'`,
         );
       }
-      return {
+      const entry: OptOutHistoryEntry = {
         id: r.id,
         tenantId: r.tenant_id,
         tableName: r.table_name,
@@ -1217,6 +1230,14 @@ export class PostgresTraceRetention {
         nextState: r.next_state,
         attributes: r.attributes,
       };
+      if (joinActor) {
+        return {
+          ...entry,
+          actorDisplayName: r.actor_display_name ?? null,
+          actorEmail: r.actor_email ?? null,
+        };
+      }
+      return entry;
     });
   }
 

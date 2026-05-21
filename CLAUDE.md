@@ -21,15 +21,154 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,544 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.threshold
+**56 packages + 1 app, 129 meta-schema tables, 8,564 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.history.actor-join
+closes ADR-0170 Q9 by adding `--with-actor-names` flag to
+`retention history` + LEFT JOIN meta.users in the
+listOptOutHistory adapter when joinActor:true. Operators
+reading audit logs previously saw raw UUIDs in every row
+(actor=00000000-...) and had to copy each one + SELECT
+from meta.users to find the actual person. Now one flag
+surfaces 'display_name (uuid)' format alongside email
+fallback. Adapter ListOptOutHistoryInput gains optional
+joinActor?: boolean field; when set, SQL adds LEFT JOIN
+meta.users u ON u.id = h.actor_id + SELECT adds u.display_name
+AS actor_display_name + u.email AS actor_email; result
+entries include actorDisplayName + actorEmail fields
+(string | null). LEFT JOIN deliberately preserves history
+rows when actor has been deleted from meta.users (orphan
+FK) or when actor_id is NULL (system actors) — audit
+context never lost. History table now aliased as h
+consistently with all WHERE-clause column references
+prefixed h. — JOIN-vs-no-JOIN paths share same query
+shape modulo LEFT JOIN + extra SELECT columns; cursor-
+pagination inline subquery stays unqualified (own FROM,
+no alias). CLI rendering rules — actor_id NULL → <system>,
+actor_id + actorDisplayName present → 'display_name
+(uuid)', actor_id + actorDisplayName null + actorEmail
+present → 'email (uuid)' fallback, actor_id + both null
+(orphan FK) → raw UUID, actor_id without --with-actor-
+names (fields absent) → raw UUID (existing behavior).
+name (uuid) format gives operators both human-readable
+name AND UUID for unambiguous forensic accuracy. JSON
+output conditionally emits actorDisplayName + actorEmail
+ONLY when --with-actor-names is set (otherwise fields
+absent); operators detect feature use via
+entries[0].actorDisplayName !== undefined. Backward
+compat preserved — pre-flag callers see identical
+behavior. Cross-schema join cost negligible at typical
+scales — meta.users.id is primary key index-only lookup,
+LEFT JOIN no row-count expansion (1:1 by actor_id),
+bounded by LIMIT clause. Use cases unblocked — audit-
+review readability (Alice Smith (uuid) immediately
+recognizable), per-actor compliance report via jq
+.actorDisplayName // .actorEmail // "system" producing
+human-readable changelog, orphan-actor detection via jq
+filter on actorId != null + actorDisplayName == null +
+actorEmail == null surfacing FK orphans, backward-compat
+for raw-UUID consumers (fields absent without flag). Why
+LEFT JOIN not INNER JOIN — INNER would silently drop
+orphan-FK rows + system-actor rows losing audit
+completeness. Why opt-in flag not always-on — adds query
+cost to every history call; opt-in keeps default cheap.
+Why name (uuid) format — operators need both for forensic
+accuracy stale audit logs reviewed years later still show
+UUID even if user renamed. Why conditional JSON emission
+— preserves existing envelope shape for backward compat
+consumers detect feature via undefined check. Rejected
+alternatives — CLI-side --users-file JSON map (substrate
+stays uncoupled but meta.users exists already as
+canonical path), INNER JOIN (drops orphans loses audit
+completeness), substrate change always-on JOIN (adds
+cost to every call; opt-in cheaper default), add
+actorDisplayName to JSON envelope unconditionally null
+when no lookup (changes shape for backward-compat
+callers conditional preserves), new retention history-
+with-actors action (adds CLI surface; flag-on-existing
+matches --vs-platform etc. precedent), return only
+actorDisplayName omit actorEmail (operators wanting email
+fallback can't get it), display_name <email> format
+(mixes with <system> placeholder syntax), display only
+display_name without UUID (strips forensic context),
+cache user lookups across paginated calls (operator-side
+concern substrate stays stateless). Drawbacks — cross-
+schema dependency adapter SQL now references meta.users
+directly (if operators deploy history table without
+meta.users very unusual but possible in custom test
+fixtures --with-actor-names fails at query time;
+substrate ships both tables together so not regression),
+no multi-tenant filtering on users meta.users is
+platform-wide (cross-tenant actor like platform admin
+appears with same display_name in all tenants' history
+matches operator intent), no email fallback in JSON
+envelope shape — caller composes preference order
+(adapter returns both fields CLI rendering picks one
+programmatic consumers via JSON make own choice), always
+uses h. SQL aliasing existing test assertions checking
+bare-column SQL substrings broke and were updated (minor
+migration cost), no --actor-name <name> filter (operators
+filter at jq layer for now), one JOIN per query operators
+iterating with pagination + --with-actor-names get JOIN
+cost N times across N pages (bounded — meta.users lookup
+index-only — future Q if measured). 9 new adapter tests
+in trace-retention.test.ts — omits LEFT JOIN when
+joinActor false/not set, emits LEFT JOIN meta.users when
+joinActor=true with u.display_name AS actor_display_name
++ u.email AS actor_email in SELECT, returns
+actorDisplayName + actorEmail when joinActor=true and
+user row exists (Alice Smith + alice@example.com),
+returns null for both when joinActor=true but actor has
+no user row (orphan FK), returns null for both when
+actor_id is null (system actor), omits actorDisplayName
++ actorEmail fields when joinActor is false (TypeScript
+undefined), LEFT JOIN preserves history rows even when
+user has been deleted (mixed Alice present + Bob orphan),
+composes with other filters (tenantId + tableName +
+joinActor with h. prefix verified), composes with cursor
+pagination (joinActor + afterId both present). 11 new
+CLI tests in retention.test.ts — threads joinActor=true
+to adapter when --with-actor-names is set, omits
+joinActor from adapter input when flag NOT set (backward
+compat), human-format renders 'Alice Smith (uuid)' when
+actorDisplayName populated, human-format falls back to
+'email (uuid)' when display_name null, human-format
+falls back to raw UUID when both null (orphan FK),
+human-format renders <system> for null actor_id
+regardless of --with-actor-names, human-format without
+--with-actor-names renders raw UUID no display lookup
+(no paren-wrap), JSON envelope includes actorDisplayName
++ actorEmail fields when entries carry them, composes
+with other filters --tenant + --kind + --with-actor-
+names (joinActor:true threaded with all other inputs);
+formatActor helper unit tests — renders display_name
+(uuid) when both display_name and email present, falls
+back to email when display_name null. 4 existing tests
+updated to assert h.-prefixed SQL (ORDER BY h.occurred_at
+DESC, h.id DESC; (h.occurred_at, h.id) < cursor). cli.ts
+helpText extended with --with-actor-names flag note +
+2-line description explaining LEFT JOIN meta.users +
+display_name + email surfacing alongside raw UUIDs.
+fakeRetention listOptOutHistory mock already captures
+input so joinActor flag flows through automatically.
+ADR-0185 documents the design + 9 rejected alternatives
++ 7 future Qs (--actor-id filter, --actor-name-equals
+filter, show user status alongside name, display user's
+tenant_membership role would need additional JOIN, surface
+actor names in other audit surfaces like restore history
+rows future audit logs, --actor-name-pattern regex,
+pretty-printed actor format without UUID for narrow
+terminals). The retention CLI now has 17 actions with
+audit-readability across the history surface — operators
+get human-readable actor attribution via opt-in flag
+without changing the default cheap query path.
+M6.7.zz.tenant.opt-out.cli.diff.threshold
 closes ADR-0181 Q2 + ADR-0183 Q5 by adding `--threshold N`
 string flag to `retention diff` (all 4 variants) for fuzzy
 CI-gate thresholds — only fail when N+ fields/variations
@@ -6482,7 +6621,19 @@ at top of runRetentionDiff before any PG queries;
 pure CLI enhancement single divergenceExitCode helper
 extended no adapter/result-type/envelope changes;
 operators get tier-migration tolerance + cohort
-minor-drift tolerance + graduated CI gates).
+minor-drift tolerance + graduated CI gates),
+ADR-0185 covers M6.7.zz.tenant.opt-out.history.actor-join
+(`retention history --with-actor-names` actor display
+name surfacing — closes ADR-0170 Q9 — LEFT JOIN
+meta.users when joinActor:true; adapter returns
+actorDisplayName + actorEmail (string | null) on entries;
+CLI renders 'name (uuid)' format with email fallback +
+raw-UUID fallback for orphan FKs; <system> preserved
+for null actor_id; backward compat preserved fields
+absent when flag not set; substrate now aliases history
+table as h consistently to support JOIN; replaces
+operator-side meta.users lookup loop for every audit
+review).
 
 ## Architecture in 90 seconds
 
@@ -9161,6 +9312,212 @@ both strict mode (--threshold 1 / default = fail on
 any drift) and fuzzy mode (--threshold N>=2 = fail
 on N+ field differences) across pair-wise AND N-way
 comparison matrices.
+ADR-0185 covers Phase 2 M6.7.zz.tenant.opt-out.history.actor-join
+(`crossengin retention history --with-actor-names`
+actor display name surfacing — closes ADR-0170 Q9;
+operators reading audit logs previously saw raw UUIDs
+in every row (actor=00000000-...) and had to copy
+each one + SELECT FROM meta.users WHERE id = ... to
+find the actual person, repeated per row for compliance
+attestations / incident reports / audit reviews — one
+flag now surfaces display_name + email alongside raw
+UUID. CLI surface `retention history [...other flags
+...] [--with-actor-names]`; boolean flag default off
+existing behavior preserved (raw UUID or <system>);
+with --with-actor-names adapter does LEFT JOIN
+meta.users and returns actorDisplayName + actorEmail
+fields alongside actorId. Adapter ListOptOutHistoryInput
+gains optional joinActor?: boolean field (default
+false); when set SQL adds LEFT JOIN meta.users u ON
+u.id = h.actor_id + SELECT adds u.display_name AS
+actor_display_name + u.email AS actor_email + result
+entries include actorDisplayName: string | null +
+actorEmail: string | null fields; when joinActor is
+false or omitted SQL omits JOIN entirely + result
+entries omit actorDisplayName + actorEmail
+(TypeScript optional string | null | undefined).
+LEFT JOIN not INNER JOIN deliberately — preserves
+history rows even when actor has been deleted from
+meta.users (orphan FK), preserves history rows where
+actor_id is NULL (system actors), operators never
+lose audit context due to user-row mutations; when
+user row exists but display_name is NULL (rare —
+meta.users has email NOT NULL but display_name
+nullable) adapter returns actorDisplayName:null +
+actorEmail:<email> CLI render layer falls back to
+email then to raw UUID. Adapter SQL aliasing — history
+table now aliased as h consistently (even when
+joinActor is false) with all WHERE-clause column
+references prefixed h. — JOIN-vs-no-JOIN paths share
+same query shape modulo LEFT JOIN + SELECT additions
++ easier to reason about + avoids any column-
+ambiguity surprise if meta.users adds new columns;
+cursor-pagination inline subquery (SELECT occurred_at
+FROM ... WHERE id = $N) stays unqualified because has
+own FROM with no alias — id and occurred_at reference
+inline subquery's table directly. CLI rendering rules
+table — actor_id NULL → <system>, actor_id + actorDisplayName
+present → 'display_name (uuid)' with paren-wrapped UUID
+for unambiguous identification, actor_id + actorDisplayName
+null + actorEmail present → 'email (uuid)' fallback,
+actor_id + both null (orphan FK) → raw UUID no name,
+actor_id without --with-actor-names (fields absent) →
+raw UUID no lookup. name (uuid) format gives operators
+both human-readable name AND UUID for unambiguous
+identification + stale audit logs reviewed years later
+still show UUID even if user has since been renamed.
+JSON format — history entries include actorDisplayName
++ actorEmail ONLY when --with-actor-names is set;
+otherwise these fields are absent (not null); operators
+detect feature use via entries[0].actorDisplayName !==
+undefined; backward compat preserved — pre-flag
+callers see identical envelope shape. Two-table join
+cost — meta.users.id is primary key index-only lookup,
+LEFT JOIN doesn't add row-count expansion (1:1 by
+actor_id), one additional query plan node negligible
+cost on typical history result sets; for operators
+with millions of history rows + thousands of users
+LEFT JOIN still index-only bounded by LIMIT clause no
+materialization concerns at typical scales. Use cases
+unblocked — audit-review readability (one command +
+flag yields 'Alice Smith (uuid)' immediately
+recognizable), per-actor compliance report via jq
+'.entries[] | "\(.occurredAt) \(.eventKind) by
+\(.actorDisplayName // .actorEmail // "system")"'
+producing human-readable changelog without lookup
+boilerplate, orphan-actor detection via jq filter on
+actorId != null + actorDisplayName == null + actorEmail
+== null surfacing FK orphans for cleanup, backward-
+compat for raw-UUID consumers (pipelines parsing
+existing JSON output without actorDisplayName continue
+to work — fields absent unless --with-actor-names is
+set no schema-shift surprise). Rejected alternatives
+— CLI-side --users-file <path> JSON map (operators
+maintain separate file substrate stays uncoupled from
+meta.users — rejected meta.users exists in substrate
+using it is canonical path), INNER JOIN instead of
+LEFT JOIN (would silently drop history rows with
+orphan FK or NULL actor_id — rejected preserves audit
+completeness), substrate change with always-on JOIN
+no flag (adds query cost to every history call —
+rejected opt-in keeps default cheap), add
+actorDisplayName to existing JSON envelope
+unconditionally null when no lookup (changes JSON
+shape for backward-compat callers — rejected
+conditional emission preserves existing shape), new
+retention history-with-actors action (adds CLI surface
+— rejected flag-on-existing matches --vs-platform /
+--cross-table / --add-tenant precedent), return only
+actorDisplayName omit actorEmail (operators wanting
+email fallback can't get it — rejected both fields
+cheap to emit), display_name <email> format (mixes
+with <system> placeholder syntax — rejected
+display_name (uuid) parens disambiguates), display
+only display_name without UUID (strips audit-trail
+context for compliance reviews — rejected UUID
+disambiguation matters for forensic accuracy), cache
+user lookups across paginated calls (operator-side
+concern substrate stays stateless — rejected).
+Drawbacks — cross-schema dependency adapter SQL now
+references meta.users directly (if operators deploy
+tenant_retention_opt_out_history without meta.users
+very unusual but possible in custom test fixtures
+--with-actor-names would fail at query time;
+documented not regression because substrate ships both
+tables together), no multi-tenant filtering on users
+meta.users is platform-wide (one user can be a member
+of multiple tenants via user_tenant_membership;
+join doesn't scope users by tenant — cross-tenant
+actor like platform admin appears with same
+display_name in all tenants' history matches operator
+intent "who did this action?" RLS on meta.users would
+still apply), no email fallback in JSON envelope
+shape — caller composes preference order (adapter
+returns both actorDisplayName + actorEmail; CLI
+rendering picks one; programmatic consumers via JSON
+make own choice; documented as contract), always uses
+h. SQL aliasing existing test assertions checking for
+bare-column SQL substrings broke and were updated
+(minor migration cost for callers verifying SQL
+shape directly none outside our tests), no --actor-
+name <name> filter for "show only Alice's mutations"
+(operators filter at jq layer for now), one JOIN per
+query operators iterating with pagination + --with-
+actor-names get JOIN cost N times across N pages
+(bounded — meta.users lookup is index-only — but
+operators with very large cohorts might prefer to
+fetch all rows first then look up actors in one
+batch; future Q if measured). 9 new adapter tests in
+trace-retention.test.ts (omits LEFT JOIN when
+joinActor false/not set verified via not.toContain,
+emits LEFT JOIN meta.users u ON u.id = h.actor_id
+when joinActor=true with u.display_name AS
+actor_display_name + u.email AS actor_email in
+SELECT, returns actorDisplayName + actorEmail when
+joinActor=true and user row exists (Alice Smith +
+alice@example.com both populated), returns null for
+both when joinActor=true but actor has no user row
+(orphan FK — adapter passes null through), returns
+null for both when actor_id is null (system actor —
+adapter still returns the entry), omits
+actorDisplayName + actorEmail fields when joinActor
+is false (TypeScript undefined not null), LEFT JOIN
+preserves history rows even when user has been
+deleted (mixed Alice present + Bob orphan case
+returns 2 entries one with name one without),
+composes with other filters tenantId + tableName +
+joinActor (h.tenant_id = $1 + h.table_name = $2
+verified), composes with cursor pagination joinActor
++ afterId (LEFT JOIN + (h.occurred_at, h.id) <
+cursor both present)); 11 new CLI tests in
+retention.test.ts (threads joinActor=true to adapter
+when --with-actor-names is set, omits joinActor from
+adapter input when flag NOT set verified backward
+compat, human-format renders 'Alice Smith (uuid)' when
+actorDisplayName populated, human-format falls back
+to 'email (uuid)' when display_name null, human-
+format falls back to raw UUID when both null orphan
+FK no paren-wrap, human-format renders <system> for
+null actor_id regardless of --with-actor-names,
+human-format without --with-actor-names renders raw
+UUID no display lookup no paren-wrap, JSON envelope
+includes actorDisplayName + actorEmail fields when
+entries carry them, composes with other filters
+--tenant + --kind + --with-actor-names (joinActor:
+true threaded with all other inputs); formatActor
+helper unit tests via formatHistoryList — renders
+display_name (uuid) when both present, falls back to
+email (uuid) when display_name null). 4 existing
+tests updated to assert h.-prefixed SQL (ORDER BY
+h.occurred_at DESC, h.id DESC; (h.occurred_at, h.id)
+< cursor) — minor migration cost. cli.ts helpText
+extended with --with-actor-names flag note + 2-line
+description explaining LEFT JOIN meta.users +
+display_name + email surfacing alongside raw UUIDs.
+fakeRetention listOptOutHistory mock already captures
+input so joinActor flag flows through automatically;
+no harness change needed. Future Qs cover --actor-id
+<uuid> filter to scope history to one actor's
+mutations (pair with --with-actor-names for "show all
+of Alice's mutations with her name shown"),
+--actor-name-equals <name> filter substring or exact
+match against display_name (operators currently jq-
+filter), show user status alongside name (active/
+suspended/deleted useful for compliance "this action
+was done by a now-suspended user"), display user's
+tenant_membership role like 'Alice (erp_admin)' would
+need additional JOIN to meta.user_tenant_membership
+(different scope defer), surface actor names in other
+audit surfaces like retention restore history rows
+(pattern set replicate in future milestones),
+--actor-name-pattern <regex> for pattern-based
+filtering (operators use jq), pretty-printed actor
+format option without UUID for narrow terminals
+(operators wrap output with cut/awk for now). The
+retention CLI now has 17 actions with audit-readability
+across the history surface — operators get human-
+readable actor attribution via opt-in flag without
+changing the default cheap query path.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey
