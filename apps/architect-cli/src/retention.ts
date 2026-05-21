@@ -1,5 +1,8 @@
+import { readFile } from "node:fs/promises";
+
 import {
   createNodePgConnection,
+  effectiveRetentionKey,
   isOptOutHistoryEventKind,
   parsePgEnvConfig,
   PostgresTraceRetention,
@@ -44,7 +47,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|diff|prune> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|diff|prune> [args]",
     );
     return 2;
   }
@@ -56,6 +59,12 @@ export async function runRetention(
         return await runRetentionExpiring(command, ctx, handle.retention);
       case "effective":
         return await runRetentionEffective(command, ctx, handle.retention);
+      case "effective-batch":
+        return await runRetentionEffectiveBatch(
+          command,
+          ctx,
+          handle.retention,
+        );
       case "opt-out":
         return await runRetentionOptOut(command, ctx, handle.retention);
       case "opt-in":
@@ -79,7 +88,7 @@ export async function runRetention(
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, diff, prune`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, diff, prune`,
         );
         return 2;
     }
@@ -262,6 +271,176 @@ export function formatEffectiveResolution(
       break;
   }
   return lines.join("\n") + "\n";
+}
+
+interface EffectiveBatchPairInput {
+  readonly tenantId: string;
+  readonly tableName: string;
+}
+
+interface EffectiveBatchResultEntry {
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly resolution: EffectiveRetentionResolution;
+}
+
+async function runRetentionEffectiveBatch(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const pairsFile = getStringFlag(command, "pairs-file");
+  if (pairsFile === null) {
+    printError(
+      ctx.io,
+      "retention effective-batch: missing --pairs-file. usage: crossengin retention effective-batch --pairs-file <path>",
+    );
+    return 2;
+  }
+
+  let raw: string;
+  try {
+    raw = await readFile(pairsFile, "utf8");
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention effective-batch: failed to read '${pairsFile}': ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention effective-batch: '${pairsFile}' is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 2;
+  }
+
+  const validation = validateBatchPairs(parsedJson);
+  if (!validation.ok) {
+    printError(
+      ctx.io,
+      `retention effective-batch: '${pairsFile}' ${validation.error}`,
+    );
+    return 2;
+  }
+  const pairs = validation.pairs;
+
+  let resolutionMap: ReadonlyMap<string, EffectiveRetentionResolution>;
+  try {
+    resolutionMap = await retention.effectiveRetentionBatch({ pairs });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention effective-batch: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  const results: EffectiveBatchResultEntry[] = pairs.map((p) => {
+    const resolution = resolutionMap.get(
+      effectiveRetentionKey(p.tenantId, p.tableName),
+    );
+    if (resolution === undefined) {
+      throw new Error(
+        `retention effective-batch: resolver returned no entry for ${p.tenantId}:${p.tableName}`,
+      );
+    }
+    return { tenantId: p.tenantId, tableName: p.tableName, resolution };
+  });
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "effective-batch",
+      count: results.length,
+      results,
+    });
+    return 0;
+  }
+  ctx.io.stdout.write(formatEffectiveBatch(results));
+  return 0;
+}
+
+interface BatchPairsValidation {
+  ok: true;
+  pairs: EffectiveBatchPairInput[];
+}
+interface BatchPairsValidationFail {
+  ok: false;
+  error: string;
+}
+
+function validateBatchPairs(
+  raw: unknown,
+): BatchPairsValidation | BatchPairsValidationFail {
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: "must be a JSON array of {tenantId, tableName} objects" };
+  }
+  const pairs: EffectiveBatchPairInput[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (typeof entry !== "object" || entry === null) {
+      return {
+        ok: false,
+        error: `entry at index ${i} is not an object`,
+      };
+    }
+    const obj = entry as Record<string, unknown>;
+    const tenantId = obj.tenantId;
+    const tableName = obj.tableName;
+    if (typeof tenantId !== "string" || tenantId.length === 0) {
+      return {
+        ok: false,
+        error: `entry at index ${i} missing or empty tenantId (string)`,
+      };
+    }
+    if (typeof tableName !== "string" || tableName.length === 0) {
+      return {
+        ok: false,
+        error: `entry at index ${i} missing or empty tableName (string)`,
+      };
+    }
+    pairs.push({ tenantId, tableName });
+  }
+  return { ok: true, pairs };
+}
+
+export function formatEffectiveBatch(
+  results: ReadonlyArray<EffectiveBatchResultEntry>,
+): string {
+  if (results.length === 0) {
+    return "Effective retention for 0 pair(s): (empty input)\n";
+  }
+  const lines: string[] = [];
+  lines.push(`Effective retention for ${results.length} pair(s):`);
+  for (const entry of results) {
+    lines.push(
+      `  ${entry.tenantId}  ${entry.tableName.padEnd(20)} ${summarizeBatchResolution(entry.resolution)}`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+function summarizeBatchResolution(
+  resolution: EffectiveRetentionResolution,
+): string {
+  switch (resolution.source) {
+    case "tenant":
+      return `source=tenant         retention=${resolution.retentionDays}d  enabled=yes`;
+    case "tenant_opt_out": {
+      const until = resolution.optOutUntil ?? "indefinite";
+      const reason = resolution.optOutReason ?? "<no reason>";
+      return `source=tenant_opt_out  reason=${reason}  until=${until}`;
+    }
+    case "platform":
+      return `source=platform       retention=${resolution.retentionDays}d  enabled=${resolution.enabled ? "yes" : "no"}`;
+    case "none":
+      return `source=none           (no policy configured)`;
+  }
 }
 
 async function runRetentionOptOut(

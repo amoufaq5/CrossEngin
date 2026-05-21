@@ -21,15 +21,152 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,485 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
+**56 packages + 1 app, 129 meta-schema tables, 8,502 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.effective-batch
+closes ADR-0177 Q1 by adding `crossengin retention
+effective-batch --pairs-file <path>` action exposing the
+ADR-0177 batch adapter at the CLI. Pure CLI delivery — no
+adapter changes; wraps existing
+PostgresTraceRetention.effectiveRetentionBatch one-for-one.
+Operators wanting ad-hoc bulk lookups previously wrote
+Node scripts calling the adapter directly. Now one command.
+Input format JSON-only for v1 — array of {tenantId,
+tableName} objects; CSV deferred to future Q (operators
+generating pairs from another command get JSON for free
+via jq, and JSON's typed shape maps cleanly to the
+adapter's EffectiveRetentionBatchPair without per-field
+type inference + quoting rules). Layered validation —
+missing --pairs-file flag exit 2, file unreadable exit 1
+(runtime), invalid JSON exit 2, not-an-array exit 2, entry
+not-an-object at index N exit 2, missing tenantId/
+tableName at index N exit 2 with index-aware error
+messages so operators with 1000-pair files find bad entry
+by line. Output ordering preserves input — adapter
+deduplicates internally (returns ReadonlyMap keyed by
+effectiveRetentionKey), but CLI iterates ORIGINAL input
+pairs and looks up each in Map emitting one output row
+per input entry; duplicates in input → duplicates in
+output (1:1 contract, predictable ordering, duplicate
+visibility). Human output renders 'Effective retention
+for N pair(s):' header + per-pair line '<tenantId>
+<tableName-padded-20> <summary>' with summary via
+internal summarizeBatchResolution helper covering 4
+resolution variants (tenant/tenant_opt_out/platform/none)
+with established 'indefinite'/'<no reason>'/'(no policy
+configured)' conventions; empty input prints '0 pair(s):
+(empty input)' on exit 0 (not an error). JSON envelope
+{action: "effective-batch", count, results: [{tenantId,
+tableName, resolution}]} with count field echoing
+results.length for jq scalar filters that want quick
+count without traversing array. Use cases unblocked —
+compliance audit across watchlist via jq filter on
+.resolution.source=="tenant_opt_out" length count,
+migration verification via jq filter on .resolution.source
+!= "tenant" or .resolutionDays != expected surfacing
+deviations, spreadsheet export via jq -r @csv pipe,
+reconciliation against upstream tier system via diff
+of sorted JSON outputs. Rejected alternatives — stdin
+support via --pairs-file - (platform-specific stdin
+handling; defer until requested), inline --pairs '[...]'
+flag (flag-value-as-JSON unwieldy past 2-3 pairs; file
+is right scale boundary), CSV in v1 (tokenizer + quoting
++ type-inference complexity; jq one-liners convert),
+auto-detect file format by extension (magic; explicit
+JSON-only contract simpler), deduplicate output to
+match adapter's internal dedup (breaks 1:1 input/output;
+operators preferring dedup wrap with jq .results |
+unique), return adapter Map shape directly as JSON
+object {"<tenantId>:<tableName>": resolution} (JSON
+property ordering implementation-defined + colon-as-
+key-separator fragile; array of records cleaner),
+pre-deduplicate before calling adapter (adapter already
+dedupes; CLI dedup redundant), --max-pairs N validation
+at CLI boundary (operator policy choice; PG IN-list
+limit is real constraint; CLI doesn't second-guess),
+auto-chunking for very large inputs (deferred to
+ADR-0177 Q2 substrate work; not a CLI concern).
+Drawbacks — JSON-only no CSV in v1 (operators convert
+with jq; documented), no streaming output (all pairs
+held in memory; bounded by ADR-0177 chunking Q —
+acceptable at typical scales), no per-pair validation
+against PRUNABLE_TABLES allowlist (operators passing
+unknown tables get source:"none" surfacing typos but
+not as error; matches retention effective non-validation
+stance), no dedup in CLI output (operators with
+accidentally-duplicated pairs see duplicates —
+by-design 1:1 contract may confuse operators expecting
+dedup), output ordering preserves input no --sort flag
+(operators use jq sort_by or sort on tabular text),
+file-based input only no --pairs <json> inline arg or
+stdin (operators with one-off ad-hoc queries write
+temp file; future Q). 17 new CLI tests in retention.
+test.ts — missing --pairs-file flag exit 2 with
+'missing --pairs-file' message, file path doesn't exist
+exit 1 with 'failed to read' message, file content not
+valid JSON exit 2 with 'not valid JSON' message, JSON
+not an array exit 2 with 'must be a JSON array'
+message, entry missing tenantId at index 0 exit 2 with
+index-aware 'index 0' + 'tenantId' in error, entry
+missing tableName exit 2 with 'tableName' in error,
+threads pairs to adapter in input order verified via
+effectiveBatchCapture (TENANT_A workflow_traces then
+TENANT_B llm_call_traces), empty input array prints '0
+pair(s) (empty input)' + exit 0, human-format renders
+one row per input pair preserving order (idxA<idxB
+verified in output), human-format includes 'Effective
+retention for 2 pair(s):' header + tenantId + tableName
++ retention=Nd + source=tenant/source=platform per
+pair, JSON envelope shape {action:
+"effective-batch", count, results[]} with results[0]
+fully populated, duplicate input pairs appear in
+output as duplicates (count=2 + results.length=2 for
+identical pairs preserving 1:1 contract), adapter
+errors propagate exit 1 ('PG connection refused' in
+stderr); formatEffectiveBatch helper unit tests — 0
+pair(s) (empty input) message for empty array, count
+header + per-pair rows with summary lines + 'source=
+tenant'/'source=platform', tenant_opt_out variant
+inline with 'reason=legal_hold:case#42' + 'until=2099-
+01-01T00:00:00.000Z', 'indefinite' for null
+optOutUntil + '<no reason>' for null optOutReason
+('until=indefinite' + 'reason=<no reason>' verified),
+'none' variant with '(no policy configured)'
+annotation. fakeRetention extended with
+effectiveRetentionBatch method + effectiveBatchResults
++ effectiveBatchCapture options for test injection.
+cli.ts helpText extended with retention effective-batch
+--pairs-file <path> usage line + 5-line description
+explaining JSON array file format + 2-query batch
+optimization + preserved input order in output;
+dispatcher case + missing-action + unknown-action
+error messages all updated to include effective-batch.
+ADR-0182 documents the design + 9 rejected alternatives
++ 8 future Qs (CSV input format, stdin support via -,
+inline --pairs JSON, --sort flag for output ordering,
+--include-only source filter for CI gates, auto-
+chunking for >10K pairs, pretty-printed JSON output,
+per-pair source-attribution PostgresCostCeilingResolver
+style returning tier/override/global signal). The
+retention CLI now has 17 actions covering forensic +
+recovery + comparison + performance workflows
+comprehensively: 3 read (expiring/effective/list-
+policies) + 1 batch-read (effective-batch from this
+milestone) + 4 write (opt-out/opt-in/set/delete) + 1
+audit (history) + 1 restore (with --dry-run) + 3 diff
+(diff-history + diff with cross-tenant default + --vs-
+platform + --cross-table variants + --exit-on-
+divergence flag on all 3) + 1 maintenance (prune with
+--dry-run) — all substrate adapters now have at least
+one CLI surface; ADR-0177's substrate-only deferral
+is closed.
+M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
 closes ADR-0179 Q6 + ADR-0180 Q3 by adding `--exit-on-
 divergence` boolean flag to `retention diff` (all three
 variants — cross-tenant default + --vs-platform +
@@ -6036,7 +6173,19 @@ callers never see exit 3; replaces fragile `jq -e`
 wrapping whose exit-1 collides with runtime-error exit-
 1 making CI logs ambiguous; single flag uniform across
 all 3 variants; operators route exit 1 to on-call +
-exit 3 to compliance team).
+exit 3 to compliance team),
+ADR-0182 covers M6.7.zz.tenant.opt-out.cli.effective-batch
+(`retention effective-batch --pairs-file <path>` CLI
+action exposing ADR-0177's batch adapter — closes
+ADR-0177 Q1 — pure CLI delivery no adapter changes;
+JSON-only input v1 (array of {tenantId, tableName});
+layered validation with index-aware error messages;
+output ordering preserves input including duplicates
+for 1:1 contract; envelope {action: "effective-batch",
+count, results[]}; replaces Node script boilerplate
+operators previously wrote; substrate-to-CLI gap from
+ADR-0177's substrate-only milestone now closed —
+all retention adapters have first-class CLI surfaces).
 
 ## Architecture in 90 seconds
 
@@ -8154,6 +8303,172 @@ tenant + tenant-vs-platform + cross-table-within-
 tenant), with deliberate exit-3 convention keeping
 drift-detection signal distinguishable from runtime
 errors.
+ADR-0182 covers Phase 2 M6.7.zz.tenant.opt-out.cli.effective-batch
+(`crossengin retention effective-batch --pairs-file
+<path>` CLI action — closes ADR-0177 Q1; ADR-0177
+shipped effectiveRetentionBatch as a substrate-only
+milestone — substrate gained 2-query batch read API
+for dashboard performance but operators wanting ad-
+hoc bulk lookups had to write Node scripts calling
+the adapter directly; M6.7.zz.tenant.opt-out.cli.
+effective-batch closes that gap with pure CLI delivery
+no adapter changes wrapping PostgresTraceRetention.
+effectiveRetentionBatch one-for-one. Use cases —
+compliance audit across watchlist, migration
+verification, periodic snapshot feeding spreadsheet,
+reconciliation against upstream tier system. Input
+format JSON-only for v1 — array of {tenantId,
+tableName} objects; three reasons CSV deferred: (1)
+operators generating pairs file from another command
+get JSON for free via jq pipe like `crossengin
+retention list-policies --format json | jq '[.tenantPolicies[]
+| {tenantId, tableName}]' > pairs.json`, (2) type
+safety — JSON's typed null+boolean+string+number maps
+cleanly to adapter's EffectiveRetentionBatchPair shape
+while CSV needs per-field type inference + quoting
+rules, (3) smaller substrate surface for v1 —
+operators wanting CSV convert with one-liner `jq -R
+'split(",") | {tenantId: .[0], tableName: .[1]}'`;
+native CSV when measured demand. Layered validation at
+CLI boundary with explicit error messages per failure
+mode — missing --pairs-file flag exit 2 with 'missing
+--pairs-file', file doesn't exist or unreadable exit
+1 (runtime not misuse) with 'failed to read <path>:
+<reason>', file content not valid JSON exit 2 with
+'<path> is not valid JSON: <reason>', JSON not an
+array exit 2 with 'must be a JSON array of {tenantId,
+tableName} objects', entry at index N not an object
+exit 2 with 'entry at index N is not an object',
+entry missing tenantId exit 2 with 'entry at index N
+missing or empty tenantId (string)', entry missing
+tableName exit 2 with 'entry at index N missing or
+empty tableName (string)'; index-aware error messages
+so operators with 1000-pair file find bad entry by
+line number; exit 1 reserved for runtime errors (file
+I/O + adapter throws), exit 2 for misuse (missing
+flag + invalid JSON shape). Output ordering preserves
+input including duplicates for 1:1 contract — adapter
+deduplicates pairs internally returning ReadonlyMap
+keyed by effectiveRetentionKey(tenantId, tableName)
+but CLI iterates ORIGINAL input pairs and looks up
+each in Map emitting one output row per input entry;
+duplicates in input → duplicates in output; three
+reasons: 1:1 input/output contract operators reading
+output count rows expecting input count, predictable
+ordering input order preserved without sorting,
+duplicate visibility operators with accidental
+duplicates see them in output rather than silent
+deduplication; adapter still called with original
+pairs list not pre-deduplicated. Human output renders
+'Effective retention for N pair(s):' header followed
+by per-pair line '<tenantId> <tableName-padded-20>
+<summary>' with summary via internal
+summarizeBatchResolution helper covering 4 resolution
+variants (tenant retention=Nd enabled=yes,
+tenant_opt_out reason=<reason> until=<iso|indefinite>,
+platform retention=Nd enabled=yes|no, none (no policy
+configured)) reusing established conventions; empty
+input prints '0 pair(s): (empty input)' on exit 0 not
+an error. JSON envelope {action: "effective-batch",
+count, results: [{tenantId, tableName, resolution}]}
+where count field echoes results.length for jq scalar
+filters wanting quick count without traversing array.
+Pure CLI wrap — same pattern as ADR-0174 (retention
+prune wrapping prune/previewPrune), ADR-0181
+(--exit-on-divergence CLI flag). No max-pairs limit
+at CLI boundary — operators are local; if they want
+100K pairs PG IN-list size limit or deferred ADR-0177
+chunking Q is the constraint; CLI doesn't second-
+guess; documented in helpText. Rejected alternatives
+— stdin support via --pairs-file - (platform-specific
+stdin handling defer until requested), inline --pairs
+'[...]' flag (flag-value-as-JSON unwieldy past 2-3
+pairs; file is right scale boundary), CSV support in
+v1 (tokenizer + quoting + type-inference complexity
+defer), auto-detect file format by extension (magic
+explicit JSON-only contract simpler), deduplicate
+output to match adapter internal dedup (breaks 1:1
+input/output contract; operators preferring dedup
+wrap with `jq '.results | unique'`), return adapter
+Map shape directly as JSON object with
+'<tenantId>:<tableName>' keys (JSON property ordering
+implementation-defined + colon-as-key-separator
+fragile; array of records cleaner), pre-deduplicate
+before calling adapter (adapter already dedupes CLI
+dedup redundant), --max-pairs N validation at CLI
+boundary (operator policy choice PG IN-list limit is
+real constraint), auto-chunking for very large inputs
+(deferred to ADR-0177 Q2 substrate work not CLI
+concern). Drawbacks — JSON-only no CSV in v1
+(operators with CSV convert via jq; documented; CSV
+deferred), no streaming output all pairs held in
+memory for very large inputs >100K pairs operators
+see latency (bounded by deferred ADR-0177 chunking Q
+— not problem at typical scales), no per-pair
+validation against PRUNABLE_TABLES allowlist
+(operators passing unknown tables get source:"none"
+for those entries surfacing typos but not as error;
+matches retention effective non-validation stance),
+no deduplication in CLI output even though adapter
+dedupes for queries (operators with accidentally-
+duplicated input pairs see duplicates in output —
+by design 1:1 contract may confuse operators
+expecting dedup), output ordering preserves input
+operators wanting sorted output use jq on JSON or
+sort on tabular text no --sort flag yet, file-based
+input only no --pairs <json> inline arg or stdin
+support (operators with one-off ad-hoc queries write
+to temp file; future Q). 17 new CLI tests in
+retention.test.ts — missing --pairs-file flag exit 2
+with clear message, file path doesn't exist exit 1
+with 'failed to read', file content not valid JSON
+exit 2 with 'not valid JSON', JSON not an array exit
+2 with 'must be a JSON array', entry missing
+tenantId at index 0 exit 2 with index-aware 'index 0'
++ 'tenantId' in error message, entry missing
+tableName exit 2 with 'tableName' in error, threads
+pairs to adapter in input order verified via
+effectiveBatchCapture (TENANT_A workflow_traces then
+TENANT_B llm_call_traces), empty input array prints
+'0 pair(s) (empty input)' message + exit 0, human-
+format renders one row per input pair preserving
+order (idxA < idxB verified in output), human-format
+includes 'Effective retention for 2 pair(s):' header
++ tenantId + tableName + retention=Nd + source=tenant
+/source=platform per pair, JSON envelope shape
+{action: "effective-batch", count, results[]} with
+results[0] fully populated tenantId + tableName +
+resolution, duplicate input pairs appear in output as
+duplicates (count=2 + results.length=2 for identical
+pairs preserving 1:1 contract), adapter errors
+propagate exit 1 ('PG connection refused' in stderr);
+formatEffectiveBatch helper unit tests — '0 pair(s)
+(empty input)' message for empty array, count header
++ per-pair rows with summary lines, tenant_opt_out
+variant inline with 'reason=legal_hold:case#42' +
+'until=2099-01-01T00:00:00.000Z', 'indefinite' for
+null optOutUntil + '<no reason>' for null
+optOutReason, 'none' variant with '(no policy
+configured)' annotation. fakeRetention extended with
+effectiveRetentionBatch method + effectiveBatchResults
++ effectiveBatchCapture options for test injection.
+cli.ts helpText extended with retention effective-
+batch --pairs-file <path> usage line + 5-line
+description explaining JSON array file format + 2-
+query batch optimization + preserved input order in
+output; dispatcher case + missing-action + unknown-
+action error messages all updated to include the new
+effective-batch action; future Qs cover CSV input
+format when measured demand, stdin support via --
+pairs-file - for shell pipelines, inline --pairs JSON
+for one-off queries, --sort flag for output ordering,
+--include-only source filter as CI gate similar to
+ADR-0181 --exit-on-divergence, auto-chunking for >10K
+pairs pairing with ADR-0177 Q2 substrate work,
+pretty-printed JSON output operators currently use
+jq, per-pair source-attribution
+PostgresCostCeilingResolver style returning tier/
+override/global signal alongside resolution).
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

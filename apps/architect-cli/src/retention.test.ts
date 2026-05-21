@@ -26,11 +26,15 @@ import type {
   SetTenantRetentionInput,
   TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { parseArgs, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import {
+  formatEffectiveBatch,
   formatEffectiveResolution,
   formatExpiringTable,
   formatPoliciesList,
@@ -76,6 +80,8 @@ function fakeRetention(opts: {
   throws?: Error;
   effective?: EffectiveRetentionResolution;
   effectiveCapture?: { tenantId: string; tableName: string }[];
+  effectiveBatchResults?: ReadonlyMap<string, EffectiveRetentionResolution>;
+  effectiveBatchCapture?: { tenantId: string; tableName: string }[][];
   setOptOutResult?: TenantRetentionPolicyRow;
   setOptOutCapture?: SetTenantOptOutInput[];
   clearOptOutResult?: TenantRetentionPolicyRow | null;
@@ -121,6 +127,24 @@ function fakeRetention(opts: {
           enabled: false,
         }
       );
+    },
+    effectiveRetentionBatch: async (input: {
+      pairs: ReadonlyArray<{ tenantId: string; tableName: string }>;
+    }) => {
+      opts.effectiveBatchCapture?.push(input.pairs.map((p) => ({ ...p })));
+      if (opts.throws !== undefined) throw opts.throws;
+      if (opts.effectiveBatchResults !== undefined) {
+        return opts.effectiveBatchResults;
+      }
+      const map = new Map<string, EffectiveRetentionResolution>();
+      for (const p of input.pairs) {
+        map.set(`${p.tenantId}:${p.tableName}`, {
+          source: "none",
+          retentionDays: null,
+          enabled: false,
+        });
+      }
+      return map;
     },
     setTenantOptOut: async (input: SetTenantOptOutInput) => {
       opts.setOptOutCapture?.push(input);
@@ -865,6 +889,373 @@ describe("formatEffectiveResolution", () => {
       "workflow_traces",
     );
     expect(out).toContain("<no reason>");
+  });
+});
+
+describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-batch)", () => {
+  async function writePairsFile(content: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "retention-batch-"));
+    const path = join(dir, "pairs.json");
+    await writeFile(path, content);
+    return path;
+  }
+
+  it("returns exit 2 when --pairs-file is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "effective-batch"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing --pairs-file");
+  });
+
+  it("returns exit 1 when --pairs-file path doesn't exist", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "effective-batch",
+        "--pairs-file=/nonexistent/path/pairs.json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("failed to read");
+  });
+
+  it("returns exit 2 when --pairs-file content is not valid JSON", async () => {
+    const path = await writePairsFile("not json at all {");
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("not valid JSON");
+  });
+
+  it("returns exit 2 when JSON is not an array", async () => {
+    const path = await writePairsFile('{"tenantId":"a","tableName":"b"}');
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("must be a JSON array");
+  });
+
+  it("returns exit 2 when an entry is missing tenantId", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([{ tableName: "workflow_traces" }]),
+    );
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("index 0");
+    expect(err()).toContain("tenantId");
+  });
+
+  it("returns exit 2 when an entry is missing tableName", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([{ tenantId: TENANT_A }]),
+    );
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("tableName");
+  });
+
+  it("threads pairs to adapter in input order", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_B, tableName: "llm_call_traces" },
+      ]),
+    );
+    const capture: { tenantId: string; tableName: string }[][] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ effectiveBatchCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]).toEqual([
+      { tenantId: TENANT_A, tableName: "workflow_traces" },
+      { tenantId: TENANT_B, tableName: "llm_call_traces" },
+    ]);
+  });
+
+  it("empty input array prints 'empty input' message + exit 0", async () => {
+    const path = await writePairsFile("[]");
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("0 pair(s)");
+    expect(out()).toContain("(empty input)");
+  });
+
+  it("human-format renders one row per input pair preserving order", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_B, tableName: "llm_call_traces" },
+      ]),
+    );
+    const resultMap = new Map<string, EffectiveRetentionResolution>([
+      [
+        `${TENANT_A}:workflow_traces`,
+        {
+          source: "tenant",
+          retentionDays: 30,
+          enabled: true,
+          tenantId: TENANT_A,
+        },
+      ],
+      [
+        `${TENANT_B}:llm_call_traces`,
+        { source: "platform", retentionDays: 90, enabled: true },
+      ],
+    ]);
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ effectiveBatchResults: resultMap }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("Effective retention for 2 pair(s):");
+    expect(output).toContain(`${TENANT_A}  workflow_traces`);
+    expect(output).toContain("source=tenant");
+    expect(output).toContain("retention=30d");
+    expect(output).toContain(`${TENANT_B}  llm_call_traces`);
+    expect(output).toContain("retention=90d");
+    const idxA = output.indexOf(TENANT_A);
+    const idxB = output.indexOf(TENANT_B);
+    expect(idxA).toBeLessThan(idxB);
+  });
+
+  it("JSON envelope shape {action, count, results[]}", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+      ]),
+    );
+    const resultMap = new Map<string, EffectiveRetentionResolution>([
+      [
+        `${TENANT_A}:workflow_traces`,
+        {
+          source: "tenant",
+          retentionDays: 30,
+          enabled: true,
+          tenantId: TENANT_A,
+        },
+      ],
+    ]);
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "effective-batch",
+        `--pairs-file=${path}`,
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ effectiveBatchResults: resultMap }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.action).toBe("effective-batch");
+    expect(parsedOut.count).toBe(1);
+    expect(parsedOut.results).toHaveLength(1);
+    expect(parsedOut.results[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      resolution: {
+        source: "tenant",
+        retentionDays: 30,
+        enabled: true,
+        tenantId: TENANT_A,
+      },
+    });
+  });
+
+  it("duplicate input pairs appear in output as duplicates (preserves 1:1 input/output)", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+      ]),
+    );
+    const resultMap = new Map<string, EffectiveRetentionResolution>([
+      [
+        `${TENANT_A}:workflow_traces`,
+        {
+          source: "tenant",
+          retentionDays: 30,
+          enabled: true,
+          tenantId: TENANT_A,
+        },
+      ],
+    ]);
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "effective-batch",
+        `--pairs-file=${path}`,
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ effectiveBatchResults: resultMap }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.count).toBe(2);
+    expect(parsedOut.results).toHaveLength(2);
+  });
+
+  it("adapter errors propagate as exit 1", async () => {
+    const path = await writePairsFile(
+      JSON.stringify([
+        { tenantId: TENANT_A, tableName: "workflow_traces" },
+      ]),
+    );
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective-batch", `--pairs-file=${path}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatEffectiveBatch", () => {
+  it("renders 'empty input' message when results array is empty", () => {
+    const out = formatEffectiveBatch([]);
+    expect(out).toContain("0 pair(s)");
+    expect(out).toContain("(empty input)");
+  });
+
+  it("renders count header + per-pair rows with summary lines", () => {
+    const out = formatEffectiveBatch([
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        resolution: {
+          source: "tenant",
+          retentionDays: 30,
+          enabled: true,
+          tenantId: TENANT_A,
+        },
+      },
+      {
+        tenantId: TENANT_B,
+        tableName: "llm_call_traces",
+        resolution: { source: "platform", retentionDays: 90, enabled: true },
+      },
+    ]);
+    expect(out).toContain("Effective retention for 2 pair(s):");
+    expect(out).toContain(`${TENANT_A}  workflow_traces`);
+    expect(out).toContain(`${TENANT_B}  llm_call_traces`);
+    expect(out).toContain("source=tenant");
+    expect(out).toContain("source=platform");
+  });
+
+  it("renders tenant_opt_out variant with reason + until inline", () => {
+    const out = formatEffectiveBatch([
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        resolution: {
+          source: "tenant_opt_out",
+          retentionDays: null,
+          enabled: false,
+          tenantId: TENANT_A,
+          optOutReason: "legal_hold:case#42",
+          optOutUntil: "2099-01-01T00:00:00.000Z",
+        },
+      },
+    ]);
+    expect(out).toContain("source=tenant_opt_out");
+    expect(out).toContain("reason=legal_hold:case#42");
+    expect(out).toContain("until=2099-01-01T00:00:00.000Z");
+  });
+
+  it("renders 'indefinite' for null optOutUntil + '<no reason>' for null optOutReason", () => {
+    const out = formatEffectiveBatch([
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        resolution: {
+          source: "tenant_opt_out",
+          retentionDays: null,
+          enabled: false,
+          tenantId: TENANT_A,
+          optOutReason: null,
+          optOutUntil: null,
+        },
+      },
+    ]);
+    expect(out).toContain("until=indefinite");
+    expect(out).toContain("reason=<no reason>");
+  });
+
+  it("renders 'none' variant with '(no policy configured)' annotation", () => {
+    const out = formatEffectiveBatch([
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        resolution: { source: "none", retentionDays: null, enabled: false },
+      },
+    ]);
+    expect(out).toContain("source=none");
+    expect(out).toContain("(no policy configured)");
   });
 });
 
