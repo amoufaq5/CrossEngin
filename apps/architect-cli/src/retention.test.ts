@@ -4658,6 +4658,285 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
   });
+
+  it("threads joinActor=true to adapter when --with-actor-names is set", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBe(true);
+  });
+
+  it("omits joinActor when --with-actor-names is NOT set (backward compat)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBeUndefined();
+  });
+
+  it("human-format renders 'Alice Smith (uuid)' when --with-actor-names + actorDisplayName populated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: "11111111-1111-1111-1111-111111111111",
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+                actorDisplayName: "Alice Smith",
+                actorEmail: "alice@example.com",
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(
+      "Alice Smith (11111111-1111-1111-1111-111111111111)",
+    );
+  });
+
+  it("human-format falls back to email when --with-actor-names + display_name null", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: "11111111-1111-1111-1111-111111111111",
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+                actorDisplayName: null,
+                actorEmail: "alice@example.com",
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(
+      "alice@example.com (11111111-1111-1111-1111-111111111111)",
+    );
+  });
+
+  it("human-format renders <system> for null actor_id regardless of --with-actor-names", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "policy_deleted",
+                actorId: null,
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: null,
+                attributes: {},
+                actorDisplayName: null,
+                actorEmail: null,
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("by <system>");
+  });
+
+  it("human-format omits 'by <actor>' suffix when --with-actor-names is NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: "11111111-1111-1111-1111-111111111111",
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).not.toContain(" by ");
+  });
+
+  it("JSON envelope includes withActorNames + actorDisplayName + actorEmail when --with-actor-names set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--with-actor-names",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: "11111111-1111-1111-1111-111111111111",
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+                actorDisplayName: "Alice Smith",
+                actorEmail: "alice@example.com",
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.withActorNames).toBe(true);
+    expect(parsed_.result.entries[0].actorDisplayName).toBe("Alice Smith");
+    expect(parsed_.result.entries[0].actorEmail).toBe("alice@example.com");
+  });
+
+  it("JSON envelope withActorNames=false when flag NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.withActorNames).toBe(false);
+  });
 });
 
 describe("formatTimelineDiff", () => {
@@ -4773,6 +5052,87 @@ describe("formatTimelineDiff", () => {
     const idx3 = out.indexOf("[A] opt_out_cleared");
     expect(idx1).toBeLessThan(idx2);
     expect(idx2).toBeLessThan(idx3);
+  });
+
+  it("renders 'by <actor-name> (uuid)' suffix when withActorNames opt is true", () => {
+    const out = formatTimelineDiff(
+      {
+        tenantIdA: TENANT_A,
+        tenantIdB: TENANT_B,
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h1",
+            tenantId: TENANT_A,
+            tenantSide: "A",
+            tableName: "workflow_traces",
+            eventKind: "opt_out_set",
+            actorId: "11111111-1111-1111-1111-111111111111",
+            occurredAt: "2026-01-01T00:00:00.000Z",
+            prevState: null,
+            nextState: { opt_out: true, retention_days: 365 },
+            attributes: {},
+            actorDisplayName: "Alice Smith",
+            actorEmail: "alice@example.com",
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(out).toContain(
+      "by Alice Smith (11111111-1111-1111-1111-111111111111)",
+    );
+  });
+
+  it("renders 'by <system>' when actorId is null + withActorNames=true", () => {
+    const out = formatTimelineDiff(
+      {
+        tenantIdA: TENANT_A,
+        tenantIdB: TENANT_B,
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h1",
+            tenantId: TENANT_A,
+            tenantSide: "A",
+            tableName: "workflow_traces",
+            eventKind: "policy_deleted",
+            actorId: null,
+            occurredAt: "2026-01-01T00:00:00.000Z",
+            prevState: null,
+            nextState: null,
+            attributes: {},
+            actorDisplayName: null,
+            actorEmail: null,
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(out).toContain("by <system>");
+  });
+
+  it("omits 'by' suffix when withActorNames opt is not set (default false)", () => {
+    const out = formatTimelineDiff({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h1",
+          tenantId: TENANT_A,
+          tenantSide: "A",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          actorId: "11111111-1111-1111-1111-111111111111",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          prevState: null,
+          nextState: { opt_out: true, retention_days: 365 },
+          attributes: {},
+        },
+      ],
+    });
+    expect(out).not.toContain("by ");
   });
 });
 

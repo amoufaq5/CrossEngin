@@ -3860,7 +3860,7 @@ describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli
     };
   }
 
-  it("issues a single query with WHERE (tenant_id = $1 OR tenant_id = $2) AND table_name = $3", async () => {
+  it("issues a single query with WHERE (h.tenant_id = $1 OR h.tenant_id = $2) AND h.table_name = $3", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -3871,13 +3871,13 @@ describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli
     });
     expect(capture).toHaveLength(1);
     expect(capture[0]?.sql).toContain(
-      "(tenant_id = $1 OR tenant_id = $2)",
+      "(h.tenant_id = $1 OR h.tenant_id = $2)",
     );
-    expect(capture[0]?.sql).toContain("table_name = $3");
+    expect(capture[0]?.sql).toContain("h.table_name = $3");
     expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 100]);
   });
 
-  it("orders by occurred_at ASC, id ASC (chronological)", async () => {
+  it("orders by h.occurred_at ASC, h.id ASC (chronological)", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -3886,7 +3886,7 @@ describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).toContain("ORDER BY occurred_at ASC, id ASC");
+    expect(capture[0]?.sql).toContain("ORDER BY h.occurred_at ASC, h.id ASC");
   });
 
   it("tags each entry with tenantSide A or B by matching tenant_id", async () => {
@@ -4061,6 +4061,127 @@ describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli
     expect(entry.prevState).toBeNull();
     expect(entry.nextState).toEqual({ opt_out: true, retention_days: 365 });
     expect(entry.attributes).toEqual({});
+  });
+
+  it("omits LEFT JOIN when joinActor is not set (backward compat)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).not.toContain("LEFT JOIN meta.users");
+    expect(capture[0]?.sql).not.toContain("actor_display_name");
+    expect(capture[0]?.sql).not.toContain("actor_email");
+  });
+
+  it("emits LEFT JOIN meta.users when joinActor is true with display_name + email in SELECT", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      joinActor: true,
+    });
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
+    expect(capture[0]?.sql).toContain("u.display_name AS actor_display_name");
+    expect(capture[0]?.sql).toContain("u.email AS actor_email");
+  });
+
+  it("returns actorDisplayName + actorEmail when joinActor=true + user row exists", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        {
+          ...rawRow(TENANT_A),
+          actor_id: "11111111-1111-1111-1111-111111111111",
+          actor_display_name: "Alice Smith",
+          actor_email: "alice@example.com",
+        },
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      joinActor: true,
+    });
+    const entry = result.entries[0]!;
+    expect(entry.actorId).toBe("11111111-1111-1111-1111-111111111111");
+    expect(entry.actorDisplayName).toBe("Alice Smith");
+    expect(entry.actorEmail).toBe("alice@example.com");
+  });
+
+  it("returns null actorDisplayName + actorEmail when joinActor=true but actor has no user row (orphan FK)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        {
+          ...rawRow(TENANT_A),
+          actor_id: "22222222-2222-2222-2222-222222222222",
+          actor_display_name: null,
+          actor_email: null,
+        },
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      joinActor: true,
+    });
+    const entry = result.entries[0]!;
+    expect(entry.actorId).toBe("22222222-2222-2222-2222-222222222222");
+    expect(entry.actorDisplayName).toBeNull();
+    expect(entry.actorEmail).toBeNull();
+  });
+
+  it("returns null actorDisplayName + actorEmail when joinActor=true but actor_id is null (system actor)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        {
+          ...rawRow(TENANT_A),
+          actor_id: null,
+          actor_display_name: null,
+          actor_email: null,
+        },
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      joinActor: true,
+    });
+    const entry = result.entries[0]!;
+    expect(entry.actorId).toBeNull();
+    expect(entry.actorDisplayName).toBeNull();
+    expect(entry.actorEmail).toBeNull();
+  });
+
+  it("omits actorDisplayName + actorEmail fields when joinActor is false (TypeScript undefined)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [{ ...rawRow(TENANT_A), actor_id: "33333333-3333-3333-3333-333333333333" }],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    const entry = result.entries[0]!;
+    expect(entry.actorId).toBe("33333333-3333-3333-3333-333333333333");
+    expect(entry.actorDisplayName).toBeUndefined();
+    expect(entry.actorEmail).toBeUndefined();
   });
 });
 

@@ -945,7 +945,11 @@ export function formatHistoryList(
   return lines.join("\n") + "\n";
 }
 
-function formatActor(e: OptOutHistoryEntry): string {
+function formatActor(e: {
+  readonly actorId: string | null;
+  readonly actorDisplayName?: string | null;
+  readonly actorEmail?: string | null;
+}): string {
   if (e.actorId === null) return "<system>";
   const name = e.actorDisplayName ?? e.actorEmail;
   if (name === undefined || name === null) return e.actorId;
@@ -1387,6 +1391,8 @@ async function runRetentionDiffTimeline(
     limit = parsed;
   }
 
+  const withActorNames = getBooleanFlag(command, "with-actor-names");
+
   let result: DiffHistoryTimelineResult;
   try {
     result = await retention.diffHistoryTimeline({
@@ -1396,6 +1402,7 @@ async function runRetentionDiffTimeline(
       since,
       until,
       limit,
+      joinActor: withActorNames || undefined,
     });
   } catch (err) {
     printError(
@@ -1411,16 +1418,18 @@ async function runRetentionDiffTimeline(
       since: since ?? null,
       until: until ?? null,
       limit,
+      withActorNames,
       result,
     });
     return 0;
   }
-  ctx.io.stdout.write(formatTimelineDiff(result));
+  ctx.io.stdout.write(formatTimelineDiff(result, { withActorNames }));
   return 0;
 }
 
 export function formatTimelineDiff(
   result: DiffHistoryTimelineResult,
+  opts: { readonly withActorNames?: boolean } = {},
 ): string {
   const lines: string[] = [];
   lines.push(`Timeline for tenants on ${result.tableName}:`);
@@ -1434,8 +1443,11 @@ export function formatTimelineDiff(
   lines.push(`Events (${result.entries.length}):`);
   for (const e of result.entries) {
     const stateSummary = summarizeTimelineEntry(e);
+    const actorSuffix = opts.withActorNames
+      ? `  by ${formatActor(e)}`
+      : "";
     lines.push(
-      `  ${e.occurredAt}  [${e.tenantSide}] ${e.eventKind.padEnd(16)} ${stateSummary}`,
+      `  ${e.occurredAt}  [${e.tenantSide}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
   }
   return lines.join("\n") + "\n";

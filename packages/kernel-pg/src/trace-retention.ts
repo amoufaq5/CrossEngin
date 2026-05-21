@@ -398,6 +398,7 @@ export interface DiffHistoryTimelineInput {
   readonly since?: string;
   readonly until?: string;
   readonly limit?: number;
+  readonly joinActor?: boolean;
 }
 
 export interface TimelineEntry {
@@ -406,10 +407,13 @@ export interface TimelineEntry {
   readonly tenantSide: "A" | "B";
   readonly tableName: string;
   readonly eventKind: OptOutHistoryEventKind;
+  readonly actorId: string | null;
   readonly occurredAt: string;
   readonly prevState: Record<string, unknown> | null;
   readonly nextState: Record<string, unknown> | null;
   readonly attributes: Record<string, unknown>;
+  readonly actorDisplayName?: string | null;
+  readonly actorEmail?: string | null;
 }
 
 export interface DiffHistoryTimelineResult {
@@ -1495,34 +1499,45 @@ export class PostgresTraceRetention {
       throw new Error(`limit must be an integer >= 1, got ${limit}`);
     }
     const conditions: string[] = [
-      "(tenant_id = $1 OR tenant_id = $2)",
-      "table_name = $3",
+      "(h.tenant_id = $1 OR h.tenant_id = $2)",
+      "h.table_name = $3",
     ];
     const params: unknown[] = [input.tenantIdA, input.tenantIdB, input.tableName];
     if (input.since !== undefined) {
       params.push(input.since);
-      conditions.push(`occurred_at >= $${params.length}`);
+      conditions.push(`h.occurred_at >= $${params.length}`);
     }
     if (input.until !== undefined) {
       params.push(input.until);
-      conditions.push(`occurred_at <= $${params.length}`);
+      conditions.push(`h.occurred_at <= $${params.length}`);
     }
     params.push(limit);
+    const joinActor = input.joinActor === true;
+    const selectActorCols = joinActor
+      ? ", u.display_name AS actor_display_name, u.email AS actor_email"
+      : "";
+    const joinClause = joinActor
+      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
+      : "";
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
       table_name: string;
       event_kind: string;
+      actor_id: string | null;
+      actor_display_name?: string | null;
+      actor_email?: string | null;
       occurred_at: string;
       prev_state: Record<string, unknown> | null;
       next_state: Record<string, unknown> | null;
       attributes: Record<string, unknown>;
     }>(
-      `SELECT id, tenant_id, table_name, event_kind, occurred_at,
-              prev_state, next_state, attributes
-       FROM ${SCHEMA}.${HISTORY_TABLE}
+      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
+              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
        WHERE ${conditions.join(" AND ")}
-       ORDER BY occurred_at ASC, id ASC
+       ORDER BY h.occurred_at ASC, h.id ASC
        LIMIT $${params.length}`,
       params,
     );
@@ -1532,17 +1547,26 @@ export class PostgresTraceRetention {
           `diffHistoryTimeline: unknown event_kind '${r.event_kind}'`,
         );
       }
-      return {
+      const entry: TimelineEntry = {
         id: r.id,
         tenantId: r.tenant_id,
         tenantSide: r.tenant_id === input.tenantIdA ? ("A" as const) : ("B" as const),
         tableName: r.table_name,
         eventKind: r.event_kind,
+        actorId: r.actor_id,
         occurredAt: r.occurred_at,
         prevState: r.prev_state,
         nextState: r.next_state,
         attributes: r.attributes,
       };
+      if (joinActor) {
+        return {
+          ...entry,
+          actorDisplayName: r.actor_display_name ?? null,
+          actorEmail: r.actor_email ?? null,
+        };
+      }
+      return entry;
     });
     return {
       tenantIdA: input.tenantIdA,
