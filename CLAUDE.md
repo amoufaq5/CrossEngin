@@ -21,15 +21,116 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,318 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.history-retention
+**56 packages + 1 app, 129 meta-schema tables, 8,342 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history
+closes ADR-0170 Q5 by adding `crossengin retention diff-history
+<id-a> <id-b>` action + diffHistoryEntries adapter method +
+exported computeFieldDiffs pure helper. Operators querying
+the audit log via retention history saw a chronological
+event list but couldn't easily answer "what changed between
+event A and event B?" — current workflow required manual
+JSONB comparison via two queries + mental diffing. New
+adapter method runs single query `SELECT ... WHERE id IN
+($1, $2)` then computes field-by-field diff client-side
+via computeFieldDiffs(stateA, stateB) — union of keys
+sorted alphabetically, JSON.stringify deep comparison,
+returns only differing fields. Result type
+DiffHistoryEntriesResult carries idA + idB + tenantId +
+tableName + occurredAtA + occurredAtB + eventKindA +
+eventKindB + fieldDiffs array of {field, valueA, valueB}.
+Same-(tenant, table) constraint enforced — refuses cross-
+tenant comparison ("events on different tenants
+(<tenantA> vs <tenantB>)") and cross-table comparison
+(same shape) because the use case is reconstructing single-
+policy state at two moments; cross-tenant/cross-table
+comparisons are different workflows (ADR-0165 Q6 separate
+milestone). Compares next_state only not prev_state —
+each history row has both but cross-event question is
+"snapshot A vs snapshot B"; prev_state vs next_state of
+single event is covered by retention history rendering
+both columns. Client-side diff chosen over PG-side
+jsonb_each because the diff logic is small (10 lines),
+PG-side would need verbose "sort by key then compare via
+text equality" expression, application-side is unit-
+testable as pure function with no DB dependency, two
+JSONB blobs (~400 bytes each) cheap to move. CLI action
+takes positional <history-id-a> <history-id-b> args
+(both required exit 2 if missing) + --format flag. Human
+output renders metadata header (A: <id> at <iso>
+event_kind=<kind>, B: <id> at <iso> event_kind=<kind>,
+Tenant + Table) + Field changes (N) section with
+'fieldname valueA → valueB' lines (or 'No differences
+between the two events' policy states.' when empty);
+'absent' placeholder rendered when value is undefined
+(e.g., DELETE event's null next_state shows fields as
+absent → value). JSON envelope {action: "diff-history",
+result: DiffHistoryEntriesResult} preserves full structure
+for jq. Use cases unblocked — forensic audit "what
+changed between mutations X and Y?", compliance report
+"policy state transitions over time" via retention
+history + diff-history between consecutive events,
+restore validation (diff source-history vs current-state
+before running restore), JSON-driven compliance
+dashboards via jq pipe. Rejected alternatives —
+PG-side diff via jsonb_each (adds SQL complexity for
+small win), compare prev_state vs next_state of single
+event (covered by retention history rendering both
+columns; cross-event use case is priority), allow
+cross-tenant comparison (different concern; covered by
+future retention diff action), allow cross-table
+comparison (same), three-way diff idA+idB+idC
+(overengineered; operators chain pair-wise),
+--field <name> filter (jq covers), visual color diff
+(substrate stays terminal-emoji-free; pipe to delta),
+compare full event metadata kind+actor+attributes
+(diff focuses on policy state; metadata visible in
+headers), implicit restore on diff (conflates two
+operations — diff is read-only), auto-sort by occurred_at
+(operators may want B-then-A semantics; argument order
+preserved). 16 new adapter tests + 8 new CLI tests = 24
+total covering: throws when neither id exists with
+clear message including both missing ids, throws when
+only one id missing with single missing id in message,
+throws on different tenants, throws on different tables,
+throws on unknown event_kind, returns metadata +
+fieldDiffs for valid pair, DELETE event with null
+next_state shows 'absent' (valueA: undefined) for fields
+present on B, empty fieldDiffs when both states equal,
+empty fieldDiffs when both null (both DELETE), SELECT
+shape uses WHERE id IN ($1, $2), computeFieldDiffs
+returns sorted alphabetical diffs, returns empty array
+for equal states, treats null state as empty object,
+compares via JSON.stringify deep equality, treats
+deep-equal objects as no diff; CLI tests cover missing
+idA returns exit 2, missing idB returns exit 2, threads
+ids to adapter, human-format 'No differences' when empty,
+human-format renders metadata + field-by-field diff with
+'A → B' arrow + 'Field changes (N)' header, human-format
+renders 'absent' for undefined values, JSON envelope
+shape, adapter errors propagate exit 1. cli.ts helpText
+extended with retention diff-history usage line +
+description explaining next_state vs next_state semantic.
+ADR-0173 documents the design + 10 rejected alternatives
++ 7 future Qs (cross-tenant diff retention diff
+<tenant-a> <tenant-b> <table> separate milestone closing
+ADR-0165 Q6, --field name filter, three-way diff or
+n-way merge view, visual color highlighting via opt-in
+flag, prev_state vs next_state of single event via
+retention show-event action, configurable comparison
+depth, diff against current policy state via --current
+flag for "what would restore change?" workflows). The
+retention CLI now has 11 actions (3 read + 4 write +
+1 audit + 1 restore-undo + 1 diff); operators have
+full forensic + recovery + comparison workflows
+without leaving the CLI.
+M6.7.zz.tenant.opt-out.history-retention
 closes ADR-0170 Q1 with the mechanically simplest change in
 the retention substrate — wires the new audit-log table
 into the existing retention machinery. Three additive
@@ -4988,7 +5089,19 @@ table inherits the entire ADR-0143 + 0155 + 0162 retention
 machinery; hasTenantId:true so per-tenant overrides work;
 recursive-concern questions for audit-log-of-audit-log
 rejected; substrate now self-managing — the audit log
-produced by retention is itself subject to retention).
+produced by retention is itself subject to retention),
+ADR-0173 covers M6.7.zz.tenant.opt-out.cli.diff-history
+(`crossengin retention diff-history <id-a> <id-b>` action
++ diffHistoryEntries adapter + computeFieldDiffs pure
+helper — closes ADR-0170 Q5 — single query then
+client-side diff comparing next_state vs next_state of
+two history events; same-(tenant, table) constraint
+enforced; refuses cross-tenant/cross-table (separate
+workflow); 'absent' placeholder for undefined values
+(DELETE event's null next_state); empty fieldDiffs when
+states deep-equal; alphabetically sorted output; forensic
+audit + compliance changelog + restore validation
+workflows now CLI-native).
 
 ## Architecture in 90 seconds
 
@@ -6477,6 +6590,133 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0173 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff-history
+(`crossengin retention diff-history <history-id-a>
+<history-id-b>` CLI action + diffHistoryEntries adapter
+method + exported computeFieldDiffs pure helper — closes
+ADR-0170 Q5; operators querying retention history saw
+chronological event lists but couldn't answer "what
+changed between event A and event B" without manual
+JSONB comparison — this action does the diff in one
+command; single-query SELECT id+tenant_id+table_name+
+event_kind+occurred_at+next_state FROM
+meta.tenant_retention_opt_out_history WHERE id IN
+($1, $2) then client-side diff via computeFieldDiffs
+helper (union of keys sorted alphabetically, JSON.stringify
+deep comparison, returns only differing fields); result
+type DiffHistoryEntriesResult carries idA + idB +
+tenantId + tableName + occurredAtA + occurredAtB +
+eventKindA + eventKindB + fieldDiffs ReadonlyArray of
+{field, valueA, valueB}; same-(tenant, table) constraint
+enforced — throws when events on different tenants
+("events on different tenants (<tenantA> vs <tenantB>)")
+or different tables (same shape) because the use case
+is single-policy state at two moments not cross-tenant
+comparison (cross-tenant workflow covered by separate
+future retention diff action closing ADR-0165 Q6);
+compares next_state only not prev_state because each
+history row has both columns but cross-event question
+is "snapshot A vs snapshot B" while prev_state vs
+next_state of single event is already covered by
+retention history rendering both columns; client-side
+diff chosen over PG-side jsonb_each because the diff
+logic is small (10 lines TypeScript), PG-side would
+need verbose "sort by key then compare via text
+equality" expression, application-side is unit-testable
+as pure function with no DB dependency, two JSONB
+blobs (~400 bytes each) cheap to move; CLI action takes
+positional <history-id-a> <history-id-b> (both required
+exit 2 if missing) + --format flag; human output
+renders 3-section format — metadata header (A: <id>
+at <iso> event_kind=<kind>, B: <id> at <iso>
+event_kind=<kind>, Tenant + Table), blank line, then
+either 'No differences between the two events' policy
+states.' for empty fieldDiffs OR 'Field changes (N):'
+header followed by 'fieldname valueA → valueB' lines;
+'absent' placeholder rendered when value is undefined
+(e.g., DELETE event's null next_state shows fields as
+absent → value); arrow rendered as '→'; field name
+padded to 20 chars for column alignment; values
+JSON.stringify'd (numbers + booleans + strings as
+literals, objects/arrays as compact JSON); JSON envelope
+{action: "diff-history", result: DiffHistoryEntriesResult}
+preserves full structure for jq downstream; use cases
+unblocked — forensic audit "what changed between
+mutations X and Y" answered in one command, compliance
+report "policy state transitions over time" via
+retention history + diff-history between consecutive
+events generates clean changelog, restore validation
+(diff source-history vs current-state before running
+restore to confirm what would change), JSON-driven
+compliance dashboards via jq '.result.fieldDiffs[] |
+"\(.field): \(.valueA) → \(.valueB)"' pipe; rejected
+alternatives — PG-side diff via jsonb_each (adds SQL
+complexity for small win), compare prev_state vs
+next_state of single event (covered by retention history;
+cross-event use case is the priority), allow cross-
+tenant comparison (different concern; covered by future
+retention diff action), allow cross-table comparison
+(same), three-way diff idA+idB+idC (overengineered;
+operators chain pair-wise comparisons), --field <name>
+filter flag (jq covers on JSON output), visual color
+diff red/green (substrate stays terminal-emoji-free;
+operators pipe to delta or diff for colored output),
+compare full event metadata kind+actor+attributes
+(diff focuses on policy state; metadata visible in
+rendered headers), implicit restore on diff (conflates
+two operations — diff is read-only), auto-sort by
+occurred_at so output always older→newer (operators
+may want B-then-A semantics; argument order preserved);
+drawbacks — same-(tenant, table) constraint surfaces
+as error not silent skip, no diff visualisation beyond
+absent/value (nested object diffs render as full JSON;
+operators rely on jq or dedicated diff tools — flat
+policy shape doesn't have nested fields in practice),
+one-pair comparisons only (operators chain multiple
+diff-history commands or use external tools), no
+--field filter (all differing fields render; jq covers),
+next_state only (single-event prev-vs-next covered by
+retention history); 16 new adapter tests in
+trace-retention.test.ts — throws when neither id exists
+with clear message including both missing ids, throws
+when only one id missing with single id in message,
+throws on different tenants with mismatch values in
+error, throws on different tables similarly, throws on
+unknown event_kind, returns metadata + fieldDiffs for
+valid pair on same (tenant, table), DELETE event with
+next_state=null shows 'absent' (valueA: undefined) for
+fields present on B-event, empty fieldDiffs when both
+states deep-equal, empty fieldDiffs when both null
+(both DELETE events), SELECT uses WHERE id IN ($1, $2)
+with both ids as params; computeFieldDiffs pure helper
+tests — returns sorted alphabetical diffs, returns
+empty array when both states equal, returns empty array
+when both null, treats null state as empty object,
+compares values via JSON.stringify deep equality,
+treats deep-equal nested objects as no diff; 8 new
+CLI tests in retention.test.ts — missing idA exit 2,
+missing idB exit 2, threads ids to adapter, human-
+format 'No differences' for empty fieldDiffs, human-
+format metadata + field-by-field diff with arrow + count
+header, human-format 'absent' for undefined values,
+JSON envelope shape, adapter errors propagate exit 1;
+cli.ts helpText extended with retention diff-history
+usage line + description explaining next_state vs
+next_state semantic; future Qs cover cross-tenant
+retention diff <tenant-a> <tenant-b> <table> as separate
+milestone closing ADR-0165 Q6, --field <name> filter,
+three-way diff or n-way merge view, visual color
+highlighting via opt-in flag, prev_state vs next_state
+of single event via future retention show-event <id>
+action, configurable comparison depth, diff against
+current policy state via --current flag for "what
+would restore change?" workflows). The retention CLI
+now has 11 actions covering forensic + recovery +
+comparison workflows — 3 read (expiring/effective/list-
+policies) + 4 write (opt-out/opt-in/set/delete) + 1
+audit (history) + 1 restore (restore) + 1 diff (diff-
+history); operators have full lifecycle CLI without
+leaving the substrate.
 ADR-0172 covers Phase 2 M6.7.zz.tenant.opt-out.history-retention
 (history-table retention — closes ADR-0170 Q1; the
 mechanically simplest retention milestone — three additive

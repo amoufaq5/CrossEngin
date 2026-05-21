@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
+  computeFieldDiffs,
   isOptOutHistoryEventKind,
   OPT_OUT_HISTORY_EVENT_KINDS,
   PostgresTraceRetention,
@@ -3625,5 +3626,248 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
     );
     expect(result?.status).toBe("previewed");
     expect(result?.wouldDeleteCount).toBe(42);
+  });
+});
+
+describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.diff-history)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const ID_A = "40000000-0000-4000-8000-000000000001";
+  const ID_B = "40000000-0000-4000-8000-000000000002";
+
+  function historyRow(
+    overrides: Partial<{
+      id: string;
+      tenant_id: string;
+      table_name: string;
+      event_kind: string;
+      occurred_at: string;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id: ID_A,
+      tenant_id: TENANT_A,
+      table_name: "workflow_traces",
+      event_kind: "opt_out_set",
+      occurred_at: "2026-05-20T12:00:00.000Z",
+      next_state: { opt_out: true, retention_days: 365 },
+      ...overrides,
+    };
+  }
+
+  it("throws when neither id exists", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
+    ).rejects.toThrow(/not found.*40000000-0000-4000-8000-000000000001.*40000000-0000-4000-8000-000000000002/);
+  });
+
+  it("throws when only one id is missing", async () => {
+    const conn = mockConnection(() => ({
+      rows: [historyRow({ id: ID_A })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
+    ).rejects.toThrow(/not found.*40000000-0000-4000-8000-000000000002/);
+  });
+
+  it("throws when events on different tenants", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({ id: ID_A, tenant_id: TENANT_A }),
+        historyRow({ id: ID_B, tenant_id: TENANT_B }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
+    ).rejects.toThrow(/different tenants/);
+  });
+
+  it("throws when events on different tables", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({ id: ID_A, table_name: "workflow_traces" }),
+        historyRow({ id: ID_B, table_name: "llm_call_traces" }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
+    ).rejects.toThrow(/different tables/);
+  });
+
+  it("throws when event_kind is unknown", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({ id: ID_A, event_kind: "bogus_kind" }),
+        historyRow({ id: ID_B }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
+    ).rejects.toThrow(/unknown event_kind/);
+  });
+
+  it("returns metadata + fieldDiffs for two events on the same (tenant, table)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({
+          id: ID_A,
+          event_kind: "opt_out_set",
+          occurred_at: "2026-05-20T12:00:00.000Z",
+          next_state: {
+            opt_out: true,
+            retention_days: 365,
+            enabled: false,
+          },
+        }),
+        historyRow({
+          id: ID_B,
+          event_kind: "retention_set",
+          occurred_at: "2026-05-21T12:00:00.000Z",
+          next_state: {
+            opt_out: false,
+            retention_days: 30,
+            enabled: true,
+          },
+        }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.idA).toBe(ID_A);
+    expect(result.idB).toBe(ID_B);
+    expect(result.tenantId).toBe(TENANT_A);
+    expect(result.tableName).toBe("workflow_traces");
+    expect(result.eventKindA).toBe("opt_out_set");
+    expect(result.eventKindB).toBe("retention_set");
+    expect(result.fieldDiffs).toEqual([
+      { field: "enabled", valueA: false, valueB: true },
+      { field: "opt_out", valueA: true, valueB: false },
+      { field: "retention_days", valueA: 365, valueB: 30 },
+    ]);
+  });
+
+  it("DELETE event (next_state=null) shows full diff as 'absent' on that side", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({
+          id: ID_A,
+          event_kind: "policy_deleted",
+          next_state: null,
+        }),
+        historyRow({
+          id: ID_B,
+          event_kind: "opt_out_set",
+          next_state: {
+            opt_out: true,
+            retention_days: 365,
+          },
+        }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.fieldDiffs).toEqual([
+      { field: "opt_out", valueA: undefined, valueB: true },
+      { field: "retention_days", valueA: undefined, valueB: 365 },
+    ]);
+  });
+
+  it("returns empty fieldDiffs when both next_state are equal", async () => {
+    const sameState = { opt_out: true, retention_days: 90 };
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({ id: ID_A, next_state: sameState }),
+        historyRow({ id: ID_B, next_state: sameState }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.fieldDiffs).toEqual([]);
+  });
+
+  it("returns empty fieldDiffs when both next_state are null (both DELETE)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        historyRow({ id: ID_A, event_kind: "policy_deleted", next_state: null }),
+        historyRow({ id: ID_B, event_kind: "policy_deleted", next_state: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.fieldDiffs).toEqual([]);
+  });
+
+  it("SELECT shape uses WHERE id IN ($1, $2) with both ids as params", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({
+        rows: [historyRow({ id: ID_A }), historyRow({ id: ID_B })],
+        rowCount: 2,
+      }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(capture[0]?.sql).toContain(
+      "FROM meta.tenant_retention_opt_out_history",
+    );
+    expect(capture[0]?.sql).toContain("WHERE id IN ($1, $2)");
+    expect(capture[0]?.params).toEqual([ID_A, ID_B]);
+  });
+});
+
+describe("computeFieldDiffs", () => {
+  it("returns sorted alphabetical diffs", () => {
+    const diffs = computeFieldDiffs(
+      { z: 1, a: 1, m: 1 },
+      { z: 2, a: 2, m: 2 },
+    );
+    expect(diffs.map((d) => d.field)).toEqual(["a", "m", "z"]);
+  });
+
+  it("returns empty array when both states are equal", () => {
+    expect(computeFieldDiffs({ a: 1 }, { a: 1 })).toEqual([]);
+  });
+
+  it("returns empty array when both states are null", () => {
+    expect(computeFieldDiffs(null, null)).toEqual([]);
+  });
+
+  it("treats null state as empty object", () => {
+    const diffs = computeFieldDiffs(null, { a: 1 });
+    expect(diffs).toEqual([{ field: "a", valueA: undefined, valueB: 1 }]);
+  });
+
+  it("compares values via JSON.stringify for deep equality", () => {
+    const diffs = computeFieldDiffs(
+      { nested: { x: 1 } },
+      { nested: { x: 2 } },
+    );
+    expect(diffs).toEqual([
+      { field: "nested", valueA: { x: 1 }, valueB: { x: 2 } },
+    ]);
+  });
+
+  it("treats deep-equal objects as no diff", () => {
+    const diffs = computeFieldDiffs(
+      { nested: { x: 1, y: 2 } },
+      { nested: { x: 1, y: 2 } },
+    );
+    expect(diffs).toEqual([]);
   });
 });

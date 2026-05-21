@@ -3,6 +3,7 @@ import {
   isOptOutHistoryEventKind,
   parsePgEnvConfig,
   PostgresTraceRetention,
+  type DiffHistoryEntriesResult,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type OptOutHistoryEntry,
@@ -37,7 +38,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history> [args]",
     );
     return 2;
   }
@@ -63,10 +64,12 @@ export async function runRetention(
         return await runRetentionHistory(command, ctx, handle.retention);
       case "restore":
         return await runRetentionRestore(command, ctx, handle.retention);
+      case "diff-history":
+        return await runRetentionDiffHistory(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history`,
         );
         return 2;
     }
@@ -806,4 +809,65 @@ async function runRetentionRestore(
   }
   ctx.io.stdout.write(formatPolicyChange("restored", result.policy));
   return 0;
+}
+
+async function runRetentionDiffHistory(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const idA = command.positional[1];
+  const idB = command.positional[2];
+  if (idA === undefined || idB === undefined) {
+    printError(
+      ctx.io,
+      "retention diff-history: missing arguments. usage: crossengin retention diff-history <history-id-a> <history-id-b>",
+    );
+    return 2;
+  }
+
+  let result: DiffHistoryEntriesResult;
+  try {
+    result = await retention.diffHistoryEntries({ idA, idB });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff-history: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "diff-history", result });
+    return 0;
+  }
+  ctx.io.stdout.write(formatHistoryDiff(result));
+  return 0;
+}
+
+export function formatHistoryDiff(result: DiffHistoryEntriesResult): string {
+  const lines: string[] = [];
+  lines.push("Diff between history events:");
+  lines.push(
+    `  A: ${result.idA} at ${result.occurredAtA} (event_kind=${result.eventKindA})`,
+  );
+  lines.push(
+    `  B: ${result.idB} at ${result.occurredAtB} (event_kind=${result.eventKindB})`,
+  );
+  lines.push(`  Tenant: ${result.tenantId}`);
+  lines.push(`  Table:  ${result.tableName}`);
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(
+      "No differences between the two events' policy states.",
+    );
+  } else {
+    lines.push(`Field changes (${result.fieldDiffs.length}):`);
+    for (const d of result.fieldDiffs) {
+      const a = d.valueA === undefined ? "absent" : JSON.stringify(d.valueA);
+      const b = d.valueB === undefined ? "absent" : JSON.stringify(d.valueB);
+      lines.push(`  ${d.field.padEnd(20)} ${a}  →  ${b}`);
+    }
+  }
+  return lines.join("\n") + "\n";
 }

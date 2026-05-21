@@ -1,6 +1,8 @@
 import type {
   ClearTenantOptOutInput,
   DeleteTenantPolicyInput,
+  DiffHistoryEntriesInput,
+  DiffHistoryEntriesResult,
   EffectiveRetentionResolution,
   ExpiringOptOut,
   ExpiringOptOutsInput,
@@ -72,6 +74,8 @@ function fakeRetention(opts: {
   historyCapture?: ListOptOutHistoryInput[];
   restoreResult?: RestoreTenantPolicyResult;
   restoreCapture?: RestoreTenantPolicyInput[];
+  diffResult?: DiffHistoryEntriesResult;
+  diffCapture?: DiffHistoryEntriesInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -172,6 +176,23 @@ function fakeRetention(opts: {
             optOutUntil: null,
             lastPrunedAt: null,
           },
+        }
+      );
+    },
+    diffHistoryEntries: async (input: DiffHistoryEntriesInput) => {
+      opts.diffCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.diffResult ?? {
+          idA: input.idA,
+          idB: input.idB,
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          occurredAtA: "2026-05-20T12:00:00.000Z",
+          occurredAtB: "2026-05-21T12:00:00.000Z",
+          eventKindA: "opt_out_set",
+          eventKindB: "retention_set",
+          fieldDiffs: [],
         }
       );
     },
@@ -2436,6 +2457,181 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
         ...ctx,
         retentionOverride: fakeRetention({
           throws: new Error("history id 'xxx' not found"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("not found");
+  });
+});
+
+describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", () => {
+  const ID_A = "40000000-0000-4000-8000-000000000001";
+  const ID_B = "40000000-0000-4000-8000-000000000002";
+
+  it("returns exit 2 when idA arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "diff-history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when idB arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("threads idA + idB to adapter", async () => {
+    const { ctx } = buffers();
+    const diffCapture: DiffHistoryEntriesInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(diffCapture[0]).toEqual({ idA: ID_A, idB: ID_B });
+  });
+
+  it("human-format renders 'No differences' when fieldDiffs is empty", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "opt_out_set",
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("No differences");
+  });
+
+  it("human-format renders metadata + field-by-field diff", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            fieldDiffs: [
+              { field: "opt_out", valueA: true, valueB: false },
+              { field: "retention_days", valueA: 365, valueB: 30 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Diff between history events");
+    expect(out()).toContain(`A: ${ID_A}`);
+    expect(out()).toContain(`B: ${ID_B}`);
+    expect(out()).toContain(`Tenant: ${TENANT_A}`);
+    expect(out()).toContain("Table:  workflow_traces");
+    expect(out()).toContain("opt_out");
+    expect(out()).toContain("true  →  false");
+    expect(out()).toContain("retention_days");
+    expect(out()).toContain("365  →  30");
+    expect(out()).toContain("Field changes (2)");
+  });
+
+  it("human-format renders 'absent' for undefined values (e.g., DELETE event)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "policy_deleted",
+            eventKindB: "opt_out_set",
+            fieldDiffs: [
+              { field: "opt_out", valueA: undefined, valueB: true },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("absent  →  true");
+  });
+
+  it("json-format emits envelope with action + result", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            fieldDiffs: [{ field: "opt_out", valueA: true, valueB: false }],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("diff-history");
+    expect(parsedJson.result.idA).toBe(ID_A);
+    expect(parsedJson.result.idB).toBe(ID_B);
+    expect(parsedJson.result.fieldDiffs).toHaveLength(1);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("history id(s) not found: xxx"),
         }),
       } as RetentionContext,
     );

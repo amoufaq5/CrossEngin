@@ -23,6 +23,24 @@ export function isOptOutHistoryEventKind(
   );
 }
 
+export function computeFieldDiffs(
+  stateA: Record<string, unknown> | null,
+  stateB: Record<string, unknown> | null,
+): ReadonlyArray<HistoryEntryFieldDiff> {
+  const a = stateA ?? {};
+  const b = stateB ?? {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  const diffs: HistoryEntryFieldDiff[] = [];
+  for (const field of [...keys].sort()) {
+    const valueA = a[field];
+    const valueB = b[field];
+    if (JSON.stringify(valueA) !== JSON.stringify(valueB)) {
+      diffs.push({ field, valueA, valueB });
+    }
+  }
+  return diffs;
+}
+
 interface PrunableTableSpec {
   readonly timeColumn: string;
   readonly hasTenantId: boolean;
@@ -206,6 +224,29 @@ export type RestoreTenantPolicyResult =
       readonly tenantId: string;
       readonly tableName: string;
     };
+
+export interface DiffHistoryEntriesInput {
+  readonly idA: string;
+  readonly idB: string;
+}
+
+export interface HistoryEntryFieldDiff {
+  readonly field: string;
+  readonly valueA: unknown;
+  readonly valueB: unknown;
+}
+
+export interface DiffHistoryEntriesResult {
+  readonly idA: string;
+  readonly idB: string;
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly occurredAtA: string;
+  readonly occurredAtB: string;
+  readonly eventKindA: OptOutHistoryEventKind;
+  readonly eventKindB: OptOutHistoryEventKind;
+  readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
+}
 
 interface RawPolicyRow {
   readonly table_name: string;
@@ -977,6 +1018,64 @@ export class PostgresTraceRetention {
       attributes: restoreAttrs,
     });
     return { kind: "restored", policy };
+  }
+
+  async diffHistoryEntries(
+    input: DiffHistoryEntriesInput,
+  ): Promise<DiffHistoryEntriesResult> {
+    const result = await this.conn.query<{
+      id: string;
+      tenant_id: string;
+      table_name: string;
+      event_kind: string;
+      occurred_at: string;
+      next_state: Record<string, unknown> | null;
+    }>(
+      `SELECT id, tenant_id, table_name, event_kind, occurred_at, next_state
+       FROM ${SCHEMA}.${HISTORY_TABLE}
+       WHERE id IN ($1, $2)`,
+      [input.idA, input.idB],
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    const missing = [input.idA, input.idB].filter((id) => !found.has(id));
+    if (missing.length > 0) {
+      throw new Error(
+        `diffHistoryEntries: history id(s) not found: ${missing.join(", ")}`,
+      );
+    }
+    const entryA = found.get(input.idA)!;
+    const entryB = found.get(input.idB)!;
+    if (entryA.tenant_id !== entryB.tenant_id) {
+      throw new Error(
+        `diffHistoryEntries: events on different tenants (${entryA.tenant_id} vs ${entryB.tenant_id})`,
+      );
+    }
+    if (entryA.table_name !== entryB.table_name) {
+      throw new Error(
+        `diffHistoryEntries: events on different tables (${entryA.table_name} vs ${entryB.table_name})`,
+      );
+    }
+    if (!isOptOutHistoryEventKind(entryA.event_kind)) {
+      throw new Error(
+        `diffHistoryEntries: event A has unknown event_kind '${entryA.event_kind}'`,
+      );
+    }
+    if (!isOptOutHistoryEventKind(entryB.event_kind)) {
+      throw new Error(
+        `diffHistoryEntries: event B has unknown event_kind '${entryB.event_kind}'`,
+      );
+    }
+    return {
+      idA: input.idA,
+      idB: input.idB,
+      tenantId: entryA.tenant_id,
+      tableName: entryA.table_name,
+      occurredAtA: entryA.occurred_at,
+      occurredAtB: entryB.occurred_at,
+      eventKindA: entryA.event_kind,
+      eventKindB: entryB.event_kind,
+      fieldDiffs: computeFieldDiffs(entryA.next_state, entryB.next_state),
+    };
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {
