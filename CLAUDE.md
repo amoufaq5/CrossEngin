@@ -21,15 +21,159 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,455 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.vs-platform
+**56 packages + 1 app, 129 meta-schema tables, 8,476 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.cross-table
+closes ADR-0178 Q3 by adding `--cross-table` flag to
+`retention diff` + diffTenantTables adapter method.
+Completes the diff matrix — after ADR-0173 (same-tenant
+cross-event diff-history) + ADR-0178 (cross-tenant
+same-table diff) + ADR-0179 (tenant-vs-platform), this
+milestone ships the orthogonal cross-table-within-tenant
+axis. Operators auditing a single tenant want to answer
+"is this tenant's retention consistent across all the
+trace tables they have data in?" — e.g., is the legal
+hold applied to workflow_traces ALSO applied to
+llm_call_traces? Previously: two retention effective
+commands + mental-diff. Now one command. Flag-on-
+existing-action chosen over new retention diff-tables
+action — matches the --vs-platform precedent operators
+already learned. With --cross-table set, dispatcher
+expects 3 positional args (tenant + 2 tables) instead
+of default cross-tenant shape (2 tenants + 1 table).
+--vs-platform and --cross-table mutually exclusive at
+the CLI boundary — both set returns exit 2 with clear
+"mutually exclusive" error. New diffTenantTables adapter
+composes on effectiveRetentionBatch (RESTORES the
+canonical composition pattern from ADR-0177/0178 that
+ADR-0179 documented as its exception); single call
+with pairs [{tenantId, tableNameA}, {tenantId,
+tableNameB}] runs 2 queries total — tenant lookup with
+both pairs in IN tuple, platform lookup with both
+table names in IN — Promise.all parallelized; looks up
+both resolutions from returned Map via exported
+effectiveRetentionKey helper. Identical diff-computation
+flow to ADR-0178 — computeFieldDiffs after
+normalizeResolutionForDiff on both sides, alphabetical
+sort, 'indefinite'/'<no reason>' conventions, 'absent'
+placeholder for undefined values. Result type
+DiffTenantTablesResult carries {tenantId, tableNameA,
+tableNameB, resolutionA, resolutionB, fieldDiffs}.
+Human output renders 3-section format — 'Diff between
+tables for tenant <uuid>:' header, per-table summary
+line via shared summarizeResolutionForDiff helper from
+ADR-0178 with 20-char table-name padding for column
+alignment ('Table A: workflow_traces      source=...',
+'Table B: llm_call_traces      source=...'), blank line,
+then either 'No differences — both tables resolve to
+the same effective retention policy for this tenant.'
+for empty fieldDiffs OR 'Field changes (N):' header
+followed by 'fieldname valueA → valueB' lines. JSON
+envelope {action: "diff", crossTable: true, result:
+DiffTenantTablesResult} where crossTable:true is the
+discriminator distinguishing from ADR-0178's cross-
+tenant variant + ADR-0179's vs-platform variant.
+Operators now have 3 diff envelope shapes — cross-
+tenant (no boolean discriminator), vsPlatform:true,
+crossTable:true — boolean discriminators are mutually
+exclusive at CLI boundary; JSON parsers branch on
+discriminator first. Use cases unblocked — cross-table
+consistency audit for one tenant (one command vs two
+retention effective + mental-diff), legal hold
+completeness check via jq filter on resolutionA.source=
+"tenant_opt_out" vs resolutionB.source!="tenant_opt_out"
+surfacing incomplete holds, compliance migration
+verification via shell loop across table pairs, CI gate
+for cohort consistency failing build when cross-table
+drift detected. No validation on tableNameA===tableNameB
+matching diffTenantPolicies pattern from ADR-0178 —
+substrate doesn't enforce semantic constraints unless
+critical; identical resolutions + empty fieldDiffs
+surface the typo immediately. Rejected alternatives —
+new retention diff-tables action (cleaner separation
+but adds CLI surface and divides diff vocabulary across
+three action names), implicit detection if positional
+args look like tenant+table+table (heuristic fragile
+when table names look like UUIDs), compose on two
+single-pair effectiveRetention calls (4 queries vs 2
+batch), N-way diff via --add-table (overkill for v1;
+pair-wise canonical), cross-table without flag (magic),
+retention compare-tables returning all-pairs combinations
+(operator-unrequested; defer), allow --cross-table +
+--vs-platform to mean "compare two tables' platform
+defaults for one tenant" (semantic stretch; mutual
+exclusivity cleaner), return Map<tableName, Resolution>
+instead of A/B labels (more general but breaks pair-
+wise diff shape from ADR-0178). Drawbacks — three
+positional-arg shapes on one action (cross-tenant +
+--vs-platform + --cross-table), mutual-exclusivity
+error at CLI boundary not automatic disambiguation,
+JSON envelope discriminator proliferation operators
+write 3 jq branches (could be unified via tagged union
+but breaks ADR-0178+0179 compat — defer), N-way table
+diff out of scope, same-tenant constraint (operators
+wanting tenant A on table X vs tenant B on table Y
+run two retention effective commands manually). 8 new
+adapter tests + 13 new CLI tests = 21 total covering:
+adapter composes on effectiveRetentionBatch issuing
+exactly 2 queries, returns metadata + resolutions +
+empty fieldDiffs when both resolve to none, empty
+fieldDiffs when both identical platform retention,
+fieldDiffs when retention differs across tables (tenant
+override on A vs platform on B), fieldDiffs comparing
+tenant_opt_out on A vs tenant on B covering source +
+opt_out + opt_out_reason + opt_out_until, resolutionA
+carries A's data and resolutionB carries B's verified,
+clock-aware expiry preserved across both table
+resolutions, supports same tenant on same table for
+both axes (degenerate but valid empty fieldDiffs);
+CLI — missing tenant exit 2, missing table-a exit 2,
+missing table-b exit 2, both --vs-platform + --cross-
+table exit 2 with 'mutually exclusive' message, calls
+diffTenantTables NOT diffTenantPolicies or
+diffTenantVsPlatform verified via three separate
+captures (diffTenantCapture length 0, diffTenantVsPlatformCapture
+length 0, diffTenantTablesCapture length 1 with
+{tenantId, tableNameA, tableNameB}), human-format
+'No differences' message + 'Diff between tables for
+tenant' header, human-format renders Table A + Table B
+headers + 'Field changes (N):' with arrow-formatted
+diff lines + 30 → 365 number diff, JSON envelope
+crossTable:true discriminator + result.tenantId +
+result.tableNameA + result.tableNameB, adapter errors
+propagate exit 1; formatTenantTablesDiff helper unit
+tests — 'No differences' message for empty, Table A +
+Table B headers with per-table summary lines + retention=
+Nd, tenant_opt_out variant inline with reason+until,
+source=none with '(no policy configured)' annotation.
+cli.ts helpText extended with retention diff <tenant>
+<table-a> <table-b> --cross-table usage line + 5-line
+description explaining 2-query optimization + mutually
+exclusive with --vs-platform. ADR-0180 documents the
+design + 8 rejected alternatives + 7 future Qs (N-way
+diff via repeated --add-table flag, --all-tables for
+one-tenant-across-every-prunable-table, --exit-on-
+divergence for CI gates, JSON envelope unification
+across all 3 diff variants via tagged union, table-name
+validation against PRUNABLE_TABLES allowlist, combined
+cross-table + diff-history --at-time DATE for point-in-
+time cross-table comparison, --field name filter on
+JSON output). The retention CLI now has 16 actions
+covering forensic + recovery + comparison + performance
+workflows comprehensively: 3 read (expiring/effective/
+list-policies) + 4 write (opt-out/opt-in/set/delete)
++ 1 audit (history) + 1 restore (with --dry-run) + 3
+diff (diff-history same-tenant + diff with cross-
+tenant default + --vs-platform variant + --cross-table
+variant) + 1 maintenance (prune with --dry-run) + 1
+batch substrate-only (effectiveRetentionBatch).
+M6.7.zz.tenant.opt-out.cli.diff.vs-platform
 closes ADR-0178 Q1 by adding `--vs-platform` flag to
 `retention diff` + diffTenantVsPlatform adapter method.
 Operators wanting "how does this tenant differ from
@@ -5760,7 +5904,25 @@ normalizeResolutionForDiff helpers; vsPlatform:true JSON
 envelope discriminator distinguishes from cross-tenant
 diff; one-command "is this tenant on the default?" check
 vs operators previously running two retention effective
-commands + mental-diffing).
+commands + mental-diffing),
+ADR-0180 covers M6.7.zz.tenant.opt-out.cli.diff.cross-table
+(`retention diff <tenant> <table-a> <table-b> --cross-
+table` cross-table-within-tenant comparison — closes
+ADR-0178 Q3 — diffTenantTables adapter method; restores
+composition on effectiveRetentionBatch from ADR-0177/
+0178 (ADR-0179 was the documented exception); 2 queries
+total via batch resolver; reuses summarizeResolutionForDiff
++ computeFieldDiffs + normalizeResolutionForDiff
+helpers; crossTable:true JSON envelope discriminator;
+--cross-table and --vs-platform mutually exclusive at
+CLI boundary; completes the diff matrix — same-tenant
+cross-event from ADR-0173 + cross-tenant same-table
+from ADR-0178 + tenant-vs-platform from ADR-0179 +
+cross-table-within-tenant new; one-command "is this
+tenant's retention consistent across all trace tables?"
+audit; legal-hold completeness check + compliance
+migration verification + CI cohort consistency
+workflows).
 
 ## Architecture in 90 seconds
 
@@ -7541,6 +7703,206 @@ in / set / delete) + 1 audit (history) + 1 restore
 diff cross-tenant with --vs-platform variant) + 1
 maintenance (prune with --dry-run) + 1 batch substrate-
 only (effectiveRetentionBatch).
+ADR-0180 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff.cross-table
+(`crossengin retention diff <tenant> <table-a>
+<table-b> --cross-table` CLI action + diffTenantTables
+adapter method — closes ADR-0178 Q3; after ADR-0173
+shipped same-tenant cross-event diff-history, ADR-0178
+shipped cross-tenant same-table diff, and ADR-0179
+shipped tenant-vs-platform, this milestone closes the
+remaining diff axis: cross-table-within-tenant.
+Operators auditing a single tenant want to answer "is
+this tenant's retention consistent across all the
+trace tables they have data in?" — e.g., is the legal
+hold applied to workflow_traces ALSO applied to
+llm_call_traces? Previously two retention effective
+commands + mental-diff was the only workaround; now
+one command. CLI surface `retention diff <tenant>
+<table-a> <table-b> --cross-table [--format human|
+json]` — flag-on-existing-action chosen over new
+`retention diff-tables` action matching the
+--vs-platform precedent operators already learned;
+with --cross-table set dispatcher expects 3 positional
+args (tenant + 2 tables) instead of default cross-
+tenant shape (2 tenants + 1 table); --cross-table and
+--vs-platform mutually exclusive at CLI boundary —
+both set returns exit 2 with 'retention diff: --vs-
+platform and --cross-table are mutually exclusive'
+error checked early before any other arg parsing;
+without either flag the existing cross-tenant default
+path is unchanged. New diffTenantTables adapter takes
+{tenantId, tableNameA, tableNameB} and returns
+DiffTenantTablesResult {tenantId, tableNameA,
+tableNameB, resolutionA, resolutionB, fieldDiffs}.
+RESTORES the canonical composition pattern from
+ADR-0177/0178 (ADR-0179 was the documented exception
+because batch resolver hides tenant-vs-platform
+distinction; this milestone wants the EFFECTIVE
+resolution for each pair which is exactly what batch
+returns); adapter calls effectiveRetentionBatch({pairs:
+[{tenantId, tableNameA}, {tenantId, tableNameB}]})
+— 2 queries total (one tenant lookup with both pairs
+in IN tuple, one platform lookup with both table
+names in IN list), Promise.all parallelized; looks up
+both resolutions from returned Map via exported
+effectiveRetentionKey helper; throws when either
+resolution undefined (defensive). Diff computation
+identical to ADR-0178's cross-tenant flow —
+computeFieldDiffs(normalizeResolutionForDiff(A),
+normalizeResolutionForDiff(B)); reuses existing helpers
+unchanged; same alphabetical sort, same 'indefinite'/
+'<no reason>' conventions, same 'absent' placeholder
+for undefined values. Human output renders 3-section
+format — 'Diff between tables for tenant <uuid>:'
+header, per-table summary line via shared
+summarizeResolutionForDiff helper with 20-char table-
+name padding for column alignment, blank line, then
+either 'No differences — both tables resolve to the
+same effective retention policy for this tenant.' for
+empty fieldDiffs OR 'Field changes (N):' header
+followed by 'fieldname valueA → valueB' lines. JSON
+envelope {action: "diff", crossTable: true, result:
+DiffTenantTablesResult} where crossTable:true is the
+discriminator; operators now have 3 diff envelope
+shapes — cross-tenant (no boolean discriminator),
+vsPlatform:true, crossTable:true — boolean discriminators
+mutually exclusive at CLI boundary; JSON parsers
+branch on discriminator first. Why no validation on
+tableNameA===tableNameB — substrate doesn't enforce
+semantic constraints unless critical; passing same
+table produces identical resolutions + empty fieldDiffs
+surfacing the typo immediately; matches existing
+diffTenantPolicies (ADR-0178) approach where
+tenantA===tenantB is also valid though equally
+pointless; keeps adapter signature simple. Use cases
+unblocked — cross-table consistency audit for one
+tenant (one command), legal hold completeness check
+via jq filter on resolutionA.source="tenant_opt_out"
+vs resolutionB.source!="tenant_opt_out" surfacing
+incomplete holds where opt-out was applied to one
+trace table but not the other, compliance migration
+verification via shell loop across table pairs after
+cross-table policy update to verify all trace tables
+under tenant ended up matching, CI cohort consistency
+gate failing build when cross-table retention drift
+detected. Rejected alternatives — new action retention
+diff-tables (cleaner separation but adds CLI surface
+and divides diff vocabulary across three action names;
+--cross-table matches --vs-platform precedent), implicit
+detection if positional args look like tenant+table+
+table (heuristic-based; ambiguous when table names
+look like UUIDs), compose on two single-pair
+effectiveRetention calls (4 queries vs 2 batch defeats
+composition pattern), N-way diff via repeated --add-
+table (overkill for v1; pair-wise is canonical from
+ADR-0178/0179 which both rejected N-way; operators
+chain commands), cross-table without flag (default to
+it when 2 of 3 positionals look like table names —
+fragile + magic), retention compare-tables <tenant>
+returning all-table-pairs combinations (operator-
+unrequested; bulk variants deferred), allow --cross-
+table + --vs-platform to mean "compare two tables'
+platform defaults for one tenant" (semantic stretch;
+operators wanting that use retention list-policies +
+manual compare; mutual exclusivity cleaner), return
+Map<tableName, EffectiveRetentionResolution> instead
+of A/B labeled fields (more general but breaks pair-
+wise diff shape established by ADR-0178; operators
+rendering output need to know how to label two map
+entries; A/B labeling matches existing diff shapes).
+Drawbacks — two flags on diff (--vs-platform +
+--cross-table) operators may forget to set one and
+fall through to default cross-tenant path (mitigated
+by clear missing-args error messages naming expected
+flag), three positional-arg shapes on one action
+(cross-tenant + --vs-platform + --cross-table)
+documented in three separate helpText usage lines,
+mutual-exclusivity error at CLI boundary not automatic
+disambiguation (acceptable since semantic ambiguous —
+cross-table vs vs-platform aren't composable), JSON
+envelope discriminator proliferation operators write
+3 jq branches (could be unified via tagged union from
+ADR-0179 Q7 but would break ADR-0178+0179 compat),
+N-way table diff not in scope (operators chain
+commands; future Q if requested), same-tenant
+constraint both axes share tenant (operators wanting
+tenant A on table X vs tenant B on table Y run two
+retention effective commands manually — different
+semantic out of scope). 8 new adapter tests in
+trace-retention.test.ts — composes on
+effectiveRetentionBatch issuing exactly 2 queries,
+returns metadata + resolutions + empty fieldDiffs when
+both resolve to none, empty fieldDiffs when both
+tables resolve to identical platform retention,
+fieldDiffs when retention differs across tables
+(tenant override on A=workflow_traces 30d vs platform
+on B=llm_call_traces 365d covering source +
+retention_days), fieldDiffs comparing tenant_opt_out
+on A vs tenant on B covering source + opt_out +
+opt_out_reason + opt_out_until, resolutionA carries
+A's data and resolutionB carries B's verified via
+platform 30d vs 90d test (resolutionA={source:platform,
+retentionDays:30} vs resolutionB={source:platform,
+retentionDays:90}), clock-aware expiry preserved
+across both table resolutions (expired opt_out on A
+falls through to tenant enabled=true while B resolves
+platform), supports same tenant on same table for both
+axes degenerate but valid empty fieldDiffs; 13 new
+CLI tests in retention.test.ts — missing tenant arg
+exit 2 with 'missing arguments' + '--cross-table'
+mention, missing table-a arg exit 2, missing table-b
+arg exit 2, both --vs-platform + --cross-table exit 2
+with 'mutually exclusive' error, calls diffTenantTables
+NOT diffTenantPolicies or diffTenantVsPlatform
+verified via three separate captures (diffTenantCapture
+length 0, diffTenantVsPlatformCapture length 0,
+diffTenantTablesCapture length 1 with {tenantId,
+tableNameA, tableNameB}), human-format 'No differences'
+message + 'Diff between tables for tenant <uuid>'
+header, human-format renders Table A + Table B headers
++ 'Field changes (2)' with source=tenant + source=
+platform + retention=30d + retention=365d + arrow-
+formatted lines '30 → 365', JSON envelope crossTable:
+true discriminator + result.tenantId + result.tableNameA
++ result.tableNameB, adapter errors propagate exit 1
+('PG connection refused' in stderr); formatTenantTablesDiff
+helper unit tests — 'No differences' message for empty
+diff, Table A + Table B headers with per-table summary
+lines + retention=Nd display, tenant_opt_out variant
+inline with reason+until ('reason=legal_hold' +
+'until=2099-01-01T00:00:00.000Z'), source=none variant
+with '(no policy configured)' annotation; cli.ts
+helpText retention diff <tenant> <table-a> <table-b>
+--cross-table usage line + 5-line description
+explaining 2-query optimization + mutually exclusive
+with --vs-platform + consistency-across-trace-tables
+audit benefit; future Qs cover N-way table diff via
+repeated --add-table <name> flag (chain commands
+for now), --all-tables for one-tenant-across-every-
+prunable-table (bounded set currently 4; shell loop
+covers), --exit-on-divergence for CI gates (wrap with
+jq + bash bracket), JSON envelope unification across
+all 3 diff variants via tagged union {kind: "vs-
+tenant"/"vs-platform"/"cross-table"} would simplify
+operator jq scripts but break backward compat with
+ADR-0178+0179 envelopes — defer, table-name validation
+against PRUNABLE_TABLES allowlist (substrate currently
+doesn't validate returns source="none" for unknown
+tables surfacing typo; matches existing retention
+effective non-validation stance — defer), combined
+cross-table + diff-history --at-time DATE for point-
+in-time cross-table comparison (requires deferred
+--at-time substrate from ADR-0162), --field <name>
+filter on JSON output (jq covers). The retention CLI
+now has 16 actions covering forensic + recovery +
+comparison + performance workflows comprehensively:
+3 read (expiring/effective/list-policies) + 4 write
+(opt-out/opt-in/set/delete) + 1 audit (history) + 1
+restore (with --dry-run) + 3 diff (diff-history same-
+tenant + diff with cross-tenant default + --vs-
+platform variant + --cross-table variant) + 1
+maintenance (prune with --dry-run) + 1 batch
+substrate-only (effectiveRetentionBatch).
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

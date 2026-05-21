@@ -5,6 +5,7 @@ import {
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
   type DiffTenantPoliciesResult,
+  type DiffTenantTablesResult,
   type DiffTenantVsPlatformResult,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
@@ -1102,8 +1103,20 @@ async function runRetentionDiff(
   ctx: RunContext,
   retention: PostgresTraceRetention,
 ): Promise<number> {
-  if (getBooleanFlag(command, "vs-platform")) {
+  const vsPlatform = getBooleanFlag(command, "vs-platform");
+  const crossTable = getBooleanFlag(command, "cross-table");
+  if (vsPlatform && crossTable) {
+    printError(
+      ctx.io,
+      "retention diff: --vs-platform and --cross-table are mutually exclusive",
+    );
+    return 2;
+  }
+  if (vsPlatform) {
     return await runRetentionDiffVsPlatform(command, ctx, retention);
+  }
+  if (crossTable) {
+    return await runRetentionDiffCrossTable(command, ctx, retention);
   }
 
   const tenantIdA = command.positional[1];
@@ -1178,6 +1191,49 @@ async function runRetentionDiffVsPlatform(
   return 0;
 }
 
+async function runRetentionDiffCrossTable(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantId = command.positional[1];
+  const tableNameA = command.positional[2];
+  const tableNameB = command.positional[3];
+  if (
+    tenantId === undefined ||
+    tableNameA === undefined ||
+    tableNameB === undefined
+  ) {
+    printError(
+      ctx.io,
+      "retention diff --cross-table: missing arguments. usage: crossengin retention diff <tenant> <table-a> <table-b> --cross-table",
+    );
+    return 2;
+  }
+
+  let result: DiffTenantTablesResult;
+  try {
+    result = await retention.diffTenantTables({
+      tenantId,
+      tableNameA,
+      tableNameB,
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "diff", crossTable: true, result });
+    return 0;
+  }
+  ctx.io.stdout.write(formatTenantTablesDiff(result));
+  return 0;
+}
+
 function summarizeResolutionForDiff(
   resolution: EffectiveRetentionResolution,
 ): string {
@@ -1209,6 +1265,33 @@ export function formatTenantDiff(result: DiffTenantPoliciesResult): string {
   if (result.fieldDiffs.length === 0) {
     lines.push(
       "No differences — both tenants have the same effective retention policy.",
+    );
+  } else {
+    lines.push(`Field changes (${result.fieldDiffs.length}):`);
+    for (const d of result.fieldDiffs) {
+      const a = d.valueA === undefined ? "absent" : JSON.stringify(d.valueA);
+      const b = d.valueB === undefined ? "absent" : JSON.stringify(d.valueB);
+      lines.push(`  ${d.field.padEnd(20)} ${a}  →  ${b}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function formatTenantTablesDiff(
+  result: DiffTenantTablesResult,
+): string {
+  const lines: string[] = [];
+  lines.push(`Diff between tables for tenant ${result.tenantId}:`);
+  lines.push(
+    `  Table A: ${result.tableNameA.padEnd(20)} ${summarizeResolutionForDiff(result.resolutionA)}`,
+  );
+  lines.push(
+    `  Table B: ${result.tableNameB.padEnd(20)} ${summarizeResolutionForDiff(result.resolutionB)}`,
+  );
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(
+      "No differences — both tables resolve to the same effective retention policy for this tenant.",
     );
   } else {
     lines.push(`Field changes (${result.fieldDiffs.length}):`);

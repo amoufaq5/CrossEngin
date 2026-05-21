@@ -338,6 +338,21 @@ export interface DiffTenantVsPlatformResult {
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
 }
 
+export interface DiffTenantTablesInput {
+  readonly tenantId: string;
+  readonly tableNameA: string;
+  readonly tableNameB: string;
+}
+
+export interface DiffTenantTablesResult {
+  readonly tenantId: string;
+  readonly tableNameA: string;
+  readonly tableNameB: string;
+  readonly resolutionA: EffectiveRetentionResolution;
+  readonly resolutionB: EffectiveRetentionResolution;
+  readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -1362,6 +1377,37 @@ export class PostgresTraceRetention {
       tenantIdA: input.tenantIdA,
       tenantIdB: input.tenantIdB,
       tableName: input.tableName,
+      resolutionA,
+      resolutionB,
+      fieldDiffs: computeFieldDiffs(
+        normalizeResolutionForDiff(resolutionA),
+        normalizeResolutionForDiff(resolutionB),
+      ),
+    };
+  }
+
+  async diffTenantTables(
+    input: DiffTenantTablesInput,
+  ): Promise<DiffTenantTablesResult> {
+    const resolutions = await this.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: input.tenantId, tableName: input.tableNameA },
+        { tenantId: input.tenantId, tableName: input.tableNameB },
+      ],
+    });
+    const keyA = effectiveRetentionKey(input.tenantId, input.tableNameA);
+    const keyB = effectiveRetentionKey(input.tenantId, input.tableNameB);
+    const resolutionA = resolutions.get(keyA);
+    const resolutionB = resolutions.get(keyB);
+    if (resolutionA === undefined || resolutionB === undefined) {
+      throw new Error(
+        `diffTenantTables: failed to resolve both tables (A=${resolutionA !== undefined}, B=${resolutionB !== undefined})`,
+      );
+    }
+    return {
+      tenantId: input.tenantId,
+      tableNameA: input.tableNameA,
+      tableNameB: input.tableNameB,
       resolutionA,
       resolutionB,
       fieldDiffs: computeFieldDiffs(
