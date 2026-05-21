@@ -453,6 +453,36 @@ export interface DiffHistoryTimelineNwayResult {
   readonly entries: ReadonlyArray<NwayTimelineEntry>;
 }
 
+export interface DiffHistoryTimelineCrossTableInput {
+  readonly tenantId: string;
+  readonly tableNames: ReadonlyArray<string>;
+  readonly since?: string;
+  readonly until?: string;
+  readonly limit?: number;
+  readonly joinActor?: boolean;
+}
+
+export interface CrossTableTimelineEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly tableLabel: string;
+  readonly eventKind: OptOutHistoryEventKind;
+  readonly actorId: string | null;
+  readonly occurredAt: string;
+  readonly prevState: Record<string, unknown> | null;
+  readonly nextState: Record<string, unknown> | null;
+  readonly attributes: Record<string, unknown>;
+  readonly actorDisplayName?: string | null;
+  readonly actorEmail?: string | null;
+}
+
+export interface DiffHistoryTimelineCrossTableResult {
+  readonly tenantId: string;
+  readonly tableNames: ReadonlyArray<string>;
+  readonly entries: ReadonlyArray<CrossTableTimelineEntry>;
+}
+
 export function labelForIndex(index: number): string {
   if (index < 26) return String.fromCharCode(65 + index);
   return `T${index + 1}`;
@@ -1708,6 +1738,107 @@ export class PostgresTraceRetention {
     return {
       tenantIds: input.tenantIds,
       tableName: input.tableName,
+      entries,
+    };
+  }
+
+  async diffHistoryTimelineCrossTable(
+    input: DiffHistoryTimelineCrossTableInput,
+  ): Promise<DiffHistoryTimelineCrossTableResult> {
+    if (input.tableNames.length < 2) {
+      throw new Error(
+        `diffHistoryTimelineCrossTable: at least 2 tableNames required, got ${input.tableNames.length}`,
+      );
+    }
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`limit must be an integer >= 1, got ${limit}`);
+    }
+    const params: unknown[] = [input.tenantId];
+    const tableStartIdx = params.length + 1;
+    input.tableNames.forEach((t) => params.push(t));
+    const tablePlaceholders = input.tableNames
+      .map((_, i) => `$${tableStartIdx + i}`)
+      .join(", ");
+    const conditions: string[] = [
+      `h.tenant_id = $1`,
+      `h.table_name IN (${tablePlaceholders})`,
+    ];
+    if (input.since !== undefined) {
+      params.push(input.since);
+      conditions.push(`h.occurred_at >= $${params.length}`);
+    }
+    if (input.until !== undefined) {
+      params.push(input.until);
+      conditions.push(`h.occurred_at <= $${params.length}`);
+    }
+    params.push(limit);
+    const joinActor = input.joinActor === true;
+    const selectActorCols = joinActor
+      ? ", u.display_name AS actor_display_name, u.email AS actor_email"
+      : "";
+    const joinClause = joinActor
+      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
+      : "";
+    const result = await this.conn.query<{
+      id: string;
+      tenant_id: string;
+      table_name: string;
+      event_kind: string;
+      actor_id: string | null;
+      actor_display_name?: string | null;
+      actor_email?: string | null;
+      occurred_at: string;
+      prev_state: Record<string, unknown> | null;
+      next_state: Record<string, unknown> | null;
+      attributes: Record<string, unknown>;
+    }>(
+      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
+              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY h.occurred_at ASC, h.id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    const labelByTableName = new Map<string, string>();
+    input.tableNames.forEach((t, i) => {
+      if (!labelByTableName.has(t)) {
+        labelByTableName.set(t, labelForIndex(i));
+      }
+    });
+    const entries: CrossTableTimelineEntry[] = result.rows.map((r) => {
+      if (!isOptOutHistoryEventKind(r.event_kind)) {
+        throw new Error(
+          `diffHistoryTimelineCrossTable: unknown event_kind '${r.event_kind}'`,
+        );
+      }
+      const tableLabel = labelByTableName.get(r.table_name) ?? "?";
+      const entry: CrossTableTimelineEntry = {
+        id: r.id,
+        tenantId: r.tenant_id,
+        tableName: r.table_name,
+        tableLabel,
+        eventKind: r.event_kind,
+        actorId: r.actor_id,
+        occurredAt: r.occurred_at,
+        prevState: r.prev_state,
+        nextState: r.next_state,
+        attributes: r.attributes,
+      };
+      if (joinActor) {
+        return {
+          ...entry,
+          actorDisplayName: r.actor_display_name ?? null,
+          actorEmail: r.actor_email ?? null,
+        };
+      }
+      return entry;
+    });
+    return {
+      tenantId: input.tenantId,
+      tableNames: input.tableNames,
       entries,
     };
   }

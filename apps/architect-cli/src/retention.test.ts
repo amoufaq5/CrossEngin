@@ -3,6 +3,8 @@ import type {
   DeleteTenantPolicyInput,
   DiffHistoryEntriesInput,
   DiffHistoryEntriesResult,
+  DiffHistoryTimelineCrossTableInput,
+  DiffHistoryTimelineCrossTableResult,
   DiffHistoryTimelineInput,
   DiffHistoryTimelineNwayInput,
   DiffHistoryTimelineNwayResult,
@@ -55,6 +57,7 @@ import {
   formatTenantNwayDiff,
   formatTenantTablesDiff,
   formatTenantTablesNwayDiff,
+  formatTimelineCrossTableDiff,
   formatTimelineDiff,
   formatTimelineNwayDiff,
   formatTenantVsPlatformDiff,
@@ -115,6 +118,8 @@ function fakeRetention(opts: {
   diffTimelineCapture?: DiffHistoryTimelineInput[];
   diffTimelineNwayResult?: DiffHistoryTimelineNwayResult;
   diffTimelineNwayCapture?: DiffHistoryTimelineNwayInput[];
+  diffTimelineCrossTableResult?: DiffHistoryTimelineCrossTableResult;
+  diffTimelineCrossTableCapture?: DiffHistoryTimelineCrossTableInput[];
   pruneResults?: readonly RetentionRunResult[];
   previewResults?: readonly RetentionPreviewResult[];
   pruneCalled?: { count: number };
@@ -288,6 +293,19 @@ function fakeRetention(opts: {
         opts.diffTimelineNwayResult ?? {
           tenantIds: input.tenantIds,
           tableName: input.tableName,
+          entries: [],
+        }
+      );
+    },
+    diffHistoryTimelineCrossTable: async (
+      input: DiffHistoryTimelineCrossTableInput,
+    ) => {
+      opts.diffTimelineCrossTableCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.diffTimelineCrossTableResult ?? {
+          tenantId: input.tenantId,
+          tableNames: input.tableNames,
           entries: [],
         }
       );
@@ -5284,6 +5302,426 @@ describe("formatTimelineNwayDiff", () => {
             tenantId: TENANT_A,
             tenantLabel: "A",
             tableName: "workflow_traces",
+            eventKind: "opt_out_set",
+            actorId: "11111111-1111-1111-1111-111111111111",
+            occurredAt: "2026-01-01T00:00:00.000Z",
+            prevState: null,
+            nextState: { opt_out: true, retention_days: 365 },
+            attributes: {},
+            actorDisplayName: "Alice Smith",
+            actorEmail: "alice@example.com",
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(out).toContain(
+      "by Alice Smith (11111111-1111-1111-1111-111111111111)",
+    );
+  });
+});
+
+describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table)", () => {
+  it("returns exit 2 when --add-table is set without --cross-table", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-table",
+        "llm_call_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--add-table requires --cross-table");
+  });
+
+  it("returns exit 2 when --cross-table + --add-tenant both set", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-tenant",
+        TENANT_B,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("dispatches to cross-table path with positional <tenant> <table-a> <table-b>", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.tenantId).toBe(TENANT_A);
+    expect(capture[0]?.tableNames).toEqual(["workflow_traces", "llm_call_traces"]);
+  });
+
+  it("collects --add-table flags in argv order extending the table list", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "llm_latency_samples",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tableNames).toEqual([
+      "workflow_traces",
+      "llm_call_traces",
+      "llm_latency_samples",
+      "tenant_retention_opt_out_history",
+    ]);
+  });
+
+  it("does NOT dispatch to cross-table path when --cross-table absent", async () => {
+    const pairCapture: DiffHistoryTimelineInput[] = [];
+    const crossCapture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCapture: pairCapture,
+          diffTimelineCrossTableCapture: crossCapture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(pairCapture).toHaveLength(1);
+    expect(crossCapture).toHaveLength(0);
+  });
+
+  it("threads --with-actor-names + --since + --limit through to cross-table adapter", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--with-actor-names",
+        "--since",
+        "2026-01-01",
+        "--limit",
+        "50",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBe(true);
+    expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
+    expect(capture[0]?.limit).toBe(50);
+  });
+
+  it("human-format renders 'Cross-table timeline for tenant ... across N tables:' header", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "llm_latency_samples",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(
+      `Cross-table timeline for tenant ${TENANT_A} across 3 tables`,
+    );
+    expect(out()).toContain("Table A: workflow_traces");
+    expect(out()).toContain("Table B: llm_call_traces");
+    expect(out()).toContain("Table C: llm_latency_samples");
+  });
+
+  it("human-format renders [A]/[B]/[C] tagged events with tableLabel", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "llm_latency_samples",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableResult: {
+            tenantId: TENANT_A,
+            tableNames: [
+              "workflow_traces",
+              "llm_call_traces",
+              "llm_latency_samples",
+            ],
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                tableLabel: "A",
+                eventKind: "opt_out_set",
+                actorId: null,
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+              },
+              {
+                id: "h2",
+                tenantId: TENANT_A,
+                tableName: "llm_call_traces",
+                tableLabel: "B",
+                eventKind: "retention_set",
+                actorId: null,
+                occurredAt: "2026-01-15T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: false, retention_days: 90, enabled: true },
+                attributes: {},
+              },
+              {
+                id: "h3",
+                tenantId: TENANT_A,
+                tableName: "llm_latency_samples",
+                tableLabel: "C",
+                eventKind: "policy_deleted",
+                actorId: null,
+                occurredAt: "2026-02-01T00:00:00.000Z",
+                prevState: { retention_days: 30 },
+                nextState: null,
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("[A] opt_out_set");
+    expect(out()).toContain("[B] retention_set");
+    expect(out()).toContain("[C] policy_deleted");
+    expect(out()).toContain("(policy deleted)");
+  });
+
+  it("JSON envelope includes crossTable:true discriminator + result.tableNames + entries with tableLabel", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableResult: {
+            tenantId: TENANT_A,
+            tableNames: ["workflow_traces", "llm_call_traces"],
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                tableLabel: "A",
+                eventKind: "opt_out_set",
+                actorId: null,
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.action).toBe("diff-timeline");
+    expect(parsed_.crossTable).toBe(true);
+    expect(parsed_.result.tenantId).toBe(TENANT_A);
+    expect(parsed_.result.tableNames).toEqual(["workflow_traces", "llm_call_traces"]);
+    expect(parsed_.result.entries[0].tableLabel).toBe("A");
+  });
+
+  it("adapter errors on cross-table path propagate as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+
+  it("missing positional arg with --cross-table returns exit 2 with cross-table usage hint", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "--cross-table",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+    expect(err()).toContain("--cross-table");
+  });
+});
+
+describe("formatTimelineCrossTableDiff", () => {
+  it("renders 'No history events for this tenant' when entries empty", () => {
+    const out = formatTimelineCrossTableDiff({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+      entries: [],
+    });
+    expect(out).toContain(
+      `Cross-table timeline for tenant ${TENANT_A} across 2 tables`,
+    );
+    expect(out).toContain("Table A: workflow_traces");
+    expect(out).toContain("Table B: llm_call_traces");
+    expect(out).toContain(
+      "No history events for this tenant on any of these tables.",
+    );
+  });
+
+  it("renders [A]/[B]/[C] tagged event lines with state summary", () => {
+    const out = formatTimelineCrossTableDiff({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
+      entries: [
+        {
+          id: "h1",
+          tenantId: TENANT_A,
+          tableName: "llm_latency_samples",
+          tableLabel: "C",
+          eventKind: "opt_out_set",
+          actorId: null,
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          prevState: null,
+          nextState: {
+            opt_out: true,
+            retention_days: 365,
+            opt_out_reason: "legal-hold",
+          },
+          attributes: {},
+        },
+      ],
+    });
+    expect(out).toContain("Events (1):");
+    expect(out).toContain("[C] opt_out_set");
+    expect(out).toContain("retention=365");
+    expect(out).toContain("reason=legal-hold");
+  });
+
+  it("renders 'by Alice Smith (uuid)' suffix when withActorNames=true opt", () => {
+    const out = formatTimelineCrossTableDiff(
+      {
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces", "llm_call_traces"],
+        entries: [
+          {
+            id: "h1",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tableLabel: "A",
             eventKind: "opt_out_set",
             actorId: "11111111-1111-1111-1111-111111111111",
             occurredAt: "2026-01-01T00:00:00.000Z",

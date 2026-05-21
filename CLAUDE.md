@@ -21,15 +21,144 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,684 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant
+**56 packages + 1 app, 129 meta-schema tables, 8,708 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table
+closes ADR-0189 Q2 by adding `--cross-table` (+ optional
+`--add-table <c> ...`) to `retention diff-timeline`. Mirrors
+ADR-0180/0188's cross-table pattern on the timeline axis,
+completing matrix symmetry — both `retention diff` and
+`retention diff-timeline` now support cross-tenant +
+cross-table axes uniformly. Under `--cross-table` the 3
+positional args reinterpret as `<tenant> <table-a>
+<table-b>` (vs pair-wise/N-way's `<tenant-a> <tenant-b>
+<table>`). New diffHistoryTimelineCrossTable adapter
+separate from diffHistoryTimeline + diffHistoryTimelineNway
+mirroring ADR-0180/0188 separate-method pattern. Three
+diff-timeline adapters now exist — pair-wise cross-tenant
+(tenantSide: "A" | "B"), N-way cross-tenant (tenantLabel:
+string), cross-table (tableLabel: string) — each axis gets
+its own narrow TypeScript types. Strict-require: --add-table
+needs --cross-table (matches ADR-0188); --cross-table +
+--add-tenant mutually exclusive (different N-way axes; rejected
+at CLI boundary with clear error). SQL uses `h.table_name
+IN ($2, $3, ...)` with h.tenant_id = $1; per-row tableLabel
+tagged via Map<tableName, label> from input order matching
+ADR-0191 pattern; duplicate tableNames first-occurrence wins
+label. labelForIndex helper from ADR-0191 reused. CLI
+dispatcher validates flag combinations BEFORE reading
+positionals — invalid combos return exit 2 without any PG
+queries. Three timeline paths now in runRetentionDiffTimeline:
+cross-table (when --cross-table) → diffHistoryTimelineCrossTable;
+N-way cross-tenant (when --add-tenant) → diffHistoryTimelineNway;
+pair-wise default → diffHistoryTimeline. All flags (--since,
+--until, --limit, --with-actor-names) compose uniformly across
+all three paths. Human output renders 'Cross-table timeline
+for tenant <uuid> across N tables:' header + per-table 'Table
+A: <name>' rows + 'Events (N):' header + per-event '<occurred_at>
+[<table-label>] <event-kind-padded> <state-summary>  [by
+<actor>]' lines. New formatTimelineCrossTableDiff exported
+helper reuses summarizeTimelineEntry + formatActor — no
+duplication. JSON envelope gains crossTable:true discriminator;
+operators jq-filter on .result.entries[] | select(.tableLabel
+== "B") to extract one table's events from merged tenant
+timeline. Diff envelope matrix now 4 shapes — (no
+discriminator) pair-wise cross-tenant, nway:true N-way cross-
+tenant, crossTable:true cross-table (any N >= 2), and the
+nway:true + crossTable:true combination deferred. Use cases
+unblocked — full-cohort cross-table audit for one tenant over
+time (4 prunable tables in one command), legal-hold uniformity
+verification via jq group_by tableLabel for per-table event
+counts surfacing missed mutations, cross-table tier migration
+verification (did migration touch all tables?), compliance
+attestation per tenant × all tables via shell loop. Rejected
+alternatives — widen diffHistoryTimeline to accept tableNames
++ infer cross-table when tenantIds.length === 1 (confuses
+pair-wise narrowing), auto-detect cross-table when positional[2]
+looks like a table name vs UUID (magical), new action
+retention diff-timeline-cross-table (adds CLI surface flag-on-
+existing matches precedent), tenantSide field on cross-table
+entries widened to string (type system would lie "side"
+implies tenant axis), JSON envelope without crossTable
+discriminator (operators detect by tableNames[] vs
+tenantIdA/tenantIdB — explicit discriminator matches ADR-0180),
+allow --cross-table + --add-tenant for N×M matrix (different
+conceptual axis defer), compose on diffHistoryTimelineNway
+treating tableName as varying axis (confused semantics),
+--all-tables shorthand expanding to PRUNABLE_TABLES (operator-
+policy concern defer), table-name validation against
+allowlist (matches existing non-validation stance defer).
+Drawbacks — three diff-timeline adapter methods to maintain
+(mirrors ADR-0183/0188 pattern), positional arg shape depends
+on --cross-table flag same 3 args different semantics
+(documented in helpText with separate usage lines mirrors
+ADR-0180 precedent), tenantLabel vs tableLabel field name
+divergence between N-way variants (honest about which axis is
+varying callers branch on JSON discriminator), no combined
+cross-tenant × cross-table matrix (different axis defer),
+strict-require --add-table needs --cross-table (matches
+ADR-0188 precedent clear error message), PG IN-list parser
+limit at thousands of tables not practical concern, no state-
+replay (operators wrap with retention diff --cross-table for
+current state). 10 new adapter tests in trace-retention.
+test.ts (rejects fewer than 2 tableNames with explicit
+error, single query h.tenant_id = $1 + h.table_name IN ($2,
+$3, $4) for 3 tables verified, tags each entry with tableLabel
+A/B/C from input order, ORDER BY h.occurred_at ASC + h.id
+ASC chronological, returns empty entries when no rows match,
+threads --since/--until/--limit through with param positions
+after table IN list (3 tables → since $5 until $6), composes
+with joinActor=true emitting LEFT JOIN + actor cols, rejects
+limit < 1, throws on unknown event_kind defensive schema-
+drift guard, supports 4-table full-cohort across all prunable
+tables). 11 new CLI tests in retention.test.ts — exit 2 when
+--add-table set without --cross-table with '--add-table
+requires --cross-table' error, exit 2 when --cross-table +
+--add-tenant both set with 'mutually exclusive', dispatches
+to cross-table path with positional <tenant> <table-a>
+<table-b>, collects --add-table flags in argv order extending
+the table list, does NOT dispatch to cross-table path when
+--cross-table absent, threads --with-actor-names + --since +
+--limit through, human-format 'Cross-table timeline for
+tenant ... across N tables:' header + per-table rows, human-
+format renders [A]/[B]/[C] tagged events with tableLabel +
+'(policy deleted)' for null nextState, JSON envelope
+crossTable:true discriminator + result.tenantId +
+result.tableNames + entries with tableLabel, adapter errors
+on cross-table path propagate exit 1, missing positional arg
+with --cross-table returns exit 2 with cross-table usage
+hint. 3 new formatTimelineCrossTableDiff helper unit tests —
+'No history events for this tenant' empty rendering with
+'Cross-table timeline for tenant ... across N tables' header,
+[A]/[B]/[C] tagged event lines with state summary including
+retention/reason fields, 'by Alice Smith (uuid)' suffix with
+withActorNames=true opt. fakeRetention extended with
+diffHistoryTimelineCrossTable mock + diffTimelineCrossTableResult
++ diffTimelineCrossTableCapture options. cli.ts helpText
+extended with retention diff-timeline <tenant> <table-a>
+<table-b> --cross-table [--add-table <table-c> ...] usage
+line + 6-line description explaining one-tenant-N-tables
+semantic + --add-table requires --cross-table + mutual
+exclusivity with --add-tenant. ADR-0192 documents the design
++ 9 rejected alternatives + 8 future Qs (combined cross-
+tenant × cross-table matrix, --all-tables shorthand,
+--exclude-table set-subtraction, table-name validation
+against PRUNABLE_TABLES allowlist, cursor pagination matching
+ADR-0175, state-replay per-event divergence delta, tagged-
+union JSON envelope across all retention diff-* actions,
+grouped human output events per table). The retention CLI
+now has 18 actions with diff-timeline complete on all three
+axes — pair-wise cross-tenant (ADR-0189) + N-way cross-
+tenant (ADR-0191) + cross-table within tenant (this
+milestone) — operators have first-class chronological
+audit-log workflows across both temporal axes uniformly.
+M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant
 closes ADR-0189 Q1 by adding `--add-tenant <c> [--add-tenant <d>
 ...]` repeated flag to `retention diff-timeline` for N-way
 chronological merge across 3+ tenants. Mirrors ADR-0183's
@@ -7471,7 +7600,34 @@ duplication; all flags (--since, --until, --limit,
 paths; cohort-wide divergence audit + legal-hold
 cohort verification + tier migration drift detection
 + compliance attestation across regulated cohort
-workflows now CLI-native).
+workflows now CLI-native),
+ADR-0192 covers M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table
+(`retention diff-timeline <tenant> <table-a> <table-b>
+--cross-table [--add-table <table-c> ...]` cross-table-
+within-tenant chronological merge — closes ADR-0189
+Q2 — mirrors ADR-0180/0188's cross-table pattern on
+the timeline axis completing matrix symmetry; new
+diffHistoryTimelineCrossTable adapter separate from
+diffHistoryTimeline + diffHistoryTimelineNway;
+positional args reinterpret under --cross-table as
+<tenant> <table-a> <table-b>; strict-require
+--add-table needs --cross-table matching ADR-0188;
+--cross-table + --add-tenant mutually exclusive
+different N-way axes; SQL `h.tenant_id = $1 AND
+h.table_name IN ($2, $3, ...)`; per-row tableLabel
+tagged at adapter via Map<tableName, label> using
+labelForIndex helper from ADR-0191; three diff-
+timeline adapters now exist each axis gets narrow
+TypeScript types — pair-wise tenantSide: "A" | "B",
+N-way tenantLabel: string, cross-table tableLabel:
+string; JSON envelope gains crossTable:true
+discriminator; new formatTimelineCrossTableDiff helper
+reuses summarizeTimelineEntry + formatActor; all
+flags compose uniformly across all three paths; full-
+cohort cross-table audit for one tenant over time +
+legal-hold uniformity verification + cross-table tier
+migration verification + compliance attestation per
+tenant × all tables workflows now CLI-native).
 
 ## Architecture in 90 seconds
 
@@ -11424,6 +11580,203 @@ retention diff-timeline --add-tenant from this
 milestone — operators have first-class cohort-
 investigation ergonomics at both 'what differs RIGHT
 NOW?' and 'when did they diverge OVER TIME?' levels.
+ADR-0192 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table
+(`crossengin retention diff-timeline <tenant>
+<table-a> <table-b> --cross-table [--add-table
+<table-c> ...]` cross-table-within-tenant
+chronological merge — closes ADR-0189 Q2; ADR-0191
+shipped N-way cross-tenant timeline merge but operators
+investigating per-tenant cross-table consistency over
+time ("across this tenant's 4 prunable tables, when
+did each get its policy applied and did any get
+missed?") still needed M retention history calls per
+table + manual jq merge per audit; this milestone
+mirrors ADR-0180/0188's cross-table pattern on the
+timeline axis completing matrix symmetry — both
+retention diff and retention diff-timeline now support
+cross-tenant + cross-table axes uniformly; CLI surface
+3 positional args reinterpret under --cross-table as
+<tenant> <table-a> <table-b> (vs pair-wise/N-way's
+<tenant-a> <tenant-b> <table>); --add-table repeatable
+extends table list beyond 2 positional — strict-
+require --add-table needs --cross-table matches
+ADR-0188 pattern (exit 2 with clear error on misuse);
+--cross-table + --add-tenant mutually exclusive
+(different N-way axes; exit 2); all other flags
+(--since, --until, --limit, --with-actor-names)
+compose uniformly across all 3 timeline paths;
+adapter — new diffHistoryTimelineCrossTable separate
+from diffHistoryTimeline + diffHistoryTimelineNway
+mirroring ADR-0180/0188 separate-method pattern; takes
+{tenantId, tableNames: ReadonlyArray<string>, since?,
+until?, limit?, joinActor?}; returns {tenantId,
+tableNames, entries: CrossTableTimelineEntry[]} where
+CrossTableTimelineEntry has tableLabel: string field
+(parallels ADR-0191 tenantLabel); three diff-timeline
+adapters now exist each axis gets narrow TypeScript
+types — pair-wise tenantSide: "A" | "B", N-way
+tenantLabel: string, cross-table tableLabel: string;
+SQL — single query with `h.tenant_id = $1 AND
+h.table_name IN ($2, $3, $4, ...)`; per-row tableLabel
+tagged at adapter via Map<tableName, label> built
+from input order using labelForIndex helper from
+ADR-0191; duplicate tableNames first-occurrence wins
+label matches ADR-0191 pattern; CLI dispatcher reads
+flags BEFORE positionals — validates flag
+combinations and exits 2 on invalid before any PG
+query; three timeline paths in runRetentionDiffTimeline
+— cross-table (when --cross-table) →
+diffHistoryTimelineCrossTable, N-way cross-tenant
+(when --add-tenant) → diffHistoryTimelineNway, pair-
+wise default → diffHistoryTimeline; human output
+renders 'Cross-table timeline for tenant <uuid>
+across N tables:' header + per-table 'Table A:
+<name>' rows + 'Events (N):' header + per-event
+'<occurred_at>  [<table-label>] <event-kind-padded-16>
+<state-summary>  [by <actor>]' lines; new
+formatTimelineCrossTableDiff exported helper reuses
+existing summarizeTimelineEntry + formatActor helpers
+from ADR-0189/0190 — no duplication; JSON envelope
+{action: "diff-timeline", crossTable: true, since,
+until, limit, withActorNames, result:
+DiffHistoryTimelineCrossTableResult} where crossTable:
+true is the discriminator; operators jq-filter on
+.result.entries[] | select(.tableLabel == "B") to
+extract one table's events from merged tenant
+timeline; diff envelope matrix now 4 shapes — no-
+discriminator pair-wise cross-tenant, nway:true N-way
+cross-tenant, crossTable:true cross-table any N >= 2,
+nway:true + crossTable:true combination deferred for
+N×M matrix; use cases unblocked — full-cohort cross-
+table audit for one tenant over time (4 prunable
+tables in one command compares retention evolution
+across them), legal-hold uniformity verification via
+jq group_by(.tableLabel) per-table event counts
+surfacing tables missing the hold mutation, cross-
+table tier migration verification ("did migration
+touch all tables? who ran it?"), compliance
+attestation per tenant × all tables via shell loop
+producing per-tenant quarterly export; rejected
+alternatives — widen diffHistoryTimeline to accept
+tableNames + infer cross-table when tenantIds.length
+=== 1 (confuses pair-wise narrowing), auto-detect
+cross-table when positional[2] looks like a table
+name vs UUID (magical fragile to embedded edge cases),
+new action retention diff-timeline-cross-table (adds
+CLI surface flag-on-existing matches ADR-0180/0188
+precedent), tenantSide field on cross-table entries
+widened to string (type system would lie since "side"
+implies tenant axis), JSON envelope without crossTable
+discriminator (operators detect by tableNames[] vs
+tenantIdA/tenantIdB — explicit discriminator matches
+ADR-0180 pattern), allow --cross-table + --add-tenant
+for N×M matrix (different conceptual axis output
+dimensions multiply defer), compose on
+diffHistoryTimelineNway treating tableName as varying
+axis (confused semantics separate adapter clearer),
+--all-tables shorthand expanding to PRUNABLE_TABLES
+set (operator-policy concern substrate doesn't
+enumerate externally defer), table-name validation
+against PRUNABLE_TABLES allowlist (substrate
+currently doesn't validate matches existing pattern
+defer); drawbacks — three diff-timeline adapter
+methods to maintain (mirrors ADR-0183/0188 pattern
+narrow TypeScript types per axis), positional arg
+shape depends on --cross-table flag same 3 args
+different semantics mirrors ADR-0180 on retention
+diff (documented in helpText with separate usage
+lines), tenantLabel vs tableLabel field name
+divergence between N-way cross-tenant and cross-
+table variants (honest about which axis is varying
+callers branch on JSON envelope discriminator), no
+combined cross-tenant × cross-table matrix (different
+axis defer), strict-require --add-table needs
+--cross-table (operators must remember pairing matches
+ADR-0188 precedent clear error), PG IN-list parser
+limit at thousands of tables not practical concern
+substrate has 4 prunable tables today defer, no state-
+replay (operators wrap with retention diff
+--cross-table for current state); 10 new adapter
+tests in trace-retention.test.ts (rejects fewer than
+2 tableNames with 'at least 2 tableNames required'
+error, single query h.tenant_id = $1 + h.table_name
+IN ($2, $3, $4) for 3 tables verified via SQL
+substring + params, tags each entry with tableLabel
+A/B/C from input order with tableName preserved,
+ORDER BY h.occurred_at ASC + h.id ASC chronological,
+returns empty entries when no rows match, threads
+--since + --until + --limit through with param
+positions after table IN list (3 tables → since at
+$5 until at $6 limit at end), composes with
+joinActor=true emitting LEFT JOIN meta.users + actor
+cols, rejects limit < 1 with explicit error, throws
+on unknown event_kind defensive schema-drift guard,
+supports 4-table full-cohort across all prunable
+tables IN ($2, $3, $4, $5)); 11 new CLI tests in
+retention.test.ts — returns exit 2 when --add-table
+set without --cross-table with '--add-table requires
+--cross-table' error, exit 2 when --cross-table +
+--add-tenant both set with 'mutually exclusive',
+dispatches to cross-table path with positional
+<tenant> <table-a> <table-b> (capture verifies
+tenantId + tableNames threaded), collects --add-table
+flags in argv order extending the table list
+[workflow_traces, llm_call_traces, llm_latency_samples,
+tenant_retention_opt_out_history], does NOT dispatch
+to cross-table path when --cross-table absent
+backward compat verified, threads --with-actor-names
++ --since + --limit through to cross-table adapter,
+human-format 'Cross-table timeline for tenant ...
+across N tables:' header + per-table rows, human-
+format renders [A]/[B]/[C] tagged events with
+'(policy deleted)' for null nextState, JSON envelope
+crossTable:true discriminator + result.tenantId +
+result.tableNames + entries with tableLabel, adapter
+errors on cross-table path propagate exit 1, missing
+positional arg with --cross-table returns exit 2
+with cross-table usage hint mentioning --cross-table;
+3 new formatTimelineCrossTableDiff helper unit tests
+— 'No history events for this tenant on any of these
+tables' empty rendering with 'Cross-table timeline'
+header + Table A/B rows, [A]/[B]/[C] tagged event
+lines with state summary including retention/reason
+fields, 'by Alice Smith (uuid)' suffix with
+withActorNames=true opt; fakeRetention extended with
+diffHistoryTimelineCrossTable mock +
+diffTimelineCrossTableResult +
+diffTimelineCrossTableCapture options; cli.ts
+helpText extended with retention diff-timeline
+<tenant> <table-a> <table-b> --cross-table
+[--add-table <table-c> ...] usage line + 6-line
+description explaining one-tenant-N-tables semantic
++ --add-table requires --cross-table + mutual
+exclusivity with --add-tenant; future Qs cover
+combined cross-tenant × cross-table matrix N tenants
+× M tables merged timeline (output dimensions
+multiply defer), --all-tables shorthand enumerating
+PRUNABLE_TABLES operator-policy concern defer,
+--exclude-table set-subtraction defer, table-name
+validation against PRUNABLE_TABLES allowlist matches
+existing non-validation stance defer, cursor
+pagination via --after-id on cross-table matching
+ADR-0175 same pattern defer, state-replay variant
+emitting per-event divergence delta across tables
+significant query cost defer, tagged-union JSON
+envelope across all retention diff-* actions pairing
+with similar deferred Qs across ADR-0173/0178/0179/
+0180/0183/0188/0189/0190/0191 defer, grouped human
+output events grouped by table column for operators
+with many tables defer. The retention CLI now has 18
+actions with diff-timeline complete on all three
+axes — pair-wise cross-tenant from ADR-0189 + N-way
+cross-tenant from ADR-0191 + cross-table within
+tenant from this milestone — operators have first-
+class chronological audit-log workflows across both
+temporal axes uniformly; combined with retention diff
+matrix from ADR-0173/0178/0179/0180/0181/0183/0184/
+0188 operators have point-in-time AND chronological
+comparison ergonomics complete on cross-tenant +
+cross-table + N-way variants.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

@@ -8,6 +8,7 @@ import {
   parsePgEnvConfig,
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
+  type DiffHistoryTimelineCrossTableResult,
   type DiffHistoryTimelineNwayResult,
   type DiffHistoryTimelineResult,
   type DiffTenantPoliciesNwayResult,
@@ -1337,17 +1338,41 @@ async function runRetentionDiffTimeline(
   ctx: RunContext,
   retention: PostgresTraceRetention,
 ): Promise<number> {
-  const tenantIdA = command.positional[1];
-  const tenantIdB = command.positional[2];
-  const tableName = command.positional[3];
-  if (
-    tenantIdA === undefined ||
-    tenantIdB === undefined ||
-    tableName === undefined
-  ) {
+  const crossTable = getBooleanFlag(command, "cross-table");
+  const addTenants = getMultiFlag(command, "add-tenant");
+  const addTables = getMultiFlag(command, "add-table");
+  const hasAddTenant = addTenants.length > 0;
+  const hasAddTable = addTables.length > 0;
+
+  if (hasAddTable && !crossTable) {
     printError(
       ctx.io,
-      "retention diff-timeline: missing arguments. usage: crossengin retention diff-timeline <tenant-a> <tenant-b> <table-name> [--since DATE] [--until DATE] [--limit N]",
+      "retention diff-timeline: --add-table requires --cross-table",
+    );
+    return 2;
+  }
+  if (crossTable && hasAddTenant) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: --cross-table and --add-tenant are mutually exclusive",
+    );
+    return 2;
+  }
+
+  const positionalA = command.positional[1];
+  const positionalB = command.positional[2];
+  const positionalC = command.positional[3];
+  if (
+    positionalA === undefined ||
+    positionalB === undefined ||
+    positionalC === undefined
+  ) {
+    const usage = crossTable
+      ? "crossengin retention diff-timeline <tenant> <table-a> <table-b> --cross-table [--add-table <table-c> ...]"
+      : "crossengin retention diff-timeline <tenant-a> <tenant-b> <table-name> [--add-tenant <tenant-c> ...]";
+    printError(
+      ctx.io,
+      `retention diff-timeline: missing arguments. usage: ${usage}`,
     );
     return 2;
   }
@@ -1394,9 +1419,51 @@ async function runRetentionDiffTimeline(
   }
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
-  const addTenants = getMultiFlag(command, "add-tenant");
 
-  if (addTenants.length > 0) {
+  if (crossTable) {
+    const tenantId = positionalA;
+    const tableNames = [positionalB, positionalC, ...addTables];
+    let crossResult: DiffHistoryTimelineCrossTableResult;
+    try {
+      crossResult = await retention.diffHistoryTimelineCrossTable({
+        tenantId,
+        tableNames,
+        since,
+        until,
+        limit,
+        joinActor: withActorNames || undefined,
+      });
+    } catch (err) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        action: "diff-timeline",
+        crossTable: true,
+        since: since ?? null,
+        until: until ?? null,
+        limit,
+        withActorNames,
+        result: crossResult,
+      });
+      return 0;
+    }
+    ctx.io.stdout.write(
+      formatTimelineCrossTableDiff(crossResult, { withActorNames }),
+    );
+    return 0;
+  }
+
+  const tenantIdA = positionalA;
+  const tenantIdB = positionalB;
+  const tableName = positionalC;
+
+  if (hasAddTenant) {
     const tenantIds = [tenantIdA, tenantIdB, ...addTenants];
     let nwayResult: DiffHistoryTimelineNwayResult;
     try {
@@ -1516,6 +1583,35 @@ export function formatTimelineNwayDiff(
       : "";
     lines.push(
       `  ${e.occurredAt}  [${e.tenantLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function formatTimelineCrossTableDiff(
+  result: DiffHistoryTimelineCrossTableResult,
+  opts: { readonly withActorNames?: boolean } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `Cross-table timeline for tenant ${result.tenantId} across ${result.tableNames.length} tables:`,
+  );
+  result.tableNames.forEach((t, i) => {
+    lines.push(`  Table ${labelForIndex(i)}: ${t}`);
+  });
+  lines.push("");
+  if (result.entries.length === 0) {
+    lines.push("No history events for this tenant on any of these tables.");
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`Events (${result.entries.length}):`);
+  for (const e of result.entries) {
+    const stateSummary = summarizeTimelineEntry(e);
+    const actorSuffix = opts.withActorNames
+      ? `  by ${formatActor(e)}`
+      : "";
+    lines.push(
+      `  ${e.occurredAt}  [${e.tableLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
   }
   return lines.join("\n") + "\n";

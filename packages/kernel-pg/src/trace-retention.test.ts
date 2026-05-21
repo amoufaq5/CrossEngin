@@ -4399,6 +4399,212 @@ describe("PostgresTraceRetention.diffHistoryTimelineNway (M6.7.zz.tenant.opt-out
   });
 });
 
+describe("PostgresTraceRetention.diffHistoryTimelineCrossTable (M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  function rawRow(
+    table_name: string,
+    overrides: Partial<{
+      id: string;
+      event_kind: string;
+      occurred_at: string;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id: "h1",
+      tenant_id: TENANT_A,
+      table_name,
+      event_kind: "opt_out_set",
+      actor_id: null,
+      occurred_at: "2026-01-01T00:00:00.000Z",
+      prev_state: null,
+      next_state: { opt_out: true, retention_days: 365 },
+      attributes: {},
+      ...overrides,
+    };
+  }
+
+  it("rejects fewer than 2 tableNames", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimelineCrossTable({
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces"],
+      }),
+    ).rejects.toThrow("at least 2 tableNames required");
+  });
+
+  it("issues a single query with h.table_name IN ($2, $3, $4) + h.tenant_id = $1", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
+    });
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.sql).toContain("h.tenant_id = $1");
+    expect(capture[0]?.sql).toContain("h.table_name IN ($2, $3, $4)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "llm_call_traces",
+      "llm_latency_samples",
+      100,
+    ]);
+  });
+
+  it("tags each entry with tableLabel A/B/C from input order", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawRow("workflow_traces", { id: "h1" }),
+        rawRow("llm_call_traces", { id: "h2" }),
+        rawRow("llm_latency_samples", { id: "h3" }),
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
+    });
+    expect(result.entries).toHaveLength(3);
+    expect(result.entries[0]?.tableLabel).toBe("A");
+    expect(result.entries[0]?.tableName).toBe("workflow_traces");
+    expect(result.entries[1]?.tableLabel).toBe("B");
+    expect(result.entries[1]?.tableName).toBe("llm_call_traces");
+    expect(result.entries[2]?.tableLabel).toBe("C");
+    expect(result.entries[2]?.tableName).toBe("llm_latency_samples");
+  });
+
+  it("orders by h.occurred_at ASC, h.id ASC (chronological)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+    });
+    expect(capture[0]?.sql).toContain("ORDER BY h.occurred_at ASC, h.id ASC");
+  });
+
+  it("returns empty entries when no rows match", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+    });
+    expect(result.entries).toEqual([]);
+    expect(result.tenantId).toBe(TENANT_A);
+    expect(result.tableNames).toEqual(["workflow_traces", "llm_call_traces"]);
+  });
+
+  it("threads --since + --until + --limit through (param positions after table IN list)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-06-01T00:00:00.000Z",
+      limit: 50,
+    });
+    expect(capture[0]?.sql).toContain("h.occurred_at >= $5");
+    expect(capture[0]?.sql).toContain("h.occurred_at <= $6");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "llm_call_traces",
+      "llm_latency_samples",
+      "2026-01-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+      50,
+    ]);
+  });
+
+  it("composes with joinActor=true emitting LEFT JOIN + actor cols", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({
+        rows: [
+          {
+            ...rawRow("workflow_traces"),
+            actor_id: "11111111-1111-1111-1111-111111111111",
+            actor_display_name: "Alice Smith",
+            actor_email: "alice@example.com",
+          },
+        ],
+        rowCount: 1,
+      }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+      joinActor: true,
+    });
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
+    const entry = result.entries[0]!;
+    expect(entry.actorDisplayName).toBe("Alice Smith");
+    expect(entry.actorEmail).toBe("alice@example.com");
+  });
+
+  it("rejects limit < 1", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimelineCrossTable({
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces", "llm_call_traces"],
+        limit: 0,
+      }),
+    ).rejects.toThrow("limit must be an integer >= 1");
+  });
+
+  it("throws on unknown event_kind in returned row (schema-drift guard)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [rawRow("workflow_traces", { event_kind: "unknown_kind" })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimelineCrossTable({
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces", "llm_call_traces"],
+      }),
+    ).rejects.toThrow("unknown event_kind 'unknown_kind'");
+  });
+
+  it("supports the 4-table full-cohort across all prunable tables", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: [
+        "workflow_traces",
+        "llm_call_traces",
+        "llm_latency_samples",
+        "tenant_retention_opt_out_history",
+      ],
+    });
+    expect(capture[0]?.sql).toContain("IN ($2, $3, $4, $5)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "llm_call_traces",
+      "llm_latency_samples",
+      "tenant_retention_opt_out_history",
+      100,
+    ]);
+  });
+});
+
 describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.tenant.opt-out.cli.history.cursor)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";
