@@ -4792,6 +4792,265 @@ describe("PostgresTraceRetention.diffTenantPolicies (M6.7.zz.tenant.opt-out.cli.
   });
 });
 
+describe("PostgresTraceRetention.diffTenantVsPlatform (M6.7.zz.tenant.opt-out.cli.diff.vs-platform)", () => {
+  const TENANT = "00000000-0000-4000-8000-00000000000C";
+
+  function platformRow(
+    overrides: Partial<{
+      table_name: string;
+      retention_days: number;
+      enabled: boolean;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      table_name: "workflow_traces",
+      retention_days: 90,
+      enabled: true,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  function tenantRow(
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      opt_out: boolean;
+      opt_out_reason: string | null;
+      opt_out_until: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id: TENANT,
+      table_name: "workflow_traces",
+      retention_days: 30,
+      enabled: true,
+      opt_out: false,
+      opt_out_reason: null,
+      opt_out_until: null,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("issues exactly 2 queries in parallel — one tenant lookup + one platform lookup", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(capture).toHaveLength(2);
+    const tenantCall = capture.find((c) =>
+      c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    const platformCall = capture.find(
+      (c) =>
+        c.sql.includes("FROM meta.retention_policies") &&
+        !c.sql.includes("FROM meta.tenant_retention_policies"),
+    );
+    expect(tenantCall).toBeDefined();
+    expect(platformCall).toBeDefined();
+    expect(tenantCall?.params).toEqual([TENANT, "workflow_traces"]);
+    expect(platformCall?.params).toEqual(["workflow_traces"]);
+  });
+
+  it("returns both resolutions as none + empty fieldDiffs when neither row exists", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantId).toBe(TENANT);
+    expect(result.tableName).toBe("workflow_traces");
+    expect(result.tenantResolution.source).toBe("none");
+    expect(result.platformResolution.source).toBe("none");
+    expect(result.fieldDiffs).toEqual([]);
+  });
+
+  it("returns identical resolutions + empty fieldDiffs when tenant falls back to platform", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.includes("FROM meta.retention_policies") &&
+        !sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantResolution.source).toBe("platform");
+    expect(result.platformResolution.source).toBe("platform");
+    expect(result.fieldDiffs).toEqual([]);
+  });
+
+  it("returns fieldDiffs when tenant override differs from platform default", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantRow({ retention_days: 30, enabled: true })],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [platformRow({ retention_days: 90, enabled: true })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantResolution.source).toBe("tenant");
+    expect(result.platformResolution.source).toBe("platform");
+    const fields = result.fieldDiffs.map((d) => d.field);
+    expect(fields).toContain("source");
+    expect(fields).toContain("retention_days");
+  });
+
+  it("renders tenant_opt_out as tenantResolution when active opt-out present", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantRow({
+              enabled: false,
+              opt_out: true,
+              opt_out_reason: "legal_hold:case#42",
+              opt_out_until: "2099-01-01T00:00:00.000Z",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantResolution.source).toBe("tenant_opt_out");
+    expect(result.platformResolution.source).toBe("platform");
+    const fields = result.fieldDiffs.map((d) => d.field);
+    expect(fields).toContain("opt_out");
+    expect(fields).toContain("opt_out_reason");
+    expect(fields).toContain("opt_out_until");
+  });
+
+  it("platformResolution always reflects the platform table — independent of tenant", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantRow({ retention_days: 7 })],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [platformRow({ retention_days: 365, enabled: false })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.platformResolution).toEqual({
+      source: "platform",
+      retentionDays: 365,
+      enabled: false,
+    });
+  });
+
+  it("returns platformResolution=none when no platform row exists", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return { rows: [tenantRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.platformResolution.source).toBe("none");
+    expect(result.tenantResolution.source).toBe("tenant");
+  });
+
+  it("expired opt-out falls through to platform on tenantResolution (clock-aware)", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantRow({
+              enabled: true,
+              opt_out: true,
+              opt_out_reason: "expired_hold",
+              opt_out_until: "2020-01-01T00:00:00.000Z",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({
+      conn,
+      clock: () => Date.parse("2026-06-01T00:00:00Z"),
+    });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantResolution.source).toBe("tenant");
+    expect(result.platformResolution.source).toBe("platform");
+  });
+
+  it("tenant row with enabled=false + opt_out=false falls through to platform", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantRow({ enabled: false, opt_out: false })],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantVsPlatform({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantResolution.source).toBe("platform");
+    expect(result.platformResolution.source).toBe("platform");
+    expect(result.fieldDiffs).toEqual([]);
+  });
+});
+
 describe("normalizeResolutionForDiff", () => {
   it("flattens tenant variant to {source, retention_days, enabled, opt_out:false}", () => {
     const out = normalizeResolutionForDiff({

@@ -5,6 +5,7 @@ import {
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
   type DiffTenantPoliciesResult,
+  type DiffTenantVsPlatformResult,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type OptOutHistoryEntry,
@@ -1101,6 +1102,10 @@ async function runRetentionDiff(
   ctx: RunContext,
   retention: PostgresTraceRetention,
 ): Promise<number> {
+  if (getBooleanFlag(command, "vs-platform")) {
+    return await runRetentionDiffVsPlatform(command, ctx, retention);
+  }
+
   const tenantIdA = command.positional[1];
   const tenantIdB = command.positional[2];
   const tableName = command.positional[3];
@@ -1139,6 +1144,40 @@ async function runRetentionDiff(
   return 0;
 }
 
+async function runRetentionDiffVsPlatform(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantId = command.positional[1];
+  const tableName = command.positional[2];
+  if (tenantId === undefined || tableName === undefined) {
+    printError(
+      ctx.io,
+      "retention diff --vs-platform: missing arguments. usage: crossengin retention diff <tenant> <table-name> --vs-platform",
+    );
+    return 2;
+  }
+
+  let result: DiffTenantVsPlatformResult;
+  try {
+    result = await retention.diffTenantVsPlatform({ tenantId, tableName });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "diff", vsPlatform: true, result });
+    return 0;
+  }
+  ctx.io.stdout.write(formatTenantVsPlatformDiff(result));
+  return 0;
+}
+
 function summarizeResolutionForDiff(
   resolution: EffectiveRetentionResolution,
 ): string {
@@ -1170,6 +1209,35 @@ export function formatTenantDiff(result: DiffTenantPoliciesResult): string {
   if (result.fieldDiffs.length === 0) {
     lines.push(
       "No differences — both tenants have the same effective retention policy.",
+    );
+  } else {
+    lines.push(`Field changes (${result.fieldDiffs.length}):`);
+    for (const d of result.fieldDiffs) {
+      const a = d.valueA === undefined ? "absent" : JSON.stringify(d.valueA);
+      const b = d.valueB === undefined ? "absent" : JSON.stringify(d.valueB);
+      lines.push(`  ${d.field.padEnd(20)} ${a}  →  ${b}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function formatTenantVsPlatformDiff(
+  result: DiffTenantVsPlatformResult,
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `Diff between tenant and platform default (table: ${result.tableName}):`,
+  );
+  lines.push(
+    `  Tenant:   ${result.tenantId}  ${summarizeResolutionForDiff(result.tenantResolution)}`,
+  );
+  lines.push(
+    `  Platform: ${summarizeResolutionForDiff(result.platformResolution)}`,
+  );
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(
+      "No differences — tenant has the same effective retention policy as the platform default.",
     );
   } else {
     lines.push(`Field changes (${result.fieldDiffs.length}):`);

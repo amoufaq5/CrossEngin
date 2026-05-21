@@ -21,15 +21,129 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,435 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff
+**56 packages + 1 app, 129 meta-schema tables, 8,455 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.vs-platform
+closes ADR-0178 Q1 by adding `--vs-platform` flag to
+`retention diff` + diffTenantVsPlatform adapter method.
+Operators wanting "how does this tenant differ from
+platform default?" previously ran two retention effective
+commands and mental-diffed; now one command. Flag-on-
+existing-action chosen over new `retention diff-platform`
+action — operators learn --vs-platform more naturally
+than new action name. With flag set, diff dispatcher
+branches before positional validation and expects 2
+positional args (tenant, table) instead of 3. New
+diffTenantVsPlatform adapter runs 2 parallel queries via
+Promise.all — one tenant lookup + one platform lookup —
+single wall-clock round-trip. FIRST adapter method in
+retention substrate NOT composing on effectiveRetention/
+effectiveRetentionBatch — documented exception because
+the batch resolver returns only the EFFECTIVE resolution
+per pair (hides whether tenant fell through to platform
+or has its own policy), losing the distinction --vs-
+platform must surface. Algorithm — parallel queries,
+build platformResolution from platform row (or {source:
+"none"} when absent), build tenantResolution using same
+opt-out/enabled/fallback logic as effectiveRetention but
+falling back to the platformResolution we already
+computed, compute fieldDiffs via reused computeFieldDiffs
+from ADR-0173 after normalizeResolutionForDiff on both.
+Same clock() source as effectiveRetention for opt-out
+expiry boundary. Result type DiffTenantVsPlatformResult
+carries {tenantId, tableName, tenantResolution,
+platformResolution, fieldDiffs}. Human output renders
+3-section format — 'Diff between tenant and platform
+default (table: <name>):' header, tenant row with
+tenantId + summary line via shared summarizeResolutionForDiff
+helper, platform row (no tenantId since platform policy
+isn't tenant-scoped), blank line, then either 'No
+differences — tenant has the same effective retention
+policy as the platform default.' for empty fieldDiffs
+OR 'Field changes (N):' header followed by 'fieldname
+valueA → valueB' lines reusing established conventions.
+JSON envelope {action: "diff", vsPlatform: true, result:
+DiffTenantVsPlatformResult} where vsPlatform:true is
+the discriminator distinguishing from ADR-0178's cross-
+tenant variant for downstream jq consumers. Use cases
+unblocked — one-command "is this tenant on the default?"
+check, compliance audit shell loop filtering tenants
+whose effective retention deviates from default, tier
+migration verification via jq on .result.tenantResolution.source,
+pre-deletion safety check showing what would change
+when policy reverted to platform default. Rejected
+alternatives — new action retention diff-platform
+(cleaner separation but adds CLI surface, divides diff
+vocabulary), sentinel --platform token in positional
+arg (magical), always 3 positionals + --vs-platform
+ignores 3rd (silent ignore of operator-supplied tenant
+ids is error-prone), compose on effectiveRetentionBatch
+with sentinel tenant (semantic awkward), return only
+platform + fieldDiffs without tenantResolution echo
+(operators re-query for tenant side redundantly),
+implicit fallback when only 2 positionals (surprising —
+explicit flag clearer), retention vs-default standalone
+action (diverges from diff-* naming), JSON unified shape
+with sentinel string "platform" for tenant-b (type
+pollution + sentinel-string discrimination instead of
+typed). 10 new adapter tests + 10 new CLI tests = 20
+total covering: adapter issues exactly 2 queries in
+parallel with tenant query against meta.tenant_retention_policies
++ platform query against meta.retention_policies + params
+verified, returns both resolutions as none + empty
+fieldDiffs when neither row exists, returns identical
+resolutions + empty fieldDiffs when tenant falls back to
+platform (no per-tenant policy + platform exists),
+returns fieldDiffs when tenant override differs from
+platform default (source + retention_days), renders
+tenant_opt_out as tenantResolution when active opt-out
+present with opt_out + opt_out_reason + opt_out_until
+fields in diff, platformResolution always reflects
+platform table independent of tenant verified via
+tenant=7d + platform=365d enabled=false case,
+platformResolution=none when no platform row exists,
+expired opt-out falls through to platform on tenantResolution
+clock-aware, tenant row with enabled=false + opt_out=false
+falls through to platform; CLI tests — missing tenant
+arg exit 2 with 'missing arguments' + '--vs-platform'
+mention, missing table arg exit 2, calls diffTenantVsPlatform
+NOT diffTenantPolicies verified via separate captures,
+human-format 'No differences' message + 'Diff between
+tenant and platform default' header, human-format 'Field
+changes (N)' for non-empty diff with arrow + count
+header, JSON envelope vsPlatform:true discriminator +
+result.tenantId + result.platformResolution.source,
+adapter errors propagate exit 1; formatTenantVsPlatformDiff
+helper unit tests — 'No differences' message for empty,
+tenant row with tenantId + summary line + retention=Nd,
+tenant_opt_out with reason + until inline, platform=none
+variant with '(no policy configured)' annotation. cli.ts
+helpText extended with retention diff <tenant> <table-
+name> --vs-platform usage line + 5-line description
+explaining 2-query optimization + one-command vs two-
+effective workflow benefit. ADR-0179 documents the
+design + 8 rejected alternatives + 7 future Qs (--vs-tier
+flag for tenant-vs-tier-default, --all-tables for one-
+tenant across all prunable tables, combined retention
+diff <tenant> defaulting to --vs-platform without flag,
+table format output, bulk --bulk file.csv variant,
+--exit-on-divergence for CI gates, JSON envelope
+unification with cross-tenant diff via tagged union).
+The retention CLI now has 15 actions covering forensic
++ recovery + comparison + performance workflows: 3 read
+(expiring/effective/list-policies) + 4 write (opt-out/
+opt-in/set/delete) + 1 audit (history) + 1 restore
+(with --dry-run) + 2 diff (diff-history + cross-tenant
+diff with both --vs-platform AND cross-tenant variants)
++ 1 maintenance (prune with --dry-run) + 1 batch
+substrate-only (effectiveRetentionBatch).
+M6.7.zz.tenant.opt-out.cli.diff
 closes ADR-0165 Q6 by adding `crossengin retention diff
 <tenant-a> <tenant-b> <table>` action + diffTenantPolicies
 adapter method + normalizeResolutionForDiff pure helper.
@@ -5631,7 +5745,22 @@ per-tenant resolution summary line varies by variant via
 summarizeResolutionForDiff helper; tier migration
 verification + drift detection + compliance audit + CI
 gate workflows now CLI-native; sibling to retention
-diff-history but on the cross-tenant axis).
+diff-history but on the cross-tenant axis),
+ADR-0179 covers M6.7.zz.tenant.opt-out.cli.diff.vs-platform
+(`retention diff <tenant> <table> --vs-platform` tenant-
+vs-default comparison — closes ADR-0178 Q1 —
+diffTenantVsPlatform adapter method; 2 parallel queries
+via Promise.all (NOT composing on effectiveRetentionBatch
+because batch resolver hides whether tenant fell through
+to platform or has own policy, losing distinction that
+--vs-platform must surface); first adapter exception to
+composition pattern from ADR-0177/0178; reuses shared
+summarizeResolutionForDiff + computeFieldDiffs +
+normalizeResolutionForDiff helpers; vsPlatform:true JSON
+envelope discriminator distinguishes from cross-tenant
+diff; one-command "is this tenant on the default?" check
+vs operators previously running two retention effective
+commands + mental-diffing).
 
 ## Architecture in 90 seconds
 
@@ -7241,6 +7370,177 @@ evolved over time). The retention CLI now has 14
 operator-facing actions + 1 substrate-only adapter
 method covering forensic + recovery + comparison +
 performance workflows comprehensively.
+ADR-0179 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff.vs-platform
+(`crossengin retention diff <tenant> <table-name>
+--vs-platform` flag + diffTenantVsPlatform adapter
+method — closes ADR-0178 Q1; operators wanting "how
+does this tenant differ from platform default?"
+previously had no one-command answer — running two
+retention effective commands and mental-diffing was the
+workaround; new flag on existing diff action takes 2
+positional args (tenant + table) instead of 3 + flag
+triggers branch BEFORE positional validation; chose
+flag-on-existing-action over new retention diff-platform
+action since operators learn --vs-platform more
+naturally than new action name; new adapter method
+diffTenantVsPlatform({tenantId, tableName}) returns
+DiffTenantVsPlatformResult {tenantId, tableName,
+tenantResolution, platformResolution, fieldDiffs}; FIRST
+adapter method in retention substrate NOT composing on
+effectiveRetention/effectiveRetentionBatch — documented
+exception because batch resolver returns only EFFECTIVE
+resolution per pair (when tenant has no per-tenant
+policy the batch result IS the platform fallback so the
+"is tenant on default vs has override" distinction is
+lost), and --vs-platform must surface BOTH sides
+regardless of fallback for the workflow to be meaningful;
+implementation 2 parallel queries via Promise.all — one
+against meta.tenant_retention_policies + one against
+meta.retention_policies — single wall-clock round-trip;
+algorithm parallel queries, build platformResolution
+from platform row (or {source:"none"} when absent),
+build tenantResolution using same opt-out-active/enabled/
+fallback logic as effectiveRetention but falling back
+to the platformResolution we already computed (avoiding
+duplicate platform query), compute fieldDiffs via reused
+computeFieldDiffs from ADR-0173 after
+normalizeResolutionForDiff on both sides; same clock()
+source as effectiveRetention for opt-out expiry boundary
+semantics; human output renders 3-section format —
+'Diff between tenant and platform default (table:
+<name>):' header, tenant row 'Tenant:   <uuid>  <summary>'
+with summary via shared summarizeResolutionForDiff
+helper from ADR-0178, platform row 'Platform: <summary>'
+(no tenantId since platform policy isn't tenant-scoped),
+blank line, then either 'No differences — tenant has
+the same effective retention policy as the platform
+default.' for empty fieldDiffs OR 'Field changes (N):'
+header followed by 'fieldname valueA → valueB' lines
+reusing established conventions; JSON envelope {action:
+"diff", vsPlatform: true, result: DiffTenantVsPlatformResult}
+where vsPlatform:true is the discriminator distinguishing
+from ADR-0178's cross-tenant variant for downstream jq
+consumers parsing either shape; use cases unblocked —
+one-command "is this tenant on the default?" check
+(.result.fieldDiffs.length==0 means yes), compliance
+audit shell loop filtering tenants whose effective
+retention deviates from default (for-each-tenant +
+jq 'select(.result.fieldDiffs | length > 0)'), tier
+migration verification via .result.tenantResolution.source
+returning "platform" if migration succeeded vs "tenant"/
+"tenant_opt_out" if per-tenant policy still applies,
+pre-deletion safety check showing what would change when
+policy reverted to default; rejected alternatives — new
+action retention diff-platform (cleaner separation but
+adds CLI surface and divides diff vocabulary), sentinel
+--platform token in positional arg (magical hard-to-
+document), always 3 positionals + --vs-platform silently
+ignoring 3rd (operator-supplied real tenant ids would
+be silently dropped error-prone), compose on
+effectiveRetentionBatch with sentinel non-existent
+tenant id (semantically awkward + relies on query
+short-circuit + still doesn't return platform resolution
+as separate field), return only platform + fieldDiffs
+without tenantResolution echo (operators rendering would
+re-query for tenant side redundantly — both sides
+costs nothing extra), implicit fallback when only 2
+positionals supplied to diff (surprising magical
+behavior; explicit flag clearer), retention vs-default
+standalone action name (diverges from diff-* naming
+established in ADR-0173/0178), JSON unified envelope
+with sentinel string "platform" in tenantIdB position
+of cross-tenant shape (type pollution + sentinel-string
+discrimination instead of typed discriminator); drawbacks
+— single-flag overload on diff action with two arg
+shapes (3 positionals or 2+flag) operators reading help
+may not immediately notice (mitigated by separate
+helpText usage line), doesn't compose on
+effectiveRetentionBatch breaking pattern from ADR-0178
+(documented as exception not the rule), 2 queries always
+no short-circuit when tenant has no per-tenant policy
+(same query count as effectiveRetention when it falls
+through), no --vs-tier companion (operators run diff
+against reference tenant on same tier instead), JSON
+envelope shape divergence with two diff variants
+operators write 2 jq branches (mitigated by
+vsPlatform:true discriminator); 10 new adapter tests
+in trace-retention.test.ts — issues exactly 2 queries
+in parallel with tenant query against
+meta.tenant_retention_policies + platform query against
+meta.retention_policies with params verified
+[tenantId, tableName] + [tableName] respectively,
+returns both resolutions as none + empty fieldDiffs
+when neither row exists, returns identical resolutions
++ empty fieldDiffs when tenant falls back to platform
+(no per-tenant policy + platform exists — both resolve
+platform), returns fieldDiffs when tenant override
+differs from platform default (source=tenant vs
+source=platform + retention_days=30 vs 90), renders
+tenant_opt_out as tenantResolution when active opt-out
+present (opt_out + opt_out_reason + opt_out_until fields
+appear in diff), platformResolution always reflects
+platform table independent of tenant verified via
+tenant=7d but platform=365d enabled=false case (platform
+returns 365d+disabled regardless of tenant's 7d
+override), platformResolution=none when no platform row
+exists (tenant policy present + platform absent),
+expired opt-out falls through to platform on
+tenantResolution (clock-aware via clock injection in
+2026-06-01 with opt_out_until=2020-01-01 producing
+tenantResolution.source=tenant), tenant row with
+enabled=false + opt_out=false falls through to platform
+(disabled per-tenant policy + active platform = both
+resolutions platform + empty fieldDiffs); 10 new CLI
+tests in retention.test.ts — missing tenant arg returns
+exit 2 with 'missing arguments' + '--vs-platform'
+mention in error, missing table arg returns exit 2,
+calls diffTenantVsPlatform NOT diffTenantPolicies
+verified via separate captures (diffTenantCapture
+length 0, diffTenantVsPlatformCapture length 1 with
+{tenantId, tableName}), human-format renders 'No
+differences' message when fieldDiffs empty with 'Diff
+between tenant and platform default' header, human-
+format renders 'Field changes (N)' for non-empty diff
+with retention_days field + 30 → 90 + source field +
+"tenant" → "platform", JSON envelope includes
+vsPlatform:true discriminator + result.tenantId +
+result.platformResolution.source, adapter errors
+propagate exit 1 ('PG connection refused' in stderr);
+formatTenantVsPlatformDiff helper unit tests — 'No
+differences' message for empty diff, tenant row with
+tenantId prefix + summary line + 'retention=30d' for
+tenant variant + Platform: prefix + 'retention=90d'
+for platform + 'Field changes (1)' header,
+tenant_opt_out variant inline with 'source=tenant_opt_out'
++ 'reason=legal_hold:case#42' + 'until=2099-01-01T00:00:00.000Z',
+platform=none variant renders 'source=none' +
+'(no policy configured)' annotation; cli.ts helpText
+retention diff <tenant> <table-name> --vs-platform
+usage line + 5-line description explaining 2-parallel-
+queries + one-command workflow benefit vs two retention
+effective + mental-diff workaround; future Qs cover
+--vs-tier <tier-id> flag for tenant-vs-tier-default
+comparison (requires tier substrate aware resolution),
+--all-tables for one-tenant-vs-platform across every
+prunable table, combined retention diff <tenant>
+defaulting to --vs-platform without flag (rejected for
+explicit-clearer), render diff as table format,
+bulk --bulk file.csv variant for many tenants in one
+call, --exit-on-divergence for CI gates that fail when
+tenant differs from platform, JSON envelope unification
+with cross-tenant diff via tagged union shape
+{kind: "vs-tenant"/"vs-platform"} would simplify
+operator jq scripts but break backward compat with
+ADR-0178 envelope so deferred — vsPlatform:true
+discriminator is sufficient). The retention CLI now has
+15 actions covering forensic + recovery + comparison +
+performance workflows comprehensively: 3 read (expiring
+/ effective / list-policies) + 4 write (opt-out / opt-
+in / set / delete) + 1 audit (history) + 1 restore
+(with --dry-run) + 2 diff (diff-history same-tenant +
+diff cross-tenant with --vs-platform variant) + 1
+maintenance (prune with --dry-run) + 1 batch substrate-
+only (effectiveRetentionBatch).
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

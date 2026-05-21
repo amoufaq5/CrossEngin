@@ -5,6 +5,8 @@ import type {
   DiffHistoryEntriesResult,
   DiffTenantPoliciesInput,
   DiffTenantPoliciesResult,
+  DiffTenantVsPlatformInput,
+  DiffTenantVsPlatformResult,
   EffectiveRetentionResolution,
   ExpiringOptOut,
   ExpiringOptOutsInput,
@@ -35,6 +37,7 @@ import {
   formatPruneRun,
   formatRestorePreview,
   formatTenantDiff,
+  formatTenantVsPlatformDiff,
   runRetention,
   type RetentionContext,
 } from "./retention.js";
@@ -94,6 +97,8 @@ function fakeRetention(opts: {
   previewRestoreCapture?: PreviewRestoreTenantPolicyInput[];
   diffTenantResult?: DiffTenantPoliciesResult;
   diffTenantCapture?: DiffTenantPoliciesInput[];
+  diffTenantVsPlatformResult?: DiffTenantVsPlatformResult;
+  diffTenantVsPlatformCapture?: DiffTenantVsPlatformInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -252,6 +257,27 @@ function fakeRetention(opts: {
             enabled: false,
           },
           resolutionB: {
+            source: "none",
+            retentionDays: null,
+            enabled: false,
+          },
+          fieldDiffs: [],
+        }
+      );
+    },
+    diffTenantVsPlatform: async (input: DiffTenantVsPlatformInput) => {
+      opts.diffTenantVsPlatformCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.diffTenantVsPlatformResult ?? {
+          tenantId: input.tenantId,
+          tableName: input.tableName,
+          tenantResolution: {
+            source: "none",
+            retentionDays: null,
+            enabled: false,
+          },
+          platformResolution: {
             source: "none",
             retentionDays: null,
             enabled: false,
@@ -3655,6 +3681,306 @@ describe("runRetention diff (M6.7.zz.tenant.opt-out.cli.diff)", () => {
     );
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-platform)", () => {
+  it("returns exit 2 when tenant arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff", "--vs-platform"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+    expect(err()).toContain("--vs-platform");
+  });
+
+  it("returns exit 2 when table arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff", TENANT_A, "--vs-platform"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("calls diffTenantVsPlatform NOT diffTenantPolicies", async () => {
+    const { ctx } = buffers();
+    const diffTenantCapture: DiffTenantPoliciesInput[] = [];
+    const diffTenantVsPlatformCapture: DiffTenantVsPlatformInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantCapture,
+          diffTenantVsPlatformCapture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(diffTenantCapture).toHaveLength(0);
+    expect(diffTenantVsPlatformCapture).toHaveLength(1);
+    expect(diffTenantVsPlatformCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+  });
+
+  it("human-format renders 'No differences' message when fieldDiffs empty", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantVsPlatformResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tenantResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            platformResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(
+      "Diff between tenant and platform default (table: workflow_traces)",
+    );
+    expect(out()).toContain(
+      "No differences — tenant has the same effective retention policy as the platform default.",
+    );
+  });
+
+  it("human-format renders 'Field changes' for non-empty diff", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantVsPlatformResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tenantResolution: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            platformResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "retention_days", valueA: 30, valueB: 90 },
+              { field: "source", valueA: "tenant", valueB: "platform" },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Field changes (2):");
+    expect(out()).toContain("retention_days");
+    expect(out()).toContain("30  →  90");
+    expect(out()).toContain('"tenant"  →  "platform"');
+  });
+
+  it("JSON envelope includes vsPlatform:true discriminator + result", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantVsPlatformResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tenantResolution: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            platformResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.action).toBe("diff");
+    expect(parsedOut.vsPlatform).toBe(true);
+    expect(parsedOut.result.tenantId).toBe(TENANT_A);
+    expect(parsedOut.result.platformResolution.source).toBe("platform");
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatTenantVsPlatformDiff", () => {
+  const TENANT = "00000000-0000-4000-8000-00000000000C";
+
+  it("renders 'No differences' message when fieldDiffs is empty", () => {
+    const out = formatTenantVsPlatformDiff({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+      tenantResolution: {
+        source: "platform",
+        retentionDays: 90,
+        enabled: true,
+      },
+      platformResolution: {
+        source: "platform",
+        retentionDays: 90,
+        enabled: true,
+      },
+      fieldDiffs: [],
+    });
+    expect(out).toContain("table: workflow_traces");
+    expect(out).toContain(
+      "No differences — tenant has the same effective retention policy as the platform default.",
+    );
+  });
+
+  it("renders tenant row with tenantId + summary line", () => {
+    const out = formatTenantVsPlatformDiff({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+      tenantResolution: {
+        source: "tenant",
+        retentionDays: 30,
+        enabled: true,
+        tenantId: TENANT,
+      },
+      platformResolution: {
+        source: "platform",
+        retentionDays: 90,
+        enabled: true,
+      },
+      fieldDiffs: [{ field: "retention_days", valueA: 30, valueB: 90 }],
+    });
+    expect(out).toContain(`Tenant:   ${TENANT}`);
+    expect(out).toContain("source=tenant");
+    expect(out).toContain("retention=30d");
+    expect(out).toContain("Platform:");
+    expect(out).toContain("source=platform");
+    expect(out).toContain("retention=90d");
+    expect(out).toContain("Field changes (1):");
+  });
+
+  it("renders tenant_opt_out with reason + until inline", () => {
+    const out = formatTenantVsPlatformDiff({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+      tenantResolution: {
+        source: "tenant_opt_out",
+        retentionDays: null,
+        enabled: false,
+        tenantId: TENANT,
+        optOutReason: "legal_hold:case#42",
+        optOutUntil: "2099-01-01T00:00:00.000Z",
+      },
+      platformResolution: {
+        source: "platform",
+        retentionDays: 90,
+        enabled: true,
+      },
+      fieldDiffs: [{ field: "opt_out", valueA: true, valueB: false }],
+    });
+    expect(out).toContain("source=tenant_opt_out");
+    expect(out).toContain("reason=legal_hold:case#42");
+    expect(out).toContain("until=2099-01-01T00:00:00.000Z");
+  });
+
+  it("renders platform=none variant when no platform default configured", () => {
+    const out = formatTenantVsPlatformDiff({
+      tenantId: TENANT,
+      tableName: "workflow_traces",
+      tenantResolution: {
+        source: "tenant",
+        retentionDays: 30,
+        enabled: true,
+        tenantId: TENANT,
+      },
+      platformResolution: {
+        source: "none",
+        retentionDays: null,
+        enabled: false,
+      },
+      fieldDiffs: [{ field: "source", valueA: "tenant", valueB: "none" }],
+    });
+    expect(out).toContain("Platform:");
+    expect(out).toContain("source=none");
+    expect(out).toContain("(no policy configured)");
   });
 });
 

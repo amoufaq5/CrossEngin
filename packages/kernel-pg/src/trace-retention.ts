@@ -325,6 +325,19 @@ export interface DiffTenantPoliciesResult {
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
 }
 
+export interface DiffTenantVsPlatformInput {
+  readonly tenantId: string;
+  readonly tableName: string;
+}
+
+export interface DiffTenantVsPlatformResult {
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly tenantResolution: EffectiveRetentionResolution;
+  readonly platformResolution: EffectiveRetentionResolution;
+  readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -1354,6 +1367,80 @@ export class PostgresTraceRetention {
       fieldDiffs: computeFieldDiffs(
         normalizeResolutionForDiff(resolutionA),
         normalizeResolutionForDiff(resolutionB),
+      ),
+    };
+  }
+
+  async diffTenantVsPlatform(
+    input: DiffTenantVsPlatformInput,
+  ): Promise<DiffTenantVsPlatformResult> {
+    const [tenantResult, platformResult] = await Promise.all([
+      this.conn.query<RawTenantPolicyRow>(
+        `SELECT tenant_id, table_name, retention_days, enabled, opt_out, opt_out_reason, opt_out_until, last_pruned_at
+         FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE tenant_id = $1 AND table_name = $2`,
+        [input.tenantId, input.tableName],
+      ),
+      this.conn.query<RawPolicyRow>(
+        `SELECT table_name, retention_days, enabled, last_pruned_at
+         FROM ${SCHEMA}.${POLICIES_TABLE}
+         WHERE table_name = $1`,
+        [input.tableName],
+      ),
+    ]);
+
+    const platformRow = platformResult.rows[0];
+    const platformResolution: EffectiveRetentionResolution =
+      platformRow !== undefined
+        ? {
+            source: "platform",
+            retentionDays: platformRow.retention_days,
+            enabled: platformRow.enabled,
+          }
+        : { source: "none", retentionDays: null, enabled: false };
+
+    const tenantRow = tenantResult.rows[0];
+    let tenantResolution: EffectiveRetentionResolution = platformResolution;
+    if (tenantRow !== undefined) {
+      if (tenantRow.opt_out) {
+        const active =
+          tenantRow.opt_out_until === null ||
+          Date.parse(tenantRow.opt_out_until) > this.clock();
+        if (active) {
+          tenantResolution = {
+            source: "tenant_opt_out",
+            retentionDays: null,
+            enabled: false,
+            tenantId: tenantRow.tenant_id,
+            optOutReason: tenantRow.opt_out_reason,
+            optOutUntil: tenantRow.opt_out_until,
+          };
+        } else if (tenantRow.enabled) {
+          tenantResolution = {
+            source: "tenant",
+            retentionDays: tenantRow.retention_days,
+            enabled: true,
+            tenantId: tenantRow.tenant_id,
+          };
+        }
+      } else if (tenantRow.enabled) {
+        tenantResolution = {
+          source: "tenant",
+          retentionDays: tenantRow.retention_days,
+          enabled: true,
+          tenantId: tenantRow.tenant_id,
+        };
+      }
+    }
+
+    return {
+      tenantId: input.tenantId,
+      tableName: input.tableName,
+      tenantResolution,
+      platformResolution,
+      fieldDiffs: computeFieldDiffs(
+        normalizeResolutionForDiff(tenantResolution),
+        normalizeResolutionForDiff(platformResolution),
       ),
     };
   }
