@@ -7,6 +7,8 @@ import type {
   ListOptOutHistoryInput,
   OptOutHistoryEntry,
   PostgresTraceRetention,
+  RestoreTenantPolicyInput,
+  RestoreTenantPolicyResult,
   RetentionPolicyRow,
   SetTenantOptOutInput,
   SetTenantRetentionInput,
@@ -68,6 +70,8 @@ function fakeRetention(opts: {
   deleteCapture?: DeleteTenantPolicyInput[];
   historyEntries?: readonly OptOutHistoryEntry[];
   historyCapture?: ListOptOutHistoryInput[];
+  restoreResult?: RestoreTenantPolicyResult;
+  restoreCapture?: RestoreTenantPolicyInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -151,6 +155,25 @@ function fakeRetention(opts: {
       opts.historyCapture?.push(input);
       if (opts.throws !== undefined) throw opts.throws;
       return opts.historyEntries ?? [];
+    },
+    restoreTenantPolicy: async (input: RestoreTenantPolicyInput) => {
+      opts.restoreCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.restoreResult ?? {
+          kind: "restored",
+          policy: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            retentionDays: 30,
+            enabled: true,
+            optOut: false,
+            optOutReason: null,
+            optOutUntil: null,
+            lastPrunedAt: null,
+          },
+        }
+      );
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -2256,5 +2279,167 @@ describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () =
     );
     expect(code).toBe(0);
     expect(setOptOutCapture[0]?.actorId).toBeNull();
+  });
+});
+
+describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
+  const HISTORY_ID = "30000000-0000-4000-8000-000000000003";
+  const ACTOR = "11111111-1111-4111-8111-111111111111";
+
+  it("returns exit 2 when history-id arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "restore"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing argument");
+  });
+
+  it("threads historyId to adapter (default actorId null)", async () => {
+    const { ctx } = buffers();
+    const restoreCapture: RestoreTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ restoreCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(restoreCapture[0]).toEqual({
+      historyId: HISTORY_ID,
+      actorId: null,
+    });
+  });
+
+  it("threads --actor to adapter", async () => {
+    const { ctx } = buffers();
+    const restoreCapture: RestoreTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--actor", ACTOR),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ restoreCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(restoreCapture[0]?.actorId).toBe(ACTOR);
+  });
+
+  it("human-format prints 'restored' policy when kind=restored", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          restoreResult: {
+            kind: "restored",
+            policy: {
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              retentionDays: 90,
+              enabled: false,
+              optOut: true,
+              optOutReason: "legal_hold:case#42",
+              optOutUntil: "2027-01-01T00:00:00.000Z",
+              lastPrunedAt: null,
+            },
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Tenant restored");
+    expect(out()).toContain("90 day(s)");
+    expect(out()).toContain("legal_hold:case#42");
+  });
+
+  it("human-format prints 'restored from <id>: policy deleted' when kind=deleted", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          restoreResult: {
+            kind: "deleted",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`restored from ${HISTORY_ID}`);
+    expect(out()).toContain("policy deleted");
+    expect(out()).toContain("(prev_state was null)");
+    expect(out()).toContain(TENANT_A);
+  });
+
+  it("json-format emits envelope with action + historyId + result (restored)", async () => {
+    const { ctx, out } = buffers();
+    const restored: RestoreTenantPolicyResult = {
+      kind: "restored",
+      policy: {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 30,
+        enabled: true,
+        optOut: false,
+        optOutReason: null,
+        optOutUntil: null,
+        lastPrunedAt: null,
+      },
+    };
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ restoreResult: restored }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("restore");
+    expect(parsedJson.historyId).toBe(HISTORY_ID);
+    expect(parsedJson.result).toEqual(restored);
+  });
+
+  it("json-format emits envelope with kind=deleted variant", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          restoreResult: {
+            kind: "deleted",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.result.kind).toBe("deleted");
+    expect(parsedJson.result.tenantId).toBe(TENANT_A);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("history id 'xxx' not found"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("not found");
   });
 });

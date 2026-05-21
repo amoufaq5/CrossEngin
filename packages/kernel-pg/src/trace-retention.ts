@@ -186,6 +186,23 @@ export interface ListOptOutHistoryInput {
   readonly limit?: number;
 }
 
+export interface RestoreTenantPolicyInput {
+  readonly historyId: string;
+  readonly actorId?: string | null;
+  readonly attributes?: Record<string, unknown>;
+}
+
+export type RestoreTenantPolicyResult =
+  | {
+      readonly kind: "restored";
+      readonly policy: TenantRetentionPolicyRow;
+    }
+  | {
+      readonly kind: "deleted";
+      readonly tenantId: string;
+      readonly tableName: string;
+    };
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -879,6 +896,83 @@ export class PostgresTraceRetention {
         attributes: r.attributes,
       };
     });
+  }
+
+  async restoreTenantPolicy(
+    input: RestoreTenantPolicyInput,
+  ): Promise<RestoreTenantPolicyResult> {
+    const sourceResult = await this.conn.query<{
+      tenant_id: string;
+      table_name: string;
+      prev_state: Record<string, unknown> | null;
+    }>(
+      `SELECT tenant_id, table_name, prev_state
+       FROM ${SCHEMA}.${HISTORY_TABLE}
+       WHERE id = $1`,
+      [input.historyId],
+    );
+    const source = sourceResult.rows[0];
+    if (source === undefined) {
+      throw new Error(
+        `restoreTenantPolicy: history id '${input.historyId}' not found`,
+      );
+    }
+    const restoreAttrs: Record<string, unknown> = {
+      ...(input.attributes ?? {}),
+      restored_from: input.historyId,
+    };
+    const actorId = input.actorId ?? null;
+
+    if (source.prev_state === null) {
+      await this.deleteTenantPolicy({
+        tenantId: source.tenant_id,
+        tableName: source.table_name,
+        actorId,
+        attributes: restoreAttrs,
+      });
+      return {
+        kind: "deleted",
+        tenantId: source.tenant_id,
+        tableName: source.table_name,
+      };
+    }
+
+    const prev = source.prev_state as Record<string, unknown>;
+    const retentionDays = prev.retention_days;
+    if (typeof retentionDays !== "number") {
+      throw new Error(
+        `restoreTenantPolicy: prev_state missing retention_days (history id '${input.historyId}')`,
+      );
+    }
+    const optOut = prev.opt_out === true;
+    const optOutReason =
+      typeof prev.opt_out_reason === "string" ? prev.opt_out_reason : null;
+    const optOutUntil =
+      typeof prev.opt_out_until === "string" ? prev.opt_out_until : null;
+    const enabled = prev.enabled === true;
+
+    if (optOut) {
+      const policy = await this.setTenantOptOut({
+        tenantId: source.tenant_id,
+        tableName: source.table_name,
+        retentionDays,
+        optOutUntil,
+        optOutReason,
+        actorId,
+        attributes: restoreAttrs,
+      });
+      return { kind: "restored", policy };
+    }
+
+    const policy = await this.setTenantRetention({
+      tenantId: source.tenant_id,
+      tableName: source.table_name,
+      retentionDays,
+      enabled,
+      actorId,
+      attributes: restoreAttrs,
+    });
+    return { kind: "restored", policy };
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {

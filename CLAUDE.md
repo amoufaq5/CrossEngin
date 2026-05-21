@@ -21,15 +21,99 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,295 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.history
+**56 packages + 1 app, 129 meta-schema tables, 8,313 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.restore
+closes ADR-0169 Q7 + ADR-0170 Q4 by adding `crossengin
+retention restore <history-id>` action +
+restoreTenantPolicy adapter method. The audit-log table
+shipped in ADR-0170 captured prev_state on every mutation;
+this milestone wires undo. Operators making mistakes
+(wrong tenant, wrong table, wrong retention days) recover
+in one command. Adapter restoreTenantPolicy({historyId,
+actorId?, attributes?}) returns discriminated
+RestoreTenantPolicyResult: {kind:"restored", policy} when
+prev_state had data, {kind:"deleted", tenantId, tableName}
+when prev_state was null (restoring to absence — the
+policy was originally created by the source event, so
+"restore to before-state" means delete it now). Algorithm
+two queries — SELECT source history row by id (throws if
+not found), then dispatch on prev_state shape: null →
+deleteTenantPolicy, opt_out=true → setTenantOptOut with
+prev fields, otherwise → setTenantRetention with prev
+fields. The restore adds {restored_from: historyId} to
+attributes (merged with caller-provided attributes) so the
+new history row written by the underlying mutation carries
+forensic traceability. Delegates to existing mutation
+methods rather than custom restore SQL — reuses their
+atomic CTE history-write pattern, inherits their tests +
+behavior, no new code path. Why no new policy_restored
+event_kind: audit clarity preserved via attributes.restored_from
+(operators see actual mutation kind opt_out_set / retention_set
+/ policy_deleted plus restore reference in attributes);
+restore is meta-operation not new policy state; additive
+schema change deferred; operator query `WHERE attributes->>
+'restored_from' IS NOT NULL` works without it. Defensive
+runtime check on prev_state.retention_days as number (
+schema-drift safety). CLI takes positional <history-id>
+(exit 2 if missing) + optional --actor flag. Human output
+reuses formatPolicyChange("restored", policy) helper for
+kind=restored variant; renders "restored from <id>: policy
+deleted (prev_state was null) — tenant X / table Y" for
+kind=deleted variant. JSON envelope {action: "restore",
+historyId, result} where result preserves discriminated
+union shape for jq branching on .result.kind. Use cases
+unblocked — recover from accidental delete (history --kind
+policy_deleted | restore), undo wrong opt-out, roll back
+tier migration mistake, compliance audit "restore proof"
+via jq filter on attributes.restored_from, CI test recovery
+via clean reset. Rejected alternatives: single CTE for
+source-lookup + restore (polymorphic apply on event_kind
+makes CTE unreadable), generic applyPolicyState method
+(duplicates four mutation methods), new policy_restored
+event_kind (audit clarity via attributes + restore is meta-
+op), dedicated restored_from column (attributes JSONB
+designed for this), refuse restore for policy_deleted
+events (that IS the headline use case), --dry-run flag
+(defer), restore by tenant+table most recent (ambiguous —
+operators may want specific historical state), atomic
+restore-and-emit-policy_restored CTE (see above),
+restore --to-time DATE (would need to walk multiple
+history rows — defer to advanced action), cascade restore
+across multiple rows (semantics unclear — defer). 10 new
+adapter tests + 8 new CLI tests = 18 total covering: throws
+when history id not found, looks up source by id with
+WHERE id=$1, prev_state=null restores via DELETE
+(kind="deleted"), prev_state opt_out=true restores via
+setTenantOptOut, prev_state opt_out=false restores via
+setTenantRetention, attributes.restored_from added,
+caller-provided attributes merged with restored_from,
+actorId threaded to underlying mutation, throws when
+prev_state missing retention_days, kind="deleted" result
+carries tenantId+tableName from source row, CLI missing
+history-id arg exit 2, threads historyId (actorId null
+by default), --actor threading, human output "Tenant
+restored" for kind=restored, human output "restored from
+<id>: policy deleted" for kind=deleted, JSON envelope
+{action, historyId, result} restored variant, JSON envelope
+deleted variant, adapter errors propagate exit 1. cli.ts
+helpText extended with retention restore usage line + the
+multi-line description explaining prev_state-null
+behavior. ADR-0171 documents the design + 10 rejected
+alternatives + 7 future Qs (--dry-run, --to-time DATE,
+batch restore, confirmation prompt for destructive
+restores, restore-from-snapshot cross-tenant, lastPrunedAt
+preservation semantic, GUI dashboard integration). The
+retention CLI now has 10 actions (3 read + 4 write + 1
+audit + 1 restore-undo); the history table is now
+operationally complete — capturing every change AND
+enabling undo. M6.7.zz.tenant.opt-out.history
 closes six prior ADR Qs (ADR-0161 alt-1 + ADR-0162 Q7 +
 ADR-0166 Q1+Q2 + ADR-0167 Q3 + ADR-0168 Q6 + ADR-0169 audit
 + restore Qs) by shipping META_TENANT_RETENTION_OPT_OUT_HISTORY
@@ -4794,7 +4878,19 @@ existing-CTE snapshot or DELETE RETURNING + next_state
 JSONB from INSERT/UPDATE RETURNING + nullable actor_id;
 five filter dimensions on the query method + history
 CLI; substrate gains audit-log pattern future audit tables
-can copy).
+can copy),
+ADR-0171 covers M6.7.zz.tenant.opt-out.cli.restore
+(`crossengin retention restore <history-id>` action +
+restoreTenantPolicy adapter method — closes ADR-0169 Q7
++ ADR-0170 Q4 — wires undo on top of the audit-log table;
+reads source history row's prev_state and delegates to
+existing mutation method (deleteTenantPolicy for null,
+setTenantOptOut for opt_out=true, setTenantRetention
+otherwise); adds attributes.restored_from for forensic
+traceability; discriminated RestoreTenantPolicyResult
+covers kind="restored" + kind="deleted" variants;
+operational undo for accidental delete / wrong opt-out
+/ tier migration mistake recovery workflows).
 
 ## Architecture in 90 seconds
 
@@ -6283,6 +6379,129 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0171 covers Phase 2 M6.7.zz.tenant.opt-out.cli.restore
+(`crossengin retention restore <history-id>` CLI action +
+restoreTenantPolicy adapter method on PostgresTraceRetention
+— closes ADR-0169 Q7 + ADR-0170 Q4; wires undo on top of
+the audit-log table shipped in ADR-0170 — prev_state was
+already captured on every mutation, this milestone uses
+it; adapter takes RestoreTenantPolicyInput {historyId,
+actorId?, attributes?} and returns discriminated
+RestoreTenantPolicyResult — {kind:"restored", policy:
+TenantRetentionPolicyRow} when prev_state had data,
+{kind:"deleted", tenantId, tableName} when prev_state was
+null (the source event created a new row, so restoring to
+before-state means delete it now); two-query algorithm —
+SELECT source history row by id (throws not_found),
+dispatch on prev_state: null → deleteTenantPolicy,
+opt_out=true → setTenantOptOut with prev fields
+(retentionDays/optOutUntil/optOutReason), otherwise →
+setTenantRetention with prev fields (retentionDays/
+enabled); attributes merged with {restored_from: historyId}
+so new history row written by underlying mutation carries
+forensic traceability; delegates to existing mutation
+methods rather than custom restore SQL — reuses their
+atomic CTE history-write pattern, inherits their tests +
+behavior, no new code path needed; defensive runtime check
+on prev_state.retention_days as number (schema-drift
+safety); CLI takes positional <history-id> (exit 2 if
+missing) + optional --actor flag; human output for
+kind=restored reuses shared formatPolicyChange("restored",
+policy) helper rendering 'Tenant restored: <uuid> /
+<table>' header + day + enabled + opt-out + conditional
+Until + conditional Reason lines; human output for
+kind=deleted renders 'restored from <history-id>: policy
+deleted (prev_state was null) — tenant X / table Y'; JSON
+envelope {action: "restore", historyId, result} preserves
+discriminated union shape for jq branching on .result.kind;
+why no new policy_restored event_kind — audit clarity
+preserved via attributes.restored_from (operators see
+actual mutation kind opt_out_set/retention_set/policy_deleted
+plus restore reference); restore is meta-operation not
+new policy state — schema's event kinds describe what
+happened on the row, restore describes how operator chose;
+additive schema change avoided; query 'WHERE attributes
+->>'restored_from' IS NOT NULL' works without new kind;
+why delegation over custom SQL — polymorphic apply on
+event_kind would make single CTE unreadable, delegation
+reuses four mutation methods' tested atomic CTE write
+pattern, restore inherits future improvements to those
+methods; why attributes JSONB over dedicated column —
+attributes designed exactly for extensible audit metadata,
+restored_from joins source: "cli" / correlationId /
+operator-defined keys; use cases unblocked — recover from
+accidental delete (history --kind policy_deleted --limit 1
+| restore), undo wrong opt-out by finding most recent
+opt_out_set then restore, roll back tier migration mistake
+via prev_state retentionDays reversion, compliance audit
+'restore proof' via jq filter on attributes.restored_from
+showing every restore action with source-of-truth history
+reference, CI test recovery via clean reset from fresh
+history; rejected alternatives — single CTE for source-
+lookup + restore (polymorphic apply on event_kind makes
+CTE unreadable beyond maintainability threshold), generic
+applyPolicyState method (essentially duplicates four
+existing mutation methods), new policy_restored event_kind
+(audit clarity already preserved via attributes), dedicated
+restored_from column on history table (attributes JSONB is
+the canonical extensible audit metadata location), refuse
+restore for policy_deleted events on the basis row is gone
+(that IS the headline use case — DELETE history rows have
+valid prev_state from RETURNING d.* and restoring re-creates
+the policy), --dry-run flag this milestone (defer),
+restore by tenant+table most-recent event (ambiguous —
+operators may want to restore to specific historical state
+not just last; by-history-id is unambiguous), atomic
+restore-and-emit-policy_restored CTE (combines complexity
+of #1 + #3), restore --to-time DATE (would need to walk
+multiple history rows computing state at time T — defer
+to advanced action if requested), cascade restore across
+multiple history rows (semantics unclear — defer); 10
+new adapter tests in trace-retention.test.ts — throws
+when history id not found, looks up source by id with
+WHERE id=$1 first-query, prev_state=null restores via
+DELETE second-query (kind="deleted" result, SQL contains
+'policy_deleted'), prev_state opt_out=true restores via
+setTenantOptOut second-query (SQL contains 'opt_out_set',
+result.policy carries restored fields), prev_state
+opt_out=false restores via setTenantRetention second-query
+(SQL contains 'retention_set'), attributes.restored_from
+added to mutation attributes param, caller-provided
+attributes merged with restored_from, actorId threaded to
+underlying mutation as parameter $4 or $5, throws when
+prev_state missing retention_days defensive check, kind=
+"deleted" result carries tenantId+tableName from source
+row not from input args; 8 new CLI tests in retention.
+test.ts — missing history-id arg returns exit 2, threads
+historyId+actorId=null defaults to adapter, --actor flag
+threading verified, human-format renders 'Tenant restored'
+for kind=restored variant with policy fields + reason,
+human-format renders 'restored from <id>: policy deleted
+(prev_state was null) — tenant X / table Y' for kind=
+deleted variant, JSON envelope shape {action: "restore",
+historyId, result} for restored variant, JSON envelope
+deleted variant with result.kind="deleted" + tenantId,
+adapter errors propagate as exit 1 with clear message;
+cli.ts helpText extended with retention restore usage line
++ multi-line description explaining prev_state-null
+behavior (restores via DELETE, populated prev_state via
+setTenantOptOut or setTenantRetention based on prev_state
+.opt_out); future Qs cover --dry-run flag showing prev_state
++ which method would be called, restore --to-time DATE
+walking history to compute state at time T, batch restore
+restore-bulk file.csv for tier migration rollbacks,
+confirmation prompt --confirm for destructive restores
+(when prev_state null would DELETE an existing policy
+matching apply --confirm pattern), restore-from-snapshot
+for cross-tenant bulk operations, lastPrunedAt preservation
+semantic on restore (currently inherits underlying mutation
+methods' behavior — documented), GUI/dashboard integration
+with history timeline + one-click restore out of CLI
+scope). The retention CLI is now operationally complete on
+the audit + recovery axes — 10 actions total (3 read +
+4 write + 1 audit + 1 restore-undo); the audit-log table
+is now usefully connected to recovery workflows not just
+forensic reads.
 ADR-0170 covers Phase 2 M6.7.zz.tenant.opt-out.history
 (META_TENANT_RETENTION_OPT_OUT_HISTORY append-only audit
 log + atomic history writes from all 4 mutation methods +

@@ -8,6 +8,7 @@ import {
   type OptOutHistoryEntry,
   type OptOutHistoryEventKind,
   type PgConnection,
+  type RestoreTenantPolicyResult,
   type RetentionPolicyRow,
   type TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
@@ -36,7 +37,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore> [args]",
     );
     return 2;
   }
@@ -60,10 +61,12 @@ export async function runRetention(
         return await runRetentionListPolicies(command, ctx, handle.retention);
       case "history":
         return await runRetentionHistory(command, ctx, handle.retention);
+      case "restore":
+        return await runRetentionRestore(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore`,
         );
         return 2;
     }
@@ -761,5 +764,46 @@ async function runRetentionDelete(
       `no per-tenant policy for tenant ${tenantId} on ${tableName} (idempotent no-op)`,
     );
   }
+  return 0;
+}
+
+async function runRetentionRestore(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const historyId = command.positional[1];
+  if (historyId === undefined) {
+    printError(
+      ctx.io,
+      "retention restore: missing argument. usage: crossengin retention restore <history-id> [--actor <uuid>]",
+    );
+    return 2;
+  }
+  const actorId = getStringFlag(command, "actor");
+
+  let result: RestoreTenantPolicyResult;
+  try {
+    result = await retention.restoreTenantPolicy({ historyId, actorId });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention restore: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "restore", historyId, result });
+    return 0;
+  }
+  if (result.kind === "deleted") {
+    printSuccess(
+      ctx.io,
+      `restored from ${historyId}: policy deleted (prev_state was null) — tenant ${result.tenantId} / ${result.tableName}`,
+    );
+    return 0;
+  }
+  ctx.io.stdout.write(formatPolicyChange("restored", result.policy));
   return 0;
 }
