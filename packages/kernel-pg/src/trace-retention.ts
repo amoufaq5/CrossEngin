@@ -271,6 +271,7 @@ export interface ListOptOutHistoryInput {
   readonly tenantId?: string;
   readonly tableName?: string;
   readonly eventKind?: OptOutHistoryEventKind;
+  readonly actorId?: string;
   readonly since?: string;
   readonly until?: string;
   readonly limit?: number;
@@ -1158,6 +1159,10 @@ export class PostgresTraceRetention {
     if (input.eventKind !== undefined) {
       params.push(input.eventKind);
       conditions.push(`h.event_kind = $${params.length}`);
+    }
+    if (input.actorId !== undefined) {
+      params.push(input.actorId);
+      conditions.push(`h.actor_id = $${params.length}`);
     }
     if (input.since !== undefined) {
       params.push(input.since);

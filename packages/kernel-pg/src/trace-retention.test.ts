@@ -3943,6 +3943,117 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
   });
 });
 
+describe("PostgresTraceRetention.listOptOutHistory actorId filter (M6.7.zz.tenant.opt-out.cli.history.actor-filter)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const ACTOR_A = "11111111-1111-4000-8000-111111111111";
+  const ACTOR_B = "22222222-2222-4000-8000-222222222222";
+
+  it("adds h.actor_id = $N WHERE clause when actorId is set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ actorId: ACTOR_A });
+    expect(capture[0]?.sql).toContain("h.actor_id = $1");
+    expect(capture[0]?.params).toEqual([ACTOR_A, 100]);
+  });
+
+  it("omits actor_id WHERE clause when actorId is not set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({});
+    expect(capture[0]?.sql).not.toContain("h.actor_id =");
+  });
+
+  it("composes with other filters (tenantId + actorId)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      tenantId: TENANT_A,
+      actorId: ACTOR_A,
+    });
+    expect(capture[0]?.sql).toContain("h.tenant_id = $1");
+    expect(capture[0]?.sql).toContain("h.actor_id = $2");
+    expect(capture[0]?.params).toEqual([TENANT_A, ACTOR_A, 100]);
+  });
+
+  it("composes with joinActor (actor-id filter + LEFT JOIN names)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      actorId: ACTOR_A,
+      joinActor: true,
+    });
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users");
+    expect(capture[0]?.sql).toContain("h.actor_id = $1");
+  });
+
+  it("composes with all filter dimensions (tenant + table + kind + actor + since + until + afterId)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      eventKind: "opt_out_set",
+      actorId: ACTOR_A,
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-06-01T00:00:00.000Z",
+      afterId: "00000000-0000-0000-0000-000000000001",
+      limit: 50,
+    });
+    expect(capture[0]?.sql).toContain("h.tenant_id = $1");
+    expect(capture[0]?.sql).toContain("h.table_name = $2");
+    expect(capture[0]?.sql).toContain("h.event_kind = $3");
+    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.occurred_at >= $5");
+    expect(capture[0]?.sql).toContain("h.occurred_at <= $6");
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) <");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "opt_out_set",
+      ACTOR_A,
+      "2026-01-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+      "00000000-0000-0000-0000-000000000001",
+      50,
+    ]);
+  });
+
+  it("returns only rows matching the actor (substrate verifies WHERE filter)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        {
+          id: "h1",
+          tenant_id: TENANT_A,
+          table_name: "workflow_traces",
+          event_kind: "opt_out_set",
+          actor_id: ACTOR_A,
+          occurred_at: "2026-05-21T00:00:00.000Z",
+          prev_state: null,
+          next_state: { opt_out: true },
+          attributes: {},
+        },
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const entries = await r.listOptOutHistory({ actorId: ACTOR_A });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.actorId).toBe(ACTOR_A);
+  });
+
+  it("returns empty array when filtered actor has no rows", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const entries = await r.listOptOutHistory({ actorId: ACTOR_B });
+    expect(entries).toEqual([]);
+  });
+});
+
 describe("PostgresTraceRetention.listOptOutHistory joinActor (M6.7.zz.tenant.opt-out.history.actor-join)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const ACTOR_A = "11111111-1111-4000-8000-111111111111";

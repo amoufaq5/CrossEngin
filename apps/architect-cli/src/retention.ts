@@ -797,6 +797,7 @@ async function runRetentionHistory(
   const untilFlag = getStringFlag(command, "until");
   const limitFlag = getStringFlag(command, "limit");
   const afterIdFlag = getStringFlag(command, "after-id");
+  const actorIdFlag = getStringFlag(command, "actor-id");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
 
   let kind: OptOutHistoryEventKind | undefined;
@@ -856,6 +857,7 @@ async function runRetentionHistory(
       tenantId: tenantFilter ?? undefined,
       tableName: tableFilter ?? undefined,
       eventKind: kind,
+      actorId: actorIdFlag ?? undefined,
       since,
       until,
       limit,
@@ -878,6 +880,7 @@ async function runRetentionHistory(
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
       eventKind: kind ?? null,
+      actorId: actorIdFlag ?? null,
       since: since ?? null,
       until: until ?? null,
       afterId: afterIdFlag ?? null,

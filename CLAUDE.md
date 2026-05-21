@@ -21,15 +21,131 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,564 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.history.actor-join
+**56 packages + 1 app, 129 meta-schema tables, 8,578 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.actor-filter
+closes ADR-0185 Q1 by adding `--actor-id <uuid>` filter to
+`retention history`. Operators wanting "show me everything
+actor X did in the last week" previously fetched full
+history then jq-filtered — current workaround
+`--format json | jq '.entries[] | select(.actorId == "...")'`
+broke LIMIT correctness (asking for --limit 100 returned
+<100 entries after jq filtered) and pagination correctness
+(--after-id semantics with jq-side filter are wrong);
+substrate-side WHERE filter fixes both. Adapter
+ListOptOutHistoryInput gains optional actorId?: string
+field positioned between eventKind and since in WHERE
+clause assembly (param sequence $1:tenantId, $2:tableName,
+$3:eventKind, $4:actorId, $5:since, $6:until, $7:afterId,
+$8:limit when all set); when set SQL adds h.actor_id = $N
+condition + index-scan on existing actor_id column; when
+omitted no actor filter applied existing behavior
+preserved. Composes uniformly with every existing filter
+dimension — --tenant + --actor-id (actor's mutations on
+one tenant), --table + --actor-id (one table), --kind +
+--actor-id (specific event kind), --since/--until +
+--actor-id (time range), --after-id + --actor-id
+(paginated actor-scoped history), --with-actor-names +
+--actor-id (actor-scoped + display-name surfacing
+canonical "Alice's audit log" pattern). JSON envelope
+gains actorId field (string when set, null when not)
+position between eventKind and since matches WHERE-clause
+order. No null-actor filtering — operators wanting
+actor_id IS NULL events jq-filter on .actorId === null
+(substrate stays minimal one filter per dimension no
+sentinel values null is logically absence of actor not
+specific actor ID jq idiom is one-liner). Pure CLI
+delivery modulo one adapter input field — no new types
+no new helpers no result-shape changes mechanical
+addition. Use cases unblocked — per-actor incident
+response (--actor-id <suspect> --with-actor-names --since
+2026-05-01), compliance attestation per officer (for loop
+through compliance-officers.txt jq aggregating), "what
+did Alice do in the last 7 days?" (--actor-id <uuid>
+--with-actor-names --since 7d-ago reads like English),
+CI gate on unauthorized-actor mutations (--actor-id
+service-account --since build-start jq length > 0 fails
+build). Rejected alternatives — CLI-side jq filtering as
+documented workflow (rejected — substrate-side ensures
+LIMIT + pagination correctness; jq-side returns < N
+entries when filtering bites), --actor-id-equals /
+--actor-id-not pair (overkill for v1 positive-only is
+common case; defer not-equals), multi-actor --actor-id
+repeated via multiFlags (operators wanting OR across N
+actors; pair-wise sufficient for now run twice + concat),
+--actor system sentinel for null filtering (overloads
+string semantic; operators jq-filter), add actor_id
+composite index (schema migration concern defer until
+measured slow), --actor-id-pattern regex (operators with
+structured ID schemes uncommon defer), implicit actor
+scoping via --my or $CROSSENGIN_ACTOR_ID env var
+(operator-state-dependent magic; explicit --actor-id
+clearer), surface in JSON as actorFilter for naming
+consistency with tenantFilter/tableFilter (chose actorId
+because per-entry actorId field already uses that name;
+envelope-level matches entry-level). Drawbacks — no
+null-actor sentinel operators wanting actor_id IS NULL
+filtering jq-filter (documented), no --actor-id-not
+exclusion operators excluding one actor jq-filter
+(defer), no multi-actor filter (--actor-id alice
+--actor-id bob with OR semantics; operators wanting that
+run two commands concatenate defer), no --actor-name-
+equals for human-readable input (requires actor → UUID
+resolution operators look up UUIDs first; future Q
+paired with ADR-0185 Q2), substrate-side index
+requirement actor_id filtering without composite index
+(actor_id, occurred_at) does sequence scan + sort defer
+until measured slow meta-schema currently has no
+actor_id index, no validation of UUID shape at CLI
+boundary operators passing invalid UUIDs hit PG error
+message rather than CLI exit-2 (matches existing
+pattern from --after-id ADR-0175 deferred validation
+to PG). 7 new adapter tests in trace-retention.test.ts
+(adds h.actor_id = $N WHERE clause when actorId set
+verified via SQL substring + params, omits actor_id
+WHERE when actorId not set, composes with tenantId
+(both h.tenant_id = $1 + h.actor_id = $2 verified),
+composes with joinActor (LEFT JOIN + actor-id WHERE
+both present), composes with ALL filter dimensions
+(tenant + table + kind + actor + since + until +
+afterId + limit — full param array verified), returns
+only rows matching actor verified via mock row +
+adapter result actorId check, returns empty when
+filtered actor has no rows); 7 new CLI tests in
+retention.test.ts (threads actor-id to adapter when
+--actor-id set, omits actorId from adapter input when
+not set backward compat, composes with --tenant +
+--actor-id + --kind, composes with --with-actor-names
+verifying both actorId + joinActor:true threaded, JSON
+envelope includes actorId field with value when set,
+JSON envelope actorId null when not set, human-format
+empty-result message preserved when --actor-id has no
+matches). cli.ts helpText extended with --actor-id
+<uuid> flag note added to retention history usage line
++ description mentioning actor filtering for one
+actor's mutations. ADR-0186 documents the design + 8
+rejected alternatives + 7 future Qs (--actor-name-
+equals via meta.users.display_name JOIN pairing with
+ADR-0185, multi-actor via repeated --actor-id using
+multiFlags from ADR-0183, --actor-id-not exclusion,
+composite index on (actor_id, occurred_at) for large-
+scale pagination, CLI-side UUID validation matching
+ADR-0175 deferred decision, --system-only flag for
+actor_id IS NULL, surface --actor-id in audit-log diff
+actions like retention diff-history --actor-id).
+The retention CLI now has 17 actions with 6 filter
+dimensions on retention history (tenant + table +
+kind + actor + since + until) plus cursor pagination
+plus --with-actor-names display surfacing —
+comprehensive per-actor forensic + compliance
+workflows now CLI-native.
+M6.7.zz.tenant.opt-out.history.actor-join
 closes ADR-0170 Q9 by adding `--with-actor-names` flag to
 `retention history` + LEFT JOIN meta.users in the
 listOptOutHistory adapter when joinActor:true. Operators
@@ -6633,7 +6749,19 @@ for null actor_id; backward compat preserved fields
 absent when flag not set; substrate now aliases history
 table as h consistently to support JOIN; replaces
 operator-side meta.users lookup loop for every audit
-review).
+review),
+ADR-0186 covers M6.7.zz.tenant.opt-out.cli.history.actor-filter
+(`retention history --actor-id <uuid>` filter — closes
+ADR-0185 Q1 — ListOptOutHistoryInput gains actorId?:
+string field positioned between eventKind and since;
+substrate-side WHERE filter h.actor_id = $N ensures
+LIMIT + pagination correctness vs jq-side post-fetch
+filtering; composes with all 5 existing filter
+dimensions + cursor pagination + --with-actor-names
+display surfacing; JSON envelope gains actorId field;
+no null-actor sentinel operators jq-filter for system
+events; pair with --with-actor-names for canonical
+"Alice's audit log" pattern).
 
 ## Architecture in 90 seconds
 
@@ -9518,6 +9646,190 @@ retention CLI now has 17 actions with audit-readability
 across the history surface — operators get human-
 readable actor attribution via opt-in flag without
 changing the default cheap query path.
+ADR-0186 covers Phase 2 M6.7.zz.tenant.opt-out.cli.history.actor-filter
+(`crossengin retention history --actor-id <uuid>`
+filter — closes ADR-0185 Q1; after ADR-0170 shipped 5
+filter dimensions (tenant, table, kind, since, until),
+ADR-0175 added --after-id cursor pagination, and
+ADR-0185 added --with-actor-names display surfacing,
+operators kept wanting "show me everything actor X
+did in the last week" — current jq-filter workaround
+broke LIMIT correctness (asking for --limit 100
+returned <100 entries after post-fetch filter) and
+pagination correctness (--after-id semantics with
+jq-side filter are wrong; skip-then-filter is wrong,
+filter-then-skip is right; substrate-side filtering
+is the only way to get this right) plus index usage
+(PG can use composite index on (actor_id,
+occurred_at) if added; jq filtering can't); single
+substrate-side WHERE filter eliminates jq dance.
+CLI surface `retention history [...other flags...]
+[--actor-id <uuid>]` — string flag scoping history to
+mutations performed by that actor; when omitted no
+actor filter applied existing behavior preserved.
+Adapter — ListOptOutHistoryInput gains optional
+actorId?: string field; when set SQL WHERE adds
+h.actor_id = $N condition with index-scan on existing
+actor_id column; filter position between eventKind
+and since in WHERE-clause assembly order placing
+actor-based filters near "who" semantically (tenant +
+table + kind + actor + time-range); param-number
+sequence $1: tenantId, $2: tableName, $3: eventKind,
+$4: actorId, $5: since, $6: until, $7: afterId, $8:
+limit when all set. Substrate-side not CLI-side — the
+filter happens in PG via WHERE clause not via post-
+fetch jq; three benefits: LIMIT correctness
+(operators asking for --limit 100 --actor-id <x> get
+the latest 100 entries BY that actor not the latest
+100 entries filtered to that actor which may return
+<100), cursor pagination correctness (--after-id
+semantics with --actor-id work intuitively — skip-
+then-filter-by-actor is wrong; filter-then-skip is
+right; substrate-side filtering is the only way),
+index usage (PG can use composite index on
+(actor_id, occurred_at) if added; jq filtering can't).
+Composes uniformly with every existing filter
+dimension — --tenant + --actor-id (actor's mutations
+on one tenant), --table + --actor-id (one table),
+--kind + --actor-id (specific event kind), --since /
+--until + --actor-id (time range), --after-id +
+--actor-id (paginated actor-scoped history),
+--with-actor-names + --actor-id (actor-scoped +
+display-name surfacing — canonical "Alice's audit
+log" pattern). No null-actor filtering — operators
+wanting "only system-actor events" where actor_id IS
+NULL jq-filter on .actorId === null; three reasons:
+substrate stays minimal (one filter per dimension no
+sentinel values), null is logically the absence of an
+actor not a specific actor ID, jq idiom is one-liner
+(crossengin retention history --format json | jq
+'.entries[] | select(.actorId == null)'); future Q if
+measured demand. JSON envelope gains an actorId field
+(string when --actor-id set null when not) operators
+piping through jq can branch on it; position between
+eventKind and since matches WHERE-clause order. Pure
+CLI delivery modulo adapter input field — the adapter
+gets one new field (actorId?: string), the CLI gets
+one new flag (--actor-id), no new types no new
+helpers no result-shape changes mechanical addition.
+Use cases unblocked — per-actor incident response
+(crossengin retention history --actor-id <suspect-
+actor-uuid> --with-actor-names --since 2026-05-01
+lists every mutation by that actor since May 1 with
+display name), compliance attestation per officer
+(for officer in $(cat compliance-officers.txt); do
+crossengin retention history --actor-id "$officer"
+--tenant "$regulated-tenant" --format json; done |
+jq -s aggregating), "what did Alice do in the last
+7 days?" (--actor-id alice_uuid --with-actor-names
+--since 7-days-ago reads like English; output is
+clean per-actor changelog), CI gate on unauthorized-
+actor mutations (crossengin retention history
+--actor-id service-account-id --since build-start
+--format json | jq '.entries | length' — if > 0
+automated mutation occurred during build window
+investigate). Rejected alternatives — CLI-side jq
+filtering as documented workflow (rejected substrate-
+side ensures LIMIT + pagination correctness jq-side
+returns < N entries when filtering bites),
+--actor-id-equals / --actor-id-not pair (overkill
+for v1 positive-only is common case rejected defer
+not-equals variant), multi-actor --actor-id repeated
+via multiFlags (operators wanting OR-semantic across
+N actors pair-wise sufficient for now run twice +
+concat multi-actor defer), --actor system sentinel
+for null filtering (overloads string semantic null
+is valid filter doesn't need sentinel operators jq-
+filter), add actor_id index in this milestone
+(schema migration concern defer until measured slow),
+--actor-id-pattern regex for pattern matching
+(operators with structured ID schemes uncommon
+defer), implicit actor scoping via --my or
+$CROSSENGIN_ACTOR_ID env var (operator-state-
+dependent magic explicit --actor-id clearer),
+surface in JSON envelope as actorFilter not actorId
+for naming consistency with tenantFilter/tableFilter
+(chose actorId because per-entry actorId field
+already uses that name envelope-level matches
+entry-level rejected verbose form). Drawbacks — no
+null-actor sentinel operators wanting actor_id IS
+NULL filtering jq-filter (documented), no
+--actor-id-not exclusion operators excluding one
+actor (everything Alice didn't do) jq-filter defer,
+no multi-actor filter (--actor-id alice --actor-id
+bob with OR semantics; operators run two commands +
+concatenate could use multiFlags from ADR-0183 —
+defer), no --actor-name-equals for human-readable
+input (requires actor → UUID resolution operators
+look up UUIDs first; future Q paired with ADR-0185
+Q2), substrate-side index requirement actor_id
+filtering without composite index (actor_id,
+occurred_at) does sequence scan + sort defer until
+measured slow meta-schema currently has no actor_id
+index on tenant_retention_opt_out_history, no
+validation of UUID shape at CLI boundary operators
+passing invalid UUIDs hit PG's error message rather
+than a CLI exit-2 (matches existing pattern from
+--after-id ADR-0175 which deferred validation to PG).
+7 new adapter tests in trace-retention.test.ts —
+adds h.actor_id = $N WHERE clause when actorId is
+set verified via SQL substring + params [ACTOR_A,
+100] (limit at end), omits actor_id WHERE clause
+when actorId is not set verified via not.toContain,
+composes with other filters tenantId + actorId
+(h.tenant_id = $1 + h.actor_id = $2 verified with
+params [TENANT_A, ACTOR_A, 100]), composes with
+joinActor actor-id filter + LEFT JOIN names (LEFT
+JOIN meta.users + h.actor_id = $1 both present),
+composes with all filter dimensions tenant + table
++ kind + actor + since + until + afterId + limit
+(full param array [TENANT_A, workflow_traces,
+opt_out_set, ACTOR_A, since, until, afterId, 50]
+verified plus all 7 SQL substrings present),
+returns only rows matching the actor verified via
+mock row + adapter result actorId check, returns
+empty array when filtered actor has no rows. 7 new
+CLI tests in retention.test.ts — threads actor-id
+to adapter when --actor-id is set verified via
+historyCapture, omits actorId from adapter input
+when --actor-id NOT set backward compat verified,
+composes with other filters --tenant + --actor-id
++ --kind (full input shape matched), composes with
+--with-actor-names actor-id filter + LEFT JOIN
+names (capture verifies both actorId + joinActor:
+true threaded), JSON envelope includes actorId
+field with value when set, JSON envelope actorId
+is null when --actor-id not set, human-format
+empty-result message preserved when --actor-id has
+no matches ("no history entries match"). cli.ts
+helpText extended with --actor-id <uuid> flag note
+added to retention history usage line + description
+mentioning "actor filtering for one actor's
+mutations" + 6-filter-dimension semantic. Future Qs
+cover --actor-name-equals <name> filter resolving
+through meta.users.display_name (requires JOIN
+pairs with ADR-0185 --with-actor-names
+infrastructure future Q), multi-actor via repeated
+--actor-id using ADR-0183 multiFlags infrastructure
+(operators with cohort audit needs would benefit
+defer until measured demand), --actor-id-not <uuid>
+for exclusion defer, composite index on (actor_id,
+occurred_at) for large-scale actor-scoped
+pagination defer until measured slow, CLI-side UUID
+validation matching ADR-0175 deferred decision PG
+gives clearer error, --system-only boolean flag for
+actor_id IS NULL filtering defer operators jq-filter
+substrate doesn't need sentinel, surface --actor-id
+filter in audit-log diff actions like retention
+diff-history --actor-id <uuid> filtering events by
+actor before diffing different surface future ADR
+if requested. The retention CLI now has 17 actions
+with 6 filter dimensions on retention history
+(tenant + table + kind + actor + since + until)
+plus cursor pagination + --with-actor-names display
+surfacing — comprehensive per-actor forensic +
+compliance workflows now CLI-native without LIMIT/
+pagination-correctness gotchas.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey
