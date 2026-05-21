@@ -21,15 +21,95 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,342 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history
+**56 packages + 1 app, 129 meta-schema tables, 8,357 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.prune
+closes ADR-0172 Q2 by adding `crossengin retention prune
+[--dry-run]` action — pure CLI delivery, no new substrate
+code. The pruning machinery already existed via
+PostgresTraceRetention.prune() (ADR-0143) and previewPrune
+(ADR-0153); operators invoked them only through scheduled
+jobs. This milestone exposes ad-hoc invocation at the
+terminal — debugging stuck prunes, on-demand compliance
+sweeps, validation after configuring new policies, CI
+gates, post-incident forensic snapshots. Single CLI action
++ one optional flag (--dry-run) wraps the two adapter
+methods one-for-one: default calls prune() returning
+RetentionRunResult[], --dry-run calls previewPrune()
+returning RetentionPreviewResult[]. Two distinct formatter
+functions (formatPruneRun / formatPrunePreview) keep
+terminology distinct — header 'Retention prune results'
+vs 'Retention prune dry-run results', count label
+'deleted=N' vs 'would_delete=N', summary verb 'pruned'
+vs 'would prune'. Per-row format: <status> <table-name>
+<tenant=uuid|(platform)> <count> retention=Nd cutoff=<iso>
+with extra reason=X until=Y appended for skipped_opt_out
++ skipped_opt_out_expired statuses (the latter also gets
+'(EXPIRED)' marker). Summary line aggregates pruned count
++ row count + categorised skip counts sorted alphabetically:
+'Summary: 2 pruned (1042 rows), 1 skipped
+(1 skipped_disabled)' or multi-category 'Summary: 0
+pruned (0 rows), 3 skipped (1 skipped_disabled, 1
+skipped_opt_out, 1 skipped_opt_out_expired)'. JSON
+envelope {action: "prune", dryRun: boolean, results: [...]}
+preserves discriminator + full typed array. Empty results
+print 'no retention policies configured' (or with
+'(dry-run)' suffix); exit code 0 — absence of policies is
+not an error. Why share formatter scaffolding via private
+PruneResultLike interface: two result types differ in two
+fields (deletedCount vs wouldDeleteCount) but share the
+rest; count-rendering helper takes countLabel parameter
+avoiding duplication while keeping public adapter types
+separate. Why no --policy <table> or --tenant <uuid>
+filter flags: scope creep, filter ambiguity (platform-
+default DELETE uses NOT IN subqueries against ALL per-
+tenant policies — filtering changes subtle semantics),
+operator pattern (scheduled jobs run full prune; ad-hoc
+mirrors that). Why no --confirm flag: --dry-run is the
+canonical preview pattern, scheduled jobs would bypass
+prompts anyway creating asymmetry, prune is destructive
+but per-tenant restore action can recreate policies (just
+not pruned trace data). 11 new CLI tests + 4 new
+formatter tests = 15 total covering: default calls
+prune() not previewPrune, --dry-run calls previewPrune()
+not prune, human empty result 'no retention policies
+configured', --dry-run empty adds '(dry-run)' suffix,
+human renders pruned + skipped rows with summary,
+--dry-run uses 'would prune' verb + 'would_delete='
+label, human renders opt-out skip with reason + until,
+skipped_opt_out_expired gets '(EXPIRED)' marker, JSON
+envelope dryRun:false default, JSON envelope dryRun:true
+with --dry-run, adapter errors propagate exit 1,
+formatPruneRun renders header+rows+summary,
+formatPrunePreview uses dry-run terminology,
+'(platform)' for results without tenantId, summary line
+shows multiple skip categories alphabetically sorted.
+cli.ts helpText extended with retention prune usage line
++ multi-line description explaining dry-run semantics +
+output structure. ADR-0174 documents the design + 8
+rejected alternatives (two separate actions retention
+prune+preview vs --dry-run flag, filter flags, --confirm
+prompt, summary at top vs bottom, aggregate by table_name
+grouping, implicit --limit, auto-emit notification on
+threshold, CSV output) + 8 future Qs (--actor attribution
+pairing with deferred audit-pruning-runs table, filter
+flags --filter-table/--filter-tenant, --confirm flag,
+progress reporting for long-running prunes, concurrent
+invocation safety via advisory locks, --summary-only
+flag, --exit-on-pruned for CI gates, CLI integration
+with scheduled-job framework). The retention CLI now has
+12 actions: 3 read (expiring/effective/list-policies) +
+4 write (opt-out/opt-in/set/delete) + 1 audit (history)
++ 1 restore (restore) + 1 diff (diff-history) + 1
+maintenance (prune); operators have complete ad-hoc
+control over the retention substrate from one binary.
+M6.7.zz.tenant.opt-out.cli.diff-history
 closes ADR-0170 Q5 by adding `crossengin retention diff-history
 <id-a> <id-b>` action + diffHistoryEntries adapter method +
 exported computeFieldDiffs pure helper. Operators querying
@@ -5101,7 +5181,18 @@ workflow); 'absent' placeholder for undefined values
 (DELETE event's null next_state); empty fieldDiffs when
 states deep-equal; alphabetically sorted output; forensic
 audit + compliance changelog + restore validation
-workflows now CLI-native).
+workflows now CLI-native),
+ADR-0174 covers M6.7.zz.tenant.opt-out.cli.prune
+(`crossengin retention prune [--dry-run]` action — closes
+ADR-0172 Q2 — pure CLI delivery wrapping existing
+prune()/previewPrune() adapter methods; ad-hoc invocation
+for debugging stuck prunes / on-demand compliance sweeps
+/ validation after configuring new policies / CI gates;
+two distinct formatters keep run vs dry-run terminology
+distinct ('deleted=N' vs 'would_delete=N'); summary line
+aggregates pruned count + row count + categorised skip
+counts; --confirm + filter flags rejected matching
+existing scheduled-job semantics).
 
 ## Architecture in 90 seconds
 
@@ -6590,6 +6681,126 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0174 covers Phase 2 M6.7.zz.tenant.opt-out.cli.prune
+(`crossengin retention prune [--dry-run]` CLI action —
+closes ADR-0172 Q2; pure CLI delivery wrapping the two
+existing adapter methods PostgresTraceRetention.prune()
+(from ADR-0143) and previewPrune() (from ADR-0153) — no
+new substrate code, no new adapter methods, no new tests
+for actual pruning logic beyond the parameterized cases;
+the pruning machinery already existed via scheduled-job
+invocation (cron, Inngest, K8s CronJob, AWS EventBridge);
+this milestone exposes ad-hoc invocation at the terminal
+— debugging stuck prunes, on-demand compliance sweeps,
+validation after configuring new policies, CI gates,
+post-incident forensic snapshots; single CLI action +
+one optional flag (--dry-run); default calls prune()
+returning RetentionRunResult[], --dry-run calls
+previewPrune() returning RetentionPreviewResult[]; two
+distinct formatter functions formatPruneRun /
+formatPrunePreview keep terminology distinct — header
+'Retention prune results (N entries):' vs 'Retention
+prune dry-run results (N entries):', count label
+'deleted=N' vs 'would_delete=N', summary verb 'pruned'
+vs 'would prune'; per-row format <status> <table-name>
+<tenant=uuid|(platform)> <count> retention=Nd
+cutoff=<iso> with extra reason=X until=Y appended for
+skipped_opt_out + skipped_opt_out_expired statuses (the
+latter gets '(EXPIRED)' marker); summary line aggregates
+pruned count + row count + categorised skip counts sorted
+alphabetically — 'Summary: 2 pruned (1042 rows), 1
+skipped (1 skipped_disabled)' or multi-category 'Summary:
+0 pruned (0 rows), 3 skipped (1 skipped_disabled, 1
+skipped_opt_out, 1 skipped_opt_out_expired)'; JSON
+envelope {action: "prune", dryRun: boolean, results:
+[...]} where dryRun boolean is the discriminator
+distinguishing the two modes for downstream jq consumers
++ results is the full typed array from the underlying
+adapter method; empty results print 'no retention
+policies configured' for live and 'no retention policies
+configured (dry-run)' for preview, exit code 0 — absence
+of policies is not an error; private PruneResultLike
+interface shares formatter scaffolding between the two
+result types (they differ in two fields deletedCount vs
+wouldDeleteCount but share the rest); count-rendering
+helper takes countLabel parameter ('deleted' /
+'would_delete') and count value avoiding duplication
+while keeping public adapter types separate; why no
+--policy <table> / --tenant <uuid> filter flags — scope
+creep (pruning machinery is one round trip per policy),
+filter ambiguity (platform-default DELETE uses NOT IN
+subqueries against ALL per-tenant policies so filtering
+changes subtle semantics), operator pattern (scheduled
+jobs run full prune so ad-hoc mirrors that for
+determinism); why no --confirm flag — --dry-run is the
+canonical preview pattern (operators preview then run
+live; two-command safety documented), scheduled jobs
+would bypass any prompt creating operational asymmetry,
+prune is destructive but per-tenant restore action
+recreates policies (just not pruned trace data); use
+cases unblocked — ad-hoc dry-run after configuring new
+policy (operator confirms what next scheduled prune
+would delete before it runs), compliance sweep on
+demand (after policy change without waiting for next
+scheduled), CI/migration validation (jq count of
+'pruned' results), debugging stuck pruning (inspect
+which policies the substrate sees and which would
+delete), forensic 'what happened last sweep'
+(crossengin retention prune --format json > snapshot.json
+for post-incident); rejected alternatives — two separate
+actions retention prune + retention preview (--dry-run
+is more idiomatic matching apply --dry-run pattern),
+--policy/--tenant filter flags (partial pruning has
+subtle semantic gotchas), --confirm flag with prompt
+(scheduled jobs bypass anyway), render summary at TOP
+of human output (operators read top-down want context
+first summary last), aggregate by table_name grouping
+in human (adds complexity for marginal gain; jq covers
+on JSON), implicit --limit (policy table bounded), auto-
+emit notification on threshold (notification delivery is
+operator concern), CSV output format (JSON + jq covers);
+drawbacks — no actor attribution unlike mutation actions
+that thread --actor (prune is maintenance op; future
+audit-pruning-runs table closes ADR-0172 Q3), no filter
+flags (operators control scope via policy-table state),
+no --confirm (mirrors scheduled-job pattern), destructive
+without per-tenant feedback in JSON (operators jq
+groupBy), one round-trip per policy at adapter level
+(acceptable for bounded policy count typically <100);
+11 new CLI tests + 4 new formatter tests = 15 covering
+default (no flag) calls prune() not previewPrune,
+--dry-run calls previewPrune() not prune, human empty
+result 'no retention policies configured', --dry-run
+empty result adds '(dry-run)' suffix, human renders
+pruned + skipped rows with summary line including
+multi-status breakdown, --dry-run uses 'would prune'
+summary verb + 'would_delete=' count label, human
+renders opt-out skip with reason + until extra fields,
+skipped_opt_out_expired gets '(EXPIRED)' marker, JSON
+envelope {action, dryRun:false, results} default mode,
+JSON envelope {action, dryRun:true, results} --dry-run
+mode, adapter errors propagate exit 1; formatter unit
+tests — formatPruneRun renders header+rows+summary,
+formatPrunePreview uses dry-run terminology, '(platform)'
+for results without tenantId, summary line shows
+multiple skip categories alphabetically sorted; cli.ts
+helpText extended with retention prune usage line + 4-
+line description explaining dry-run semantics + output
+structure mentioning per-table + per-tenant results +
+summary line; future Qs cover --actor attribution
+pairing with deferred meta.retention_pruning_runs audit
+table from ADR-0172 Q3, --filter-table/--filter-tenant
+flags, --confirm flag matching apply --confirm pattern,
+progress reporting for long-running prunes, concurrent
+invocation safety via PG advisory locks, --summary-only
+flag, --exit-on-pruned for CI gates, CLI integration
+with scheduled-job framework. The retention CLI now has
+12 actions covering the complete lifecycle: 3 read
+(expiring/effective/list-policies) + 4 write
+(opt-out/opt-in/set/delete) + 1 audit (history) + 1
+restore (restore) + 1 diff (diff-history) + 1 maintenance
+(prune); operators have complete ad-hoc control over the
+retention substrate from one binary.
 ADR-0173 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff-history
 (`crossengin retention diff-history <history-id-a>
 <history-id-b>` CLI action + diffHistoryEntries adapter

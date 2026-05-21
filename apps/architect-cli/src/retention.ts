@@ -11,6 +11,8 @@ import {
   type PgConnection,
   type RestoreTenantPolicyResult,
   type RetentionPolicyRow,
+  type RetentionPreviewResult,
+  type RetentionRunResult,
   type TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 
@@ -38,7 +40,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|prune> [args]",
     );
     return 2;
   }
@@ -66,10 +68,12 @@ export async function runRetention(
         return await runRetentionRestore(command, ctx, handle.retention);
       case "diff-history":
         return await runRetentionDiffHistory(command, ctx, handle.retention);
+      case "prune":
+        return await runRetentionPrune(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, prune`,
         );
         return 2;
     }
@@ -870,4 +874,151 @@ export function formatHistoryDiff(result: DiffHistoryEntriesResult): string {
     }
   }
   return lines.join("\n") + "\n";
+}
+
+async function runRetentionPrune(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const dryRun = getBooleanFlag(command, "dry-run");
+
+  if (dryRun) {
+    let results: ReadonlyArray<RetentionPreviewResult>;
+    try {
+      results = await retention.previewPrune();
+    } catch (err) {
+      printError(
+        ctx.io,
+        `retention prune: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+    if (command.format === "json") {
+      printJson(ctx.io, { action: "prune", dryRun: true, results });
+      return 0;
+    }
+    ctx.io.stdout.write(formatPrunePreview(results));
+    return 0;
+  }
+
+  let results: ReadonlyArray<RetentionRunResult>;
+  try {
+    results = await retention.prune();
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention prune: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "prune", dryRun: false, results });
+    return 0;
+  }
+  ctx.io.stdout.write(formatPruneRun(results));
+  return 0;
+}
+
+export function formatPruneRun(
+  results: ReadonlyArray<RetentionRunResult>,
+): string {
+  if (results.length === 0) {
+    return "no retention policies configured\n";
+  }
+  const lines: string[] = [];
+  lines.push(`Retention prune results (${results.length} entries):`);
+  for (const r of results) {
+    lines.push(`  ${formatPruneResultLine(r, "deleted", r.deletedCount)}`);
+  }
+  lines.push("");
+  lines.push(formatPruneSummary(results, "deleted"));
+  return lines.join("\n") + "\n";
+}
+
+export function formatPrunePreview(
+  results: ReadonlyArray<RetentionPreviewResult>,
+): string {
+  if (results.length === 0) {
+    return "no retention policies configured (dry-run)\n";
+  }
+  const lines: string[] = [];
+  lines.push(
+    `Retention prune dry-run results (${results.length} entries):`,
+  );
+  for (const r of results) {
+    lines.push(
+      `  ${formatPruneResultLine(r, "would_delete", r.wouldDeleteCount)}`,
+    );
+  }
+  lines.push("");
+  lines.push(formatPruneSummary(results, "would_delete"));
+  return lines.join("\n") + "\n";
+}
+
+interface PruneResultLike {
+  readonly tableName: string;
+  readonly tenantId?: string;
+  readonly status: string;
+  readonly retentionDays: number;
+  readonly cutoffMs: number | null;
+  readonly optOutReason?: string | null;
+  readonly optOutUntil?: string | null;
+}
+
+function formatPruneResultLine(
+  r: PruneResultLike,
+  countLabel: string,
+  count: number,
+): string {
+  const tenant = r.tenantId !== undefined ? `tenant=${r.tenantId}` : "(platform)";
+  const isCountedStatus =
+    r.status === "pruned" || r.status === "previewed";
+  const countPart = isCountedStatus ? `${countLabel}=${count}` : "-";
+  const cutoffPart =
+    r.cutoffMs === null
+      ? "-"
+      : `cutoff=${new Date(r.cutoffMs).toISOString()}`;
+  let extra = "";
+  if (r.status === "skipped_opt_out" || r.status === "skipped_opt_out_expired") {
+    const reason = r.optOutReason ?? "<no reason>";
+    const until = r.optOutUntil ?? "indefinite";
+    const expiredMark =
+      r.status === "skipped_opt_out_expired" ? " (EXPIRED)" : "";
+    extra = `  reason=${reason}  until=${until}${expiredMark}`;
+  }
+  return `${r.status.padEnd(24)} ${r.tableName.padEnd(36)} ${tenant.padEnd(48)} ${countPart.padEnd(20)} retention=${r.retentionDays}d  ${cutoffPart}${extra}`;
+}
+
+function formatPruneSummary(
+  results: ReadonlyArray<PruneResultLike & { deletedCount?: number; wouldDeleteCount?: number }>,
+  countLabel: string,
+): string {
+  const verb = countLabel === "deleted" ? "pruned" : "would prune";
+  let prunedCount = 0;
+  let totalRows = 0;
+  const skippedByStatus: Record<string, number> = {};
+  for (const r of results) {
+    if (r.status === "pruned" || r.status === "previewed") {
+      prunedCount += 1;
+      totalRows +=
+        countLabel === "deleted"
+          ? (r as RetentionRunResult).deletedCount
+          : (r as RetentionPreviewResult).wouldDeleteCount;
+    } else {
+      skippedByStatus[r.status] = (skippedByStatus[r.status] ?? 0) + 1;
+    }
+  }
+  const skippedParts = Object.entries(skippedByStatus)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([status, n]) => `${n} ${status}`);
+  const totalSkipped = Object.values(skippedByStatus).reduce(
+    (acc, n) => acc + n,
+    0,
+  );
+  const skippedSuffix =
+    totalSkipped > 0
+      ? `, ${totalSkipped} skipped (${skippedParts.join(", ")})`
+      : "";
+  return `Summary: ${prunedCount} ${verb} (${totalRows} rows)${skippedSuffix}`;
 }

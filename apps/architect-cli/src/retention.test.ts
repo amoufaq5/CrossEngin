@@ -12,6 +12,8 @@ import type {
   RestoreTenantPolicyInput,
   RestoreTenantPolicyResult,
   RetentionPolicyRow,
+  RetentionPreviewResult,
+  RetentionRunResult,
   SetTenantOptOutInput,
   SetTenantRetentionInput,
   TenantRetentionPolicyRow,
@@ -25,6 +27,8 @@ import {
   formatExpiringTable,
   formatPoliciesList,
   formatPolicyChange,
+  formatPrunePreview,
+  formatPruneRun,
   runRetention,
   type RetentionContext,
 } from "./retention.js";
@@ -76,6 +80,10 @@ function fakeRetention(opts: {
   restoreCapture?: RestoreTenantPolicyInput[];
   diffResult?: DiffHistoryEntriesResult;
   diffCapture?: DiffHistoryEntriesInput[];
+  pruneResults?: readonly RetentionRunResult[];
+  previewResults?: readonly RetentionPreviewResult[];
+  pruneCalled?: { count: number };
+  previewCalled?: { count: number };
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -195,6 +203,16 @@ function fakeRetention(opts: {
           fieldDiffs: [],
         }
       );
+    },
+    prune: async () => {
+      if (opts.pruneCalled !== undefined) opts.pruneCalled.count += 1;
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.pruneResults ?? [];
+    },
+    previewPrune: async () => {
+      if (opts.previewCalled !== undefined) opts.previewCalled.count += 1;
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.previewResults ?? [];
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -2637,5 +2655,325 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
     );
     expect(code).toBe(1);
     expect(err()).toContain("not found");
+  });
+});
+
+describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
+  it("default (no flag) calls prune (not previewPrune)", async () => {
+    const { ctx } = buffers();
+    const pruneCalled = { count: 0 };
+    const previewCalled = { count: 0 };
+    const code = await runRetention(parsed("retention", "prune"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ pruneCalled, previewCalled }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(pruneCalled.count).toBe(1);
+    expect(previewCalled.count).toBe(0);
+  });
+
+  it("--dry-run calls previewPrune (not prune)", async () => {
+    const { ctx } = buffers();
+    const pruneCalled = { count: 0 };
+    const previewCalled = { count: 0 };
+    const code = await runRetention(
+      parsed("retention", "prune", "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ pruneCalled, previewCalled }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(previewCalled.count).toBe(1);
+    expect(pruneCalled.count).toBe(0);
+  });
+
+  it("human-format empty result prints 'no retention policies configured'", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ pruneResults: [] }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("no retention policies configured");
+  });
+
+  it("human-format --dry-run empty result adds (dry-run) suffix", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "prune", "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ previewResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("(dry-run)");
+  });
+
+  it("human-format renders pruned + skipped rows with summary line", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        pruneResults: [
+          {
+            tableName: "workflow_traces",
+            tenantId: TENANT_A,
+            status: "pruned",
+            retentionDays: 30,
+            deletedCount: 42,
+            cutoffMs: Date.parse("2026-04-21T00:00:00.000Z"),
+          },
+          {
+            tableName: "workflow_traces",
+            status: "pruned",
+            retentionDays: 90,
+            deletedCount: 1000,
+            cutoffMs: Date.parse("2026-02-20T00:00:00.000Z"),
+          },
+          {
+            tableName: "llm_call_traces",
+            tenantId: TENANT_A,
+            status: "skipped_disabled",
+            retentionDays: 180,
+            deletedCount: 0,
+            cutoffMs: null,
+          },
+        ],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("Retention prune results (3 entries)");
+    expect(out()).toContain("pruned");
+    expect(out()).toContain("deleted=42");
+    expect(out()).toContain("deleted=1000");
+    expect(out()).toContain("tenant=" + TENANT_A);
+    expect(out()).toContain("(platform)");
+    expect(out()).toContain("skipped_disabled");
+    expect(out()).toContain(
+      "Summary: 2 pruned (1042 rows), 1 skipped (1 skipped_disabled)",
+    );
+  });
+
+  it("human-format --dry-run renders 'would prune' summary verb + 'would_delete=' count label", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "prune", "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewResults: [
+            {
+              tableName: "workflow_traces",
+              tenantId: TENANT_A,
+              status: "previewed",
+              retentionDays: 30,
+              wouldDeleteCount: 42,
+              cutoffMs: Date.parse("2026-04-21T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Retention prune dry-run results (1 entries)");
+    expect(out()).toContain("would_delete=42");
+    expect(out()).toContain("Summary: 1 would prune (42 rows)");
+  });
+
+  it("human-format renders opt-out skip with reason + until", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        pruneResults: [
+          {
+            tableName: "workflow_traces",
+            tenantId: TENANT_A,
+            status: "skipped_opt_out",
+            retentionDays: 365,
+            deletedCount: 0,
+            cutoffMs: null,
+            optOutReason: "legal_hold:case#42",
+            optOutUntil: "2027-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("skipped_opt_out");
+    expect(out()).toContain("reason=legal_hold:case#42");
+    expect(out()).toContain("until=2027-01-01T00:00:00.000Z");
+  });
+
+  it("human-format renders skipped_opt_out_expired with (EXPIRED) marker", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        pruneResults: [
+          {
+            tableName: "workflow_traces",
+            tenantId: TENANT_A,
+            status: "skipped_opt_out_expired",
+            retentionDays: 365,
+            deletedCount: 0,
+            cutoffMs: null,
+            optOutReason: "legal_hold:case#42",
+            optOutUntil: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("skipped_opt_out_expired");
+    expect(out()).toContain("(EXPIRED)");
+  });
+
+  it("json-format emits envelope {action, dryRun:false, results}", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "prune", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          pruneResults: [
+            {
+              tableName: "workflow_traces",
+              status: "pruned",
+              retentionDays: 90,
+              deletedCount: 100,
+              cutoffMs: 1_700_000_000_000,
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("prune");
+    expect(parsedJson.dryRun).toBe(false);
+    expect(parsedJson.results).toHaveLength(1);
+    expect(parsedJson.results[0].status).toBe("pruned");
+    expect(parsedJson.results[0].deletedCount).toBe(100);
+  });
+
+  it("json-format --dry-run emits envelope with dryRun:true", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "prune", "--dry-run", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewResults: [
+            {
+              tableName: "workflow_traces",
+              status: "previewed",
+              retentionDays: 90,
+              wouldDeleteCount: 50,
+              cutoffMs: 1_700_000_000_000,
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.dryRun).toBe(true);
+    expect(parsedJson.results[0].status).toBe("previewed");
+    expect(parsedJson.results[0].wouldDeleteCount).toBe(50);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "prune"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("PG connection refused"),
+      }),
+    } as RetentionContext);
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatPruneRun / formatPrunePreview", () => {
+  it("formatPruneRun renders header + result lines + summary", () => {
+    const out = formatPruneRun([
+      {
+        tableName: "workflow_traces",
+        status: "pruned",
+        retentionDays: 90,
+        deletedCount: 100,
+        cutoffMs: Date.parse("2026-02-20T00:00:00.000Z"),
+      },
+    ]);
+    expect(out).toContain("Retention prune results (1 entries)");
+    expect(out).toContain("pruned");
+    expect(out).toContain("deleted=100");
+    expect(out).toContain("retention=90d");
+    expect(out).toContain("cutoff=2026-02-20T00:00:00.000Z");
+    expect(out).toContain("Summary: 1 pruned (100 rows)");
+  });
+
+  it("formatPrunePreview uses 'would prune' verb + 'would_delete=' count label", () => {
+    const out = formatPrunePreview([
+      {
+        tableName: "workflow_traces",
+        status: "previewed",
+        retentionDays: 90,
+        wouldDeleteCount: 50,
+        cutoffMs: Date.parse("2026-02-20T00:00:00.000Z"),
+      },
+    ]);
+    expect(out).toContain("Retention prune dry-run results (1 entries)");
+    expect(out).toContain("would_delete=50");
+    expect(out).toContain("Summary: 1 would prune (50 rows)");
+  });
+
+  it("renders (platform) for results without tenantId", () => {
+    const out = formatPruneRun([
+      {
+        tableName: "workflow_traces",
+        status: "pruned",
+        retentionDays: 90,
+        deletedCount: 100,
+        cutoffMs: 1_700_000_000_000,
+      },
+    ]);
+    expect(out).toContain("(platform)");
+  });
+
+  it("summary line shows multiple skip categories sorted alphabetically", () => {
+    const out = formatPruneRun([
+      {
+        tableName: "workflow_traces",
+        tenantId: TENANT_A,
+        status: "skipped_opt_out",
+        retentionDays: 90,
+        deletedCount: 0,
+        cutoffMs: null,
+      },
+      {
+        tableName: "llm_call_traces",
+        tenantId: TENANT_A,
+        status: "skipped_disabled",
+        retentionDays: 30,
+        deletedCount: 0,
+        cutoffMs: null,
+      },
+      {
+        tableName: "workflow_traces",
+        tenantId: TENANT_B,
+        status: "skipped_opt_out_expired",
+        retentionDays: 90,
+        deletedCount: 0,
+        cutoffMs: null,
+      },
+    ]);
+    expect(out).toMatch(
+      /Summary: 0 pruned \(0 rows\), 3 skipped \(1 skipped_disabled, 1 skipped_opt_out, 1 skipped_opt_out_expired\)/,
+    );
   });
 });
