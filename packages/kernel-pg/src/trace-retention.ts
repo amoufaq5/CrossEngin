@@ -23,6 +23,22 @@ export function isOptOutHistoryEventKind(
   );
 }
 
+export function normalizeResolutionForDiff(
+  resolution: EffectiveRetentionResolution,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    source: resolution.source,
+    retention_days: resolution.retentionDays,
+    enabled: resolution.enabled,
+    opt_out: resolution.source === "tenant_opt_out",
+  };
+  if (resolution.source === "tenant_opt_out") {
+    base.opt_out_reason = resolution.optOutReason;
+    base.opt_out_until = resolution.optOutUntil;
+  }
+  return base;
+}
+
 export function computeFieldDiffs(
   stateA: Record<string, unknown> | null,
   stateB: Record<string, unknown> | null,
@@ -291,6 +307,21 @@ export interface DiffHistoryEntriesResult {
   readonly occurredAtB: string;
   readonly eventKindA: OptOutHistoryEventKind;
   readonly eventKindB: OptOutHistoryEventKind;
+  readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
+}
+
+export interface DiffTenantPoliciesInput {
+  readonly tenantIdA: string;
+  readonly tenantIdB: string;
+  readonly tableName: string;
+}
+
+export interface DiffTenantPoliciesResult {
+  readonly tenantIdA: string;
+  readonly tenantIdB: string;
+  readonly tableName: string;
+  readonly resolutionA: EffectiveRetentionResolution;
+  readonly resolutionB: EffectiveRetentionResolution;
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
 }
 
@@ -1293,6 +1324,37 @@ export class PostgresTraceRetention {
       eventKindA: entryA.event_kind,
       eventKindB: entryB.event_kind,
       fieldDiffs: computeFieldDiffs(entryA.next_state, entryB.next_state),
+    };
+  }
+
+  async diffTenantPolicies(
+    input: DiffTenantPoliciesInput,
+  ): Promise<DiffTenantPoliciesResult> {
+    const resolutions = await this.effectiveRetentionBatch({
+      pairs: [
+        { tenantId: input.tenantIdA, tableName: input.tableName },
+        { tenantId: input.tenantIdB, tableName: input.tableName },
+      ],
+    });
+    const keyA = effectiveRetentionKey(input.tenantIdA, input.tableName);
+    const keyB = effectiveRetentionKey(input.tenantIdB, input.tableName);
+    const resolutionA = resolutions.get(keyA);
+    const resolutionB = resolutions.get(keyB);
+    if (resolutionA === undefined || resolutionB === undefined) {
+      throw new Error(
+        `diffTenantPolicies: failed to resolve both tenants (A=${resolutionA !== undefined}, B=${resolutionB !== undefined})`,
+      );
+    }
+    return {
+      tenantIdA: input.tenantIdA,
+      tenantIdB: input.tenantIdB,
+      tableName: input.tableName,
+      resolutionA,
+      resolutionB,
+      fieldDiffs: computeFieldDiffs(
+        normalizeResolutionForDiff(resolutionA),
+        normalizeResolutionForDiff(resolutionB),
+      ),
     };
   }
 

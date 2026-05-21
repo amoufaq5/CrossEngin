@@ -4,6 +4,7 @@ import {
   parsePgEnvConfig,
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
+  type DiffTenantPoliciesResult,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type OptOutHistoryEntry,
@@ -41,7 +42,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|prune> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|diff|prune> [args]",
     );
     return 2;
   }
@@ -69,12 +70,14 @@ export async function runRetention(
         return await runRetentionRestore(command, ctx, handle.retention);
       case "diff-history":
         return await runRetentionDiffHistory(command, ctx, handle.retention);
+      case "diff":
+        return await runRetentionDiff(command, ctx, handle.retention);
       case "prune":
         return await runRetentionPrune(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, prune`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, diff, prune`,
         );
         return 2;
     }
@@ -1091,4 +1094,90 @@ function formatPruneSummary(
       ? `, ${totalSkipped} skipped (${skippedParts.join(", ")})`
       : "";
   return `Summary: ${prunedCount} ${verb} (${totalRows} rows)${skippedSuffix}`;
+}
+
+async function runRetentionDiff(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantIdA = command.positional[1];
+  const tenantIdB = command.positional[2];
+  const tableName = command.positional[3];
+  if (
+    tenantIdA === undefined ||
+    tenantIdB === undefined ||
+    tableName === undefined
+  ) {
+    printError(
+      ctx.io,
+      "retention diff: missing arguments. usage: crossengin retention diff <tenant-a> <tenant-b> <table-name>",
+    );
+    return 2;
+  }
+
+  let result: DiffTenantPoliciesResult;
+  try {
+    result = await retention.diffTenantPolicies({
+      tenantIdA,
+      tenantIdB,
+      tableName,
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "diff", result });
+    return 0;
+  }
+  ctx.io.stdout.write(formatTenantDiff(result));
+  return 0;
+}
+
+function summarizeResolutionForDiff(
+  resolution: EffectiveRetentionResolution,
+): string {
+  switch (resolution.source) {
+    case "tenant":
+      return `source=tenant         retention=${resolution.retentionDays}d  enabled=yes`;
+    case "tenant_opt_out": {
+      const until = resolution.optOutUntil ?? "indefinite";
+      const reason = resolution.optOutReason ?? "<no reason>";
+      return `source=tenant_opt_out  reason=${reason}  until=${until}`;
+    }
+    case "platform":
+      return `source=platform       retention=${resolution.retentionDays}d  enabled=${resolution.enabled ? "yes" : "no"}`;
+    case "none":
+      return `source=none           (no policy configured)`;
+  }
+}
+
+export function formatTenantDiff(result: DiffTenantPoliciesResult): string {
+  const lines: string[] = [];
+  lines.push(`Diff between tenant policies (table: ${result.tableName}):`);
+  lines.push(
+    `  Tenant A: ${result.tenantIdA}  ${summarizeResolutionForDiff(result.resolutionA)}`,
+  );
+  lines.push(
+    `  Tenant B: ${result.tenantIdB}  ${summarizeResolutionForDiff(result.resolutionB)}`,
+  );
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(
+      "No differences — both tenants have the same effective retention policy.",
+    );
+  } else {
+    lines.push(`Field changes (${result.fieldDiffs.length}):`);
+    for (const d of result.fieldDiffs) {
+      const a = d.valueA === undefined ? "absent" : JSON.stringify(d.valueA);
+      const b = d.valueB === undefined ? "absent" : JSON.stringify(d.valueB);
+      lines.push(`  ${d.field.padEnd(20)} ${a}  →  ${b}`);
+    }
+  }
+  return lines.join("\n") + "\n";
 }

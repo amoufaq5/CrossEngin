@@ -21,15 +21,123 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,406 tests**,
-all green, no type errors. M6.7.zz.tenant.batch closes
+**56 packages + 1 app, 129 meta-schema tables, 8,435 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff
+closes ADR-0165 Q6 by adding `crossengin retention diff
+<tenant-a> <tenant-b> <table>` action + diffTenantPolicies
+adapter method + normalizeResolutionForDiff pure helper.
+Cross-tenant policy comparison answers tier-migration
+verification ('did Tenant A's freshly-migrated retention
+match reference Tenant B's?'), drift detection ('two
+tenants on same plan — divergent?'), compliance audit
+('why HIPAA cohort tenant A retaining 365d while tenant B
+retains 90?'). Adapter calls effectiveRetentionBatch
+internally with the two (tenant, sameTable) pairs — single
+canonical batch-resolver pattern: any future comparison/
+aggregation operation needing multiple resolutions should
+compose on top of effectiveRetentionBatch rather than
+issuing its own queries. 2 queries total (one tenant
+lookup, one platform lookup with single table) regardless
+of resolution variant — matches the dashboard performance
+benefit from ADR-0177. Diff computed via reused
+computeFieldDiffs helper from ADR-0173 after normalising
+each resolution to a comparable record via new
+normalizeResolutionForDiff pure helper — flattens
+discriminated-union variant into {source, retention_days,
+enabled, opt_out, [opt_out_reason], [opt_out_until]}
+record where the last two fields appear only for
+tenant_opt_out variant. Same alphabetical-sort diff output
+across retention diff-history + retention diff for
+uniform forensic format. Same-table constraint enforced
+via single tableName field in input/result — cross-table
+comparisons (different tables for one tenant) are a
+different semantic; future action if requested. CLI takes
+three positional args (tenant-a, tenant-b, table-name)
+all required exit 2 if missing; no optional flags beyond
+--format. Human output renders 3-section format —
+'Diff between tenant policies (table: <name>):' header,
+per-tenant resolution summary line via private
+summarizeResolutionForDiff helper varying by variant
+('source=tenant retention=Nd enabled=yes',
+'source=tenant_opt_out reason=<r> until=<iso|indefinite>',
+'source=platform retention=Nd enabled=yes|no',
+'source=none (no policy configured)'), blank line, then
+either 'No differences — both tenants have the same
+effective retention policy.' for empty fieldDiffs OR
+'Field changes (N):' header followed by 'fieldname valueA
+→ valueB' lines reusing established conventions
+('indefinite' / '<no reason>' for null fields). JSON
+envelope {action: "diff", result: DiffTenantPoliciesResult}
+preserves full discriminated-union structure for jq.
+Use cases unblocked — tier migration verification (single
+command vs two retention effective + mental compare),
+drift detection across same-tier tenants, compliance
+audit for regulated cohorts, migration-script smoke test
+CI gates failing build when tenants in same cohort
+diverge. Rejected alternatives: two effectiveRetention
+calls (4 queries vs 2 batch), deep-equality without
+normalization (variant shapes differ — operators see 'all
+fields different' misleadingly), cross-table comparison
+in same command (different semantic — future action),
+N-way diff (pair-wise is canonical; chain commands),
+--vs-platform shortcut (defer — operators run two
+effective commands), use deferred retention effective-batch
+CLI for inputs (focused single-purpose command better),
+render resolution variant fields without normalization
+(diff wouldn't tell operators which values differ),
+include tenant metadata slug+name in result (substrate
+stays minimal — operators join meta.tenants at their
+layer). 13 new adapter tests + 16 new CLI tests = 29
+total covering: adapter uses effectiveRetentionBatch
+internally issuing exactly 2 queries, returns metadata +
+resolutions + empty fieldDiffs when both none, empty
+fieldDiffs when both identical platform, fieldDiffs when
+tenant vs platform differ (source + retention_days),
+fieldDiffs comparing tenant_opt_out vs tenant (source +
+opt_out + opt_out_reason + opt_out_until), fieldDiffs
+sorted alphabetically, resolutionA carries A's data and
+resolutionB carries B's verified, uses tableName on both
+axes (same table for both tenants), clock-aware expiry
+preserved (expired opt_out falls through to platform on
+diff); normalizeResolutionForDiff helper unit tests
+covering all four variants; CLI missing tenantA exit 2,
+missing tenantB exit 2, missing table exit 2, threads
+three args to adapter, human renders 'No differences' for
+empty fieldDiffs with helpful message, human renders
+metadata + per-tenant resolutions + field-by-field diff
+with arrows + count header, human renders tenant_opt_out
+inline with reason+until, JSON envelope shape, adapter
+errors propagate exit 1; formatTenantDiff helper unit
+tests covering No differences message, Field changes
+count header, tenant inline summary, tenant_opt_out
+inline with reason+until, 'indefinite' for null until +
+'<no reason>' for null reason, platform inline with
+enabled flag, none inline with '(no policy configured)'
+annotation. cli.ts helpText retention diff usage line +
+4-line description explaining effectiveRetentionBatch
+reuse + 2-query optimization. ADR-0178 documents the
+design + 8 rejected alternatives + 7 future Qs (
+--vs-platform flag for tenant-vs-default comparison,
+N-way diff via --add-tenant repeated flag, cross-table
+retention diff <tenant> <table-a> <table-b>, visual
+color highlighting, configurable comparison depth,
+--field <name> filter, combined diff-timeline showing
+how A vs B evolved over time). The retention CLI now has
+14 actions covering forensic + recovery + comparison +
+performance workflows: 3 read (expiring/effective/list-
+policies) + 4 write (opt-out/opt-in/set/delete) + 1
+audit (history) + 1 restore (with --dry-run) + 2 diff
+(diff-history + cross-tenant diff) + 1 maintenance
+(prune with --dry-run) + 1 batch substrate-only
+(effectiveRetentionBatch).
+M6.7.zz.tenant.batch closes
 ADR-0159 Q2 by adding `effectiveRetentionBatch(pairs)`
 adapter method + exported effectiveRetentionKey helper.
 The existing single-pair effectiveRetention makes 2 PG
@@ -5510,7 +5618,20 @@ parallelizes; returns ReadonlyMap<string,
 EffectiveRetentionResolution> for O(1) dashboard render
 lookups; same resolution algorithm + clock-aware expiry
 semantics as single-pair version; substrate-only milestone
-no CLI surface).
+no CLI surface),
+ADR-0178 covers M6.7.zz.tenant.opt-out.cli.diff
+(`retention diff <tenant-a> <tenant-b> <table>` cross-
+tenant policy comparison — closes ADR-0165 Q6 —
+diffTenantPolicies adapter + normalizeResolutionForDiff
+helper; reuses effectiveRetentionBatch internally so just
+2 queries; reuses computeFieldDiffs from ADR-0173 after
+normalizing each resolution to comparable record; same-
+table constraint enforced via single tableName field;
+per-tenant resolution summary line varies by variant via
+summarizeResolutionForDiff helper; tier migration
+verification + drift detection + compliance audit + CI
+gate workflows now CLI-native; sibling to retention
+diff-history but on the cross-tenant axis).
 
 ## Architecture in 90 seconds
 
@@ -6999,6 +7120,127 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0178 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff
+(`crossengin retention diff <tenant-a> <tenant-b>
+<table-name>` CLI action + diffTenantPolicies adapter
+method + exported normalizeResolutionForDiff pure helper
+— closes ADR-0165 Q6; ADR-0173 shipped diff-history for
+two events on same tenant+table, this milestone ships
+the orthogonal axis — two tenants on same table; use
+cases — tier migration verification (did Tenant A's
+freshly-migrated retention match reference Tenant B's?),
+drift detection (two tenants on same plan — divergent?),
+compliance audit for regulated cohorts, migration-script
+smoke test CI gates; adapter calls effectiveRetentionBatch
+internally with the two (tenant, sameTable) pairs —
+single canonical batch-resolver pattern: any future
+comparison/aggregation operation needing multiple
+resolutions should compose on top of effectiveRetentionBatch
+rather than issuing own queries; 2 queries total
+regardless of resolution variant matching dashboard
+performance benefit from ADR-0177; diff computed via
+reused computeFieldDiffs helper from ADR-0173 after
+normalizing each resolution to comparable record via
+new normalizeResolutionForDiff helper — flattens
+discriminated-union variant into {source, retention_days,
+enabled, opt_out, [opt_out_reason], [opt_out_until]}
+where the last two appear only for tenant_opt_out variant;
+same alphabetical-sort diff output across retention diff-
+history + retention diff for uniform forensic format;
+same-table constraint enforced via single tableName field
+in input/result — cross-table comparisons different
+semantic; result type DiffTenantPoliciesResult carries
+{tenantIdA, tenantIdB, tableName, resolutionA, resolutionB,
+fieldDiffs}; CLI takes three positional args tenant-a +
+tenant-b + table-name all required (exit 2 missing), no
+optional flags beyond --format; human output 3-section
+format — 'Diff between tenant policies (table: <name>):'
+header, per-tenant resolution summary line via private
+summarizeResolutionForDiff helper that varies by variant
+('source=tenant         retention=Nd  enabled=yes' for
+tenant, 'source=tenant_opt_out  reason=<r>  until=<iso|
+indefinite>' for opt_out, 'source=platform       retention=
+Nd  enabled=yes|no' for platform, 'source=none
+(no policy configured)' for none), blank line, then
+either 'No differences — both tenants have the same
+effective retention policy.' for empty fieldDiffs OR
+'Field changes (N):' header followed by 'fieldname
+valueA → valueB' lines reusing established conventions
+'indefinite' / '<no reason>' for null fields; JSON
+envelope {action: "diff", result: DiffTenantPoliciesResult}
+preserves full discriminated-union structure for jq;
+rejected alternatives — two effectiveRetention calls
+(4 queries vs 2 batch defeating the perf composition),
+deep-equality without normalization (variant shapes
+differ so operators see 'all fields different'
+misleadingly), allow cross-table comparison (different
+semantic — future action if requested), N-way diff via
+multiple positional args (pair-wise canonical pattern;
+operators chain commands), --vs-platform shortcut for
+tenant-vs-default (defer — operators run two retention
+effective commands), use deferred retention effective-batch
+CLI for inputs (focused single-purpose command better
+than multi-action wrap), render resolution variant fields
+without normalization (diff wouldn't tell operators which
+values differ on the comparable axis), include tenant
+metadata slug+display-name in result (substrate stays
+minimal — operators join meta.tenants at their layer);
+drawbacks — same-table only (cross-table needs different
+command), two-tenant only (N-way runs multiple commands
+or uses effectiveRetentionBatch directly via Node script),
+no --diff-against-current-platform shortcut (use two
+retention effective + manual compare), discriminated-
+union JSON shape requires .source narrowing for jq users,
+field renames in normalized diff (retentionDays becomes
+retention_days matching JSONB history-diff convention
+but different from resolution's TypeScript field name);
+13 new adapter tests in trace-retention.test.ts —
+uses effectiveRetentionBatch internally (issues exactly
+2 queries verified via capture.length), returns metadata
++ resolutions + empty fieldDiffs when both none, empty
+fieldDiffs when both identical platform, fieldDiffs when
+tenant vs platform differ (source + retention_days),
+fieldDiffs comparing tenant_opt_out vs tenant (source +
+opt_out + opt_out_reason + opt_out_until), fieldDiffs
+sorted alphabetically, resolutionA carries A's data and
+resolutionB carries B's, uses tableName on both axes
+(same table both tenants verified in params), clock-
+aware expiry preserved (expired opt_out falls through to
+platform on diff — both resolve platform, empty diffs);
+normalizeResolutionForDiff helper unit tests — flattens
+tenant variant to {source, retention_days, enabled,
+opt_out:false}, flattens tenant_opt_out including reason
++ until, flattens platform variant, flattens none variant;
+16 new CLI tests in retention.test.ts — missing tenantA/
+tenantB/table args each exit 2, threads three args to
+adapter, human-format 'No differences' for empty
+fieldDiffs with 'same effective retention policy' message,
+human-format renders metadata + per-tenant resolutions +
+field-by-field diff with arrows + 'Field changes (N)'
+header, human-format renders tenant_opt_out inline with
+reason+until, JSON envelope shape {action: "diff",
+result: ...}, adapter errors propagate exit 1;
+formatTenantDiff helper unit tests — 'No differences'
+message for empty, 'Field changes (N):' header for
+diffs, tenant inline 'source=tenant retention=Nd
+enabled=yes', tenant_opt_out inline with reason+until,
+'indefinite' for null until + '<no reason>' for null
+reason, platform inline with enabled=yes|no flag, none
+inline 'source=none (no policy configured)'; cli.ts
+helpText extended with retention diff <tenant-a>
+<tenant-b> <table-name> usage line + 4-line description
+explaining effectiveRetentionBatch reuse + 2-query
+optimization; future Qs cover --vs-platform flag for
+tenant-vs-default comparison, N-way diff via --add-tenant
+repeated flag, cross-table retention diff <tenant>
+<table-a> <table-b> (different semantic), visual color
+highlighting via opt-in flag, configurable comparison
+depth, --field <name> filter on JSON output (jq covers),
+combined diff-timeline showing how tenant A vs tenant B
+evolved over time). The retention CLI now has 14
+operator-facing actions + 1 substrate-only adapter
+method covering forensic + recovery + comparison +
+performance workflows comprehensively.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey
