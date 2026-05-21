@@ -499,6 +499,11 @@ async function runRetentionOptOut(
   }
 
   const actorId = getStringFlag(command, "actor");
+  const attributesResult = parseAttributesFlag(command);
+  if (!attributesResult.ok) {
+    printError(ctx.io, `retention opt-out: ${attributesResult.error}`);
+    return 2;
+  }
 
   let policy: TenantRetentionPolicyRow;
   try {
@@ -509,6 +514,7 @@ async function runRetentionOptOut(
       optOutUntil,
       optOutReason,
       actorId,
+      attributes: attributesResult.attributes,
     });
   } catch (err) {
     printError(
@@ -542,6 +548,11 @@ async function runRetentionOptIn(
   }
 
   const actorId = getStringFlag(command, "actor");
+  const attributesResult = parseAttributesFlag(command);
+  if (!attributesResult.ok) {
+    printError(ctx.io, `retention opt-in: ${attributesResult.error}`);
+    return 2;
+  }
 
   let policy: TenantRetentionPolicyRow | null;
   try {
@@ -549,6 +560,7 @@ async function runRetentionOptIn(
       tenantId,
       tableName,
       actorId,
+      attributes: attributesResult.attributes,
     });
   } catch (err) {
     printError(
@@ -759,6 +771,11 @@ async function runRetentionSet(
   }
 
   const actorId = getStringFlag(command, "actor");
+  const attributesResult = parseAttributesFlag(command);
+  if (!attributesResult.ok) {
+    printError(ctx.io, `retention set: ${attributesResult.error}`);
+    return 2;
+  }
 
   let policy: TenantRetentionPolicyRow;
   try {
@@ -768,6 +785,7 @@ async function runRetentionSet(
       retentionDays: days,
       enabled,
       actorId,
+      attributes: attributesResult.attributes,
     });
   } catch (err) {
     printError(
@@ -947,6 +965,11 @@ async function runRetentionDelete(
   }
 
   const actorId = getStringFlag(command, "actor");
+  const attributesResult = parseAttributesFlag(command);
+  if (!attributesResult.ok) {
+    printError(ctx.io, `retention delete: ${attributesResult.error}`);
+    return 2;
+  }
 
   let deleted: boolean;
   try {
@@ -954,6 +977,7 @@ async function runRetentionDelete(
       tenantId,
       tableName,
       actorId,
+      attributes: attributesResult.attributes,
     });
   } catch (err) {
     printError(
@@ -1026,10 +1050,19 @@ async function runRetentionRestore(
   }
 
   const actorId = getStringFlag(command, "actor");
+  const attributesResult = parseAttributesFlag(command);
+  if (!attributesResult.ok) {
+    printError(ctx.io, `retention restore: ${attributesResult.error}`);
+    return 2;
+  }
 
   let result: RestoreTenantPolicyResult;
   try {
-    result = await retention.restoreTenantPolicy({ historyId, actorId });
+    result = await retention.restoreTenantPolicy({
+      historyId,
+      actorId,
+      attributes: attributesResult.attributes,
+    });
   } catch (err) {
     printError(
       ctx.io,
@@ -1492,6 +1525,42 @@ function divergenceExitCode(
   const thresholdRaw = getStringFlag(command, "threshold");
   const threshold = thresholdRaw === null ? 1 : Number(thresholdRaw);
   return fieldDiffsLength >= threshold ? 3 : 0;
+}
+
+interface AttributesParseOk {
+  readonly ok: true;
+  readonly attributes: Record<string, unknown> | undefined;
+}
+interface AttributesParseFail {
+  readonly ok: false;
+  readonly error: string;
+}
+
+function parseAttributesFlag(
+  command: ParsedCommand,
+): AttributesParseOk | AttributesParseFail {
+  const raw = getStringFlag(command, "attributes");
+  if (raw === null) return { ok: true, attributes: undefined };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `--attributes is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed)
+  ) {
+    return {
+      ok: false,
+      error: "--attributes must be a JSON object (not array, primitive, or null)",
+    };
+  }
+  return { ok: true, attributes: parsed as Record<string, unknown> };
 }
 
 function validateThresholdFlag(command: ParsedCommand): string | null {

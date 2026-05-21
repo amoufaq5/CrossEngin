@@ -21,15 +21,152 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,578 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.actor-filter
+**56 packages + 1 app, 129 meta-schema tables, 8,595 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.attributes
+closes ADR-0170 Q10 by adding `--attributes '<json-object>'`
+flag to all 5 retention mutation/restore actions
+(opt-out, opt-in, set, delete, restore) for structured
+audit context flowing into history rows. The substrate
+has accepted attributes: Record<string, unknown> on all
+mutation methods since ADR-0170 — this milestone just
+wires the CLI flag, no adapter changes. Pure CLI delivery.
+Operators previously couldn't write structured audit
+context from the CLI — they wrote raw SQL with embedded
+JSON defeating the substrate's clean abstraction. Now
+one flag captures it: ticket references, migration IDs,
+auditor names, escalation paths. New parseAttributesFlag
+shared private helper returns discriminated union
+{ok:true, attributes: Record<string, unknown> | undefined}
+or {ok:false, error: string}; all 5 runner functions call
+it after parsing other flags before adapter invocation —
+no duplicated parsing logic per action. Validation —
+--attributes not set passes undefined to adapter (default
+behavior), valid JSON object accepted, invalid JSON
+syntax exit 2 with 'not valid JSON: <reason>', valid
+JSON but array/primitive/null exit 2 with 'must be a
+JSON object (not array, primitive, or null)', empty
+object {} valid (no attributes added). JSON-object-only
+restriction by design — arrays/primitives don't compose
+with attributes.restored_from from ADR-0171 or compliance
+queries like WHERE attributes ? 'audit_ref'; substrate's
+default value is {}::jsonb operators extend that record;
+future merge patterns (adapter-injected restored_from)
+only work on objects. Operators with array-shape data
+wrap it as {"items":[...]}. Validation fires BEFORE
+adapter call — invalid --attributes returns exit 2
+without any PG queries CI logs say "exit 2"
+immediately recognizable as CLI misuse. Restore deserves
+special note — restoreTenantPolicy from ADR-0171
+deliberately merges {restored_from:historyId} with
+operator-supplied attributes; substrate (not CLI) does
+the merge; operator-supplied keys can't override
+restored_from (system field wins on conflict safe by
+design). cli.ts helpText extended with 5-line common-flag
+note after the 5 mutation/restore usage lines explaining
+--attributes <json> + JSON object requirement + restore-
+merge semantic + invalid JSON exit 2. Use cases
+unblocked — incident-ticket attribution (--attributes
+'{"ticket":"INC-2026-001","jurisdiction":"NY"}'), bulk
+migration with shared marker (for-loop with
+--attributes '{"migration_id":"MIG-Q2-2026"}' for each
+call), compliance audit closing context (--attributes
+'{"offboarding":"trial_expiry","auditor":"ext-firm-X"}'),
+forensic restore with context (--attributes
+'{"undo_reason":"customer_complaint","escalation":"INC-007"}'
+merged with system-set restored_from). Rejected
+alternatives — substrate-side JSON validation adapter
+rejects non-object (rejected substrate stays permissive
+CLI is right boundary for shape enforcement), accept
+any JSON value arrays/primitives/null allowed (rejected
+diverges from attributes JSONB conceptual contract as
+key-value bag), --attribute key=value repeated flag using
+multiFlags from ADR-0183 for shell-friendly pairs
+(operators with structured context lose expressiveness;
+could ship as sibling later defer simpler-syntax variant),
+auto-merge environment-variable attributes
+CROSSENGIN_DEFAULT_ATTRIBUTES (implicit context invites
+surprises operators control via shell), --attributes-file
+<path> instead of inline JSON (adds file-reading code path
+operators chain with cat $(cat ctx.json) defer), restore
+auto-merge order with operator-after-restored vs system-
+before (substrate already chose operator-after operator
+can't override system field rejected the opposite),
+JSON Schema validation hook for operator-defined
+attribute contracts (out of scope for v1 operators wrap
+with own jq pre-validation), strip restored_from from
+operator-supplied attributes on restore to prevent
+forging audit reference (rejected adapter merges
+operator + system attributes system-key wins on conflict
+operators can't forge current behavior is safe).
+Drawbacks — JSON-object-only restriction (operators with
+array-shape data wrap in record documented), shell-
+quoting gotchas embedded quotes in JSON need shell
+escaping (--attributes '{"key":"value"}' vs the
+\"escaped\" form standard for CLI tools accepting JSON
+strings documented), no --attributes-file for large JSON
+(operators wrap with shell --attributes "$(cat ctx.json)"
+future Q), no schema validation on attributes content
+substrate accepts any JSON object shape (operators wanting
+"every restore must have ticket field" enforce at
+workflow/policy layer not substrate), no multi-attributes
+merge from multiple flags (operators wanting "base
+attributes from env + per-call additions" merge in shell
+before invocation defer), validation happens per-runner 5
+mutation runners each call parseAttributesFlag
+independently acceptable since per-runner error messages
+prefix the action name (retention opt-out:, retention
+set:, etc.) giving operators crisp error context. 17 new
+CLI tests — opt-out 9 tests covering threads attributes
+to setTenantOptOut when set verified via capture, omits
+attributes when not set (backward compat
+attributes:undefined), invalid JSON syntax exit 2, JSON
+array exit 2 'must be a JSON object', JSON primitive
+string exit 2, JSON null exit 2, validation BEFORE PG
+adapter call verified via setOptOutCapture length 0,
+accepts empty {} as value, accepts nested JSON object
+{approval:{reviewer,ticket},automated:false}; opt-in 2
+tests covering threads to clearTenantOptOut with attributes
++ invalid JSON exit 2 with 'retention opt-in:' prefix +
+'not valid JSON'; set 2 tests covering threads to
+setTenantRetention with tier_change attribute + non-
+object (number 42) exit 2 with 'retention set:' prefix +
+'must be a JSON object'; delete 2 tests covering threads
+to deleteTenantPolicy with context+ticket attributes +
+invalid JSON ('{trailing comma,}') exit 2 with 'retention
+delete:' prefix; restore 2 tests covering threads to
+restoreTenantPolicy with undo_reason+ticket attributes +
+JSON primitive '"a string"' exit 2 with 'retention
+restore:' prefix + 'must be a JSON object'. cli.ts
+helpText extended with 5-line common-flag note. ADR-0187
+documents the design + 8 rejected alternatives + 7 future
+Qs (--attribute key=value simpler-syntax sibling flag
+using multiFlags from ADR-0183 for non-structured cases,
+--attributes-file path for large JSON, --attributes-env
+var-name reading from environment variable for CI-secret-
+like values, JSON Schema validation hook per-tenant or
+per-action operator-policy concern, merge semantics in
+retention set when row already has attributes substrate-
+design-bound no Q to defer, surface attributes in
+retention history human output for inline auditing
+currently only JSON output shows it future Q,
+--require-attributes-keys CLI gate forcing operators to
+provide certain keys like ticket operator-policy defer).
+The retention CLI now has 17 actions with full audit-
+metadata surface — actor (--actor on mutations) + actor
+display (--with-actor-names from ADR-0185) + actor filter
+(--actor-id from ADR-0186) + structured context
+(--attributes from this milestone). Operators get who +
+human-readable name + filtering + arbitrary context
+flowing through every mutation into the append-only
+history audit log uniformly.
+M6.7.zz.tenant.opt-out.cli.history.actor-filter
 closes ADR-0185 Q1 by adding `--actor-id <uuid>` filter to
 `retention history`. Operators wanting "show me everything
 actor X did in the last week" previously fetched full
@@ -6761,7 +6898,21 @@ dimensions + cursor pagination + --with-actor-names
 display surfacing; JSON envelope gains actorId field;
 no null-actor sentinel operators jq-filter for system
 events; pair with --with-actor-names for canonical
-"Alice's audit log" pattern).
+"Alice's audit log" pattern),
+ADR-0187 covers M6.7.zz.tenant.opt-out.cli.history.attributes
+(`--attributes '<json>'` flag on 5 retention mutation/
+restore actions — closes ADR-0170 Q10 — pure CLI
+delivery substrate has accepted attributes:
+Record<string, unknown> on all mutation methods since
+ADR-0170; new parseAttributesFlag shared helper +
+JSON-object-only validation (arrays/primitives/null
+rejected exit 2); restore deliberately merges
+{restored_from:historyId} with operator-supplied
+attributes via substrate-side merge (system key wins on
+conflict — operators can't forge audit reference);
+completes the audit-metadata surface alongside actor
+(--actor) + actor display (ADR-0185) + actor filter
+(ADR-0186)).
 
 ## Architecture in 90 seconds
 
@@ -9830,6 +9981,204 @@ plus cursor pagination + --with-actor-names display
 surfacing — comprehensive per-actor forensic +
 compliance workflows now CLI-native without LIMIT/
 pagination-correctness gotchas.
+ADR-0187 covers Phase 2 M6.7.zz.tenant.opt-out.cli.history.attributes
+(`--attributes '<json>'` flag on all 5 retention
+mutation/restore CLI actions — closes ADR-0170 Q10
+which was the longest-deferred retention-history Q;
+ADR-0170 shipped the append-only history audit log
+with attributes JSONB column for structured audit
+context + all 4 mutation adapter methods plus
+restoreTenantPolicy (ADR-0171) accept attributes?:
+Record<string, unknown> as optional input — the
+substrate has been ready since the beginning but CLI
+never exposed a flag to populate it. Real operator
+workflows piled context they wanted to capture — "I'm
+opting out tenant X for legal hold case#42 ticket
+INC-2026-001" wanting to attach {ticket:"INC-2026-001"}
+to history row, tier migration script wanting every
+retention-set call during migration to carry
+{migration_id:"MIG-Q2-2026"} for auditor traceability,
+compliance review wanting structured attributes to
+filter on later via WHERE attributes ? 'audit_ref' —
+until now operators couldn't write structured audit
+context from CLI they wrote raw SQL with embedded
+JSON defeating substrate's clean abstraction. CLI
+surface — `crossengin retention opt-out|opt-in|set|
+delete|restore <...> [--attributes '<json-object>']`;
+uniform flag across all 5 mutation/restore sites
+(restore included because it accepts attributes from
+ADR-0171 and is mechanically the same pattern).
+Validation rules — --attributes not set passes
+undefined to adapter (default behavior), valid JSON
+object accepted, invalid JSON syntax exit 2 with 'not
+valid JSON: <reason>', valid JSON but array exit 2
+with 'must be a JSON object (not array, primitive, or
+null)', valid JSON but primitive (string/number/bool)
+exit 2, valid JSON but null exit 2, empty object {}
+valid (no attributes added). Validation fires BEFORE
+adapter call so invalid --attributes returns exit 2
+without any PG queries; CI logs say "exit 2"
+immediately recognizable as CLI misuse. JSON-object-
+only restriction by design — JSON arrays + primitives
++ null are valid JSONB values that PG accepts but
+substrate's CLI surface is opinionated about shape
+because attributes is conceptually a record (key-value
+bag) — arrays/primitives don't compose with
+attributes.restored_from (ADR-0171) or compliance
+queries like WHERE attributes ? 'audit_ref', default
+substrate value is {}::jsonb operators expect to
+extend that record not replace with non-record type,
+future merge patterns (adapter-injected restored_from)
+only work on objects. Operators with array-shape data
+wrap it: {"items":["a","b"]} instead of ["a","b"].
+Shared private helper parseAttributesFlag(command)
+returns discriminated union {ok:true, attributes:
+Record<string, unknown> | undefined} or {ok:false,
+error: string}; all 5 runner functions call it after
+parsing other flags before adapter invocation —
+handles all 5 validation cases uniformly no
+duplicated parsing logic per action. Adapter unchanged
+— all 5 adapter methods already accept attributes?
+from ADR-0170/0171; CLI just stops passing undefined
+always; zero substrate changes; history row gets
+attributes JSONB column populated via existing CTE
+chain. Restore merges attributes — restoreTenantPolicy
+from ADR-0171 deliberately merges {restored_from:
+historyId} with operator-supplied attributes so
+'crossengin retention restore <id> --attributes
+'{"ticket":"INC-001"}'' produces history row with
+attributes = {restored_from:<historyId>, ticket:
+"INC-001"} — operators querying for "every restore
+with ticket X" use WHERE attributes->>'restored_from'
+IS NOT NULL AND attributes->>'ticket' = 'X'; this was
+already in substrate this milestone just exposes
+operator-supplied half via CLI; system field wins on
+conflict so operators can't forge audit reference
+(safe by design). Use cases unblocked — incident-
+ticket attribution (--attributes '{"ticket":"INC-2026-
+001","jurisdiction":"NY","attorney":"alice.smith"}'),
+bulk migration with shared marker (for-loop iterating
+tier-migration-list.txt with --attributes
+'{"migration_id":"MIG-Q2-2026","batch":"tier-promotion"}'
+for each call; later audit "Show me every retention
+set during MIG-Q2-2026" via WHERE attributes->>
+'migration_id'='MIG-Q2-2026'), compliance audit
+closing context (--attributes '{"offboarding":
+"trial_expiry","retention_review":"closed","auditor":
+"ext-firm-X"}'), forensic restore with context
+(--attributes '{"undo_reason":"customer_complaint",
+"escalation":"INC-2026-007","approval":"director"}'
+merged with system-set restored_from yields history
+row attributes including both). Rejected alternatives
+— substrate-side JSON validation adapter rejects non-
+object attributes (rejected substrate stays permissive
+CLI is right boundary for shape enforcement), accept
+any JSON value arrays/primitives/null allowed
+(rejected would diverge from attributes JSONB column's
+conceptual contract as key-value bag), --attribute
+<key>=<value> repeated flag for shell-friendly key=
+value pairs using ADR-0183 multiFlags infrastructure
+(keys are limited to strings no nested objects
+operators with structured context lose expressiveness;
+could ship as sibling later --attribute key=value for
+simple cases --attributes <json> for structured defer
+simpler-syntax variant), auto-merge environment-
+variable attributes CROSSENGIN_DEFAULT_ATTRIBUTES
+(implicit context invites surprises in pipelines
+operators control via shell), --attributes-file <path>
+instead of inline JSON (adds file-reading code path
+operators chain with cat; defer), restore auto-merge
+order operator-after-restored vs system-before
+(substrate already chose operator-after operator
+can't override system field; rejected opposite),
+JSON Schema validation hook for operator-defined
+attribute contracts (out of scope for v1 operators
+wrap with own jq pre-validation if needed), strip
+restored_from from operator-supplied attributes on
+restore to prevent forging audit reference (rejected
+adapter merges operator + system attributes system-
+key wins on conflict so operators can't forge current
+behavior safe). Drawbacks — JSON-object-only
+restriction operators with array-shape data wrap in
+record (documented), shell-quoting gotchas embedded
+quotes in JSON need shell escaping operators using
+--attributes "{\"key\":\"value\"}" instead of
+'{"key":"value"}' may hit shell-substitution issues
+(standard for CLI tools accepting JSON strings
+documented), no --attributes-file for large JSON
+(operators wrap with shell --attributes "$(cat
+ctx.json)" future Q), no schema validation on
+attributes content substrate accepts any JSON object
+shape (operators wanting "every restore must have
+ticket field" enforce at workflow/policy layer not
+substrate), no multi-attributes merge from multiple
+flags (operators wanting "base attributes from env +
+per-call additions" merge in shell before invocation
+defer), validation happens per-runner 5 mutation
+runners each call parseAttributesFlag independently
+(acceptable since per-runner error messages prefix
+the action name 'retention opt-out:', 'retention
+set:', etc. giving operators crisp error context).
+17 new CLI tests in retention.test.ts — opt-out: 9
+tests covering threads attributes to setTenantOptOut
+when --attributes is set verified via capture
+(attributes equals {ticket:"INC-2026-001", source:
+"cli"}), omits attributes from adapter input when
+not set backward compat (attributes undefined),
+invalid JSON syntax exit 2 with 'not valid JSON',
+JSON array '["a","b"]' exit 2 with 'must be a JSON
+object', JSON primitive '"a string"' exit 2, JSON
+null exit 2, validation BEFORE PG adapter call
+verified via setOptOutCapture length 0 with invalid
+JSON, accepts empty {} as value (attributes equals
+{}), accepts nested JSON object {approval:{reviewer,
+ticket}, automated:false}; opt-in: 2 tests covering
+threads to clearTenantOptOut with {reason:"hold-
+lifted", ticket:"INC-002"} + invalid JSON exit 2
+with 'retention opt-in:' prefix + 'not valid JSON';
+set: 2 tests covering threads to setTenantRetention
+with {tier_change:"free->pro"} + non-object value
+'42' (number) exit 2 with 'retention set:' prefix +
+'must be a JSON object'; delete: 2 tests covering
+threads to deleteTenantPolicy with {context:
+"offboarding", ticket:"OFF-2026-005"} + invalid JSON
+'{trailing comma,}' exit 2 with 'retention delete:'
+prefix; restore: 2 tests covering threads to
+restoreTenantPolicy with {undo_reason:"accidental",
+ticket:"INC-003"} + JSON primitive '"a string"'
+exit 2 with 'retention restore:' prefix + 'must be
+a JSON object'. cli.ts helpText extended with 5-line
+common-flag note after the 5 mutation/restore usage
+lines explaining all 5 actions accept --attributes
+'<json>' + restore merges {restored_from:historyId}
+with operator-supplied + invalid JSON or non-object
+exit 2. Future Qs cover --attribute key=value
+simpler-syntax sibling flag using multiFlags
+infrastructure for non-structured cases defer,
+--attributes-file <path> for large JSON defer,
+--attributes-env <var-name> reading from env variable
+for CI-secret-like values defer, JSON Schema
+validation hook per-tenant or per-action operator-
+policy concern substrate doesn't enforce, merge
+semantics in retention set when row already has
+attributes (substrate-design-bound no Q to defer
+live policy row has no attributes column; history is
+per-event), surface attributes in retention history
+human output for inline auditing currently only JSON
+output shows it human-format omits for terminal
+width future Q, --require-attributes-keys <list>
+CLI gate forcing operators to provide certain keys
+like ticket operator-policy defer. The retention CLI
+now has 17 actions with full audit-metadata surface
+across the mutation/restore family — actor (--actor
+on each mutation from ADR-0170), actor display
+(--with-actor-names on history from ADR-0185), actor
+filter (--actor-id on history from ADR-0186), and
+structured context (--attributes on each mutation
+from this milestone). Operators get who + human-
+readable name + filtering + arbitrary structured
+context flowing through every mutation into the
+append-only history audit log uniformly.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

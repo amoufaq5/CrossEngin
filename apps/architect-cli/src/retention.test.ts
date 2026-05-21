@@ -6510,3 +6510,379 @@ describe("formatTenantDiff", () => {
     expect(out).toContain("(no policy configured)");
   });
 });
+
+describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attributes)", () => {
+  describe("opt-out", () => {
+    it("threads attributes to setTenantOptOut adapter when --attributes is set", async () => {
+      const capture: SetTenantOptOutInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          '{"ticket":"INC-2026-001","source":"cli"}',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ setOptOutCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({
+        ticket: "INC-2026-001",
+        source: "cli",
+      });
+    });
+
+    it("omits attributes from adapter input when --attributes is NOT set (backward compat)", async () => {
+      const capture: SetTenantOptOutInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ setOptOutCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toBeUndefined();
+    });
+
+    it("returns exit 2 when --attributes is invalid JSON", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          "{not json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("not valid JSON");
+    });
+
+    it("returns exit 2 when --attributes is a JSON array (not object)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          '["a","b"]',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("must be a JSON object");
+    });
+
+    it("returns exit 2 when --attributes is a JSON primitive", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          '"a string"',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("must be a JSON object");
+    });
+
+    it("returns exit 2 when --attributes is null", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          "null",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("must be a JSON object");
+    });
+
+    it("validates --attributes BEFORE PG adapter call", async () => {
+      const capture: SetTenantOptOutInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          "{not json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ setOptOutCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(capture).toHaveLength(0);
+    });
+
+    it("accepts empty object {} as --attributes value", async () => {
+      const capture: SetTenantOptOutInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          "{}",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ setOptOutCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({});
+    });
+
+    it("accepts nested JSON object as --attributes value", async () => {
+      const capture: SetTenantOptOutInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-out",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          '{"approval":{"reviewer":"alice","ticket":"INC-001"},"automated":false}',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ setOptOutCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({
+        approval: { reviewer: "alice", ticket: "INC-001" },
+        automated: false,
+      });
+    });
+  });
+
+  describe("opt-in", () => {
+    it("threads attributes to clearTenantOptOut adapter when --attributes is set", async () => {
+      const capture: ClearTenantOptOutInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-in",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          '{"reason":"hold-lifted","ticket":"INC-002"}',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ clearOptOutCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({
+        reason: "hold-lifted",
+        ticket: "INC-002",
+      });
+    });
+
+    it("returns exit 2 when --attributes is invalid JSON for opt-in", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "opt-in",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          "not-json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("retention opt-in:");
+      expect(err()).toContain("not valid JSON");
+    });
+  });
+
+  describe("set", () => {
+    it("threads attributes to setTenantRetention adapter when --attributes is set", async () => {
+      const capture: SetTenantRetentionInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "set",
+          TENANT_A,
+          "workflow_traces",
+          "--days",
+          "30",
+          "--attributes",
+          '{"tier_change":"free->pro"}',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ setRetentionCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({ tier_change: "free->pro" });
+    });
+
+    it("returns exit 2 when --attributes is non-object for set", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "set",
+          TENANT_A,
+          "workflow_traces",
+          "--days",
+          "30",
+          "--attributes",
+          "42",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("retention set:");
+      expect(err()).toContain("must be a JSON object");
+    });
+  });
+
+  describe("delete", () => {
+    it("threads attributes to deleteTenantPolicy adapter when --attributes is set", async () => {
+      const capture: DeleteTenantPolicyInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "delete",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          '{"context":"offboarding","ticket":"OFF-2026-005"}',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ deleteCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({
+        context: "offboarding",
+        ticket: "OFF-2026-005",
+      });
+    });
+
+    it("returns exit 2 when --attributes is invalid JSON for delete", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "delete",
+          TENANT_A,
+          "workflow_traces",
+          "--attributes",
+          "{trailing comma,}",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("retention delete:");
+    });
+  });
+
+  describe("restore", () => {
+    const HISTORY_ID = "00000000-0000-7000-8000-000000000001";
+
+    it("threads attributes to restoreTenantPolicy adapter when --attributes is set", async () => {
+      const capture: RestoreTenantPolicyInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "restore",
+          HISTORY_ID,
+          "--attributes",
+          '{"undo_reason":"accidental","ticket":"INC-003"}',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ restoreCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.attributes).toEqual({
+        undo_reason: "accidental",
+        ticket: "INC-003",
+      });
+    });
+
+    it("returns exit 2 when --attributes is invalid JSON for restore", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "restore",
+          HISTORY_ID,
+          "--attributes",
+          '"a string"',
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("retention restore:");
+      expect(err()).toContain("must be a JSON object");
+    });
+  });
+});
