@@ -25,6 +25,7 @@ describe("SUBCOMMANDS", () => {
       "chat",
       "sessions",
       "gateway",
+      "retention",
       "version",
       "help",
     ]);

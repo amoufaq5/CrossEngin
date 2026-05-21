@@ -10,6 +10,7 @@ export * from "./gateway-routes.js";
 export * from "./gateway-server.js";
 export * from "./manifest-io.js";
 export * from "./pack-registry.js";
+export * from "./retention.js";
 export * from "./router-setup.js";
 export * from "./sessions.js";
 export * from "./tools.js";

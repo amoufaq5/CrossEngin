@@ -15,6 +15,7 @@ import {
   type RunContext,
 } from "../src/commands.js";
 import { runGateway } from "../src/gateway.js";
+import { runRetention } from "../src/retention.js";
 import { runSessions } from "../src/sessions.js";
 import { printError } from "../src/format.js";
 
@@ -64,6 +65,8 @@ async function main(): Promise<number> {
       return runSessions(command, ctx);
     case "gateway":
       return runGateway(command, ctx);
+    case "retention":
+      return runRetention(command, ctx);
   }
 }
 

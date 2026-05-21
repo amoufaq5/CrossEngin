@@ -21,15 +21,88 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,124 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.alerts
+**56 packages + 1 app, 128 meta-schema tables, 8,144 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli closes
+ADR-0163 Q4 by adding `crossengin retention expiring
+[--within-days N] [--include-expired]` CLI subcommand. The
+ADR-0163 expiringOptOuts resolver shipped a query surface
+but operators were still writing custom scripts to call it
+— the binary is the canonical operator surface for the rest
+of the substrate (apply, chat, sessions, gateway), retention
+belongs in the same place. New top-level `retention`
+subcommand added to SUBCOMMANDS list; first action `expiring`
+follows the established sessions/gateway-routes action-verb
+pattern. Defaults: --within-days=30 (matches monthly review
+cadence), --include-expired=false (upcoming-window query is
+the common case), --format=human (workspace standard).
+Human output renders a table with daysUntilExpiry as 'Nd'
+for future or 'EXPIRED Nd ago' for negative + tenant +
+table + reason (with <no reason> placeholder when null —
+gives operators an immediate signal that audit context
+from ADR-0161 is missing). Empty result prints a clear
+"no opt-outs ..." message. JSON output emits structured
+envelope with withinDays + includeExpired + count + results
+array so downstream consumers can pipe through jq for
+alerting / per-tier bucketing / spreadsheet export.
+Validation at CLI boundary mirrors resolver — --within-days
+must parse as Number.isFinite() && >= 0, rejects negative
+/ NaN / non-numeric with exit code 2 and clear error
+message. PG env required (PGHOST/PGDATABASE/...) matching
+sessions / gateway routes patterns; new RetentionContext.retentionOverride
+field injects mock for testing (PostgresTraceRetention
+override). Action-verb pattern chosen over flat
+subcommand (crossengin retention-expiring) because (1)
+matches sessions list/show/replay + gateway routes list/
+register/... conventions operators already know, (2)
+reserves namespace for future actions (retention effective,
+opt-out, opt-in, list-policies all wrap existing resolver
+methods), (3) help text groups related actions together.
+Use cases unblocked: daily cron retention-alerts job
+(crossengin retention expiring --format json | jq | send-slack),
+pre-flight checks before weekly compliance meetings,
+quarterly audit reports (--within-days 365 --include-expired
+--format json > audit.json), CI alert gates (count >0 means
+alert needed). Rejected alternatives: flat subcommand
+(breaks pattern), action under sessions/gateway (retention
+is its own substrate concern), default within-days=7 (too
+aggressive, monthly 30d more common), default include-expired=true
+(upcoming-window is the default query), built-in Slack/email
+delivery (couples substrates, operators wire delivery via
+notification provider of choice), filter flags --table/
+--tenant-id/--reason-pattern (keep surface minimal, jq covers
+filtering on JSON output for now), pagination/--limit (opt-out
+count bounded in practice), wrap Inngest job definition
+(operators have different schedulers — CLI stays scheduler-
+agnostic). 20 new tests in retention.test.ts: missing
+action returns exit 2, unknown action returns exit 2, missing
+PG env returns exit 1, default within-days=30 + includeExpired=false
+threaded to resolver, --within-days threads through,
+--include-expired threads through, negative --within-days
+returns exit 2 with clear error, non-numeric --within-days
+returns exit 2, human empty-result success message includes
+day count, --include-expired empty wording is 'expired or
+expiring', human table renders with all results visible,
+JSON emits structured envelope with all flags + count +
+results, JSON envelope includes withinDays + includeExpired,
+resolver errors propagate as exit 1, formatExpiringTable
+renders positive days as 'Nd', renders negative as 'EXPIRED
+Nd ago', renders <no reason> for null optOutReason, renders
+actual reason when set, uses 'expired or expiring' header
+when includeExpired=true, uses 'expiring' header when false.
+helpText extended with the new retention expiring usage line
++ --within-days / --include-expired flag docs. SUBCOMMANDS
+test in cli.test.ts updated to include 'retention'. Future
+Qs in ADR-0164 cover sibling actions (effective, opt-out,
+opt-in, list-policies), --tenant-id + --table filter flags,
+--exit-on-found CI gate flag, --sort output ordering, CSV
+output format, verbose debugging flag. M6.7.zz.tenant.opt-out.alerts
 closes ADR-0162 Q2 by adding `expiringOptOuts(input)`
 resolver to PostgresTraceRetention. The auto-expiry
 semantic shipped in M6.7.zz.tenant.opt-out.expiry lifted
@@ -4127,7 +4200,19 @@ workflows ("what expires soon?", "what's already expired?",
 + includeExpired parameters; daysUntilExpiry float
 pre-computed from injected clock; rejected active-push,
 PG-NOTIFY trigger, materialized view, and stateful alert
-tracking).
+tracking),
+ADR-0164 covers M6.7.zz.tenant.opt-out.cli
+(`crossengin retention expiring` CLI subcommand — closes
+ADR-0163 Q4 — new top-level `retention` subcommand follows
+sessions/gateway-routes action-verb pattern; first action
+`expiring` wraps the ADR-0163 resolver with --within-days
++ --include-expired flags + human/JSON output; PG env
+required + RetentionContext.retentionOverride for testing;
+defaults --within-days=30 + --include-expired=false match
+the most common monthly-review workflow; pipes cleanly
+into jq + cron + alert delivery; ground for future
+sibling actions like retention effective/opt-out/opt-in/
+list-policies).
 
 ## Architecture in 90 seconds
 
@@ -5616,6 +5701,88 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0164 covers Phase 2 M6.7.zz.tenant.opt-out.cli
+(`crossengin retention expiring [--within-days N]
+[--include-expired]` CLI subcommand — closes ADR-0163 Q4;
+new top-level `retention` subcommand added to SUBCOMMANDS
+list in apps/architect-cli/src/cli.ts; first action
+`expiring` follows the established sessions/gateway-routes
+action-verb pattern (top-level subcommand → action verb
+→ flags) rather than flat `crossengin retention-expiring`
+because (1) operators don't have to remember which
+subcommands are flat vs nested, (2) reserves namespace
+for future actions retention effective/opt-out/opt-in/
+list-policies, (3) help text groups related actions
+together; defaults — --within-days=30 (matches monthly
+review cadence, most common workflow), --include-expired=false
+(upcoming-window query is the default, expired cleanup
+is a distinct audit), --format=human (workspace standard);
+human output renders a table with daysUntilExpiry as 'Nd'
+for future / 'EXPIRED Nd ago' for negative + tenant +
+table + reason (with '<no reason>' placeholder when null
+giving operators an immediate signal that audit context
+from ADR-0161 is missing); empty result prints clear
+'no opt-outs ...' message with day count; --include-expired
+empty uses 'expired or expiring' wording; JSON output
+emits structured envelope {withinDays, includeExpired,
+count, results} so downstream consumers (cron jobs,
+alerting systems, spreadsheet exports) pipe through jq;
+validation at CLI boundary mirrors resolver — --within-days
+must parse as Number.isFinite() && >= 0, rejects negative
+/ NaN / non-numeric with exit code 2 and clear error
+message before any PG connection attempt; PG env required
+(PGHOST/PGDATABASE/...) matching sessions/gateway-routes
+patterns; new RetentionContext extends RunContext with
+retentionOverride?: PostgresTraceRetention field for
+test injection avoiding real DB connections; use cases
+unblocked — daily cron retention-alerts (crossengin
+retention expiring --format json | jq | send-slack),
+pre-flight checks before weekly compliance meetings,
+quarterly audit reports (--within-days 365 --include-expired
+--format json > audit.json), CI alert gates (count >0
+means alert needed); rejected alternatives — flat
+subcommand crossengin retention-expiring (breaks pattern),
+action under sessions/gateway (retention is its own
+substrate concern), default within-days=7 (too aggressive,
+30 matches monthly cadence), default include-expired=true
+(upcoming-window is the default), built-in Slack/email
+delivery (couples substrates, operators wire via
+notification provider), filter flags --table/--tenant-id/
+--reason-pattern (keep surface minimal, jq covers filter
+on JSON for now), pagination/--limit (opt-out count
+bounded in practice), wrap Inngest job definition
+(operators have different schedulers — CLI stays
+scheduler-agnostic); 20 new tests in retention.test.ts —
+missing action returns exit 2, unknown action returns
+exit 2, missing PG env returns exit 1, default within-days
++ includeExpired threaded to resolver, --within-days
+threads through, --include-expired threads through,
+negative --within-days returns exit 2 with clear error,
+non-numeric --within-days returns exit 2, human empty-result
+success message includes day count, --include-expired empty
+wording is 'expired or expiring', human table renders
+results with tenant + table + reason, JSON emits structured
+envelope with all flags + count + results array, JSON
+envelope includes both flags reflected in output, resolver
+errors propagate as exit 1 with clear message,
+formatExpiringTable renders positive days as 'Nd', renders
+negative as 'EXPIRED Nd ago', renders <no reason> for null
+optOutReason, renders actual reason when set, uses 'expired
+or expiring' header when includeExpired=true, uses
+'expiring' header when false; cli.test.ts SUBCOMMANDS
+test updated to include 'retention' in expected list;
+helpText extended with new retention expiring usage line
++ --within-days N + --include-expired flag docs; binary
+dispatcher in apps/architect-cli/bin/crossengin.ts
+imports runRetention and adds case 'retention' to switch;
+future Qs cover sibling actions (effective, opt-out,
+opt-in, list-policies — each a thin wrapper over an
+existing resolver method, mechanically derivable from
+this template), --tenant-id and --table filter flags
+(deferred — jq covers it), --exit-on-found CI gate flag
+(useful for "fail build if any opt-out expires <1d"),
+--sort output ordering, CSV output format (JSON + jq
+covers), verbose debugging flag).
 ADR-0163 covers Phase 2 M6.7.zz.tenant.opt-out.alerts
 (expiringOptOuts resolver method on PostgresTraceRetention —
 closes ADR-0162 Q2; method signature expiringOptOuts({
