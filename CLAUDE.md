@@ -21,15 +21,89 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,220 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.list
+**56 packages + 1 app, 128 meta-schema tables, 8,242 tests**,
+all green, no type errors. M6.7.zz.tenant.retention-set
+closes ADR-0166 Q7 by adding `crossengin retention set
+<tenant-id> <table-name> --days N [--enabled true|false]`
+action + setTenantRetention adapter method. Operators
+configuring active per-tenant retention overrides (NOT
+opt-out — that's ADR-0166) previously had to write raw
+INSERT ... ON CONFLICT SQL — now they have a one-command
+CLI. Mirrors the M6.7.zz.tenant.opt-out.cli.mutate pattern
+for symmetry — same INSERT ... ON CONFLICT DO UPDATE
+atomic upsert, same shared formatPolicyChange output
+renderer, same exit-code conventions. Adapter
+setTenantRetention takes {tenantId, tableName,
+retentionDays, enabled?} where enabled defaults to true;
+validates retentionDays as integer >= 1 (clearer than DB
+CHECK violation); SQL sets opt_out=false unconditionally,
+opt_out_until=NULL on UPDATE, preserves opt_out_reason
+on UPDATE (omitted from SET clause per ADR-0161
+historical audit context preservation); INSERT path
+explicitly writes all fields. CLI mandates --days flag
+(no default — operators must explicitly state the value);
+--enabled defaults to true (common case is "give this
+tenant a custom retention"); both flags validated at CLI
+boundary with exit code 2 on invalid. opt_out_until
+cleared on update because semantically belongs to opt-out
+lifecycle — stale value from previous opt-out is more
+common than pre-staging operator intent ("set this
+tenant's retention, period"). Action verb `set` chosen
+over update/configure/override for canonical operator
+vocabulary; full command (crossengin retention set ...)
+carries enough context. Human output via shared
+formatPolicyChange("retention set", policy) — "Tenant
+retention set: <uuid> / <table>" header + days + enabled
++ Opt-out:no + conditional Reason line (omitted when
+null but persists when historical). JSON output emits
+{action: "set", policy: TenantRetentionPolicyRow}. Use
+cases unblocked: per-tenant tier upgrade (free→enterprise
+365d), per-tenant tier downgrade (free 7d), disable as
+stand-by (--enabled=false), end-of-legal-hold workflow
+(opt-in then set to restore custom retention), compliance
+reset (opt-in then set disabled to inherit platform
+default), JSON pipeline for bulk tier migration scripts.
+Rejected alternatives: `retention update` (implies row
+exists), `retention override` (verbose+specific), make
+--days optional (operator may forget on new row creating
+inconsistent state), default --enabled=false (common
+case is take effect immediately), preserve opt_out_until
+(stale-vs-staging trade-off favors clear), clear
+opt_out_reason (contradicts ADR-0161), refuse set on
+opted-out row (one-shot transition is valid workflow),
+reject --enabled=false with --days (staging is valid),
+two-query SELECT-then-INSERT-or-UPDATE (race window).
+10 new adapter tests covering INSERT ... ON CONFLICT
+shape, parameter threading, default enabled=true,
+returns camelCase, UPDATE clears opt_out_until,
+PRESERVES opt_out_reason (omitted from SET clause),
+UPDATE uses EXCLUDED.retention_days + EXCLUDED.enabled,
+rejects retentionDays < 1, rejects non-integer, throws
+on empty RETURNING. 12 new CLI tests covering missing
+tenant/table exit 2, missing --days exit 2, threads
+tenantId+tableName+days+default enabled=true to adapter,
+--enabled=false threading, --enabled=true threading,
+invalid --enabled exit 2, non-integer --days exit 2,
+--days<1 exit 2, human output Tenant retention set
+header + 30 day(s) + Opt-out:no, JSON envelope {action:
+"set", policy} structure, adapter errors propagate exit
+1. cli.ts helpText extended with retention set usage
+line + --days / --enabled flag docs. ADR-0168 documents
+design + 9 rejected alternatives + future Qs (retention
+delete action for full removal, --confirm-clear-opt-out
+flag for destructive transitions, --days inherit sugar
+for DELETE-and-inherit, bulk variant for tier migration
+scripts, confirmation prompt for destructive transitions
+pairing with apply --confirm pattern, audit columns
+set_by/set_at pairing with deferred actor attribution
++ history-table milestones). M6.7.zz.tenant.opt-out.cli.list
 adds `crossengin retention list-policies [--tenant <uuid>]
 [--table <name>]` action filling the broad-audit gap left
 by the four prior CLI actions (expiring/effective/opt-out/
@@ -4512,7 +4586,18 @@ query parameters in saved output; JSON envelope {tenantFilter,
 tableFilter, platform, tenantPolicies} for downstream jq;
 parallel Promise.all adapter calls; closes the
 compliance-audit gap left by the four targeted CLI
-actions).
+actions),
+ADR-0168 covers M6.7.zz.tenant.retention-set
+(`crossengin retention set <tenant> <table> --days N
+[--enabled true|false]` action + setTenantRetention
+adapter method — closes ADR-0166 Q7 — non-opt-out
+per-tenant retention overrides previously required raw
+SQL; INSERT ... ON CONFLICT DO UPDATE clears opt_out +
+opt_out_until on UPDATE but preserves opt_out_reason
+per ADR-0161; --days required + --enabled defaults true;
+shared formatPolicyChange helper renders 'Tenant
+retention set:' header; tier-upgrade / tier-downgrade /
+stand-by / end-of-legal-hold workflows now CLI-native).
 
 ## Architecture in 90 seconds
 
@@ -6001,6 +6086,109 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0168 covers Phase 2 M6.7.zz.tenant.retention-set
+(`crossengin retention set <tenant-id> <table-name>
+--days N [--enabled true|false]` CLI action +
+setTenantRetention adapter method on PostgresTraceRetention
+— closes ADR-0166 Q7; operators configuring active
+per-tenant retention overrides (NOT opt-out — that's
+ADR-0166's path) previously had to write raw INSERT ...
+ON CONFLICT SQL — now one-command CLI; mirrors
+M6.7.zz.tenant.opt-out.cli.mutate pattern for symmetry —
+same INSERT ... ON CONFLICT DO UPDATE atomic upsert,
+same shared formatPolicyChange output renderer, same
+exit-code conventions; adapter setTenantRetention takes
+{tenantId, tableName, retentionDays, enabled?} where
+enabled defaults to true; validates retentionDays as
+integer >= 1 at adapter boundary (clearer than DB CHECK
+violation); SQL sets opt_out=false unconditionally,
+opt_out_until=NULL on UPDATE, PRESERVES opt_out_reason
+on UPDATE (omitted from SET clause per ADR-0161
+historical audit context preservation — lifting an
+opt-out keeps the reason as 'this tenant was opted out
+previously due to X' historical signal; same logic
+applies when transitioning from opt-out to active per-
+tenant override); INSERT path explicitly writes all
+fields with opt_out_reason=NULL, opt_out_until=NULL;
+throws when RETURNING yields no rows (defensive); CLI
+mandates --days flag (no default — operators must
+explicitly state the policy value; missing --days exits
+2 with clear error catching the bug); --enabled defaults
+to true (common case is take effect immediately);
+--enabled true|false validated as string match (anything
+else exits 2); opt_out_until cleared on update because
+semantically belongs to opt-out lifecycle — stale value
+from previous opt-out is more common than pre-staging
+operator intent ('set this tenant's retention, period');
+action verb `set` chosen over update/configure/override
+for canonical operator vocabulary — full command
+crossengin retention set ... carries enough context that
+set alone isn't ambiguous; human output via shared
+formatPolicyChange("retention set", policy) — 'Tenant
+retention set: <uuid> / <table>' header + Retention N
+day(s) + Enabled yes|no + Opt-out:no + conditional
+Until line (omitted when both opt_out=false and
+opt_out_until=null) + conditional Reason line (rendered
+when opt_out_reason persists from historical opt-out,
+omitted when null); JSON output emits envelope {action:
+"set", policy: TenantRetentionPolicyRow}; use cases
+unblocked — per-tenant tier upgrade (free→enterprise
+365d), per-tenant tier downgrade (free 7d), disable as
+stand-by (--enabled=false; configured retention_days
+stored as restore value if later re-enabled),
+end-of-legal-hold workflow (opt-in then set to restore
+custom retention — set also defensively clears any
+residual opt_out_until from staging), compliance reset
+(opt-in then set --enabled=false to inherit platform
+default), JSON pipeline for bulk tier migration scripts
+via shell loop; rejected alternatives — `retention
+update` (implies row exists; set is symmetric across
+new+existing), `retention override` (verbose+specific
+to per-tenant override semantic; set reads more
+naturally), make --days optional preserving existing
+(operators may forget on new row creating inconsistent
+state; mandatory catches bug), default --enabled=false
+require explicit true (common case is take effect
+immediately), preserve opt_out_until on update (stale-vs-
+staging trade-off favors clear; matches most common
+intent), clear opt_out_reason on update (contradicts
+ADR-0161 documented preservation), refuse set on row
+currently with opt_out=true (one-shot transition is
+valid workflow — current behavior clears opt_out +
+opt_out_until while preserving opt_out_reason is exactly
+that one-shot), reject --enabled=false with --days (
+staging future retention with disabled flag is valid),
+two-query SELECT-then-INSERT-or-UPDATE (race window;
+ON CONFLICT atomic); 10 new adapter tests in
+trace-retention.test.ts covering INSERT ... ON CONFLICT
+shape verified, parameter threading retentionDays +
+enabled, defaults enabled=true, returns camelCase policy
+row, UPDATE clears opt_out_until to NULL, PRESERVES
+opt_out_reason (not in SET clause), UPDATE uses
+EXCLUDED.retention_days + EXCLUDED.enabled, rejects
+retentionDays < 1 at adapter boundary, rejects
+non-integer 1.5, throws on empty RETURNING; 12 new CLI
+tests in retention.test.ts covering missing tenant
+returns exit 2, missing table returns exit 2, missing
+--days flag returns exit 2, default flag threading
+(tenantId + tableName + days + enabled=true) to adapter,
+--enabled=false threading, --enabled=true threading
+explicitly, invalid --enabled value exits 2 with clear
+error, non-integer --days exits 2, --days<1 exits 2,
+human output prints 'Tenant retention set:' header +
+30 day(s) + Opt-out:no, JSON envelope shape
+{action: "set", policy: ...}, adapter errors propagate
+as exit 1; cli.ts helpText extended with retention set
+usage line + --days/--enabled flag docs; future Qs
+cover retention delete action for full row removal
+(operators currently raw SQL DELETE), --confirm-clear-
+opt-out flag for destructive transitions (force
+explicit acknowledgement), --days inherit sugar for
+DELETE-and-inherit-platform-default, bulk variant
+--bulk file.csv for tier migration scripts, confirmation
+prompt --confirm matching apply --confirm pattern, audit
+columns set_by/set_at pairing with deferred actor
+attribution + history-table milestones).
 ADR-0167 covers Phase 2 M6.7.zz.tenant.opt-out.cli.list
 (`crossengin retention list-policies [--tenant <uuid>]
 [--table <name>]` broad-audit CLI action — fills the

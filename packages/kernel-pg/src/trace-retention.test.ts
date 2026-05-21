@@ -2445,3 +2445,193 @@ describe("PostgresTraceRetention.clearTenantOptOut (M6.7.zz.tenant.opt-out.cli.m
     expect(capture[0]?.params).toEqual([TENANT_A, "llm_call_traces"]);
   });
 });
+
+describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-set)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  function returnedRow(
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      opt_out: boolean;
+      opt_out_reason: string | null;
+      opt_out_until: string | null;
+      last_pruned_at: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id: TENANT_A,
+      table_name: "workflow_traces",
+      retention_days: 30,
+      enabled: true,
+      opt_out: false,
+      opt_out_reason: null,
+      opt_out_until: null,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("INSERTs with ON CONFLICT DO UPDATE setting opt_out=false", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+    });
+    expect(capture[0]?.sql).toContain(
+      "INSERT INTO meta.tenant_retention_policies",
+    );
+    expect(capture[0]?.sql).toContain("ON CONFLICT (tenant_id, table_name)");
+    expect(capture[0]?.sql).toContain("opt_out = false");
+  });
+
+  it("threads retentionDays + enabled into params", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({
+        rows: [returnedRow({ retention_days: 90, enabled: false })],
+        rowCount: 1,
+      }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 90,
+      enabled: false,
+    });
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      90,
+      false,
+    ]);
+  });
+
+  it("defaults enabled to true when not provided", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+    });
+    expect(capture[0]?.params?.[3]).toBe(true);
+  });
+
+  it("returns the policy row mapped to camelCase", async () => {
+    const conn = mockConnection(() => ({
+      rows: [returnedRow({ retention_days: 90 })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const policy = await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 90,
+    });
+    expect(policy.tenantId).toBe(TENANT_A);
+    expect(policy.retentionDays).toBe(90);
+    expect(policy.enabled).toBe(true);
+    expect(policy.optOut).toBe(false);
+  });
+
+  it("ON CONFLICT clears opt_out_until (to NULL) on UPDATE", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+    });
+    const sql = capture[0]?.sql ?? "";
+    const updateClause = sql.slice(sql.indexOf("DO UPDATE SET"));
+    expect(updateClause).toContain("opt_out_until = NULL");
+  });
+
+  it("ON CONFLICT DO UPDATE PRESERVES opt_out_reason (omitted from SET clause)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+    });
+    const sql = capture[0]?.sql ?? "";
+    const updateClause = sql.slice(sql.indexOf("DO UPDATE SET"));
+    expect(updateClause).not.toContain("opt_out_reason =");
+  });
+
+  it("ON CONFLICT updates retention_days + enabled to EXCLUDED.* values", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantRetention({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+    });
+    expect(capture[0]?.sql).toContain(
+      "retention_days = EXCLUDED.retention_days",
+    );
+    expect(capture[0]?.sql).toContain("enabled = EXCLUDED.enabled");
+  });
+
+  it("rejects retentionDays < 1", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.setTenantRetention({
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 0,
+      }),
+    ).rejects.toThrow(/retentionDays/);
+  });
+
+  it("rejects non-integer retentionDays", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.setTenantRetention({
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 1.5,
+      }),
+    ).rejects.toThrow(/retentionDays/);
+  });
+
+  it("throws when RETURNING yields no rows", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.setTenantRetention({
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 30,
+      }),
+    ).rejects.toThrow(/returned no rows/);
+  });
+});

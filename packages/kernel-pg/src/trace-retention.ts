@@ -126,6 +126,13 @@ export interface ClearTenantOptOutInput {
   readonly tableName: string;
 }
 
+export interface SetTenantRetentionInput {
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly retentionDays: number;
+  readonly enabled?: boolean;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -593,6 +600,46 @@ export class PostgresTraceRetention {
     );
     const r = result.rows[0];
     if (r === undefined) return null;
+    return {
+      tenantId: r.tenant_id,
+      tableName: r.table_name,
+      retentionDays: r.retention_days,
+      enabled: r.enabled,
+      optOut: r.opt_out,
+      optOutReason: r.opt_out_reason,
+      optOutUntil: r.opt_out_until,
+      lastPrunedAt: r.last_pruned_at,
+    };
+  }
+
+  async setTenantRetention(
+    input: SetTenantRetentionInput,
+  ): Promise<TenantRetentionPolicyRow> {
+    if (!Number.isInteger(input.retentionDays) || input.retentionDays < 1) {
+      throw new Error(
+        `retentionDays must be an integer >= 1, got ${input.retentionDays}`,
+      );
+    }
+    const enabled = input.enabled ?? true;
+    const result = await this.conn.query<RawTenantPolicyRow>(
+      `INSERT INTO ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         (tenant_id, table_name, retention_days, enabled, opt_out,
+          opt_out_reason, opt_out_until, updated_at)
+       VALUES ($1, $2, $3, $4, false, NULL, NULL, now())
+       ON CONFLICT (tenant_id, table_name) DO UPDATE SET
+         retention_days = EXCLUDED.retention_days,
+         enabled = EXCLUDED.enabled,
+         opt_out = false,
+         opt_out_until = NULL,
+         updated_at = now()
+       RETURNING tenant_id, table_name, retention_days, enabled,
+                 opt_out, opt_out_reason, opt_out_until, last_pruned_at`,
+      [input.tenantId, input.tableName, input.retentionDays, enabled],
+    );
+    const r = result.rows[0];
+    if (r === undefined) {
+      throw new Error("setTenantRetention: INSERT/UPDATE returned no rows");
+    }
     return {
       tenantId: r.tenant_id,
       tableName: r.table_name,

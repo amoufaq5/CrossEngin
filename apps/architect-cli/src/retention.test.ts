@@ -6,6 +6,7 @@ import type {
   PostgresTraceRetention,
   RetentionPolicyRow,
   SetTenantOptOutInput,
+  SetTenantRetentionInput,
   TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
@@ -58,6 +59,8 @@ function fakeRetention(opts: {
   clearOptOutCapture?: ClearTenantOptOutInput[];
   platformPolicies?: readonly RetentionPolicyRow[];
   tenantPolicies?: readonly TenantRetentionPolicyRow[];
+  setRetentionResult?: TenantRetentionPolicyRow;
+  setRetentionCapture?: SetTenantRetentionInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -115,6 +118,22 @@ function fakeRetention(opts: {
     listTenantPolicies: async () => {
       if (opts.throws !== undefined) throw opts.throws;
       return opts.tenantPolicies ?? [];
+    },
+    setTenantRetention: async (input: SetTenantRetentionInput) => {
+      opts.setRetentionCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.setRetentionResult ?? {
+          tenantId: input.tenantId,
+          tableName: input.tableName,
+          retentionDays: input.retentionDays,
+          enabled: input.enabled ?? true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        }
+      );
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -1482,5 +1501,242 @@ describe("formatPoliciesList", () => {
       { tenantFilter: null, tableFilter: null },
     );
     expect(out).not.toContain("filtered:");
+  });
+});
+
+describe("runRetention set", () => {
+  it("returns exit 2 when tenant arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "set"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when table arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "set", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when --days flag is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "set", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing --days flag");
+  });
+
+  it("threads tenantId + tableName + days + default enabled=true to adapter", async () => {
+    const { ctx } = buffers();
+    const setRetentionCapture: SetTenantRetentionInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setRetentionCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setRetentionCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+      enabled: true,
+    });
+  });
+
+  it("threads --enabled=false to adapter", async () => {
+    const { ctx } = buffers();
+    const setRetentionCapture: SetTenantRetentionInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+        "--enabled",
+        "false",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setRetentionCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setRetentionCapture[0]?.enabled).toBe(false);
+  });
+
+  it("threads --enabled=true explicitly to adapter", async () => {
+    const { ctx } = buffers();
+    const setRetentionCapture: SetTenantRetentionInput[] = [];
+    await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+        "--enabled",
+        "true",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setRetentionCapture }),
+      } as RetentionContext,
+    );
+    expect(setRetentionCapture[0]?.enabled).toBe(true);
+  });
+
+  it("returns exit 2 on invalid --enabled", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+        "--enabled",
+        "yes",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --enabled");
+  });
+
+  it("returns exit 2 on non-integer --days", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "abc",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --days");
+  });
+
+  it("returns exit 2 on --days < 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "0",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --days");
+  });
+
+  it("human-format prints the post-mutation policy with action verb", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Tenant retention set:");
+    expect(out()).toContain("30 day(s)");
+    expect(out()).toContain("Opt-out:    no");
+  });
+
+  it("json-format emits envelope {action: 'set', policy}", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("set");
+    expect(parsedJson.policy.tenantId).toBe(TENANT_A);
+    expect(parsedJson.policy.retentionDays).toBe(30);
+    expect(parsedJson.policy.optOut).toBe(false);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("FK constraint violated"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("FK constraint violated");
   });
 });

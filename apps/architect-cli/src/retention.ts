@@ -33,7 +33,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|list-policies> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|list-policies> [args]",
     );
     return 2;
   }
@@ -49,12 +49,14 @@ export async function runRetention(
         return await runRetentionOptOut(command, ctx, handle.retention);
       case "opt-in":
         return await runRetentionOptIn(command, ctx, handle.retention);
+      case "set":
+        return await runRetentionSet(command, ctx, handle.retention);
       case "list-policies":
         return await runRetentionListPolicies(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, list-policies`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, list-policies`,
         );
         return 2;
     }
@@ -493,4 +495,76 @@ function formatTenantOptOutSummary(p: TenantRetentionPolicyRow): string {
   const until = p.optOutUntil ?? "indefinite";
   const reason = p.optOutReason ?? "<no reason>";
   return `opt-out=yes (until ${until}, reason: ${reason})`;
+}
+
+async function runRetentionSet(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantId = command.positional[1];
+  const tableName = command.positional[2];
+  if (tenantId === undefined || tableName === undefined) {
+    printError(
+      ctx.io,
+      "retention set: missing arguments. usage: crossengin retention set <tenant-id> <table-name> --days N [--enabled true|false]",
+    );
+    return 2;
+  }
+
+  const daysFlag = getStringFlag(command, "days");
+  if (daysFlag === null) {
+    printError(
+      ctx.io,
+      "retention set: missing --days flag. usage: crossengin retention set <tenant-id> <table-name> --days N [--enabled true|false]",
+    );
+    return 2;
+  }
+  const days = Number.parseInt(daysFlag, 10);
+  if (!Number.isFinite(days) || days < 1) {
+    printError(
+      ctx.io,
+      `retention set: invalid --days '${daysFlag}' (must be an integer >= 1)`,
+    );
+    return 2;
+  }
+
+  const enabledFlag = getStringFlag(command, "enabled");
+  let enabled = true;
+  if (enabledFlag !== null) {
+    if (enabledFlag === "true") {
+      enabled = true;
+    } else if (enabledFlag === "false") {
+      enabled = false;
+    } else {
+      printError(
+        ctx.io,
+        `retention set: invalid --enabled '${enabledFlag}' (expected 'true' or 'false')`,
+      );
+      return 2;
+    }
+  }
+
+  let policy: TenantRetentionPolicyRow;
+  try {
+    policy = await retention.setTenantRetention({
+      tenantId,
+      tableName,
+      retentionDays: days,
+      enabled,
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention set: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "set", policy });
+    return 0;
+  }
+  ctx.io.stdout.write(formatPolicyChange("retention set", policy));
+  return 0;
 }
