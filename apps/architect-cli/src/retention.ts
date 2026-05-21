@@ -1419,6 +1419,8 @@ async function runRetentionDiffTimeline(
   }
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+  const actorIdFlag = getStringFlag(command, "actor-id");
+  const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
 
   if (crossTable) {
     const tenantId = positionalA;
@@ -1432,6 +1434,7 @@ async function runRetentionDiffTimeline(
         until,
         limit,
         joinActor: withActorNames || undefined,
+        actorId,
       });
     } catch (err) {
       printError(
@@ -1449,6 +1452,7 @@ async function runRetentionDiffTimeline(
         until: until ?? null,
         limit,
         withActorNames,
+        actorId: actorId ?? null,
         result: crossResult,
       });
       return 0;
@@ -1474,6 +1478,7 @@ async function runRetentionDiffTimeline(
         until,
         limit,
         joinActor: withActorNames || undefined,
+        actorId,
       });
     } catch (err) {
       printError(
@@ -1491,6 +1496,7 @@ async function runRetentionDiffTimeline(
         until: until ?? null,
         limit,
         withActorNames,
+        actorId: actorId ?? null,
         result: nwayResult,
       });
       return 0;
@@ -1509,6 +1515,7 @@ async function runRetentionDiffTimeline(
       until,
       limit,
       joinActor: withActorNames || undefined,
+      actorId,
     });
   } catch (err) {
     printError(
@@ -1525,6 +1532,7 @@ async function runRetentionDiffTimeline(
       until: until ?? null,
       limit,
       withActorNames,
+      actorId: actorId ?? null,
       result,
     });
     return 0;

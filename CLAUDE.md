@@ -21,15 +21,98 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,708 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table
+**56 packages + 1 app, 129 meta-schema tables, 8,724 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter
+closes ADR-0189 Q4 by threading `--actor-id <uuid>` filter
+through all three `retention diff-timeline` dispatch paths
+(pair-wise cross-tenant + N-way cross-tenant + cross-table).
+Composes ADR-0186's substrate-side WHERE filter pattern on the
+audit-log surface across the chronological diff-timeline
+matrix. Operators investigating per-actor forensics across
+cohorts or table sets — "show all of Alice's mutations across
+these 5 tenants" or "across this tenant's 4 prunable tables" —
+previously post-filtered with jq breaking LIMIT correctness +
+future cursor-pagination correctness; substrate-side WHERE
+filter ensures both. Pure CLI-and-adapter delivery with no new
+methods — three input types (DiffHistoryTimelineInput +
+DiffHistoryTimelineNwayInput + DiffHistoryTimelineCrossTableInput)
+gain optional actorId?: string field uniformly; three adapter
+methods add identical conditional WHERE clause `h.actor_id = $N`
+positioned after tenant/table params before --since/--until
+params. CLI runRetentionDiffTimeline reads actorIdFlag via
+getStringFlag once, threads to whichever adapter is dispatched.
+JSON envelope echoes actorId: string | null field across all
+three envelope shapes (pair-wise no-discriminator, nway:true,
+crossTable:true) so downstream consumers detect filter on
+existing envelope shapes — no new discriminator needed. No
+null-actor sentinel — operators jq-filter on
+`.result.entries[] | select(.actorId == null)` matching ADR-0186
+convention. No CLI-side UUID validation matching ADR-0175/0186
+deferred decision — PG enforces with clearer error. Use cases
+unblocked — per-actor cohort audit ("Alice's mutations across
+the 4-tenant cohort"), per-actor cross-table audit ("Alice's
+mutations across one tenant's 4 prunable tables"), incident
+timeline focused on specific operator (--actor-id <suspect>
+--since incident-window-start), service-account vs human-actor
+split via two separate commands. Rejected alternatives —
+CLI-side jq filter as documented workflow (breaks LIMIT +
+future cursor correctness), --actor-id as repeated multi-flag
+from day one (positive-only is common case defer multi-actor),
+--actor sentinel for null filtering (overloads string semantic),
+separate adapter input type for actor-filtered queries (one
+optional field doesn't justify type bloat), CLI-side UUID
+validation (substrate doesn't validate PG errors are clearer),
+composite index on (actor_id, occurred_at) (premature defer
+until measured), surface filter in JSON envelope as actorFilter
+rather than actorId (verbose; matches per-entry actorId from
+ADR-0190), reject --actor-id when result would be empty
+(over-eager; empty is a valid signal). Drawbacks — uniform
+addition to all three paths (acceptable structural symmetry),
+no null-actor sentinel (jq-filter documented), no --actor-id-not
+exclusion (defer), no multi-actor OR (defer via multiFlags),
+no --actor-name-equals human-readable input (defer pairs with
+ADR-0185 Q2), no composite index (defer until measured), no
+CLI-side UUID validation. 7 new adapter tests in trace-
+retention.test.ts (pair-wise: h.actor_id = $4 WHERE clause
+when actorId set verified via SQL substring + params,
+pair-wise: omits h.actor_id WHERE when not set, N-way:
+h.actor_id = $5 positioned after tenant IN list verified,
+cross-table: h.actor_id = $5 positioned after table IN list
+verified, pair-wise: composes actorId with --since + --until
++ --limit + joinActor (LEFT JOIN + actor-id WHERE both
+present + param positions verified), N-way: omits h.actor_id
+when not set, cross-table: omits h.actor_id when not set).
+9 new CLI tests in retention.test.ts — pair-wise: threads
+actor-id to adapter when --actor-id set, pair-wise: omits
+actorId when --actor-id NOT set backward compat, N-way:
+threads actor-id alongside --add-tenant, cross-table: threads
+actor-id alongside --cross-table, composes with --with-actor-
+names + --since + --limit verified via capture, JSON envelope
+echoes actorId on pair-wise + N-way + cross-table paths (3
+tests), JSON envelope actorId=null when flag not set. cli.ts
+helpText extended with [--actor-id <uuid>] flag note on both
+diff-timeline usage lines + description explaining substrate-
+side actor filter. ADR-0193 documents the design + 8 rejected
+alternatives + 7 future Qs (--actor-id repeated multi-flag for
+OR semantics, --actor-id-not exclusion, --actor-name-equals
+filter via meta.users.display_name JOIN, composite index on
+(actor_id, occurred_at), CLI-side UUID validation, --system-only
+flag for actor_id IS NULL, multi-dimension actor filter
+matrix). The retention CLI now has 18 actions with audit-log
+filter dimensions complete on both audit-log surfaces — six
+filter dimensions on retention history (ADR-0186) + actor
+filter uniformly across all three diff-timeline paths from
+this milestone — operators have first-class per-actor
+forensic workflows across both single-tenant and cross-tenant
+and cross-table audit-log surfaces.
+M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table
 closes ADR-0189 Q2 by adding `--cross-table` (+ optional
 `--add-table <c> ...`) to `retention diff-timeline`. Mirrors
 ADR-0180/0188's cross-table pattern on the timeline axis,
@@ -7627,7 +7710,27 @@ flags compose uniformly across all three paths; full-
 cohort cross-table audit for one tenant over time +
 legal-hold uniformity verification + cross-table tier
 migration verification + compliance attestation per
-tenant × all tables workflows now CLI-native).
+tenant × all tables workflows now CLI-native),
+ADR-0193 covers M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter
+(`retention diff-timeline --actor-id <uuid>` filter
+across all three diff-timeline paths — closes ADR-0189
+Q4 — composes ADR-0186's substrate-side WHERE filter
+pattern uniformly on pair-wise + N-way + cross-table
+diff-timeline; all three input types gain optional
+actorId?: string field; adapter methods add identical
+conditional `h.actor_id = $N` WHERE clause when set;
+CLI runRetentionDiffTimeline reads actorIdFlag once
+threads to whichever adapter is dispatched; JSON
+envelope echoes actorId: string | null on all three
+envelope shapes; substrate-side WHERE filter ensures
+LIMIT + future cursor-pagination correctness vs
+jq-side post-fetch filter that breaks both; no null-
+actor sentinel operators jq-filter for system-actor
+events matching ADR-0186 convention; per-actor cohort
+audit + per-actor cross-table audit + incident
+timeline focused on specific operator + service-
+account vs human-actor split workflows now CLI-native
+without LIMIT/pagination-correctness gotchas).
 
 ## Architecture in 90 seconds
 
@@ -11777,6 +11880,154 @@ matrix from ADR-0173/0178/0179/0180/0181/0183/0184/
 0188 operators have point-in-time AND chronological
 comparison ergonomics complete on cross-tenant +
 cross-table + N-way variants.
+ADR-0193 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter
+(`crossengin retention diff-timeline --actor-id <uuid>`
+filter across all three diff-timeline paths — closes
+ADR-0189 Q4; ADR-0186 shipped substrate-side WHERE
+actor filter on retention history; ADR-0189/0190/
+0191/0192 shipped diff-timeline with three dispatch
+paths plus --with-actor-names display surfacing;
+operators investigating per-actor forensics across
+cohorts or table sets ("show all of Alice's mutations
+across these 5 tenants" or "across this tenant's 4
+prunable tables") couldn't answer with the existing
+diff-timeline and post-filtering via jq broke LIMIT
+correctness (asking for --limit 100 returned <100
+entries after jq filter) and would break future
+cursor-pagination correctness; this milestone closes
+that gap; CLI surface --actor-id <uuid> added
+uniformly to all three diff-timeline dispatch paths
+(pair-wise cross-tenant + N-way cross-tenant + cross-
+table); composes with --with-actor-names for canonical
+"Alice's audit log across cohort" pattern; composes
+with --add-tenant and --cross-table without
+restriction; adapter — all three input types
+(DiffHistoryTimelineInput + DiffHistoryTimelineNwayInput
++ DiffHistoryTimelineCrossTableInput) gain optional
+actorId?: string field; all three adapter methods
+add identical conditional WHERE clause `h.actor_id =
+$N` when input.actorId !== undefined, positioned
+after tenant/table parameters before --since/--until
+parameters; SQL — substrate-side WHERE ensures LIMIT
+correctness (--limit 100 returns 100 actor-filtered
+entries from PG not <100 filtered from 100-row jq
+input) + future cursor-pagination correctness (when
+--after-id ships filter happens before pagination
+not after) + index usage (future composite index on
+(actor_id, occurred_at) would speed actor-scoped
+queries); CLI dispatcher reads actorIdFlag via
+getStringFlag once normalizes to actorId: string |
+undefined threads to whichever adapter method gets
+selected no restriction on which path can use the
+flag composes uniformly; JSON envelope echoes
+actorId: string | null field across all three
+envelope shapes (pair-wise no-discriminator, nway:
+true, crossTable:true) so downstream consumers
+detect filter on existing envelope shapes without
+needing yet another discriminator; no null-actor
+sentinel — operators wanting actor_id IS NULL events
+jq-filter on .result.entries[] | select(.actorId ==
+null) matching ADR-0186 convention substrate stays
+minimal one positive filter per dimension no
+sentinel string values; no CLI-side UUID validation
+PG enforces UUID format at query time with clearer
+error than CLI substring matching matches
+ADR-0175/0186 deferred decision invalid UUIDs
+surface as PG-side error exit 1; use cases unblocked
+— per-actor cohort audit ("Alice's mutations across
+the 4-tenant cohort with --with-actor-names"), per-
+actor cross-table audit ("every retention mutation
+Alice made across all 4 prunable tables of one
+tenant"), incident timeline focused on specific
+operator (--actor-id <suspect> --since
+incident-window-start forensic timeline focused on
+what one actor did during the incident window),
+service-account vs human-actor split (two separate
+commands isolate service-account mutations from
+human-actor mutations for review); rejected
+alternatives — CLI-side jq filter as documented
+workflow (breaks LIMIT + future cursor correctness),
+--actor-id as repeated multi-flag from day one
+(positive-only is common case defer multi-actor),
+--actor sentinel for null filtering (overloads
+string semantic operators jq-filter), separate
+adapter input type for actor-filtered queries (one
+optional field doesn't justify type bloat),
+CLI-side UUID validation matching regex (substrate
+doesn't validate PG errors are clearer matches
+ADR-0175/0186), composite index on (actor_id,
+occurred_at) (premature optimization substrate
+stays unindexed until measured slow defer), surface
+filter in JSON envelope as actorFilter rather than
+actorId (verbose; matches per-entry actorId field
+name from ADR-0190), reject --actor-id when result
+would be empty (over-eager; empty is a valid signal);
+drawbacks — one flag added uniformly to all three
+paths (three adapter methods + three JSON envelope
+shapes all gain same actorId field acceptable
+structural symmetry), no null-actor sentinel
+(operators jq-filter documented matches ADR-0186
+pattern), no --actor-id-not exclusion (operators
+jq-filter defer same as ADR-0186), no multi-actor
+OR filter (operators run twice + concat defer could
+ship via multiFlags from ADR-0183 if measured
+demand emerges), no --actor-name-equals for human-
+readable input (operators look up UUIDs first defer
+pairs with ADR-0185 Q2 + ADR-0186 Q1), no PG
+composite index actor-filtered queries do index
+scan + sort (defer until measured slow), no CLI-
+side UUID validation (invalid UUIDs hit PG error
+matches ADR-0175/0186); 7 new adapter tests in
+trace-retention.test.ts in a new "PostgresTraceRetention
+diff-timeline --actor-id filter" describe block —
+pair-wise adds h.actor_id = $4 WHERE clause when
+actorId set verified via SQL substring + params,
+pair-wise omits h.actor_id WHERE when not set,
+N-way adds h.actor_id = $5 positioned after tenant
+IN list verified, cross-table adds h.actor_id = $5
+positioned after table IN list verified, pair-wise
+composes actorId with --since + --until + --limit +
+joinActor (LEFT JOIN + actor-id WHERE both present
++ all param positions verified), N-way omits when
+not set, cross-table omits when not set; 9 new CLI
+tests in retention.test.ts in a new "runRetention
+diff-timeline --actor-id" describe block — pair-
+wise threads actor-id to adapter when --actor-id
+set verified via capture, pair-wise omits actorId
+when --actor-id NOT set backward compat verified,
+N-way threads actor-id alongside --add-tenant,
+cross-table threads actor-id alongside
+--cross-table, composes with --with-actor-names +
+--since + --limit verified, JSON envelope echoes
+actorId field when --actor-id set (pair-wise +
+N-way + cross-table envelope shapes — 3 tests),
+JSON envelope actorId=null when --actor-id NOT set;
+cli.ts helpText extended with [--actor-id <uuid>]
+flag note on both diff-timeline usage lines + 1-2
+line descriptions explaining substrate-side actor
+filter; future Qs cover --actor-id repeated multi-
+flag for OR semantics across N actors defer until
+measured demand, --actor-id-not exclusion defer,
+--actor-name-equals filter via meta.users.display_name
+JOIN pairs with ADR-0185 Q2 + ADR-0186 Q1 defer,
+composite index on (actor_id, occurred_at) for
+large-scale actor-scoped pagination performance
+defer until measured, CLI-side UUID validation
+matching ADR-0175 deferred decision, --system-only
+flag for actor_id IS NULL events defer jq-filter
+covers, multi-dimension actor filter matrix
+combining --actor-id + --add-tenant + --cross-table
+in single matrix query mode (current N-way axis
+singleton is sufficient). The retention CLI now has
+18 actions with audit-log filter dimensions
+complete on both audit-log surfaces — six filter
+dimensions on retention history (ADR-0186) + actor
+filter uniformly across all three diff-timeline
+paths from this milestone — operators have first-
+class per-actor forensic workflows across both
+single-tenant and cross-tenant and cross-table
+audit-log surfaces without LIMIT/pagination-
+correctness gotchas.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

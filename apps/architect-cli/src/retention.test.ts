@@ -5665,6 +5665,233 @@ describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.dif
   });
 });
 
+describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter)", () => {
+  const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+
+  it("pair-wise: threads actor-id to adapter when --actor-id set", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+  });
+
+  it("pair-wise: omits actorId when --actor-id NOT set (backward compat)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBeUndefined();
+  });
+
+  it("N-way: threads actor-id alongside --add-tenant", async () => {
+    const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--actor-id",
+        ACTOR_A,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+  });
+
+  it("cross-table: threads actor-id alongside --cross-table", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--actor-id",
+        ACTOR_A,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+  });
+
+  it("composes with --with-actor-names + --since + --limit", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+        "--with-actor-names",
+        "--since",
+        "2026-01-01",
+        "--limit",
+        "50",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.joinActor).toBe(true);
+    expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
+    expect(capture[0]?.limit).toBe(50);
+  });
+
+  it("JSON envelope echoes actorId field when --actor-id set (pair-wise)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorId).toBe(ACTOR_A);
+  });
+
+  it("JSON envelope actorId=null when --actor-id NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorId).toBeNull();
+  });
+
+  it("JSON envelope echoes actorId on N-way path", async () => {
+    const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--actor-id",
+        ACTOR_A,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.nway).toBe(true);
+    expect(parsed_.actorId).toBe(ACTOR_A);
+  });
+
+  it("JSON envelope echoes actorId on cross-table path", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--actor-id",
+        ACTOR_A,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.crossTable).toBe(true);
+    expect(parsed_.actorId).toBe(ACTOR_A);
+  });
+});
+
 describe("formatTimelineCrossTableDiff", () => {
   it("renders 'No history events for this tenant' when entries empty", () => {
     const out = formatTimelineCrossTableDiff({
