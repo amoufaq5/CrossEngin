@@ -3834,6 +3834,236 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
   });
 });
 
+describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+
+  function rawRow(
+    tenant_id: string,
+    overrides: Partial<{
+      id: string;
+      event_kind: string;
+      occurred_at: string;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id: "h1",
+      tenant_id,
+      table_name: "workflow_traces",
+      event_kind: "opt_out_set",
+      occurred_at: "2026-01-01T00:00:00.000Z",
+      prev_state: null,
+      next_state: { opt_out: true, retention_days: 365 },
+      attributes: {},
+      ...overrides,
+    };
+  }
+
+  it("issues a single query with WHERE (tenant_id = $1 OR tenant_id = $2) AND table_name = $3", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.sql).toContain(
+      "(tenant_id = $1 OR tenant_id = $2)",
+    );
+    expect(capture[0]?.sql).toContain("table_name = $3");
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 100]);
+  });
+
+  it("orders by occurred_at ASC, id ASC (chronological)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain("ORDER BY occurred_at ASC, id ASC");
+  });
+
+  it("tags each entry with tenantSide A or B by matching tenant_id", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawRow(TENANT_A, { id: "h1", occurred_at: "2026-01-01T00:00:00.000Z" }),
+        rawRow(TENANT_B, { id: "h2", occurred_at: "2026-01-15T00:00:00.000Z" }),
+        rawRow(TENANT_A, { id: "h3", occurred_at: "2026-02-01T00:00:00.000Z" }),
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(result.entries).toHaveLength(3);
+    expect(result.entries[0]!.tenantSide).toBe("A");
+    expect(result.entries[1]!.tenantSide).toBe("B");
+    expect(result.entries[2]!.tenantSide).toBe("A");
+  });
+
+  it("returns empty entries when no history for either tenant", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(result.entries).toEqual([]);
+    expect(result.tenantIdA).toBe(TENANT_A);
+    expect(result.tenantIdB).toBe(TENANT_B);
+    expect(result.tableName).toBe("workflow_traces");
+  });
+
+  it("threads --since filter as 4th param", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      since: "2026-01-01T00:00:00.000Z",
+    });
+    expect(capture[0]?.sql).toContain("occurred_at >= $4");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      "2026-01-01T00:00:00.000Z",
+      100,
+    ]);
+  });
+
+  it("threads --until filter", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      until: "2026-06-01T00:00:00.000Z",
+    });
+    expect(capture[0]?.sql).toContain("occurred_at <= $4");
+  });
+
+  it("threads --since + --until together", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-06-01T00:00:00.000Z",
+    });
+    expect(capture[0]?.sql).toContain("occurred_at >= $4");
+    expect(capture[0]?.sql).toContain("occurred_at <= $5");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      "2026-01-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+      100,
+    ]);
+  });
+
+  it("threads custom --limit + default to 100 when omitted", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      limit: 50,
+    });
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 50]);
+  });
+
+  it("rejects limit < 1", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimeline({
+        tenantIdA: TENANT_A,
+        tenantIdB: TENANT_B,
+        tableName: "workflow_traces",
+        limit: 0,
+      }),
+    ).rejects.toThrow("limit must be an integer >= 1");
+  });
+
+  it("rejects non-integer limit", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimeline({
+        tenantIdA: TENANT_A,
+        tenantIdB: TENANT_B,
+        tableName: "workflow_traces",
+        limit: 1.5,
+      }),
+    ).rejects.toThrow("limit must be an integer >= 1");
+  });
+
+  it("throws on unknown event_kind in returned row (schema-drift guard)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [rawRow(TENANT_A, { event_kind: "unknown_kind" })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimeline({
+        tenantIdA: TENANT_A,
+        tenantIdB: TENANT_B,
+        tableName: "workflow_traces",
+      }),
+    ).rejects.toThrow("unknown event_kind 'unknown_kind'");
+  });
+
+  it("preserves all fields in returned entries (id, occurredAt, prevState, nextState, attributes)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawRow(TENANT_A, {
+          id: "h-test",
+          occurred_at: "2026-03-15T00:00:00.000Z",
+          next_state: { opt_out: true, retention_days: 365 },
+        }),
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    const entry = result.entries[0]!;
+    expect(entry.id).toBe("h-test");
+    expect(entry.tenantId).toBe(TENANT_A);
+    expect(entry.tenantSide).toBe("A");
+    expect(entry.tableName).toBe("workflow_traces");
+    expect(entry.eventKind).toBe("opt_out_set");
+    expect(entry.occurredAt).toBe("2026-03-15T00:00:00.000Z");
+    expect(entry.prevState).toBeNull();
+    expect(entry.nextState).toEqual({ opt_out: true, retention_days: 365 });
+    expect(entry.attributes).toEqual({});
+  });
+});
+
 describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.tenant.opt-out.cli.history.cursor)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";

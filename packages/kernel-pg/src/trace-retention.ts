@@ -391,6 +391,34 @@ export interface DiffTenantTablesResult {
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
 }
 
+export interface DiffHistoryTimelineInput {
+  readonly tenantIdA: string;
+  readonly tenantIdB: string;
+  readonly tableName: string;
+  readonly since?: string;
+  readonly until?: string;
+  readonly limit?: number;
+}
+
+export interface TimelineEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly tenantSide: "A" | "B";
+  readonly tableName: string;
+  readonly eventKind: OptOutHistoryEventKind;
+  readonly occurredAt: string;
+  readonly prevState: Record<string, unknown> | null;
+  readonly nextState: Record<string, unknown> | null;
+  readonly attributes: Record<string, unknown>;
+}
+
+export interface DiffHistoryTimelineResult {
+  readonly tenantIdA: string;
+  readonly tenantIdB: string;
+  readonly tableName: string;
+  readonly entries: ReadonlyArray<TimelineEntry>;
+}
+
 export interface DiffTenantTablesNwayInput {
   readonly tenantId: string;
   readonly tableNames: ReadonlyArray<string>;
@@ -1456,6 +1484,71 @@ export class PostgresTraceRetention {
       eventKindA: entryA.event_kind,
       eventKindB: entryB.event_kind,
       fieldDiffs: computeFieldDiffs(entryA.next_state, entryB.next_state),
+    };
+  }
+
+  async diffHistoryTimeline(
+    input: DiffHistoryTimelineInput,
+  ): Promise<DiffHistoryTimelineResult> {
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`limit must be an integer >= 1, got ${limit}`);
+    }
+    const conditions: string[] = [
+      "(tenant_id = $1 OR tenant_id = $2)",
+      "table_name = $3",
+    ];
+    const params: unknown[] = [input.tenantIdA, input.tenantIdB, input.tableName];
+    if (input.since !== undefined) {
+      params.push(input.since);
+      conditions.push(`occurred_at >= $${params.length}`);
+    }
+    if (input.until !== undefined) {
+      params.push(input.until);
+      conditions.push(`occurred_at <= $${params.length}`);
+    }
+    params.push(limit);
+    const result = await this.conn.query<{
+      id: string;
+      tenant_id: string;
+      table_name: string;
+      event_kind: string;
+      occurred_at: string;
+      prev_state: Record<string, unknown> | null;
+      next_state: Record<string, unknown> | null;
+      attributes: Record<string, unknown>;
+    }>(
+      `SELECT id, tenant_id, table_name, event_kind, occurred_at,
+              prev_state, next_state, attributes
+       FROM ${SCHEMA}.${HISTORY_TABLE}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY occurred_at ASC, id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    const entries: TimelineEntry[] = result.rows.map((r) => {
+      if (!isOptOutHistoryEventKind(r.event_kind)) {
+        throw new Error(
+          `diffHistoryTimeline: unknown event_kind '${r.event_kind}'`,
+        );
+      }
+      return {
+        id: r.id,
+        tenantId: r.tenant_id,
+        tenantSide: r.tenant_id === input.tenantIdA ? ("A" as const) : ("B" as const),
+        tableName: r.table_name,
+        eventKind: r.event_kind,
+        occurredAt: r.occurred_at,
+        prevState: r.prev_state,
+        nextState: r.next_state,
+        attributes: r.attributes,
+      };
+    });
+    return {
+      tenantIdA: input.tenantIdA,
+      tenantIdB: input.tenantIdB,
+      tableName: input.tableName,
+      entries,
     };
   }
 

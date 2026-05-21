@@ -7,12 +7,12 @@ import {
   parsePgEnvConfig,
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
+  type DiffHistoryTimelineResult,
   type DiffTenantPoliciesNwayResult,
   type DiffTenantPoliciesResult,
   type DiffTenantTablesNwayResult,
   type DiffTenantTablesResult,
   type DiffTenantVsPlatformResult,
-  type FieldVariation,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type OptOutHistoryEntry,
@@ -50,7 +50,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|diff|prune> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|diff-timeline|diff|prune> [args]",
     );
     return 2;
   }
@@ -84,6 +84,8 @@ export async function runRetention(
         return await runRetentionRestore(command, ctx, handle.retention);
       case "diff-history":
         return await runRetentionDiffHistory(command, ctx, handle.retention);
+      case "diff-timeline":
+        return await runRetentionDiffTimeline(command, ctx, handle.retention);
       case "diff":
         return await runRetentionDiff(command, ctx, handle.retention);
       case "prune":
@@ -91,7 +93,7 @@ export async function runRetention(
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, diff, prune`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, diff-timeline, diff, prune`,
         );
         return 2;
     }
@@ -1322,6 +1324,147 @@ function formatPruneSummary(
       ? `, ${totalSkipped} skipped (${skippedParts.join(", ")})`
       : "";
   return `Summary: ${prunedCount} ${verb} (${totalRows} rows)${skippedSuffix}`;
+}
+
+async function runRetentionDiffTimeline(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantIdA = command.positional[1];
+  const tenantIdB = command.positional[2];
+  const tableName = command.positional[3];
+  if (
+    tenantIdA === undefined ||
+    tenantIdB === undefined ||
+    tableName === undefined
+  ) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: missing arguments. usage: crossengin retention diff-timeline <tenant-a> <tenant-b> <table-name> [--since DATE] [--until DATE] [--limit N]",
+    );
+    return 2;
+  }
+
+  const sinceFlag = getStringFlag(command, "since");
+  const untilFlag = getStringFlag(command, "until");
+  const limitFlag = getStringFlag(command, "limit");
+
+  let since: string | undefined;
+  if (sinceFlag !== null) {
+    const ms = Date.parse(sinceFlag);
+    if (!Number.isFinite(ms)) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: invalid --since '${sinceFlag}' (must be an ISO 8601 timestamp)`,
+      );
+      return 2;
+    }
+    since = new Date(ms).toISOString();
+  }
+  let until: string | undefined;
+  if (untilFlag !== null) {
+    const ms = Date.parse(untilFlag);
+    if (!Number.isFinite(ms)) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: invalid --until '${untilFlag}' (must be an ISO 8601 timestamp)`,
+      );
+      return 2;
+    }
+    until = new Date(ms).toISOString();
+  }
+  let limit = 100;
+  if (limitFlag !== null) {
+    const parsed = Number.parseInt(limitFlag, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: invalid --limit '${limitFlag}' (must be an integer >= 1)`,
+      );
+      return 2;
+    }
+    limit = parsed;
+  }
+
+  let result: DiffHistoryTimelineResult;
+  try {
+    result = await retention.diffHistoryTimeline({
+      tenantIdA,
+      tenantIdB,
+      tableName,
+      since,
+      until,
+      limit,
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff-timeline: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "diff-timeline",
+      since: since ?? null,
+      until: until ?? null,
+      limit,
+      result,
+    });
+    return 0;
+  }
+  ctx.io.stdout.write(formatTimelineDiff(result));
+  return 0;
+}
+
+export function formatTimelineDiff(
+  result: DiffHistoryTimelineResult,
+): string {
+  const lines: string[] = [];
+  lines.push(`Timeline for tenants on ${result.tableName}:`);
+  lines.push(`  Tenant A: ${result.tenantIdA}`);
+  lines.push(`  Tenant B: ${result.tenantIdB}`);
+  lines.push("");
+  if (result.entries.length === 0) {
+    lines.push("No history events for either tenant on this table.");
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`Events (${result.entries.length}):`);
+  for (const e of result.entries) {
+    const stateSummary = summarizeTimelineEntry(e);
+    lines.push(
+      `  ${e.occurredAt}  [${e.tenantSide}] ${e.eventKind.padEnd(16)} ${stateSummary}`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+function summarizeTimelineEntry(e: {
+  readonly eventKind: string;
+  readonly nextState: Record<string, unknown> | null;
+}): string {
+  if (e.nextState === null) {
+    return "(policy deleted)";
+  }
+  const parts: string[] = [];
+  if (
+    typeof e.nextState.retention_days === "number" ||
+    e.nextState.retention_days === null
+  ) {
+    parts.push(`retention=${e.nextState.retention_days ?? "null"}`);
+  }
+  if (typeof e.nextState.opt_out === "boolean") {
+    parts.push(`opt_out=${e.nextState.opt_out}`);
+  }
+  if (typeof e.nextState.enabled === "boolean") {
+    parts.push(`enabled=${e.nextState.enabled}`);
+  }
+  if (typeof e.nextState.opt_out_reason === "string") {
+    parts.push(`reason=${e.nextState.opt_out_reason}`);
+  }
+  return parts.join("  ");
 }
 
 async function runRetentionDiff(

@@ -3,6 +3,8 @@ import type {
   DeleteTenantPolicyInput,
   DiffHistoryEntriesInput,
   DiffHistoryEntriesResult,
+  DiffHistoryTimelineInput,
+  DiffHistoryTimelineResult,
   DiffTenantPoliciesInput,
   DiffTenantPoliciesNwayInput,
   DiffTenantPoliciesNwayResult,
@@ -51,6 +53,7 @@ import {
   formatTenantNwayDiff,
   formatTenantTablesDiff,
   formatTenantTablesNwayDiff,
+  formatTimelineDiff,
   formatTenantVsPlatformDiff,
   runRetention,
   type RetentionContext,
@@ -105,6 +108,8 @@ function fakeRetention(opts: {
   restoreCapture?: RestoreTenantPolicyInput[];
   diffResult?: DiffHistoryEntriesResult;
   diffCapture?: DiffHistoryEntriesInput[];
+  diffTimelineResult?: DiffHistoryTimelineResult;
+  diffTimelineCapture?: DiffHistoryTimelineInput[];
   pruneResults?: readonly RetentionRunResult[];
   previewResults?: readonly RetentionPreviewResult[];
   pruneCalled?: { count: number };
@@ -256,6 +261,18 @@ function fakeRetention(opts: {
           eventKindA: "opt_out_set",
           eventKindB: "retention_set",
           fieldDiffs: [],
+        }
+      );
+    },
+    diffHistoryTimeline: async (input: DiffHistoryTimelineInput) => {
+      opts.diffTimelineCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.diffTimelineResult ?? {
+          tenantIdA: input.tenantIdA,
+          tenantIdB: input.tenantIdB,
+          tableName: input.tableName,
+          entries: [],
         }
       );
     },
@@ -4306,6 +4323,456 @@ describe("formatPruneRun / formatPrunePreview", () => {
     expect(out).toMatch(
       /Summary: 0 pruned \(0 rows\), 3 skipped \(1 skipped_disabled, 1 skipped_opt_out, 1 skipped_opt_out_expired\)/,
     );
+  });
+});
+
+describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)", () => {
+  it("returns exit 2 when tenant-a is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "diff-timeline"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when tenant-b is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-timeline", TENANT_A),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when table-name is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when --since is invalid", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--since",
+        "not-a-date",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --since");
+  });
+
+  it("returns exit 2 when --until is invalid", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--until",
+        "not-a-date",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --until");
+  });
+
+  it("returns exit 2 when --limit is invalid", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--limit",
+        "0",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --limit");
+  });
+
+  it("threads three positional args to adapter with default limit=100", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]).toEqual({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      since: undefined,
+      until: undefined,
+      limit: 100,
+    });
+  });
+
+  it("threads --since + --until + --limit through to adapter (ISO normalised)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--since",
+        "2026-01-01",
+        "--until",
+        "2026-06-01",
+        "--limit",
+        "50",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
+    expect(capture[0]?.until).toBe("2026-06-01T00:00:00.000Z");
+    expect(capture[0]?.limit).toBe(50);
+  });
+
+  it("human-format renders 'No history events' when entries empty", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Timeline for tenants on workflow_traces");
+    expect(out()).toContain(`Tenant A: ${TENANT_A}`);
+    expect(out()).toContain(`Tenant B: ${TENANT_B}`);
+    expect(out()).toContain(
+      "No history events for either tenant on this table.",
+    );
+  });
+
+  it("human-format renders chronological events with [A] / [B] tags", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: {
+                  opt_out: true,
+                  retention_days: 365,
+                  opt_out_reason: "legal-hold",
+                },
+                attributes: {},
+              },
+              {
+                id: "h2",
+                tenantId: TENANT_B,
+                tenantSide: "B",
+                tableName: "workflow_traces",
+                eventKind: "retention_set",
+                occurredAt: "2026-01-15T00:00:00.000Z",
+                prevState: null,
+                nextState: {
+                  retention_days: 90,
+                  enabled: true,
+                  opt_out: false,
+                },
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const o = out();
+    expect(o).toContain("Events (2):");
+    expect(o).toContain("[A] opt_out_set");
+    expect(o).toContain("[B] retention_set");
+    expect(o).toContain("retention=365");
+    expect(o).toContain("opt_out=true");
+    expect(o).toContain("reason=legal-hold");
+    expect(o).toContain("retention=90");
+    expect(o).toContain("enabled=true");
+  });
+
+  it("human-format renders '(policy deleted)' for nextState=null", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantSide: "A",
+                tableName: "workflow_traces",
+                eventKind: "policy_deleted",
+                occurredAt: "2026-02-01T00:00:00.000Z",
+                prevState: { retention_days: 90 },
+                nextState: null,
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("[A] policy_deleted");
+    expect(out()).toContain("(policy deleted)");
+  });
+
+  it("JSON envelope shape {action, since, until, limit, result}", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.action).toBe("diff-timeline");
+    expect(parsedOut.since).toBeNull();
+    expect(parsedOut.until).toBeNull();
+    expect(parsedOut.limit).toBe(100);
+    expect(parsedOut.result.tenantIdA).toBe(TENANT_A);
+    expect(parsedOut.result.tenantIdB).toBe(TENANT_B);
+    expect(parsedOut.result.tableName).toBe("workflow_traces");
+    expect(parsedOut.result.entries).toEqual([]);
+  });
+
+  it("adapter errors propagate as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatTimelineDiff", () => {
+  it("renders 'No history events' header when entries empty", () => {
+    const out = formatTimelineDiff({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      entries: [],
+    });
+    expect(out).toContain("Timeline for tenants on workflow_traces");
+    expect(out).toContain(`Tenant A: ${TENANT_A}`);
+    expect(out).toContain(`Tenant B: ${TENANT_B}`);
+    expect(out).toContain("No history events for either tenant on this table.");
+  });
+
+  it("renders Events (N) header + tagged per-event lines with state summary", () => {
+    const out = formatTimelineDiff({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h1",
+          tenantId: TENANT_A,
+          tenantSide: "A",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          prevState: null,
+          nextState: {
+            opt_out: true,
+            retention_days: 365,
+            opt_out_reason: "legal-hold",
+          },
+          attributes: {},
+        },
+      ],
+    });
+    expect(out).toContain("Events (1):");
+    expect(out).toContain("[A] opt_out_set");
+    expect(out).toContain("retention=365");
+    expect(out).toContain("opt_out=true");
+    expect(out).toContain("reason=legal-hold");
+  });
+
+  it("renders '(policy deleted)' for entries with nextState=null", () => {
+    const out = formatTimelineDiff({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h1",
+          tenantId: TENANT_B,
+          tenantSide: "B",
+          tableName: "workflow_traces",
+          eventKind: "policy_deleted",
+          occurredAt: "2026-02-01T00:00:00.000Z",
+          prevState: { retention_days: 90 },
+          nextState: null,
+          attributes: {},
+        },
+      ],
+    });
+    expect(out).toContain("[B] policy_deleted");
+    expect(out).toContain("(policy deleted)");
+  });
+
+  it("renders multiple events in input (chronological) order with [A]/[B] tags interleaved", () => {
+    const out = formatTimelineDiff({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h1",
+          tenantId: TENANT_A,
+          tenantSide: "A",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          prevState: null,
+          nextState: { opt_out: true, retention_days: 365 },
+          attributes: {},
+        },
+        {
+          id: "h2",
+          tenantId: TENANT_B,
+          tenantSide: "B",
+          tableName: "workflow_traces",
+          eventKind: "retention_set",
+          occurredAt: "2026-01-15T00:00:00.000Z",
+          prevState: null,
+          nextState: { retention_days: 90, enabled: true, opt_out: false },
+          attributes: {},
+        },
+        {
+          id: "h3",
+          tenantId: TENANT_A,
+          tenantSide: "A",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_cleared",
+          occurredAt: "2026-02-01T00:00:00.000Z",
+          prevState: { opt_out: true },
+          nextState: { opt_out: false, retention_days: 365, enabled: false },
+          attributes: {},
+        },
+      ],
+    });
+    const idx1 = out.indexOf("[A] opt_out_set");
+    const idx2 = out.indexOf("[B] retention_set");
+    const idx3 = out.indexOf("[A] opt_out_cleared");
+    expect(idx1).toBeLessThan(idx2);
+    expect(idx2).toBeLessThan(idx3);
   });
 });
 

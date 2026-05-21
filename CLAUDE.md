@@ -21,15 +21,144 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,616 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.add-table
+**56 packages + 1 app, 129 meta-schema tables, 8,645 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline
+closes ADR-0178 Q7 by adding `crossengin retention diff-timeline
+<tenant-a> <tenant-b> <table> [--since DATE] [--until DATE]
+[--limit N]` action + diffHistoryTimeline adapter method. The
+retention CLI diff matrix from ADR-0178/0179/0180/0181/0183/0184/0188
+answers "what's different RIGHT NOW between these tenants/tables?"
+The audit-log surface from ADR-0170/0175/0185/0186/0187 answers
+"what mutations happened on ONE tenant+table over time?" Operators
+investigating "why did Tenant A end up with retention X while Tenant
+B got retention Y" needed to correlate the two surfaces manually —
+two `retention history` commands + jq merge + spreadsheet
+correlation per audit. This milestone merges both tenants' history
+events for one shared table into a single chronological timeline
+tagged per-event with [A] or [B] indicating which tenant changed.
+New adapter `diffHistoryTimeline({tenantIdA, tenantIdB, tableName,
+since?, until?, limit?})` issues a single OR-clause query against
+`meta.tenant_retention_opt_out_history WHERE (tenant_id = $1 OR
+tenant_id = $2) AND table_name = $3 [AND occurred_at >= $4]
+[AND occurred_at <= $5] ORDER BY occurred_at ASC, id ASC LIMIT $N`
+— PG's existing (table_name, occurred_at) index handles the
+OR-clause efficiently; two parallel queries would need
+application-side merge + would double-count under shared
+occurred_at ties. Returns `DiffHistoryTimelineResult {tenantIdA,
+tenantIdB, tableName, entries}` where each `TimelineEntry` includes
+`tenantSide: "A" | "B"` tagged at the adapter via runtime
+comparison `r.tenant_id === input.tenantIdA ? "A" : "B"` — runtime
+check intentional, SQL-side CASE WHEN would add parser noise without
+benefit. ASC chronological order (differs from `retention history`
+DESC) because the use case is reading divergence over time
+top-to-bottom mirroring timeline left-to-right; DESC reads
+"latest first" right semantic for routine audit but wrong for
+divergence investigation. CLI 3 positional args all required (exit
+2 missing); --since/--until ISO 8601 parseable via Date.parse +
+normalised to canonical ISO; --limit default 100 integer >= 1
+(exit 2 on invalid). No actor filter, no event-kind filter, no
+cursor pagination — focused single-purpose command (operators
+wanting finer scoping use `retention history` per tenant + jq
+merge). Human output renders 'Timeline for tenants on <table>:'
+header + 'Tenant A: <uuid>' + 'Tenant B: <uuid>' + blank line,
+then either 'No history events for either tenant on this table.'
+OR 'Events (N):' header followed by per-event line '<occurred_at>
+[<side>] <event-kind-padded-16> <state-summary>'. State summary
+via private summarizeTimelineEntry helper — null nextState
+renders '(policy deleted)', otherwise renders flat 'retention=N
+opt_out=bool enabled=bool reason=X' covering the four fields
+operators care about most. JSON envelope {action: "diff-timeline",
+tenantIdA, tenantIdB, tableName, since, until, limit, count,
+entries[]} preserves full discriminated structure for jq — chief
+discriminator is per-entry tenantSide field operators filter on
+via '.entries[] | select(.tenantSide == "A")' to extract one
+tenant's events from merged timeline. Use cases unblocked —
+"why did Tenant A end up with retention X while Tenant B got
+retention Y" (reads top-to-bottom showing each tenant's mutation
+sequence interleaved by time), compliance audit comparing two
+cohort tenants (--since 2026-01-01 --until 2026-03-31 --format
+json > q1-2026-audit.json), drift root-cause analysis (cross-
+tenant diff says A and B differ → diff-timeline shows when they
+diverged — first [A] vs [B] discrepancy reveals where divergence
+began), tier-migration verification (--since migration-start +
+jq group_by(.tenantSide) counts mutations per tenant). Rejected
+alternatives — two parallel queries per tenant + application-side
+merge (would need careful shared-occurred_at tie handling + LIMIT
+semantic across pages; single OR-query simpler PG handles
+efficiently), state replay at each event with per-event diff (O(N)
+state replays per query; complexity high for v1; operators correlate
+with `retention diff` for current state), N-way timeline merging
+via --add-tenant (would multiply complexity — label assignment,
+tenantSide widens to A|B|C|...; operators chain multiple commands
+for now), DESC ordering matching `retention history` (DESC reads
+latest first but timeline-divergence reading is naturally ASC
+top-to-bottom), surface per-event divergence delta inline (e.g.,
+"[A] retention 30 → 60, A now differs from B"; replay complexity
+high; defer), make tenantSide literal full UUID prefix not A/B
+(verbose; A/B labels match ADR-0183 cohort labels; operators
+map back via tenantIdA/tenantIdB envelope fields), embed actor
+display name in human output without --with-actor-names flag
+(couples to ADR-0185 LEFT JOIN cost on every call; defer),
+--cross-table mode for one tenant on two tables (different
+axis; separate flag if desired). Drawbacks — same-table only
+(operators wanting Tenant A on table X vs Tenant B on table Y
+chain two `retention history` calls), two-tenant only (N-way
+timeline merging out of scope for v1 — defer), no state-replay
+(operators wanting "show me actual diff between A's state and
+B's state at each timestamp" do this client-side via nextState
+JSONB blobs or wrap with `retention diff` for current state),
+no actor or event-kind filter (focused single-purpose command;
+operators chain `retention history` for finer scoping), no
+cursor pagination (--limit N is the only pagination knob;
+operators auditing >100-event pairs use --since to window),
+tenantSide tied to argument order (`diff-timeline <a> <b>` and
+`diff-timeline <b> <a>` produce identical events but swapped
+sides — operators must be consistent), PG OR-clause performance
+at very large scale may not use most efficient plan vs UNION
+ALL with two index scans + merge sort (PG planner usually handles
+well; defer optimization until measured slow). 12 new adapter
+tests in trace-retention.test.ts (single query with WHERE
+(tenant_id = $1 OR tenant_id = $2) AND table_name = $3 + 4-param
+baseline, ORDER BY occurred_at ASC + id ASC, tenantSide A/B
+tagging by tenant_id match, empty entries when no matches,
+--since threading as $4 with timestamptz comparison, --until
+threading similarly, --since + --until together with $4 + $5,
+custom --limit, rejects limit < 1 with explicit error, rejects
+non-integer limit, throws on unknown event_kind, preserves all
+entry fields including prev_state/next_state/attributes JSONB);
+13 CLI tests in retention.test.ts covering missing-arg exit 2
+for each of 3 positionals, invalid --since exit 2, invalid
+--until exit 2, invalid --limit exit 2, threads 3 positionals
+to adapter with default limit=100, threads --since + --until +
+--limit through (ISO normalized), human-format empty rendering
+with helpful message, human-format chronological events with
+[A]/[B] tags, '(policy deleted)' rendering for nextState=null,
+JSON envelope shape, adapter errors propagate exit 1; 4
+formatTimelineDiff helper unit tests — empty entries header,
+Events (N) header + tagged lines + state summary, '(policy
+deleted)' for null nextState, multiple events in chronological
+order. cli.ts helpText extended with retention diff-timeline
+<tenant-a> <tenant-b> <table-name> usage line + 4-line
+description explaining ASC chronological merge + [A]/[B]
+tenant tagging + PG single-OR-query design. ADR-0189 documents
+the design + 10 rejected alternatives + 8 future Qs (N-way
+timeline via --add-tenant, cross-table timeline for one tenant,
+--with-actor-names flag composing ADR-0185's LEFT JOIN, actor/
+kind/attributes filter dimensions, cursor pagination via
+--after-id matching ADR-0175, prev_state → nextState deltas
+inline in human output, state-replay variant emitting per-event
+divergence delta, tagged-union JSON envelope across all
+retention diff-* actions). The retention CLI now has 18 actions
+spanning forensic + recovery + comparison + performance +
+diff-history + diff-timeline workflows comprehensively.
+M6.7.zz.tenant.opt-out.cli.diff.add-table
 closes ADR-0180 Q1 by adding `--add-table <name>` repeated
 flag to `retention diff --cross-table` for N-way cross-
 table comparison across 3+ tables for one tenant.
@@ -7107,7 +7236,31 @@ correctness (contained scope; new name forever-clean);
 dual JSON envelope discriminator nway:true +
 crossTable:true (4 envelope shapes now form 2×2
 matrix); --exit-on-divergence + --threshold integrate
-uniformly).
+uniformly),
+ADR-0189 covers M6.7.zz.tenant.opt-out.cli.diff-timeline
+(`retention diff-timeline <a> <b> <table>` chronological
+event merge for two tenants on one shared table —
+closes ADR-0178 Q7 — bridges the diff matrix (point-
+in-time comparisons from ADR-0178/0179/0180/0181/0183/
+0184/0188) with the audit-log surface (single-axis
+chronological history from ADR-0170/0175/0185/0186/0187)
+into one command; new diffHistoryTimeline adapter
+issues a single OR-clause query merging both tenants'
+history rows + tags each TimelineEntry with tenantSide:
+"A" | "B" via runtime tenant_id comparison; ASC
+chronological ordering (differs from `retention history`
+DESC) matches divergence-investigation reading top-to-
+bottom; --since/--until/--limit filter the window; no
+state-replay variant (operators wrap with `retention
+diff` for current-state divergence); JSON envelope
+emits {action: "diff-timeline", tenantIdA, tenantIdB,
+tableName, since, until, limit, count, entries[]} with
+tenantSide as the per-entry chief discriminator;
+replaces two `retention history` calls + jq merge +
+spreadsheet correlation per audit; the retention CLI
+now has 18 actions spanning forensic + recovery +
+comparison + performance + diff-history + diff-timeline
+workflows comprehensively).
 
 ## Architecture in 90 seconds
 
@@ -10563,6 +10716,187 @@ diff variants — default cross-tenant pair-wise,
 --add-table N-way), --add-tenant N-way — uniformly
 supporting --exit-on-divergence + --threshold CI-
 gate semantics for graduated drift detection.
+ADR-0189 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff-timeline
+(`crossengin retention diff-timeline <tenant-a>
+<tenant-b> <table>` cross-tenant chronological event
+merge — closes ADR-0178 Q7; bridges the diff matrix
+(point-in-time comparisons from ADR-0178/0179/0180/
+0181/0183/0184/0188) with the audit-log surface
+(single-axis chronological history from ADR-0170/
+0175/0185/0186/0187) into one command answering "why
+did Tenant A end up with retention X while Tenant B
+got retention Y" by merging both tenants' history
+events for one shared table into a single chronological
+timeline tagged per-event with [A] or [B] indicating
+which tenant changed; previously required two
+`retention history` commands + jq merge + spreadsheet
+correlation per audit; new adapter diffHistoryTimeline
+({tenantIdA, tenantIdB, tableName, since?, until?,
+limit?}) returning DiffHistoryTimelineResult {tenantIdA,
+tenantIdB, tableName, entries: TimelineEntry[]} where
+each TimelineEntry has id + tenantId + tenantSide +
+tableName + eventKind + occurredAt + prevState +
+nextState + attributes JSONB; algorithm — single
+OR-clause query `WHERE (tenant_id = $1 OR tenant_id =
+$2) AND table_name = $3 [AND occurred_at >= $4] [AND
+occurred_at <= $5] ORDER BY occurred_at ASC, id ASC
+LIMIT $N` — PG handles the OR efficiently with existing
+(table_name, occurred_at) index; two parallel queries
+would need application-side merge + double-count
+shared occurred_at ties; per-row tenantSide tagged at
+adapter via runtime comparison `r.tenant_id ===
+input.tenantIdA ? "A" : "B"` (SQL-side CASE WHEN
+would add parser noise without benefit); ASC
+chronological ordering (differs from `retention
+history` DESC) because divergence-investigation reads
+top-to-bottom mirroring timeline left-to-right
+(`retention history` reads "latest first" right
+semantic for routine audit, wrong for divergence
+investigation); CLI 3 positional args all required
+(exit 2 missing each); --since/--until ISO 8601
+parseable via Date.parse, normalised to canonical
+ISO; --limit default 100 integer >= 1 (exit 2 on
+invalid); no actor filter no event-kind filter no
+cursor pagination — focused single-purpose command
+(operators wanting finer scoping use `retention
+history` per tenant + jq merge); human output renders
+'Timeline for tenants on <table>:' header + 'Tenant
+A: <uuid>' + 'Tenant B: <uuid>' + blank line + then
+either 'No history events for either tenant on this
+table.' OR 'Events (N):' header + per-event line
+'<occurred_at> [<side>] <event-kind-padded-16>
+<state-summary>'; state summary via private
+summarizeTimelineEntry helper — null nextState renders
+'(policy deleted)', otherwise renders flat
+'retention=N opt_out=bool enabled=bool reason=X'
+covering the four fields operators care about most;
+JSON envelope {action: "diff-timeline", tenantIdA,
+tenantIdB, tableName, since, until, limit, count,
+entries[]} preserves full discriminated structure for
+jq — chief discriminator is per-entry tenantSide
+field operators filter on via `.entries[] |
+select(.tenantSide == "A")` to extract one tenant's
+events from merged timeline; use cases unblocked —
+divergence investigation "why did A end up with
+retention X while B got retention Y" (reads top-to-
+bottom showing each tenant's mutation sequence
+interleaved by time), compliance audit comparing two
+cohort tenants (--since 2026-01-01 --until 2026-03-31
+--format json > q1-2026-audit.json for quarterly
+exports), drift root-cause analysis (cross-tenant
+diff says A and B differ → diff-timeline shows when
+they diverged via first [A] vs [B] discrepancy),
+tier-migration verification (--since migration-start
++ jq group_by(.tenantSide) counts mutations per
+tenant should be roughly equal for parallel cohorts);
+rejected alternatives — two parallel queries per
+tenant + application-side merge (careful shared-
+occurred_at tie handling + LIMIT semantic across
+pages; single OR-query simpler PG handles efficiently),
+state replay at each event with per-event diff (O(N)
+state replays per query; complexity high for v1;
+operators correlate with `retention diff` for current
+state), N-way timeline merging via --add-tenant
+(multiplies complexity — label assignment, tenantSide
+widens to A|B|C|...; operators chain multiple commands
+for now), DESC ordering matching `retention history`
+(DESC reads latest first but timeline-divergence
+reading is naturally ASC top-to-bottom), surface
+per-event divergence delta inline (e.g., "[A]
+retention 30 → 60, A now differs from B"; replay
+complexity high; defer), make tenantSide literal full
+UUID prefix not A/B (verbose; A/B labels match
+ADR-0183 cohort labels; operators map back via
+tenantIdA/tenantIdB envelope fields), embed actor
+display name in human output without --with-actor-
+names flag (couples to ADR-0185 LEFT JOIN cost on
+every call; defer), --cross-table mode for one tenant
+on two tables (different axis; separate flag if
+desired), include prev_state rendering in human
+output (adds vertical noise + most operators care
+about resulting state; operators wanting prev-state
+inspect JSON), auto-sort by (occurred_at, tenant_id)
+for tie determinism (ORDER BY already includes id
+ASC as secondary key matching UUID v7 time-ordering;
+sufficient for operator-visible determinism); drawbacks
+— same-table only operators wanting Tenant A on
+table X vs Tenant B on table Y chain two `retention
+history` calls (cross-axis combinations out of scope
+for v1), two-tenant only N-way timeline merging
+would multiply complexity (defer), no state-replay
+(operators wanting actual diff between A's state and
+B's state at each timestamp do this client-side via
+nextState JSONB blobs or wrap with `retention diff`
+for current state — substrate stays simple), no
+actor or event-kind filter focused single-purpose
+command (operators chain `retention history` for
+finer scoping), no cursor pagination --limit N is
+the only pagination knob (operators auditing >100-
+event pairs use --since to window cursor support
+deferable when measured demand emerges), tenantSide
+tied to argument order — `diff-timeline <a> <b>`
+and `diff-timeline <b> <a>` produce identical events
+but swapped sides (operators must be consistent
+about argument order), PG OR-clause performance at
+very large scale may not use most efficient plan vs
+UNION ALL with two index scans + merge sort (planner
+usually handles well; defer optimization until
+measured slow); 12 new adapter tests in trace-
+retention.test.ts (single query with WHERE (tenant_id
+= $1 OR tenant_id = $2) AND table_name = $3 + 4-param
+baseline, ORDER BY occurred_at ASC + id ASC, tenantSide
+A/B tagging by tenant_id match, empty entries,
+--since threading as $4 with timestamptz comparison,
+--until threading similarly, --since + --until
+together with $4 + $5, custom --limit, rejects limit
+< 1 with explicit error, rejects non-integer limit,
+throws on unknown event_kind, preserves all entry
+fields including prev_state/next_state/attributes
+JSONB); 13 new CLI tests in retention.test.ts —
+missing-arg exit 2 for each of 3 positionals (tenantA,
+tenantB, table), invalid --since exit 2, invalid
+--until exit 2, invalid --limit exit 2, threads 3
+positionals to adapter with default limit=100,
+threads --since + --until + --limit through (ISO
+normalized), human-format empty rendering with
+helpful message, human-format chronological events
+with [A]/[B] tags, '(policy deleted)' rendering for
+nextState=null, JSON envelope shape, adapter errors
+propagate exit 1; 4 formatTimelineDiff helper unit
+tests — empty entries header, Events (N) header +
+tagged lines + state summary, '(policy deleted)' for
+null nextState, multiple events in chronological
+order; cli.ts helpText extended with retention diff-
+timeline <tenant-a> <tenant-b> <table-name> usage
+line + 4-line description explaining ASC chronological
+merge + [A]/[B] tenant tagging + PG single-OR-query
+design; future Qs cover N-way timeline via --add-
+tenant <c> [--add-tenant <d> ...] (defer until
+measured demand), cross-table timeline one tenant
+two tables merged (mirrors ADR-0180 axis on the
+timeline surface defer), --with-actor-names flag
+composing ADR-0185's LEFT JOIN (render '[A]
+retention_set by Alice (uuid)' per event adds query
+cost but useful for human-readable timelines defer),
+actor / kind / attributes filters (focused single-
+purpose command for v1; could compose with the 5
+history filter dimensions defer), cursor pagination
+via --after-id matching ADR-0175 pattern for >100-
+event windows (defer until measured demand), surface
+prev_state → nextState deltas inline in human output
+('[A] retention_set: retention 30 → 60' — adds JSONB
+diff logic defer), state-replay variant emitting
+per-event divergence delta ('at this event A and B
+differ on field X' — significant query cost defer to
+future ADR if requested), tagged-union JSON envelope
+across all retention diff-* actions ({kind: "diff" |
+"diff-history" | "diff-timeline"}) — would simplify
+operator jq scripts but break backward compat pairs
+with similar deferred Qs across ADR-0173/0178/0179/
+0180/0183/0188; the retention CLI now has 18 actions
+spanning forensic + recovery + comparison +
+performance + diff-history + diff-timeline workflows
+comprehensively).
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey
