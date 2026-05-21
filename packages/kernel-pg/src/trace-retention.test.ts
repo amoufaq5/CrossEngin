@@ -2135,3 +2135,313 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
     expect(month).toHaveLength(1);
   });
 });
+
+describe("PostgresTraceRetention.setTenantOptOut (M6.7.zz.tenant.opt-out.cli.mutate)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  function returnedRow(
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      opt_out: boolean;
+      opt_out_reason: string | null;
+      opt_out_until: string | null;
+      last_pruned_at: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id: TENANT_A,
+      table_name: "workflow_traces",
+      retention_days: 365,
+      enabled: false,
+      opt_out: true,
+      opt_out_reason: null,
+      opt_out_until: null,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("INSERTs with INSERT ... ON CONFLICT DO UPDATE and sets opt_out=true + enabled=false", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain(
+      "INSERT INTO meta.tenant_retention_policies",
+    );
+    expect(capture[0]?.sql).toContain("ON CONFLICT (tenant_id, table_name)");
+    expect(capture[0]?.sql).toContain("enabled = false");
+    expect(capture[0]?.sql).toContain("opt_out = true");
+  });
+
+  it("threads retentionDays + optOutReason + optOutUntil into params", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({
+        rows: [
+          returnedRow({
+            retention_days: 90,
+            opt_out_reason: "legal_hold:case#42",
+            opt_out_until: "2027-01-01T00:00:00.000Z",
+          }),
+        ],
+        rowCount: 1,
+      }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 90,
+      optOutReason: "legal_hold:case#42",
+      optOutUntil: "2027-01-01T00:00:00.000Z",
+    });
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      90,
+      "legal_hold:case#42",
+      "2027-01-01T00:00:00.000Z",
+    ]);
+  });
+
+  it("defaults retentionDays to 365 when not provided", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.params?.[2]).toBe(365);
+  });
+
+  it("defaults optOutReason + optOutUntil to NULL when not provided", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.params?.[3]).toBeNull();
+    expect(capture[0]?.params?.[4]).toBeNull();
+  });
+
+  it("returns the policy row mapped to camelCase", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        returnedRow({
+          opt_out_reason: "legal_hold:case#42",
+          opt_out_until: "2027-01-01T00:00:00.000Z",
+        }),
+      ],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const policy = await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      optOutReason: "legal_hold:case#42",
+      optOutUntil: "2027-01-01T00:00:00.000Z",
+    });
+    expect(policy.tenantId).toBe(TENANT_A);
+    expect(policy.optOut).toBe(true);
+    expect(policy.enabled).toBe(false);
+    expect(policy.optOutReason).toBe("legal_hold:case#42");
+    expect(policy.optOutUntil).toBe("2027-01-01T00:00:00.000Z");
+  });
+
+  it("ON CONFLICT DO UPDATE preserves retention_days (excluded from SET clause)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    // The UPDATE clause should NOT touch retention_days
+    const sql = capture[0]?.sql ?? "";
+    const updateClause = sql.slice(sql.indexOf("DO UPDATE SET"));
+    expect(updateClause).not.toContain("retention_days =");
+  });
+
+  it("ON CONFLICT DO UPDATE uses EXCLUDED.opt_out_reason + EXCLUDED.opt_out_until", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.setTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain("opt_out_reason = EXCLUDED.opt_out_reason");
+    expect(capture[0]?.sql).toContain("opt_out_until = EXCLUDED.opt_out_until");
+  });
+
+  it("rejects retentionDays < 1", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.setTenantOptOut({
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 0,
+      }),
+    ).rejects.toThrow(/retentionDays/);
+  });
+
+  it("rejects non-integer retentionDays", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.setTenantOptOut({
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 1.5,
+      }),
+    ).rejects.toThrow(/retentionDays/);
+  });
+
+  it("throws when RETURNING yields no rows", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.setTenantOptOut({
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+      }),
+    ).rejects.toThrow(/returned no rows/);
+  });
+});
+
+describe("PostgresTraceRetention.clearTenantOptOut (M6.7.zz.tenant.opt-out.cli.mutate)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  function returnedRow(
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      opt_out: boolean;
+      opt_out_reason: string | null;
+      opt_out_until: string | null;
+      last_pruned_at: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id: TENANT_A,
+      table_name: "workflow_traces",
+      retention_days: 365,
+      enabled: false,
+      opt_out: false,
+      opt_out_reason: "legal_hold:case#42",
+      opt_out_until: null,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("UPDATEs opt_out=false + opt_out_until=NULL via UPDATE statement", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.clearTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain("UPDATE meta.tenant_retention_policies");
+    expect(capture[0]?.sql).toContain("opt_out = false");
+    expect(capture[0]?.sql).toContain("opt_out_until = NULL");
+  });
+
+  it("preserves opt_out_reason on lift-off (per ADR-0161 historical context)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [returnedRow()], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.clearTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    // UPDATE clause should NOT touch opt_out_reason
+    expect(capture[0]?.sql).not.toContain("opt_out_reason =");
+  });
+
+  it("returns the policy row mapped to camelCase when a row is updated", async () => {
+    const conn = mockConnection(() => ({
+      rows: [returnedRow({ opt_out_reason: "legal_hold:case#42" })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const policy = await r.clearTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(policy).not.toBeNull();
+    expect(policy?.optOut).toBe(false);
+    expect(policy?.optOutReason).toBe("legal_hold:case#42");
+    expect(policy?.optOutUntil).toBeNull();
+  });
+
+  it("returns null when no matching opt-out row exists", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const policy = await r.clearTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(policy).toBeNull();
+  });
+
+  it("WHERE clause filters opt_out = true (only opt-out rows are cleared)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.clearTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain("opt_out = true");
+  });
+
+  it("threads tenantId + tableName as WHERE clause params", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.clearTenantOptOut({
+      tenantId: TENANT_A,
+      tableName: "llm_call_traces",
+    });
+    expect(capture[0]?.params).toEqual([TENANT_A, "llm_call_traces"]);
+  });
+});

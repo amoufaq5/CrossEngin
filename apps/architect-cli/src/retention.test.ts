@@ -1,8 +1,11 @@
 import type {
+  ClearTenantOptOutInput,
   EffectiveRetentionResolution,
   ExpiringOptOut,
   ExpiringOptOutsInput,
   PostgresTraceRetention,
+  SetTenantOptOutInput,
+  TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
@@ -11,6 +14,7 @@ import type { RunContext } from "./commands.js";
 import {
   formatEffectiveResolution,
   formatExpiringTable,
+  formatPolicyChange,
   runRetention,
   type RetentionContext,
 } from "./retention.js";
@@ -46,6 +50,10 @@ function fakeRetention(opts: {
   throws?: Error;
   effective?: EffectiveRetentionResolution;
   effectiveCapture?: { tenantId: string; tableName: string }[];
+  setOptOutResult?: TenantRetentionPolicyRow;
+  setOptOutCapture?: SetTenantOptOutInput[];
+  clearOptOutResult?: TenantRetentionPolicyRow | null;
+  clearOptOutCapture?: ClearTenantOptOutInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -63,6 +71,38 @@ function fakeRetention(opts: {
           enabled: false,
         }
       );
+    },
+    setTenantOptOut: async (input: SetTenantOptOutInput) => {
+      opts.setOptOutCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.setOptOutResult ?? {
+          tenantId: input.tenantId,
+          tableName: input.tableName,
+          retentionDays: input.retentionDays ?? 365,
+          enabled: false,
+          optOut: true,
+          optOutReason: input.optOutReason ?? null,
+          optOutUntil: input.optOutUntil ?? null,
+          lastPrunedAt: null,
+        }
+      );
+    },
+    clearTenantOptOut: async (input: ClearTenantOptOutInput) => {
+      opts.clearOptOutCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.clearOptOutResult === undefined
+        ? {
+            tenantId: input.tenantId,
+            tableName: input.tableName,
+            retentionDays: 365,
+            enabled: false,
+            optOut: false,
+            optOutReason: null,
+            optOutUntil: null,
+            lastPrunedAt: null,
+          }
+        : opts.clearOptOutResult;
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -616,5 +656,433 @@ describe("formatEffectiveResolution", () => {
       "workflow_traces",
     );
     expect(out).toContain("<no reason>");
+  });
+});
+
+describe("runRetention opt-out", () => {
+  it("returns exit 2 when tenant arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "opt-out"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when table arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "opt-out", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("threads tenantId + tableName + defaults to setTenantOptOut", async () => {
+    const { ctx } = buffers();
+    const setOptOutCapture: SetTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setOptOutCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: undefined,
+      optOutUntil: null,
+      optOutReason: null,
+    });
+  });
+
+  it("threads --until + --reason + --retention-days through to adapter", async () => {
+    const { ctx } = buffers();
+    const setOptOutCapture: SetTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--until",
+        "2027-01-01T00:00:00.000Z",
+        "--reason",
+        "legal_hold:case#42",
+        "--retention-days",
+        "90",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setOptOutCapture[0]?.optOutUntil).toBe("2027-01-01T00:00:00.000Z");
+    expect(setOptOutCapture[0]?.optOutReason).toBe("legal_hold:case#42");
+    expect(setOptOutCapture[0]?.retentionDays).toBe(90);
+  });
+
+  it("normalises --until to canonical ISO 8601", async () => {
+    const { ctx } = buffers();
+    const setOptOutCapture: SetTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--until",
+        "2027-01-01",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setOptOutCapture[0]?.optOutUntil).toMatch(
+      /^2027-01-01T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+  });
+
+  it("returns exit 2 on invalid --until", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--until",
+        "not-a-date",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --until");
+  });
+
+  it("returns exit 2 on empty --reason", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--reason=",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --reason length");
+  });
+
+  it("returns exit 2 on --reason longer than 256 chars", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--reason",
+        "x".repeat(257),
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --reason length");
+  });
+
+  it("returns exit 2 on non-integer --retention-days", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--retention-days",
+        "abc",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --retention-days");
+  });
+
+  it("returns exit 2 on --retention-days < 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--retention-days",
+        "0",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --retention-days");
+  });
+
+  it("human-format prints the post-mutation policy", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--until",
+        "2027-01-01T00:00:00.000Z",
+        "--reason",
+        "legal_hold:case#42",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Tenant opted out");
+    expect(out()).toContain("legal_hold:case#42");
+    expect(out()).toContain("2027-01-01T00:00:00.000Z");
+  });
+
+  it("json-format emits envelope {action, policy}", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("opt-out");
+    expect(parsedJson.policy.tenantId).toBe(TENANT_A);
+    expect(parsedJson.policy.optOut).toBe(true);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("CHECK constraint violated"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("CHECK constraint violated");
+  });
+});
+
+describe("runRetention opt-in", () => {
+  it("returns exit 2 when tenant arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "opt-in"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when table arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "opt-in", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("threads tenantId + tableName to clearTenantOptOut", async () => {
+    const { ctx } = buffers();
+    const clearOptOutCapture: ClearTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ clearOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(clearOptOutCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+  });
+
+  it("human-format prints idempotent no-op when no policy is found", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ clearOptOutResult: null }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("idempotent no-op");
+  });
+
+  it("human-format prints the policy when a row was updated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          clearOptOutResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            retentionDays: 90,
+            enabled: false,
+            optOut: false,
+            optOutReason: "legal_hold:case#42",
+            optOutUntil: null,
+            lastPrunedAt: null,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Tenant opted in");
+    expect(out()).toContain("legal_hold:case#42");
+  });
+
+  it("json-format emits envelope {action, policy=null} on idempotent no-op", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-in",
+        TENANT_A,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ clearOptOutResult: null }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("opt-in");
+    expect(parsedJson.policy).toBeNull();
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatPolicyChange", () => {
+  function policy(
+    overrides: Partial<TenantRetentionPolicyRow> = {},
+  ): TenantRetentionPolicyRow {
+    return {
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 365,
+      enabled: false,
+      optOut: true,
+      optOutReason: null,
+      optOutUntil: null,
+      lastPrunedAt: null,
+      ...overrides,
+    };
+  }
+
+  it("includes the action verb in the header", () => {
+    const out = formatPolicyChange("opted out", policy());
+    expect(out).toMatch(/^Tenant opted out:/);
+  });
+
+  it("includes tenantId + tableName in the header", () => {
+    const out = formatPolicyChange("opted out", policy());
+    expect(out).toContain(TENANT_A);
+    expect(out).toContain("workflow_traces");
+  });
+
+  it("renders 'indefinite' for opt-out with null until", () => {
+    const out = formatPolicyChange("opted out", policy({ optOutUntil: null }));
+    expect(out).toContain("Until:      indefinite");
+  });
+
+  it("renders the ISO timestamp for opt-out with explicit until", () => {
+    const out = formatPolicyChange(
+      "opted out",
+      policy({ optOutUntil: "2027-01-01T00:00:00.000Z" }),
+    );
+    expect(out).toContain("Until:      2027-01-01T00:00:00.000Z");
+  });
+
+  it("omits the Until line on opt-in with null until", () => {
+    const out = formatPolicyChange(
+      "opted in",
+      policy({ optOut: false, optOutUntil: null }),
+    );
+    expect(out).not.toContain("Until:");
+  });
+
+  it("renders the reason when set", () => {
+    const out = formatPolicyChange(
+      "opted out",
+      policy({ optOutReason: "legal_hold:case#42" }),
+    );
+    expect(out).toContain("Reason:     legal_hold:case#42");
+  });
+
+  it("omits the Reason line when null", () => {
+    const out = formatPolicyChange("opted out", policy({ optOutReason: null }));
+    expect(out).not.toContain("Reason:");
   });
 });

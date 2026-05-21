@@ -113,6 +113,19 @@ export interface ExpiringOptOutsInput {
   readonly includeExpired?: boolean;
 }
 
+export interface SetTenantOptOutInput {
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly retentionDays?: number;
+  readonly optOutUntil?: string | null;
+  readonly optOutReason?: string | null;
+}
+
+export interface ClearTenantOptOutInput {
+  readonly tenantId: string;
+  readonly tableName: string;
+}
+
 interface RawPolicyRow {
   readonly table_name: string;
   readonly retention_days: number;
@@ -521,6 +534,75 @@ export class PostgresTraceRetention {
       daysUntilExpiry:
         (Date.parse(r.opt_out_until) - now) / (86_400 * 1_000),
     }));
+  }
+
+  async setTenantOptOut(
+    input: SetTenantOptOutInput,
+  ): Promise<TenantRetentionPolicyRow> {
+    const retentionDays = input.retentionDays ?? 365;
+    if (!Number.isInteger(retentionDays) || retentionDays < 1) {
+      throw new Error(
+        `retentionDays must be an integer >= 1, got ${retentionDays}`,
+      );
+    }
+    const optOutUntil = input.optOutUntil ?? null;
+    const optOutReason = input.optOutReason ?? null;
+    const result = await this.conn.query<RawTenantPolicyRow>(
+      `INSERT INTO ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         (tenant_id, table_name, retention_days, enabled, opt_out,
+          opt_out_reason, opt_out_until, updated_at)
+       VALUES ($1, $2, $3, false, true, $4, $5, now())
+       ON CONFLICT (tenant_id, table_name) DO UPDATE SET
+         enabled = false,
+         opt_out = true,
+         opt_out_reason = EXCLUDED.opt_out_reason,
+         opt_out_until = EXCLUDED.opt_out_until,
+         updated_at = now()
+       RETURNING tenant_id, table_name, retention_days, enabled,
+                 opt_out, opt_out_reason, opt_out_until, last_pruned_at`,
+      [input.tenantId, input.tableName, retentionDays, optOutReason, optOutUntil],
+    );
+    const r = result.rows[0];
+    if (r === undefined) {
+      throw new Error("setTenantOptOut: INSERT/UPDATE returned no rows");
+    }
+    return {
+      tenantId: r.tenant_id,
+      tableName: r.table_name,
+      retentionDays: r.retention_days,
+      enabled: r.enabled,
+      optOut: r.opt_out,
+      optOutReason: r.opt_out_reason,
+      optOutUntil: r.opt_out_until,
+      lastPrunedAt: r.last_pruned_at,
+    };
+  }
+
+  async clearTenantOptOut(
+    input: ClearTenantOptOutInput,
+  ): Promise<TenantRetentionPolicyRow | null> {
+    const result = await this.conn.query<RawTenantPolicyRow>(
+      `UPDATE ${SCHEMA}.${TENANT_POLICIES_TABLE}
+       SET opt_out = false,
+           opt_out_until = NULL,
+           updated_at = now()
+       WHERE tenant_id = $1 AND table_name = $2 AND opt_out = true
+       RETURNING tenant_id, table_name, retention_days, enabled,
+                 opt_out, opt_out_reason, opt_out_until, last_pruned_at`,
+      [input.tenantId, input.tableName],
+    );
+    const r = result.rows[0];
+    if (r === undefined) return null;
+    return {
+      tenantId: r.tenant_id,
+      tableName: r.table_name,
+      retentionDays: r.retention_days,
+      enabled: r.enabled,
+      optOut: r.opt_out,
+      optOutReason: r.opt_out_reason,
+      optOutUntil: r.opt_out_until,
+      lastPrunedAt: r.last_pruned_at,
+    };
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {
