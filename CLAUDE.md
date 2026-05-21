@@ -21,15 +21,109 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,724 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter
+**56 packages + 1 app, 129 meta-schema tables, 8,741 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter
+threads `--kind <event-kind>` filter through all three
+`retention diff-timeline` dispatch paths uniformly — pair-wise
+cross-tenant + N-way cross-tenant via --add-tenant + cross-table
+via --cross-table. Mirrors ADR-0193's --actor-id pattern;
+substrate-side WHERE filter `h.event_kind = $N` ensures LIMIT +
+future cursor-pagination correctness vs jq-side post-fetch
+filter that breaks both. CLI validates --kind against the 4-value
+OPT_OUT_HISTORY_EVENT_KINDS tuple from ADR-0170 (opt_out_set |
+opt_out_cleared | retention_set | policy_deleted) — invalid
+values exit 2 with the full valid-values list in the error
+message. Pure CLI-and-adapter delivery — three input types gain
+optional eventKind?: OptOutHistoryEventKind field uniformly;
+three adapter methods add identical conditional WHERE clause
+`h.event_kind = $N` when set, positioned immediately after
+actorId WHERE clause but before --since/--until. TypeScript type
+on the adapter input (vs plain string) gives narrowing for
+direct adapter consumers; CLI validates via isOptOutHistoryEventKind
+predicate before threading. CLI runRetentionDiffTimeline reads
+kindFlag via getStringFlag once, validates, threads to whichever
+adapter is dispatched. JSON envelope echoes kind:
+OptOutHistoryEventKind | null field across all three envelope
+shapes — matches the `kind` shorthand from retention history's
+JSON envelope (per-entry field remains eventKind from ADR-0170;
+minor envelope/entry name asymmetry matches existing retention
+history precedent). Composition with --actor-id from ADR-0193:
+"every opt_out_set event Alice authored" in one command — two
+filters combine multiplicatively at WHERE clause. Use cases
+unblocked — per-kind cohort audit ("opt_out_set events across
+5-tenant cohort during Q1 2026"), per-kind cross-table audit
+("policy_deleted events across this tenant's 4 prunable
+tables"), per-actor-per-kind forensics ("opt_out_cleared events
+Alice authored during incident window"), compliance report on
+retention adjustments only (--kind retention_set + jq group_by
+tenantLabel counts). Rejected alternatives — CLI-side jq filter
+as documented workflow (breaks LIMIT + future cursor correctness),
+--kind as repeated multi-flag from day one (single-kind common
+case defer multi-kind), PG side validation only no CLI-side
+check (PG error references column not CLI flag clearer error
+adopted CLI check), type adapter input as string not
+OptOutHistoryEventKind (loses TypeScript narrowing rejected),
+--exclude-kind inversion defer jq-filter covers, validate
+--kind via zod schema (overkill for 4-value tuple predicate
+sufficient), auto-deduce kind from positional or other args
+(magical), surface filter in JSON envelope as kindFilter
+(verbose; matches retention history's `kind` shorthand
+adopted). Drawbacks — single-kind only (operators wanting
+multi-kind OR run multiple commands defer multi-kind), one flag
+added uniformly to all three paths (mirrors ADR-0193 acceptable
+structural symmetry), no --kind-not exclusion (jq-filter
+covers defer matches ADR-0186/0193 pattern), no filter-by-
+state-shape predicate (semantically different from event_kind
+defer), no PG composite index on (event_kind, occurred_at)
+defer until measured (event_kind already has analytics index
+from ADR-0170 not composite), --kind validation requires exact
+match operators with typos like opt-out-set vs opt_out_set
+get exit 2 (documented in error message lists all 4 valid
+values). 7 new adapter tests in trace-retention.test.ts in a
+new "PostgresTraceRetention diff-timeline --kind filter"
+describe block — pair-wise adds h.event_kind = $4 WHERE clause
+when eventKind set verified via SQL substring + params, pair-
+wise omits h.event_kind WHERE when not set, N-way adds
+h.event_kind = $5 positioned after tenant IN list verified,
+cross-table adds h.event_kind = $5 positioned after table IN
+list verified, pair-wise composes eventKind with actorId +
+--since + --until + --limit + joinActor (all 5 conditions
+present + all param positions verified), N-way omits when not
+set, cross-table omits when not set. 10 new CLI tests in
+retention.test.ts in a new "runRetention diff-timeline --kind"
+describe block — invalid --kind value exit 2 with explicit
+valid-values list in error message, pair-wise threads
+eventKind to adapter when --kind set, pair-wise omits when
+--kind NOT set backward compat verified, N-way threads
+eventKind alongside --add-tenant, cross-table threads
+eventKind alongside --cross-table, composes with --actor-id
++ --with-actor-names + --since, JSON envelope echoes kind
+field when --kind set (pair-wise + N-way + cross-table — 3
+tests), JSON envelope kind=null when --kind NOT set. cli.ts
+helpText extended with [--kind <event-kind>] flag note on
+both diff-timeline usage lines + 2-line description of valid
+values. ADR-0194 documents the design + 8 rejected
+alternatives + 7 future Qs (--kind repeated multi-flag for
+OR semantics, --exclude-kind inversion, filter by state-shape
+predicate, composite index on (event_kind, occurred_at),
+combined cohort filters with --summary-by-kind mode, --kind
+filter on retention diff-history for symmetric filtering,
+--kind combined event-kind matrix for multi-kind comparison
+ergonomics). The retention CLI now has 18 actions with
+filter-dimension parity across the audit-log + diff-timeline
+surfaces — retention history has six filter dimensions
+(tenant + table + kind + actor + since + until from
+ADR-0170/0186) and diff-timeline now has actor + kind from
+ADR-0193/0194 uniformly across pair-wise + N-way + cross-
+table paths.
+M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter
 closes ADR-0189 Q4 by threading `--actor-id <uuid>` filter
 through all three `retention diff-timeline` dispatch paths
 (pair-wise cross-tenant + N-way cross-tenant + cross-table).
@@ -7730,7 +7824,30 @@ events matching ADR-0186 convention; per-actor cohort
 audit + per-actor cross-table audit + incident
 timeline focused on specific operator + service-
 account vs human-actor split workflows now CLI-native
-without LIMIT/pagination-correctness gotchas).
+without LIMIT/pagination-correctness gotchas),
+ADR-0194 covers M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter
+(`retention diff-timeline --kind <event-kind>` filter
+across all three diff-timeline paths — mirrors
+ADR-0193 --actor-id pattern; substrate-side WHERE
+filter `h.event_kind = $N` ensures LIMIT + future
+cursor-pagination correctness; all three input types
+gain optional eventKind?: OptOutHistoryEventKind
+field; adapter methods add identical conditional
+WHERE clause when set positioned immediately after
+actorId WHERE before --since/--until; CLI validates
+--kind against the 4-value OPT_OUT_HISTORY_EVENT_KINDS
+tuple from ADR-0170 (opt_out_set | opt_out_cleared |
+retention_set | policy_deleted) invalid values exit
+2 with explicit valid-values list; JSON envelope
+echoes kind field on all three envelope shapes
+matches retention history `kind` shorthand
+convention; composition with --actor-id from
+ADR-0193 gives "every opt_out_set event Alice
+authored" in one command two filters combine
+multiplicatively at WHERE clause; per-kind cohort
+audit + per-kind cross-table audit + per-actor-per-
+kind forensics + compliance report on retention
+adjustments only workflows now CLI-native).
 
 ## Architecture in 90 seconds
 
@@ -12025,6 +12142,177 @@ dimensions on retention history (ADR-0186) + actor
 filter uniformly across all three diff-timeline
 paths from this milestone — operators have first-
 class per-actor forensic workflows across both
+single-tenant and cross-tenant and cross-table
+audit-log surfaces without LIMIT/pagination-
+correctness gotchas.
+ADR-0194 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter
+(`crossengin retention diff-timeline --kind <event-kind>`
+event-kind filter across all three diff-timeline
+paths; ADR-0170 shipped META_TENANT_RETENTION_OPT_OUT_HISTORY
+with a 4-value event_kind CHECK constraint
+(opt_out_set | opt_out_cleared | retention_set |
+policy_deleted) and retention history has --kind
+filter since day one; ADR-0193 just shipped --actor-id
+across all three diff-timeline paths; operators
+investigating specific event types across a cohort
+or table set ("show me every opt_out_set event
+across these 5 tenants" or "show me every
+policy_deleted event across this tenant's 4 prunable
+tables") couldn't filter on event_kind from
+retention diff-timeline and post-filtering with jq
+broke LIMIT correctness same trap ADR-0193 closed
+for actor filtering; this milestone closes that gap;
+CLI surface — --kind <event-kind> single optional
+flag added to all three dispatch paths uniformly,
+validated at CLI boundary against the 4-value
+OPT_OUT_HISTORY_EVENT_KINDS tuple from ADR-0170
+invalid values exit 2 with explicit list of valid
+values in error message, composes with --actor-id
+ADR-0193 + --with-actor-names ADR-0190 +
+--add-tenant ADR-0191 + --cross-table/--add-table
+ADR-0192 without restriction; adapter — all three
+input types (DiffHistoryTimelineInput +
+DiffHistoryTimelineNwayInput +
+DiffHistoryTimelineCrossTableInput) gain optional
+eventKind?: OptOutHistoryEventKind field where
+OptOutHistoryEventKind is the type already exported
+from ADR-0170; all three adapter methods add
+identical conditional WHERE clause `h.event_kind =
+$N` when input.eventKind !== undefined positioned
+immediately after actorId WHERE clause but before
+--since/--until; why TypeScript type instead of
+plain string on adapter input — kernel-pg type
+already exists using OptOutHistoryEventKind gives
+TypeScript narrowing for adapter consumers calling
+directly CLI validates via isOptOutHistoryEventKind
+before passing through so narrowing is correct at
+call site; substrate-side WHERE not CLI-side jq
+filter for three reasons same as ADR-0193 — LIMIT
+correctness (--limit 100 --kind opt_out_set returns
+100 opt-out-set entries from PG not <100 filtered
+from 100-row jq input), future cursor-pagination
+correctness (when --after-id ships filter happens
+before pagination not after), index usage (future
+composite index on (event_kind, occurred_at) would
+speed kind-scoped queries); CLI dispatcher
+runRetentionDiffTimeline reads kindFlag via
+getStringFlag once validates via
+isOptOutHistoryEventKind threads eventKind:
+OptOutHistoryEventKind | undefined to whichever
+adapter method gets selected — same getStringFlag +
+validate-once pattern as runRetentionHistory for
+symmetric ergonomics; JSON envelope echoes kind:
+OptOutHistoryEventKind | null field across all
+three envelope shapes (pair-wise no-discriminator,
+nway:true, crossTable:true) — same convention as
+actorId from ADR-0193; single-kind only — operators
+wanting multi-kind filter ("show me opt_out_set OR
+opt_out_cleared events") run two commands + concat
+or jq-filter, multi-kind via repeated flag
+documented as future Q substrate stays minimal one
+positive filter per dimension matching ADR-0193
+actor-filter convention; composition with --actor-id
+operators chaining --actor-id <uuid> --kind
+opt_out_set answer "every opt_out_set event Alice
+authored" in one command canonical per-actor-per-
+kind forensic query two filters combine
+multiplicatively at WHERE-clause level; use cases
+unblocked — per-kind cohort audit (every opt_out_set
+event across 5-tenant cohort during Q1 2026), per-
+kind cross-table audit (every policy_deleted event
+across this tenant's 4 prunable tables with
+--with-actor-names), per-actor-per-kind forensics
+(every opt_out_cleared event Alice authored during
+incident window), compliance report on retention
+adjustments only (--kind retention_set + jq
+group_by tenantLabel + count); rejected alternatives
+— CLI-side jq filter as documented workflow (breaks
+LIMIT + future cursor correctness same as ADR-0193),
+--kind as repeated multi-flag from day one (overkill
+single-kind common case defer multi-kind), PG side
+validation only (PG error references column not CLI
+flag CLI check gives clearer error adopted),
+type adapter input as string not OptOutHistoryEventKind
+(loses TypeScript narrowing), --exclude-kind <event-
+kind> inversion (defer jq-filter covers matches
+ADR-0193 single-positive pattern), validate --kind
+via zod schema (overkill 4-value tuple predicate
+sufficient), auto-deduce kind from positional or
+other args (magical explicit flag clearer), surface
+filter in JSON envelope as kindFilter (verbose `kind`
+matches retention history's JSON envelope shorthand
+adopted for envelope brevity minor inconsistency
+with per-entry eventKind field name matches existing
+retention history precedent); drawbacks — single-
+kind only operators wanting multi-kind OR run
+multiple commands or jq-filter (defer multi-kind),
+one flag added uniformly to all three paths three
+adapter methods + three JSON envelopes all gain
+same eventKind field (acceptable structural
+symmetry mirrors ADR-0193 pattern), no --kind-not
+exclusion (defer matches ADR-0186/0193 pattern), no
+filter-by-state-shape predicate ("show me events
+where nextState.opt_out = true" — operators jq-
+filter on JSON output defer semantically different
+from event_kind which is mutation method name not
+resulting state), no PG composite index on
+(event_kind, occurred_at) kind-filtered queries
+do index scan + sort (defer until measured slow
+event_kind already has analytics index from ADR-0170
+not composite with occurred_at), --kind validation
+requires exact match operators with typos like
+--kind opt-out-set vs opt_out_set get exit 2
+(documented in error message lists all 4 valid
+values); 7 new adapter tests in trace-retention.
+test.ts in a new "PostgresTraceRetention diff-
+timeline --kind filter" describe block — pair-wise
+adds h.event_kind = $4 WHERE clause when eventKind
+set verified via SQL substring + params, pair-wise
+omits h.event_kind WHERE when not set, N-way adds
+h.event_kind = $5 positioned after tenant IN list
+verified, cross-table adds h.event_kind = $5
+positioned after table IN list verified, pair-wise
+composes eventKind with actorId + --since + --until
++ --limit + joinActor (all 5 conditions present +
+all 8 param positions verified), N-way omits when
+not set, cross-table omits when not set; 10 new
+CLI tests in retention.test.ts in a new
+"runRetention diff-timeline --kind" describe block
+— invalid --kind value exit 2 with explicit valid-
+values list in error message, pair-wise threads
+eventKind to adapter when --kind set, pair-wise
+omits eventKind when --kind NOT set backward
+compat verified, N-way threads eventKind alongside
+--add-tenant, cross-table threads eventKind
+alongside --cross-table, composes with --actor-id
++ --with-actor-names + --since verified via
+capture, JSON envelope echoes kind field when
+--kind set (pair-wise + N-way + cross-table
+envelope shapes — 3 tests), JSON envelope kind=
+null when --kind NOT set; cli.ts helpText extended
+with [--kind <event-kind>] flag note on both
+diff-timeline usage lines + 2-line description
+listing the 4 valid event_kind values; future Qs
+cover --kind repeated multi-flag for OR semantics
+across N kinds defer, --exclude-kind inversion
+defer jq-filter covers, filter by state-shape
+predicate semantically different from event_kind
+defer, composite index on (event_kind, occurred_at)
+defer until measured, combined cohort filters with
+--summary-by-kind mode operator-policy at jq layer
+defer, --kind filter on retention diff-history for
+symmetric filtering across the audit-log diff
+surface defer, --kind combined event-kind matrix
+for multi-kind comparison ergonomics defer. The
+retention CLI now has 18 actions with filter-
+dimension parity across the audit-log + diff-
+timeline surfaces — retention history has six
+filter dimensions (tenant + table + kind + actor +
+since + until from ADR-0170/0186) and diff-timeline
+now has actor + kind from ADR-0193/0194 uniformly
+across pair-wise + N-way + cross-table paths;
+operators have first-class per-actor + per-kind +
+per-actor-per-kind forensic workflows across both
 single-tenant and cross-tenant and cross-table
 audit-log surfaces without LIMIT/pagination-
 correctness gotchas.

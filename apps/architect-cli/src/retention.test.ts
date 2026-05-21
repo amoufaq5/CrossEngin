@@ -5892,6 +5892,253 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
   });
 });
 
+describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter)", () => {
+  it("returns exit 2 when --kind is invalid value", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "bogus_kind",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind");
+    expect(err()).toContain("opt_out_set");
+  });
+
+  it("pair-wise: threads eventKind to adapter when --kind set", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+  });
+
+  it("pair-wise: omits eventKind when --kind NOT set (backward compat)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBeUndefined();
+  });
+
+  it("N-way: threads eventKind alongside --add-tenant", async () => {
+    const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--kind",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBe("policy_deleted");
+  });
+
+  it("cross-table: threads eventKind alongside --cross-table", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--kind",
+        "retention_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBe("retention_set");
+  });
+
+  it("composes with --actor-id + --with-actor-names + --since", async () => {
+    const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+        "--kind",
+        "opt_out_set",
+        "--with-actor-names",
+        "--since",
+        "2026-01-01",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.joinActor).toBe(true);
+    expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("JSON envelope echoes kind field when --kind set (pair-wise)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kind).toBe("opt_out_set");
+  });
+
+  it("JSON envelope kind=null when --kind NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kind).toBeNull();
+  });
+
+  it("JSON envelope echoes kind on N-way path", async () => {
+    const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--kind",
+        "policy_deleted",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.nway).toBe(true);
+    expect(parsed_.kind).toBe("policy_deleted");
+  });
+
+  it("JSON envelope echoes kind on cross-table path", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--kind",
+        "retention_set",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.crossTable).toBe(true);
+    expect(parsed_.kind).toBe("retention_set");
+  });
+});
+
 describe("formatTimelineCrossTableDiff", () => {
   it("renders 'No history events for this tenant' when entries empty", () => {
     const out = formatTimelineCrossTableDiff({

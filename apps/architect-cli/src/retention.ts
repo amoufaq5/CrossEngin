@@ -1422,6 +1422,19 @@ async function runRetentionDiffTimeline(
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
 
+  const kindFlag = getStringFlag(command, "kind");
+  let eventKind: OptOutHistoryEventKind | undefined;
+  if (kindFlag !== null) {
+    if (!isOptOutHistoryEventKind(kindFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: invalid --kind '${kindFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    eventKind = kindFlag;
+  }
+
   if (crossTable) {
     const tenantId = positionalA;
     const tableNames = [positionalB, positionalC, ...addTables];
@@ -1435,6 +1448,7 @@ async function runRetentionDiffTimeline(
         limit,
         joinActor: withActorNames || undefined,
         actorId,
+        eventKind,
       });
     } catch (err) {
       printError(
@@ -1453,6 +1467,7 @@ async function runRetentionDiffTimeline(
         limit,
         withActorNames,
         actorId: actorId ?? null,
+        kind: eventKind ?? null,
         result: crossResult,
       });
       return 0;
@@ -1479,6 +1494,7 @@ async function runRetentionDiffTimeline(
         limit,
         joinActor: withActorNames || undefined,
         actorId,
+        eventKind,
       });
     } catch (err) {
       printError(
@@ -1497,6 +1513,7 @@ async function runRetentionDiffTimeline(
         limit,
         withActorNames,
         actorId: actorId ?? null,
+        kind: eventKind ?? null,
         result: nwayResult,
       });
       return 0;
@@ -1516,6 +1533,7 @@ async function runRetentionDiffTimeline(
       limit,
       joinActor: withActorNames || undefined,
       actorId,
+      eventKind,
     });
   } catch (err) {
     printError(
@@ -1533,6 +1551,7 @@ async function runRetentionDiffTimeline(
       limit,
       withActorNames,
       actorId: actorId ?? null,
+      kind: eventKind ?? null,
       result,
     });
     return 0;

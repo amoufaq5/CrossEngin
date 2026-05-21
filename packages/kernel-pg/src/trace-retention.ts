@@ -400,6 +400,7 @@ export interface DiffHistoryTimelineInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorId?: string;
+  readonly eventKind?: OptOutHistoryEventKind;
 }
 
 export interface TimelineEntry {
@@ -432,6 +433,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorId?: string;
+  readonly eventKind?: OptOutHistoryEventKind;
 }
 
 export interface NwayTimelineEntry {
@@ -463,6 +465,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorId?: string;
+  readonly eventKind?: OptOutHistoryEventKind;
 }
 
 export interface CrossTableTimelineEntry {
@@ -1575,6 +1578,10 @@ export class PostgresTraceRetention {
       params.push(input.actorId);
       conditions.push(`h.actor_id = $${params.length}`);
     }
+    if (input.eventKind !== undefined) {
+      params.push(input.eventKind);
+      conditions.push(`h.event_kind = $${params.length}`);
+    }
     if (input.since !== undefined) {
       params.push(input.since);
       conditions.push(`h.occurred_at >= $${params.length}`);
@@ -1673,6 +1680,10 @@ export class PostgresTraceRetention {
     if (input.actorId !== undefined) {
       params.push(input.actorId);
       conditions.push(`h.actor_id = $${params.length}`);
+    }
+    if (input.eventKind !== undefined) {
+      params.push(input.eventKind);
+      conditions.push(`h.event_kind = $${params.length}`);
     }
     if (input.since !== undefined) {
       params.push(input.since);
@@ -1778,6 +1789,10 @@ export class PostgresTraceRetention {
     if (input.actorId !== undefined) {
       params.push(input.actorId);
       conditions.push(`h.actor_id = $${params.length}`);
+    }
+    if (input.eventKind !== undefined) {
+      params.push(input.eventKind);
+      conditions.push(`h.event_kind = $${params.length}`);
     }
     if (input.since !== undefined) {
       params.push(input.since);
