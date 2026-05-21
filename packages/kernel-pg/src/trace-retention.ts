@@ -226,6 +226,35 @@ export type RestoreTenantPolicyResult =
       readonly tableName: string;
     };
 
+export type RestoreTenantPolicyPreview =
+  | {
+      readonly kind: "would_delete";
+      readonly tenantId: string;
+      readonly tableName: string;
+      readonly sourceHistoryId: string;
+    }
+  | {
+      readonly kind: "would_set_opt_out";
+      readonly tenantId: string;
+      readonly tableName: string;
+      readonly retentionDays: number;
+      readonly optOutUntil: string | null;
+      readonly optOutReason: string | null;
+      readonly sourceHistoryId: string;
+    }
+  | {
+      readonly kind: "would_set_retention";
+      readonly tenantId: string;
+      readonly tableName: string;
+      readonly retentionDays: number;
+      readonly enabled: boolean;
+      readonly sourceHistoryId: string;
+    };
+
+export interface PreviewRestoreTenantPolicyInput {
+  readonly historyId: string;
+}
+
 export interface DiffHistoryEntriesInput {
   readonly idA: string;
   readonly idB: string;
@@ -1029,6 +1058,67 @@ export class PostgresTraceRetention {
       attributes: restoreAttrs,
     });
     return { kind: "restored", policy };
+  }
+
+  async previewRestoreTenantPolicy(
+    input: PreviewRestoreTenantPolicyInput,
+  ): Promise<RestoreTenantPolicyPreview> {
+    const sourceResult = await this.conn.query<{
+      tenant_id: string;
+      table_name: string;
+      prev_state: Record<string, unknown> | null;
+    }>(
+      `SELECT tenant_id, table_name, prev_state
+       FROM ${SCHEMA}.${HISTORY_TABLE}
+       WHERE id = $1`,
+      [input.historyId],
+    );
+    const source = sourceResult.rows[0];
+    if (source === undefined) {
+      throw new Error(
+        `previewRestoreTenantPolicy: history id '${input.historyId}' not found`,
+      );
+    }
+
+    if (source.prev_state === null) {
+      return {
+        kind: "would_delete",
+        tenantId: source.tenant_id,
+        tableName: source.table_name,
+        sourceHistoryId: input.historyId,
+      };
+    }
+
+    const prev = source.prev_state as Record<string, unknown>;
+    const retentionDays = prev.retention_days;
+    if (typeof retentionDays !== "number") {
+      throw new Error(
+        `previewRestoreTenantPolicy: prev_state missing retention_days (history id '${input.historyId}')`,
+      );
+    }
+
+    if (prev.opt_out === true) {
+      return {
+        kind: "would_set_opt_out",
+        tenantId: source.tenant_id,
+        tableName: source.table_name,
+        retentionDays,
+        optOutUntil:
+          typeof prev.opt_out_until === "string" ? prev.opt_out_until : null,
+        optOutReason:
+          typeof prev.opt_out_reason === "string" ? prev.opt_out_reason : null,
+        sourceHistoryId: input.historyId,
+      };
+    }
+
+    return {
+      kind: "would_set_retention",
+      tenantId: source.tenant_id,
+      tableName: source.table_name,
+      retentionDays,
+      enabled: prev.enabled === true,
+      sourceHistoryId: input.historyId,
+    };
   }
 
   async diffHistoryEntries(

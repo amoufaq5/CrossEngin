@@ -21,15 +21,117 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,370 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.cursor
+**56 packages + 1 app, 129 meta-schema tables, 8,393 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.restore.dry-run
+closes ADR-0171 Q1 by adding `--dry-run` flag to retention
+restore + new previewRestoreTenantPolicy adapter method.
+Restore is destructive (overwrites current policy state
+with historical state); operators want to see what would
+change before applying — same safety motif as
+retention prune --dry-run from ADR-0174. New adapter
+method mirrors the dual-method pattern (prune +
+previewPrune) — separate method rather than dryRun?:
+boolean parameter on restoreTenantPolicy because the
+return shape is fundamentally different (Result vs Preview)
+and keeping them separate avoids type-system pollution.
+Discriminated RestoreTenantPolicyPreview union has three
+variants mirroring restoreTenantPolicy's dispatch branches:
+would_delete (prev_state null → would call
+deleteTenantPolicy), would_set_opt_out (prev_state.opt_out
+true → would call setTenantOptOut with retentionDays +
+optOutUntil + optOutReason), would_set_retention
+(otherwise → would call setTenantRetention with
+retentionDays + enabled). 'would_' prefix matches the
+prune dry-run convention ('would_delete=N'). Variants
+carry EXACT arguments that would be passed to the
+underlying mutation — operators reading preview verify
+planned action without ambiguity. Algorithm: same lookup
+as restoreTenantPolicy (SELECT source history row) but
+NO actorId/attributes parameters (preview is read-only,
+no audit row written), NO call to underlying mutation,
+same defensive validation of retention_days. CLI branches
+at start of runRetentionRestore — --dry-run flag triggers
+preview path. --actor silently ignored on --dry-run
+(operators may script with both flags always set; ignoring
+is friendlier than erroring). Human output renders preview
+header 'Restore preview (no changes applied):' + source
+history id + tenant + table + action line: 'deleteTenantPolicy
+(prev_state was null)' for would_delete, 'setTenantOptOut'
++ indented retention/until/reason for would_set_opt_out
+(reuses 'indefinite' / '<no reason>' conventions),
+'setTenantRetention' + indented retention/enabled for
+would_set_retention. JSON envelope {action: "restore",
+dryRun: true, historyId, preview: RestoreTenantPolicyPreview}
+preserves discriminated union; live mode emits {action,
+dryRun: false, historyId, result} — dryRun boolean is the
+canonical discriminator matching prune envelope convention.
+Use cases unblocked: pre-restore safety check (two-command
+preview then apply), compliance workflow validation (jq
+on preview.kind), CI gates asserting restore semantics
+before commit, forensic counterfactual investigation,
+multi-command analysis comparing preview vs current state.
+Rejected alternatives: single restoreTenantPolicy({dryRun:
+true}) returning union (type pollution; callers narrow on
+every call), previewRestoreTenantPolicy returning same
+shape as RestoreTenantPolicyResult (conflates 'what
+happened' vs 'what would happen'), --explain instead of
+--dry-run (doesn't match apply/prune convention), implicit
+preview when stdout is TTY (magic), error on --actor +
+--dry-run (silent ignore friendlier), --diff-current flag
+(defer to combined-mode milestone), preview accepting
+actorId (read-only — actor meaningless without write),
+JSON preview field renamed to result (semantically
+distinct — preview vs result is correct vocabulary for
+read-only vs write split). 9 new adapter tests covering:
+throws when history id not found, does NOT issue any
+mutation queries (single SELECT only), prev_state=null
+returns would_delete with all fields, opt_out=true returns
+would_set_opt_out with retention/until/reason, opt_out=true
+with null until/reason returns nulls, opt_out=false returns
+would_set_retention with days/enabled, opt_out=false +
+enabled=false returns enabled:false, throws on missing
+retention_days, kind discriminates three dispatch branches
+parameterized test. 14 new CLI tests covering: --dry-run
+calls previewRestoreTenantPolicy not restoreTenantPolicy,
+threads historyId to preview adapter, --dry-run ignores
+--actor flag silently, human-format renders preview header
++ source-history + action for would_delete with
+'(prev_state was null)' annotation, would_set_opt_out
+renders all three fields, 'indefinite' for null until +
+'<no reason>' for null reason, would_set_retention renders
+retention + enabled, JSON envelope {action, dryRun:true,
+historyId, preview} for dry-run, JSON envelope dryRun:false
+discriminator for live mode, --dry-run propagates preview-
+adapter errors exit 1, formatRestorePreview helper unit
+tests rendering all three variants. cli.ts helpText
+retention restore usage line extended with [--dry-run]
+optional flag + description mentions 'With --dry-run, show
+prev_state + planned mutation method without applying.'.
+ADR-0176 documents the design + 8 rejected alternatives
++ 6 future Qs (--diff-current flag combining preview with
+effectiveRetention, bulk dry-run --bulk file.csv, multi-
+version preview showing what restoring to A vs B would
+each produce, --from-time DATE walking multiple history
+rows pairing with deferred restore --to-time from ADR-0171
+Q2, confirmation prompt linking dry-run + live invocations
+via session cache, preview integration with retention
+diff-history for 'what restoring to A would look like
+compared to current'). The retention CLI now has 13
+actions with all destructive operations supporting
+--dry-run safety preview: 3 read (expiring/effective/
+list-policies) + 4 write (opt-out/opt-in/set/delete) + 1
+audit (history) + 1 restore (restore with --dry-run) + 1
+diff (diff-history) + 1 maintenance (prune with --dry-run)
++ now restore --dry-run completes the safety-preview
+coverage for write operations.
+M6.7.zz.tenant.opt-out.cli.history.cursor
 closes ADR-0170 Q8 by adding cursor pagination to retention
 history via --after-id <uuid> flag. At low-scale deployments
 the default limit=100 was fine; at >100K-event tenants
@@ -5292,7 +5394,19 @@ tiebreaker for stable pagination; backward compatible
 omitting --after-id; nextAfterId field in JSON envelope
 + human-format next-page hint when results.length === limit;
 operators paginate dashboards / stream compliance exports
-/ replay incident timelines without OFFSET instability).
+/ replay incident timelines without OFFSET instability),
+ADR-0176 covers M6.7.zz.tenant.opt-out.cli.restore.dry-run
+(`retention restore --dry-run` flag + previewRestoreTenantPolicy
+adapter — closes ADR-0171 Q1 — mirrors prune dual-method
+pattern with separate adapter (rather than dryRun?: boolean
+param) to avoid type-system pollution; RestoreTenantPolicyPreview
+discriminated union with three would_delete /
+would_set_opt_out / would_set_retention variants matching
+restoreTenantPolicy's dispatch branches; preview is purely
+read-only — no actorId/attributes; --actor silently ignored
+on --dry-run; JSON envelope dryRun:boolean discriminator
+parallel to retention prune; safety preview for the last
+remaining destructive retention action).
 
 ## Architecture in 90 seconds
 
@@ -6781,6 +6895,150 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0176 covers Phase 2 M6.7.zz.tenant.opt-out.cli.restore.dry-run
+(`retention restore --dry-run` flag + previewRestoreTenantPolicy
+adapter method on PostgresTraceRetention — closes ADR-0171
+Q1; restore is destructive (overwrites current policy state
+with historical state) and operators want to see what would
+change before applying — same safety motif as retention
+prune --dry-run from ADR-0174; new adapter method mirrors
+prune's dual-method pattern (prune + previewPrune) — separate
+method rather than dryRun?: boolean parameter on
+restoreTenantPolicy because return shape is fundamentally
+different (Result vs Preview); keeping them separate avoids
+type-system pollution where every caller would need to
+narrow on every call; PreviewRestoreTenantPolicyInput just
+takes {historyId} — no actorId, no attributes since preview
+is purely read-only no audit row written; discriminated
+RestoreTenantPolicyPreview union has three variants
+mirroring restoreTenantPolicy's three dispatch branches —
+would_delete {tenantId, tableName, sourceHistoryId} when
+prev_state IS NULL (would call deleteTenantPolicy),
+would_set_opt_out {tenantId, tableName, retentionDays,
+optOutUntil, optOutReason, sourceHistoryId} when
+prev_state.opt_out === true (would call setTenantOptOut),
+would_set_retention {tenantId, tableName, retentionDays,
+enabled, sourceHistoryId} otherwise (would call
+setTenantRetention); 'would_' prefix matches the prune
+dry-run convention 'would_delete=N'; variants carry EXACT
+arguments that would be passed to underlying mutation —
+operators reading preview verify planned action without
+ambiguity; algorithm — SELECT source history row (same
+shape as restoreTenantPolicy's first query), throw on
+not-found, dispatch on prev_state shape, return appropriate
+variant; defensive validation of retention_days as number;
+sourceHistoryId echoed in every variant for forensic
+traceability; CLI branches at start of runRetentionRestore
+— --dry-run flag triggers preview path before falling
+through to live-restore flow; --actor silently ignored on
+--dry-run (operators may script with both flags always set;
+ignoring is friendlier than erroring); human output renders
+preview header 'Restore preview (no changes applied):' +
+'Source history: <id>' + 'Tenant:         <uuid>' +
+'Table:          <name>' + action-specific lines: for
+would_delete 'Action:         deleteTenantPolicy
+(prev_state was null)'; for would_set_opt_out
+'Action:         setTenantOptOut' + indented
+'    retention_days: N' + '    opt_out_until:  <iso |
+indefinite>' + '    opt_out_reason: <text | <no reason>>';
+for would_set_retention 'Action:         setTenantRetention'
++ '    retention_days: N' + '    enabled:        yes|no';
+reuses 'indefinite' / '<no reason>' conventions from
+formatPolicyChange + retention effective; JSON envelope
+{action: "restore", dryRun: true, historyId, preview:
+RestoreTenantPolicyPreview} for dry-run mode; live mode
+emits {action: "restore", dryRun: false, historyId, result:
+RestoreTenantPolicyResult} — dryRun boolean is the
+canonical discriminator matching prune envelope convention
+from ADR-0174; use cases unblocked — pre-restore safety
+check (two-command preview then apply), compliance
+workflow validation (jq '.preview.kind' returns
+"would_set_opt_out"), CI gate asserting restore semantics
+before commit (BASH script branches on KIND), forensic
+counterfactual investigation (what WOULD have happened if
+we restored this), multi-command analysis comparing
+preview vs current state via retention effective; rejected
+alternatives — single restoreTenantPolicy({dryRun: true})
+returning discriminated union of Result | Preview (type
+system pollution forcing every caller to discriminate,
+breaks prune separate-method pattern, audit-log clarity
+weaker), previewRestoreTenantPolicy returning same shape
+as RestoreTenantPolicyResult (conflates 'what happened'
+with 'what would happen' — would_* prefix makes
+difference explicit at type level), CLI flag --explain
+instead of --dry-run (doesn't match apply --dry-run /
+prune --dry-run established convention), implicit preview
+when stdout is TTY (magic behavior; operators script
+regardless of TTY), error when --actor set with --dry-run
+(operators may script with both always set; silent ignore
+friendlier), --diff-current flag combining preview with
+current state (defer to future combined-mode milestone),
+preview method accepting actorId for 'what would the actor
+row look like' (read-only — actor meaningless without
+write), JSON preview field renamed to result for parity
+(semantically distinct — preview vs result is correct
+vocabulary for read-only-vs-write split); drawbacks — no
+--diff shortcut (operators chain retention effective +
+retention restore --dry-run + jq; future combined flag
+defer), no cross-history-event preview (operators run two
+separate commands; defer), --actor silently ignored on
+--dry-run (could error instead but operators may script
+with both; ignoring is friendlier), preview is single-
+snapshot (between dry-run and live restore another
+operator could mutate source history row's prev_state
+which is JSONB not append-only by DDL only by convention;
+documented), three variants instead of one (operators
+must switch on preview.kind; mirrors RestoreTenantPolicyResult's
+discrimination — consistent shape across the family); 9
+new adapter tests in trace-retention.test.ts — throws
+when history id not found, does NOT issue any mutation
+queries (single SELECT verified — no INSERT/UPDATE/DELETE
+in captured SQL), prev_state=null returns would_delete
+{tenantId, tableName, sourceHistoryId}, opt_out=true with
+all fields returns would_set_opt_out with retention/until/
+reason, opt_out=true with null until/reason returns nulls,
+opt_out=false returns would_set_retention {days, enabled},
+opt_out=false + enabled=false returns enabled:false,
+throws on missing retention_days defensive check, kind
+discriminates three dispatch branches parameterized test
+calling three times with different inputs; 14 new CLI
+tests in retention.test.ts — --dry-run calls
+previewRestoreTenantPolicy not restoreTenantPolicy,
+threads historyId to preview adapter, --dry-run ignores
+--actor flag silently (preview is read-only no audit
+row), human-format renders preview header + source-history
++ action for would_delete with '(prev_state was null)'
+annotation, would_set_opt_out renders all three fields,
+'indefinite' for null until + '<no reason>' for null
+reason, would_set_retention renders retention + enabled,
+JSON envelope shape for dry-run, JSON envelope dryRun:
+false discriminator for live mode, --dry-run propagates
+preview-adapter errors as exit 1, formatRestorePreview
+helper unit tests — renders would_delete with annotation,
+renders would_set_opt_out with all fields, renders
+would_set_retention with enabled:no when disabled,
+includes source history id in every variant
+parameterized test; cli.ts helpText retention restore
+usage line extended with [--dry-run] optional flag +
+description mentions 'With --dry-run, show prev_state +
+planned mutation method without applying.'; future Qs
+cover --diff-current flag combining preview with
+effectiveRetention for 'what would change' delta view,
+bulk dry-run --bulk file.csv for multiple history-ids,
+multi-version preview showing what restoring to A vs B
+would each produce, --from-time DATE walking multiple
+history rows pairing with deferred restore --to-time from
+ADR-0171 Q2, confirmation prompt linking dry-run + live
+invocations via session cache (adds complexity defer),
+preview integration with retention diff-history for 'what
+restoring to A would look like compared to current'). The
+retention CLI now has 13 actions with --dry-run support
+across all destructive operations: 3 read (expiring/
+effective/list-policies) + 4 write (opt-out/opt-in/set/
+delete) + 1 audit (history) + 1 restore (with --dry-run)
++ 1 diff (diff-history) + 1 maintenance (prune with
+--dry-run); operators have complete safety-preview coverage
+for write operations.
 ADR-0175 covers Phase 2 M6.7.zz.tenant.opt-out.cli.history.cursor
 (`retention history --after-id <uuid>` cursor pagination
 — closes ADR-0170 Q8; at low-scale deployments default

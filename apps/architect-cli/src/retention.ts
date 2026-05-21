@@ -9,6 +9,7 @@ import {
   type OptOutHistoryEntry,
   type OptOutHistoryEventKind,
   type PgConnection,
+  type RestoreTenantPolicyPreview,
   type RestoreTenantPolicyResult,
   type RetentionPolicyRow,
   type RetentionPreviewResult,
@@ -797,10 +798,36 @@ async function runRetentionRestore(
   if (historyId === undefined) {
     printError(
       ctx.io,
-      "retention restore: missing argument. usage: crossengin retention restore <history-id> [--actor <uuid>]",
+      "retention restore: missing argument. usage: crossengin retention restore <history-id> [--dry-run] [--actor <uuid>]",
     );
     return 2;
   }
+  const dryRun = getBooleanFlag(command, "dry-run");
+
+  if (dryRun) {
+    let preview: RestoreTenantPolicyPreview;
+    try {
+      preview = await retention.previewRestoreTenantPolicy({ historyId });
+    } catch (err) {
+      printError(
+        ctx.io,
+        `retention restore: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        action: "restore",
+        dryRun: true,
+        historyId,
+        preview,
+      });
+      return 0;
+    }
+    ctx.io.stdout.write(formatRestorePreview(preview));
+    return 0;
+  }
+
   const actorId = getStringFlag(command, "actor");
 
   let result: RestoreTenantPolicyResult;
@@ -815,7 +842,7 @@ async function runRetentionRestore(
   }
 
   if (command.format === "json") {
-    printJson(ctx.io, { action: "restore", historyId, result });
+    printJson(ctx.io, { action: "restore", dryRun: false, historyId, result });
     return 0;
   }
   if (result.kind === "deleted") {
@@ -827,6 +854,35 @@ async function runRetentionRestore(
   }
   ctx.io.stdout.write(formatPolicyChange("restored", result.policy));
   return 0;
+}
+
+export function formatRestorePreview(
+  preview: RestoreTenantPolicyPreview,
+): string {
+  const lines: string[] = [];
+  lines.push("Restore preview (no changes applied):");
+  lines.push(`  Source history: ${preview.sourceHistoryId}`);
+  lines.push(`  Tenant:         ${preview.tenantId}`);
+  lines.push(`  Table:          ${preview.tableName}`);
+  switch (preview.kind) {
+    case "would_delete":
+      lines.push(`  Action:         deleteTenantPolicy (prev_state was null)`);
+      break;
+    case "would_set_opt_out":
+      lines.push(`  Action:         setTenantOptOut`);
+      lines.push(`    retention_days: ${preview.retentionDays}`);
+      lines.push(`    opt_out_until:  ${preview.optOutUntil ?? "indefinite"}`);
+      lines.push(
+        `    opt_out_reason: ${preview.optOutReason ?? "<no reason>"}`,
+      );
+      break;
+    case "would_set_retention":
+      lines.push(`  Action:         setTenantRetention`);
+      lines.push(`    retention_days: ${preview.retentionDays}`);
+      lines.push(`    enabled:        ${preview.enabled ? "yes" : "no"}`);
+      break;
+  }
+  return lines.join("\n") + "\n";
 }
 
 async function runRetentionDiffHistory(

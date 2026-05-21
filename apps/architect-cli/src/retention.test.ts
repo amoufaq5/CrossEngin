@@ -9,7 +9,9 @@ import type {
   ListOptOutHistoryInput,
   OptOutHistoryEntry,
   PostgresTraceRetention,
+  PreviewRestoreTenantPolicyInput,
   RestoreTenantPolicyInput,
+  RestoreTenantPolicyPreview,
   RestoreTenantPolicyResult,
   RetentionPolicyRow,
   RetentionPreviewResult,
@@ -29,6 +31,7 @@ import {
   formatPolicyChange,
   formatPrunePreview,
   formatPruneRun,
+  formatRestorePreview,
   runRetention,
   type RetentionContext,
 } from "./retention.js";
@@ -84,6 +87,8 @@ function fakeRetention(opts: {
   previewResults?: readonly RetentionPreviewResult[];
   pruneCalled?: { count: number };
   previewCalled?: { count: number };
+  previewRestoreResult?: RestoreTenantPolicyPreview;
+  previewRestoreCapture?: PreviewRestoreTenantPolicyInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -213,6 +218,20 @@ function fakeRetention(opts: {
       if (opts.previewCalled !== undefined) opts.previewCalled.count += 1;
       if (opts.throws !== undefined) throw opts.throws;
       return opts.previewResults ?? [];
+    },
+    previewRestoreTenantPolicy: async (input: PreviewRestoreTenantPolicyInput) => {
+      opts.previewRestoreCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.previewRestoreResult ?? {
+          kind: "would_set_retention",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 30,
+          enabled: true,
+          sourceHistoryId: input.historyId,
+        }
+      );
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -2594,6 +2613,295 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
     );
     expect(code).toBe(1);
     expect(err()).toContain("not found");
+  });
+});
+
+describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry-run)", () => {
+  const HISTORY_ID = "30000000-0000-4000-8000-000000000003";
+
+  it("--dry-run calls previewRestoreTenantPolicy not restoreTenantPolicy", async () => {
+    const { ctx } = buffers();
+    const previewRestoreCapture: PreviewRestoreTenantPolicyInput[] = [];
+    const restoreCapture: RestoreTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewRestoreCapture,
+          restoreCapture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(previewRestoreCapture).toHaveLength(1);
+    expect(restoreCapture).toHaveLength(0);
+  });
+
+  it("threads historyId to preview adapter", async () => {
+    const { ctx } = buffers();
+    const previewRestoreCapture: PreviewRestoreTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ previewRestoreCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(previewRestoreCapture[0]).toEqual({ historyId: HISTORY_ID });
+  });
+
+  it("--dry-run ignores --actor flag (preview is read-only — no audit row written)", async () => {
+    const { ctx } = buffers();
+    const previewRestoreCapture: PreviewRestoreTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "restore",
+        HISTORY_ID,
+        "--dry-run",
+        "--actor",
+        "11111111-1111-4111-8111-111111111111",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ previewRestoreCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(previewRestoreCapture[0]).toEqual({ historyId: HISTORY_ID });
+  });
+
+  it("human-format renders preview header + source-history + action for would_delete", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewRestoreResult: {
+            kind: "would_delete",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            sourceHistoryId: HISTORY_ID,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Restore preview (no changes applied)");
+    expect(out()).toContain(`Source history: ${HISTORY_ID}`);
+    expect(out()).toContain(`Tenant:         ${TENANT_A}`);
+    expect(out()).toContain("Action:         deleteTenantPolicy");
+    expect(out()).toContain("(prev_state was null)");
+  });
+
+  it("human-format renders would_set_opt_out with retention + until + reason", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewRestoreResult: {
+            kind: "would_set_opt_out",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            retentionDays: 90,
+            optOutUntil: "2027-01-01T00:00:00.000Z",
+            optOutReason: "legal_hold:case#42",
+            sourceHistoryId: HISTORY_ID,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Action:         setTenantOptOut");
+    expect(out()).toContain("retention_days: 90");
+    expect(out()).toContain("opt_out_until:  2027-01-01T00:00:00.000Z");
+    expect(out()).toContain("opt_out_reason: legal_hold:case#42");
+  });
+
+  it("human-format renders 'indefinite' for null optOutUntil + '<no reason>' for null reason", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewRestoreResult: {
+            kind: "would_set_opt_out",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            retentionDays: 365,
+            optOutUntil: null,
+            optOutReason: null,
+            sourceHistoryId: HISTORY_ID,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("opt_out_until:  indefinite");
+    expect(out()).toContain("opt_out_reason: <no reason>");
+  });
+
+  it("human-format renders would_set_retention with retention + enabled", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewRestoreResult: {
+            kind: "would_set_retention",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            retentionDays: 30,
+            enabled: true,
+            sourceHistoryId: HISTORY_ID,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Action:         setTenantRetention");
+    expect(out()).toContain("retention_days: 30");
+    expect(out()).toContain("enabled:        yes");
+  });
+
+  it("json-format emits envelope {action, dryRun:true, historyId, preview}", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "restore",
+        HISTORY_ID,
+        "--dry-run",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewRestoreResult: {
+            kind: "would_delete",
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            sourceHistoryId: HISTORY_ID,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.action).toBe("restore");
+    expect(parsedJson.dryRun).toBe(true);
+    expect(parsedJson.historyId).toBe(HISTORY_ID);
+    expect(parsedJson.preview.kind).toBe("would_delete");
+  });
+
+  it("json-format live mode (no --dry-run) emits dryRun:false discriminator", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.dryRun).toBe(false);
+    expect(parsedJson.result).toBeDefined();
+  });
+
+  it("--dry-run propagates preview-adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("history id 'xxx' not found"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("not found");
+  });
+});
+
+describe("formatRestorePreview", () => {
+  const HISTORY_ID = "30000000-0000-4000-8000-000000000003";
+
+  it("renders would_delete with 'prev_state was null' annotation", () => {
+    const out = formatRestorePreview({
+      kind: "would_delete",
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      sourceHistoryId: HISTORY_ID,
+    });
+    expect(out).toContain("deleteTenantPolicy (prev_state was null)");
+  });
+
+  it("renders would_set_opt_out with all three fields", () => {
+    const out = formatRestorePreview({
+      kind: "would_set_opt_out",
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 90,
+      optOutUntil: "2027-01-01T00:00:00.000Z",
+      optOutReason: "legal_hold:case#42",
+      sourceHistoryId: HISTORY_ID,
+    });
+    expect(out).toContain("retention_days: 90");
+    expect(out).toContain("opt_out_until:  2027-01-01T00:00:00.000Z");
+    expect(out).toContain("opt_out_reason: legal_hold:case#42");
+  });
+
+  it("renders would_set_retention with enabled:no when disabled", () => {
+    const out = formatRestorePreview({
+      kind: "would_set_retention",
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      retentionDays: 30,
+      enabled: false,
+      sourceHistoryId: HISTORY_ID,
+    });
+    expect(out).toContain("enabled:        no");
+  });
+
+  it("includes the source history id in every variant", () => {
+    for (const preview of [
+      {
+        kind: "would_delete" as const,
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        sourceHistoryId: HISTORY_ID,
+      },
+      {
+        kind: "would_set_opt_out" as const,
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 90,
+        optOutUntil: null,
+        optOutReason: null,
+        sourceHistoryId: HISTORY_ID,
+      },
+      {
+        kind: "would_set_retention" as const,
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 30,
+        enabled: true,
+        sourceHistoryId: HISTORY_ID,
+      },
+    ]) {
+      expect(formatRestorePreview(preview)).toContain(
+        `Source history: ${HISTORY_ID}`,
+      );
+    }
   });
 });
 
