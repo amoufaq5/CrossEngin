@@ -21,15 +21,91 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,144 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli closes
+**56 packages + 1 app, 128 meta-schema tables, 8,160 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.effective
+closes ADR-0159 Q5 by adding `crossengin retention effective
+<tenant-id> <table-name>` action under the `retention`
+subcommand. Wraps the ADR-0159 effectiveRetention(tenantId,
+tableName) resolver one-for-one with a discriminated-union-
+aware output renderer. Operators answering "what's the
+retention policy for tenant X on table Y right now?" no
+longer drop to direct SQL — direct queries miss the
+resolution semantics (precedence, expiry filtering, the
+4-variant union shape). Each variant renders distinctly so
+operators see the actual semantic at a glance: source="tenant"
+prints "Tenant override (active)" with retention days +
+enabled; source="tenant_opt_out" prints "Tenant opt-out
+(active)" with optOutUntil (or "indefinite" for null) +
+optOutReason (or "<no reason>" for null — same convention
+as the expiring action from ADR-0164); source="platform"
+prints "Platform default" with retention days + enabled
+flag; source="none" prints "No policy configured".
+Platform + none variants don't carry a tenantId from the
+resolver (platform policy is platform-wide), so the queried
+tenant id from the CLI is rendered for context — keeps the
+human output self-explanatory. JSON output emits the full
+discriminated union unchanged inside an envelope {tenantId,
+tableName, resolution} so downstream consumers correlate
+multiple lookups via jq even when individual resolutions
+omit one field. Validation: missing tenant or table args
+return exit 2 with clear "missing arguments" error. No
+table-name validation — resolver returns source="none" for
+unknown tables, surfacing "No policy configured" with the
+queried name. Use cases unblocked: operator debugging
+"why isn't tenant X getting custom retention?" (CLI prints
+Platform default → operator checks DB row sees enabled=false
+or opt_out_until past), compliance audit "is tenant X in
+active legal hold?" (one-line jq pipe), tier migration
+verification (shell loop across tables checks consistency),
+dashboard tooltip integration (web UI renders badge from
+JSON shape). Rejected alternatives — flat positional args
+with --tenant/--table flags (verbose for two required args;
+positional matches sessions show <id> + gateway routes
+unregister <id> patterns), default to all tables when name
+omitted (pattern inconsistency with sessions show), print
+raw struct field-by-field (operators have to mentally
+decode source="tenant_opt_out"; variant-aware rendering
+surfaces semantic immediately), CSV/TSV output (defer to
+global --format csv if needed), retention effective <tenant>
+no-table-arg returning all (bulk mode deserves its own
+action), auto-fill table to default like workflow_traces
+(likely typo; failing fast clearer), --clock flag for
+testing override (read-time semantic; production uses
+Date.now via default constructor). 16 new tests in
+retention.test.ts: missing tenant arg returns exit 2,
+missing table arg returns exit 2, threads tenantId+
+tableName through to resolver, human-format renders
+source=tenant with retention days, human-format renders
+source=tenant_opt_out with reason + until, human-format
+renders source=tenant_opt_out with 'indefinite' when
+optOutUntil null, human-format renders source=platform
+with Enabled:yes, human-format renders source=platform
+with Enabled:no when disabled, human-format renders
+source=none with clear message, JSON emits structured
+envelope with full resolution, propagates resolver errors
+as exit 1, formatEffectiveResolution source=tenant uses
+resolution.tenantId (not query arg), source=platform
+uses queried tenantId (resolution lacks one), source=none
+uses queried tenantId, source=tenant_opt_out renders
+'indefinite' for null optOutUntil, source=tenant_opt_out
+renders '<no reason>' for null optOutReason. cli.ts
+helpText extended with retention effective <tenant>
+<table> usage line. ADR-0165 documents the design + 6
+rejected alternatives + future Qs (bulk --all-tables
+lookup pairing with deferred effectiveRetentionBatch
+resolver, --explain flag for diagnostics, --at-time
+history flag pairing with deferred history substrate,
+exit code by source for CI gates, sibling mutation
+actions opt-out/opt-in/list-policies, comparison query
+retention diff for tier migration verification).
+M6.7.zz.tenant.opt-out.cli closes
 ADR-0163 Q4 by adding `crossengin retention expiring
 [--within-days N] [--include-expired]` CLI subcommand. The
 ADR-0163 expiringOptOuts resolver shipped a query surface
@@ -4212,7 +4288,19 @@ defaults --within-days=30 + --include-expired=false match
 the most common monthly-review workflow; pipes cleanly
 into jq + cron + alert delivery; ground for future
 sibling actions like retention effective/opt-out/opt-in/
-list-policies).
+list-policies),
+ADR-0165 covers M6.7.zz.tenant.opt-out.cli.effective
+(`crossengin retention effective <tenant> <table>` CLI
+action — closes ADR-0159 Q5 — wraps the ADR-0159
+effectiveRetention resolver with discriminated-union-aware
+output rendering for each of four variants tenant /
+tenant_opt_out / platform / none; null optOutUntil renders
+as 'indefinite', null optOutReason as '<no reason>';
+platform + none variants render the queried tenantId since
+resolver doesn't carry one; JSON envelope echoes queried
+tenantId + tableName for downstream jq correlation;
+operator debugging + compliance audit + tier migration
+verification + dashboard tooltip workflows).
 
 ## Architecture in 90 seconds
 
@@ -5701,6 +5789,86 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0165 covers Phase 2 M6.7.zz.tenant.opt-out.cli.effective
+(`crossengin retention effective <tenant-id> <table-name>`
+CLI action — closes ADR-0159 Q5; wraps the ADR-0159
+effectiveRetention resolver one-for-one with a discriminated-
+union-aware output renderer; positional args
+<tenant-id> <table-name> match sessions show <id> + gateway
+routes unregister <id> patterns rather than --tenant/--table
+flags (verbose for two required args); each of the 4
+resolution variants renders distinctly so operators see
+the actual semantic at a glance — source="tenant" prints
+"Tenant override (active)" with retention days + enabled,
+source="tenant_opt_out" prints "Tenant opt-out (active)"
+with optOutUntil (or "indefinite" for null) + optOutReason
+(or "<no reason>" for null — same convention as ADR-0164
+expiring action), source="platform" prints "Platform
+default" with retention days + enabled flag,
+source="none" prints "No policy configured"; platform +
+none variants don't carry tenantId from resolver (platform
+policy is platform-wide), so queried tenantId from CLI
+arg is rendered for context keeping output self-contained;
+JSON output emits the full discriminated union unchanged
+inside envelope {tenantId, tableName, resolution} so
+downstream consumers (jq pipes, dashboards, compliance
+scripts) correlate multiple lookups even when individual
+resolutions omit one field; validation — missing tenant
+or table args return exit 2 with clear "missing arguments"
+error; no table-name validation against META_PRUNABLE_TABLES
+since resolver returns source="none" for unknown tables
+(surfaces "No policy configured" with queried table name —
+duplicate validation would just replicate resolver
+behavior); no --clock flag for testing override (read-time
+semantic, production uses Date.now via default constructor);
+use cases unblocked — operator debugging "why isn't tenant
+X getting custom retention?" (CLI prints Platform default
+→ operator queries DB sees enabled=false or
+opt_out_until past), compliance audit "is tenant X in
+active legal hold?" (one-line jq pipe |
+.resolution.source returns "tenant_opt_out"), tier
+migration verification (shell loop across tables verifies
+consistency), dashboard tooltip integration (web UI
+renders badge directly from JSON); rejected alternatives
+— flat positional args with --tenant/--table flags
+(verbose for two required args), default to all tables
+when name omitted (pattern inconsistency with sessions
+show), print raw struct field-by-field (operators have
+to mentally decode source="tenant_opt_out" — variant-
+aware rendering surfaces semantic immediately),
+CSV/TSV output format (defer to global --format csv),
+retention effective <tenant> returning all tables
+(bulk mode deserves own action), auto-fill table to
+default like workflow_traces (likely typo; failing fast
+clearer); 16 new tests in retention.test.ts — missing
+tenant returns exit 2, missing table returns exit 2,
+threads tenantId+tableName through to resolver, human-
+format renders source=tenant with retention days + tenant,
+source=tenant_opt_out with reason + until, source=tenant_opt_out
+with "indefinite" when optOutUntil null, source=platform
+with Enabled:yes, source=platform with Enabled:no when
+disabled, source=none with "No policy configured", JSON
+emits structured envelope with full resolution, propagates
+resolver errors as exit 1, formatEffectiveResolution
+source=tenant uses resolution.tenantId not query arg,
+source=platform uses queried tenantId since resolution
+lacks one, source=none uses queried tenantId, source=
+tenant_opt_out renders "indefinite" for null optOutUntil,
+source=tenant_opt_out renders "<no reason>" for null
+optOutReason; cli.ts helpText extended with retention
+effective <tenant-id> <table-name> usage line + brief
+description of the 4-variant resolution semantics; future
+Qs cover --all-tables bulk lookup pairing with deferred
+effectiveRetentionBatch resolver from ADR-0159 Q2,
+--explain flag for diagnostics surfacing raw row state
+when resolver falls through to platform, --at-time
+history flag pairing with deferred history substrate
+from ADR-0162 Q3, exit code by source --exit-on none
+for CI gates, sibling mutation actions retention opt-out/
+opt-in/list-policies closing M6.7.zz.tenant.opt-out.cli.mutate
+deferred milestone, comparison query retention diff
+<tenant-a> <tenant-b> <table> for tier migration
+verification).
 ADR-0164 covers Phase 2 M6.7.zz.tenant.opt-out.cli
 (`crossengin retention expiring [--within-days N]
 [--include-expired]` CLI subcommand — closes ADR-0163 Q4;

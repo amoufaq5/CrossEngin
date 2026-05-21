@@ -1,4 +1,5 @@
 import type {
+  EffectiveRetentionResolution,
   ExpiringOptOut,
   ExpiringOptOutsInput,
   PostgresTraceRetention,
@@ -8,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { parseArgs, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import {
+  formatEffectiveResolution,
   formatExpiringTable,
   runRetention,
   type RetentionContext,
@@ -42,12 +44,25 @@ function fakeRetention(opts: {
   results?: readonly ExpiringOptOut[];
   capture?: ExpiringOptOutsInput[];
   throws?: Error;
+  effective?: EffectiveRetentionResolution;
+  effectiveCapture?: { tenantId: string; tableName: string }[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
       opts.capture?.push(input);
       if (opts.throws !== undefined) throw opts.throws;
       return opts.results ?? [];
+    },
+    effectiveRetention: async (tenantId: string, tableName: string) => {
+      opts.effectiveCapture?.push({ tenantId, tableName });
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.effective ?? {
+          source: "none",
+          retentionDays: null,
+          enabled: false,
+        }
+      );
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -318,5 +333,288 @@ describe("formatExpiringTable", () => {
       false,
     );
     expect(out).toMatch(/^Opt-outs expiring within 30 day/);
+  });
+});
+
+describe("runRetention effective", () => {
+  it("returns exit 2 when tenant arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "effective"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("returns exit 2 when table arg is missing", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("threads tenantId + tableName through to effectiveRetention", async () => {
+    const { ctx } = buffers();
+    const effectiveCapture: { tenantId: string; tableName: string }[] = [];
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ effectiveCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(effectiveCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+    });
+  });
+
+  it("human-format renders source='tenant' with retention days + enabled", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          effective: {
+            source: "tenant",
+            retentionDays: 30,
+            enabled: true,
+            tenantId: TENANT_A,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Tenant override");
+    expect(out()).toContain("30 day(s)");
+    expect(out()).toContain(TENANT_A);
+    expect(out()).toContain("workflow_traces");
+  });
+
+  it("human-format renders source='tenant_opt_out' with reason + until", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          effective: {
+            source: "tenant_opt_out",
+            retentionDays: null,
+            enabled: false,
+            tenantId: TENANT_A,
+            optOutReason: "legal_hold:case#42",
+            optOutUntil: "2027-01-01T00:00:00.000Z",
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Tenant opt-out");
+    expect(out()).toContain("legal_hold:case#42");
+    expect(out()).toContain("2027-01-01T00:00:00.000Z");
+  });
+
+  it("human-format renders source='tenant_opt_out' with 'indefinite' when optOutUntil is null", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          effective: {
+            source: "tenant_opt_out",
+            retentionDays: null,
+            enabled: false,
+            tenantId: TENANT_A,
+            optOutReason: null,
+            optOutUntil: null,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("indefinite");
+    expect(out()).toContain("<no reason>");
+  });
+
+  it("human-format renders source='platform' with enabled flag", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          effective: {
+            source: "platform",
+            retentionDays: 90,
+            enabled: true,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Platform default");
+    expect(out()).toContain("90 day(s)");
+    expect(out()).toContain("Enabled:    yes");
+  });
+
+  it("human-format renders source='platform' with Enabled:no when disabled", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          effective: {
+            source: "platform",
+            retentionDays: 90,
+            enabled: false,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Enabled:    no");
+  });
+
+  it("human-format renders source='none' with clear message", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          effective: {
+            source: "none",
+            retentionDays: null,
+            enabled: false,
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("No policy configured");
+  });
+
+  it("json-format emits structured output with the full resolution", async () => {
+    const { ctx, out } = buffers();
+    const resolution: EffectiveRetentionResolution = {
+      source: "tenant_opt_out",
+      retentionDays: null,
+      enabled: false,
+      tenantId: TENANT_A,
+      optOutReason: "legal_hold:case#42",
+      optOutUntil: "2027-01-01T00:00:00.000Z",
+    };
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "effective",
+        TENANT_A,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ effective: resolution }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.tenantId).toBe(TENANT_A);
+    expect(parsedJson.tableName).toBe("workflow_traces");
+    expect(parsedJson.resolution).toEqual(resolution);
+  });
+
+  it("propagates resolver errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "effective", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("connection refused");
+  });
+});
+
+describe("formatEffectiveResolution", () => {
+  it("source='tenant' includes the tenant id from the resolution (not the query)", () => {
+    const out = formatEffectiveResolution(
+      {
+        source: "tenant",
+        retentionDays: 60,
+        enabled: true,
+        tenantId: TENANT_A,
+      },
+      "different-tenant-arg",
+      "workflow_traces",
+    );
+    expect(out).toContain(TENANT_A);
+  });
+
+  it("source='platform' includes the queried tenant id (resolution doesn't carry one)", () => {
+    const out = formatEffectiveResolution(
+      { source: "platform", retentionDays: 90, enabled: true },
+      TENANT_A,
+      "workflow_traces",
+    );
+    expect(out).toContain(TENANT_A);
+  });
+
+  it("source='none' includes the queried tenant id", () => {
+    const out = formatEffectiveResolution(
+      { source: "none", retentionDays: null, enabled: false },
+      TENANT_A,
+      "workflow_traces",
+    );
+    expect(out).toContain(TENANT_A);
+    expect(out).toContain("No policy configured");
+  });
+
+  it("source='tenant_opt_out' renders indefinite for null optOutUntil", () => {
+    const out = formatEffectiveResolution(
+      {
+        source: "tenant_opt_out",
+        retentionDays: null,
+        enabled: false,
+        tenantId: TENANT_A,
+        optOutReason: "legal_hold:case#42",
+        optOutUntil: null,
+      },
+      TENANT_A,
+      "workflow_traces",
+    );
+    expect(out).toContain("indefinite");
+  });
+
+  it("source='tenant_opt_out' renders <no reason> for null optOutReason", () => {
+    const out = formatEffectiveResolution(
+      {
+        source: "tenant_opt_out",
+        retentionDays: null,
+        enabled: false,
+        tenantId: TENANT_A,
+        optOutReason: null,
+        optOutUntil: "2027-01-01T00:00:00.000Z",
+      },
+      TENANT_A,
+      "workflow_traces",
+    );
+    expect(out).toContain("<no reason>");
   });
 });

@@ -2,6 +2,7 @@ import {
   createNodePgConnection,
   parsePgEnvConfig,
   PostgresTraceRetention,
+  type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type PgConnection,
 } from "@crossengin/kernel-pg";
@@ -30,7 +31,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective> [args]",
     );
     return 2;
   }
@@ -40,10 +41,12 @@ export async function runRetention(
     switch (action) {
       case "expiring":
         return await runRetentionExpiring(command, ctx, handle.retention);
+      case "effective":
+        return await runRetentionEffective(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective`,
         );
         return 2;
     }
@@ -145,4 +148,85 @@ export function formatExpiringTable(
     return `  ${daysLabel.padEnd(20)} ${r.tenantId}  ${r.tableName}  ${reason}`;
   });
   return [header, ...rows, ""].join("\n");
+}
+
+async function runRetentionEffective(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantId = command.positional[1];
+  const tableName = command.positional[2];
+  if (tenantId === undefined || tableName === undefined) {
+    printError(
+      ctx.io,
+      "retention effective: missing arguments. usage: crossengin retention effective <tenant-id> <table-name>",
+    );
+    return 2;
+  }
+
+  let resolution: EffectiveRetentionResolution;
+  try {
+    resolution = await retention.effectiveRetention(tenantId, tableName);
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention effective: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { tenantId, tableName, resolution });
+    return 0;
+  }
+
+  ctx.io.stdout.write(
+    formatEffectiveResolution(resolution, tenantId, tableName),
+  );
+  return 0;
+}
+
+export function formatEffectiveResolution(
+  resolution: EffectiveRetentionResolution,
+  queriedTenantId: string,
+  tableName: string,
+): string {
+  const lines: string[] = [];
+  switch (resolution.source) {
+    case "tenant":
+      lines.push("Tenant override (active)");
+      lines.push(`  Tenant:     ${resolution.tenantId}`);
+      lines.push(`  Table:      ${tableName}`);
+      lines.push(`  Retention:  ${resolution.retentionDays} day(s)`);
+      lines.push(`  Enabled:    yes`);
+      break;
+    case "tenant_opt_out": {
+      lines.push("Tenant opt-out (active)");
+      lines.push(`  Tenant:     ${resolution.tenantId}`);
+      lines.push(`  Table:      ${tableName}`);
+      const until =
+        resolution.optOutUntil === null
+          ? "indefinite"
+          : resolution.optOutUntil;
+      lines.push(`  Until:      ${until}`);
+      lines.push(
+        `  Reason:     ${resolution.optOutReason ?? "<no reason>"}`,
+      );
+      break;
+    }
+    case "platform":
+      lines.push("Platform default");
+      lines.push(`  Tenant:     ${queriedTenantId}`);
+      lines.push(`  Table:      ${tableName}`);
+      lines.push(`  Retention:  ${resolution.retentionDays} day(s)`);
+      lines.push(`  Enabled:    ${resolution.enabled ? "yes" : "no"}`);
+      break;
+    case "none":
+      lines.push("No policy configured");
+      lines.push(`  Tenant:     ${queriedTenantId}`);
+      lines.push(`  Table:      ${tableName}`);
+      break;
+  }
+  return lines.join("\n") + "\n";
 }
