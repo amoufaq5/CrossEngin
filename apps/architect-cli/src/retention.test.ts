@@ -8,6 +8,8 @@ import type {
   DiffTenantPoliciesNwayResult,
   DiffTenantPoliciesResult,
   DiffTenantTablesInput,
+  DiffTenantTablesNwayInput,
+  DiffTenantTablesNwayResult,
   DiffTenantTablesResult,
   DiffTenantVsPlatformInput,
   DiffTenantVsPlatformResult,
@@ -48,6 +50,7 @@ import {
   formatTenantDiff,
   formatTenantNwayDiff,
   formatTenantTablesDiff,
+  formatTenantTablesNwayDiff,
   formatTenantVsPlatformDiff,
   runRetention,
   type RetentionContext,
@@ -114,6 +117,8 @@ function fakeRetention(opts: {
   diffTenantVsPlatformCapture?: DiffTenantVsPlatformInput[];
   diffTenantTablesResult?: DiffTenantTablesResult;
   diffTenantTablesCapture?: DiffTenantTablesInput[];
+  diffTenantTablesNwayResult?: DiffTenantTablesNwayResult;
+  diffTenantTablesNwayCapture?: DiffTenantTablesNwayInput[];
   diffTenantNwayResult?: DiffTenantPoliciesNwayResult;
   diffTenantNwayCapture?: DiffTenantPoliciesNwayInput[];
 }): PostgresTraceRetention {
@@ -342,6 +347,26 @@ function fakeRetention(opts: {
           fieldDiffs: [],
         }
       );
+    },
+    diffTenantTablesNway: async (input: DiffTenantTablesNwayInput) => {
+      opts.diffTenantTablesNwayCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      if (opts.diffTenantTablesNwayResult !== undefined) {
+        return opts.diffTenantTablesNwayResult;
+      }
+      return {
+        tenantId: input.tenantId,
+        tableNames: input.tableNames,
+        resolutions: input.tableNames.map((tableName) => ({
+          tableName,
+          resolution: {
+            source: "none" as const,
+            retentionDays: null,
+            enabled: false,
+          },
+        })),
+        fieldVariations: [],
+      };
     },
     diffTenantPoliciesNway: async (input: DiffTenantPoliciesNwayInput) => {
       opts.diffTenantNwayCapture?.push(input);
@@ -5187,15 +5212,15 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
               {
                 field: "retention_days",
                 distinctValues: [
-                  { value: 30, tenantIds: [TENANT_A] },
-                  { value: 90, tenantIds: [TENANT_B, TENANT_C] },
+                  { value: 30, labels: [TENANT_A] },
+                  { value: 90, labels: [TENANT_B, TENANT_C] },
                 ],
               },
               {
                 field: "source",
                 distinctValues: [
-                  { value: "tenant", tenantIds: [TENANT_A] },
-                  { value: "platform", tenantIds: [TENANT_B, TENANT_C] },
+                  { value: "tenant", labels: [TENANT_A] },
+                  { value: "platform", labels: [TENANT_B, TENANT_C] },
                 ],
               },
             ],
@@ -5288,8 +5313,8 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
               {
                 field: "source",
                 distinctValues: [
-                  { value: "tenant", tenantIds: [TENANT_A] },
-                  { value: "platform", tenantIds: [TENANT_B, TENANT_C] },
+                  { value: "tenant", labels: [TENANT_A] },
+                  { value: "platform", labels: [TENANT_B, TENANT_C] },
                 ],
               },
             ],
@@ -5321,6 +5346,519 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
     );
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("runRetention diff --cross-table --add-table (M6.7.zz.tenant.opt-out.cli.diff.add-table)", () => {
+  it("returns exit 2 when --add-table is set without --cross-table", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--add-table requires --cross-table");
+  });
+
+  it("returns exit 2 when --add-table + --add-tenant + --cross-table are all set", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+        "--add-tenant",
+        TENANT_B,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("returns exit 2 when missing required positional args", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+  });
+
+  it("calls diffTenantTablesNway with [table-a, table-b, table-c] from positionals + 1 --add-table", async () => {
+    const capture: DiffTenantTablesNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesNwayCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableNames: [
+        "workflow_traces",
+        "llm_call_traces",
+        "tenant_retention_opt_out_history",
+      ],
+    });
+  });
+
+  it("collects multiple --add-table flags in order", async () => {
+    const capture: DiffTenantTablesNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+        "--add-table",
+        "llm_latency_samples",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesNwayCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tableNames).toEqual([
+      "workflow_traces",
+      "llm_call_traces",
+      "tenant_retention_opt_out_history",
+      "llm_latency_samples",
+    ]);
+  });
+
+  it("human-format renders 'No differences' when fieldVariations empty", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesNwayResult: {
+            tenantId: TENANT_A,
+            tableNames: [
+              "workflow_traces",
+              "llm_call_traces",
+              "tenant_retention_opt_out_history",
+            ],
+            resolutions: [
+              {
+                tableName: "workflow_traces",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tableName: "llm_call_traces",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tableName: "tenant_retention_opt_out_history",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("N-way diff across 3 tables for tenant");
+    expect(out()).toContain(
+      "No differences — all 3 tables resolve to the same effective retention policy for this tenant.",
+    );
+  });
+
+  it("human-format renders per-field variations with table labels", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesNwayResult: {
+            tenantId: TENANT_A,
+            tableNames: [
+              "workflow_traces",
+              "llm_call_traces",
+              "tenant_retention_opt_out_history",
+            ],
+            resolutions: [
+              {
+                tableName: "workflow_traces",
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tableName: "llm_call_traces",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tableName: "tenant_retention_opt_out_history",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "retention_days",
+                distinctValues: [
+                  { value: 30, labels: ["workflow_traces"] },
+                  {
+                    value: 90,
+                    labels: ["llm_call_traces", "tenant_retention_opt_out_history"],
+                  },
+                ],
+              },
+              {
+                field: "source",
+                distinctValues: [
+                  { value: "tenant", labels: ["workflow_traces"] },
+                  {
+                    value: "platform",
+                    labels: ["llm_call_traces", "tenant_retention_opt_out_history"],
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Field variations (2):");
+    expect(out()).toContain("Table A: workflow_traces");
+    expect(out()).toContain("Table B: llm_call_traces");
+    expect(out()).toContain("Table C: tenant_retention_opt_out_history");
+    expect(out()).toContain("30 (A) | 90 (B, C)");
+    expect(out()).toContain('"tenant" (A) | "platform" (B, C)');
+  });
+
+  it("JSON envelope includes both nway:true + crossTable:true discriminators", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.action).toBe("diff");
+    expect(parsedOut.nway).toBe(true);
+    expect(parsedOut.crossTable).toBe(true);
+    expect(parsedOut.result.tableNames).toEqual([
+      "workflow_traces",
+      "llm_call_traces",
+      "tenant_retention_opt_out_history",
+    ]);
+    expect(parsedOut.result.resolutions).toHaveLength(3);
+  });
+
+  it("--exit-on-divergence + non-empty fieldVariations returns exit 3", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesNwayResult: {
+            tenantId: TENANT_A,
+            tableNames: [
+              "workflow_traces",
+              "llm_call_traces",
+              "tenant_retention_opt_out_history",
+            ],
+            resolutions: [
+              {
+                tableName: "workflow_traces",
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tableName: "llm_call_traces",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tableName: "tenant_retention_opt_out_history",
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "source",
+                distinctValues: [
+                  { value: "tenant", labels: ["workflow_traces"] },
+                  {
+                    value: "platform",
+                    labels: ["llm_call_traces", "tenant_retention_opt_out_history"],
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("adapter errors propagate as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-table",
+        "tenant_retention_opt_out_history",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatTenantTablesNwayDiff", () => {
+  it("renders 'No differences' message when fieldVariations empty", () => {
+    const out = formatTenantTablesNwayDiff({
+      tenantId: TENANT_A,
+      tableNames: [
+        "workflow_traces",
+        "llm_call_traces",
+        "tenant_retention_opt_out_history",
+      ],
+      resolutions: [
+        {
+          tableName: "workflow_traces",
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tableName: "llm_call_traces",
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tableName: "tenant_retention_opt_out_history",
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+      ],
+      fieldVariations: [],
+    });
+    expect(out).toContain("N-way diff across 3 tables for tenant");
+    expect(out).toContain("No differences — all 3 tables");
+  });
+
+  it("renders A/B/C labels in table rows + variation lines", () => {
+    const out = formatTenantTablesNwayDiff({
+      tenantId: TENANT_A,
+      tableNames: [
+        "workflow_traces",
+        "llm_call_traces",
+        "llm_latency_samples",
+      ],
+      resolutions: [
+        {
+          tableName: "workflow_traces",
+          resolution: {
+            source: "tenant",
+            retentionDays: 30,
+            enabled: true,
+            tenantId: TENANT_A,
+          },
+        },
+        {
+          tableName: "llm_call_traces",
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tableName: "llm_latency_samples",
+          resolution: { source: "none", retentionDays: null, enabled: false },
+        },
+      ],
+      fieldVariations: [
+        {
+          field: "source",
+          distinctValues: [
+            { value: "tenant", labels: ["workflow_traces"] },
+            { value: "platform", labels: ["llm_call_traces"] },
+            { value: "none", labels: ["llm_latency_samples"] },
+          ],
+        },
+      ],
+    });
+    expect(out).toContain("Table A: workflow_traces");
+    expect(out).toContain("Table B: llm_call_traces");
+    expect(out).toContain("Table C: llm_latency_samples");
+    expect(out).toContain('"tenant" (A) | "platform" (B) | "none" (C)');
+  });
+
+  it("renders 'absent' for undefined values in variation groups", () => {
+    const out = formatTenantTablesNwayDiff({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+      resolutions: [
+        {
+          tableName: "workflow_traces",
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tableName: "llm_call_traces",
+          resolution: {
+            source: "tenant_opt_out",
+            retentionDays: null,
+            enabled: false,
+            tenantId: TENANT_A,
+            optOutReason: "legal",
+            optOutUntil: null,
+          },
+        },
+      ],
+      fieldVariations: [
+        {
+          field: "opt_out_reason",
+          distinctValues: [
+            { value: undefined, labels: ["workflow_traces"] },
+            { value: "legal", labels: ["llm_call_traces"] },
+          ],
+        },
+      ],
+    });
+    expect(out).toContain("absent (A)");
+    expect(out).toContain('"legal" (B)');
   });
 });
 
@@ -5378,9 +5916,9 @@ describe("formatTenantNwayDiff", () => {
         {
           field: "source",
           distinctValues: [
-            { value: "tenant", tenantIds: [TENANT_A] },
-            { value: "platform", tenantIds: [TENANT_B] },
-            { value: "none", tenantIds: [TENANT_C2] },
+            { value: "tenant", labels: [TENANT_A] },
+            { value: "platform", labels: [TENANT_B] },
+            { value: "none", labels: [TENANT_C2] },
           ],
         },
       ],
@@ -5416,8 +5954,8 @@ describe("formatTenantNwayDiff", () => {
         {
           field: "opt_out_reason",
           distinctValues: [
-            { value: undefined, tenantIds: [TENANT_A] },
-            { value: "legal", tenantIds: [TENANT_B] },
+            { value: undefined, labels: [TENANT_A] },
+            { value: "legal", labels: [TENANT_B] },
           ],
         },
       ],
@@ -6142,15 +6680,15 @@ describe("runRetention diff --threshold (M6.7.zz.tenant.opt-out.cli.diff.thresho
               {
                 field: "source",
                 distinctValues: [
-                  { value: "tenant", tenantIds: [TENANT_A] },
-                  { value: "platform", tenantIds: [TENANT_B, TENANT_C] },
+                  { value: "tenant", labels: [TENANT_A] },
+                  { value: "platform", labels: [TENANT_B, TENANT_C] },
                 ],
               },
               {
                 field: "retention_days",
                 distinctValues: [
-                  { value: 30, tenantIds: [TENANT_A] },
-                  { value: 90, tenantIds: [TENANT_B, TENANT_C] },
+                  { value: 30, labels: [TENANT_A] },
+                  { value: 90, labels: [TENANT_B, TENANT_C] },
                 ],
               },
             ],

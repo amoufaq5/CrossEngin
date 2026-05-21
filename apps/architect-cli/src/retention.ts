@@ -9,6 +9,7 @@ import {
   type DiffHistoryEntriesResult,
   type DiffTenantPoliciesNwayResult,
   type DiffTenantPoliciesResult,
+  type DiffTenantTablesNwayResult,
   type DiffTenantTablesResult,
   type DiffTenantVsPlatformResult,
   type FieldVariation,
@@ -1337,7 +1338,17 @@ async function runRetentionDiff(
   const vsPlatform = getBooleanFlag(command, "vs-platform");
   const crossTable = getBooleanFlag(command, "cross-table");
   const addTenants = getMultiFlag(command, "add-tenant");
+  const addTables = getMultiFlag(command, "add-table");
   const hasAddTenant = addTenants.length > 0;
+  const hasAddTable = addTables.length > 0;
+
+  if (hasAddTable && !crossTable) {
+    printError(
+      ctx.io,
+      "retention diff: --add-table requires --cross-table",
+    );
+    return 2;
+  }
 
   const conflicts: string[] = [];
   if (vsPlatform) conflicts.push("--vs-platform");
@@ -1355,6 +1366,14 @@ async function runRetentionDiff(
     return await runRetentionDiffVsPlatform(command, ctx, retention);
   }
   if (crossTable) {
+    if (hasAddTable) {
+      return await runRetentionDiffCrossTableNway(
+        command,
+        ctx,
+        retention,
+        addTables,
+      );
+    }
     return await runRetentionDiffCrossTable(command, ctx, retention);
   }
   if (hasAddTenant) {
@@ -1517,6 +1536,52 @@ async function runRetentionDiffNway(
   return divergenceExitCode(command, result.fieldVariations.length);
 }
 
+async function runRetentionDiffCrossTableNway(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+  addTables: ReadonlyArray<string>,
+): Promise<number> {
+  const tenantId = command.positional[1];
+  const tableNameA = command.positional[2];
+  const tableNameB = command.positional[3];
+  if (
+    tenantId === undefined ||
+    tableNameA === undefined ||
+    tableNameB === undefined
+  ) {
+    printError(
+      ctx.io,
+      "retention diff --cross-table --add-table: missing arguments. usage: crossengin retention diff <tenant> <table-a> <table-b> --cross-table --add-table <table-c> [--add-table <table-d> ...]",
+    );
+    return 2;
+  }
+  const tableNames: string[] = [tableNameA, tableNameB, ...addTables];
+
+  let result: DiffTenantTablesNwayResult;
+  try {
+    result = await retention.diffTenantTablesNway({ tenantId, tableNames });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "diff",
+      nway: true,
+      crossTable: true,
+      result,
+    });
+  } else {
+    ctx.io.stdout.write(formatTenantTablesNwayDiff(result));
+  }
+  return divergenceExitCode(command, result.fieldVariations.length);
+}
+
 function divergenceExitCode(
   command: ParsedCommand,
   fieldDiffsLength: number,
@@ -1652,7 +1717,7 @@ export function formatTenantNwayDiff(
         .map((group) => {
           const value =
             group.value === undefined ? "absent" : JSON.stringify(group.value);
-          const labels = group.tenantIds
+          const labels = group.labels
             .map((tid) => labelByTenant.get(tid) ?? "?")
             .join(", ");
           return `${value} (${labels})`;
@@ -1667,6 +1732,51 @@ export function formatTenantNwayDiff(
 function labelForIndex(i: number): string {
   if (i < 26) return String.fromCharCode(65 + i);
   return `T${i + 1}`;
+}
+
+export function formatTenantTablesNwayDiff(
+  result: DiffTenantTablesNwayResult,
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `N-way diff across ${result.resolutions.length} tables for tenant ${result.tenantId}:`,
+  );
+  for (let i = 0; i < result.resolutions.length; i++) {
+    const entry = result.resolutions[i]!;
+    const label = labelForIndex(i);
+    lines.push(
+      `  Table ${label}: ${entry.tableName.padEnd(36)} ${summarizeResolutionForDiff(entry.resolution)}`,
+    );
+  }
+  lines.push("");
+  if (result.fieldVariations.length === 0) {
+    lines.push(
+      `No differences — all ${result.resolutions.length} tables resolve to the same effective retention policy for this tenant.`,
+    );
+  } else {
+    lines.push(`Field variations (${result.fieldVariations.length}):`);
+    const labelByTable = new Map<string, string>();
+    for (let i = 0; i < result.tableNames.length; i++) {
+      const tname = result.tableNames[i]!;
+      if (!labelByTable.has(tname)) {
+        labelByTable.set(tname, labelForIndex(i));
+      }
+    }
+    for (const variation of result.fieldVariations) {
+      const groups = variation.distinctValues
+        .map((group) => {
+          const value =
+            group.value === undefined ? "absent" : JSON.stringify(group.value);
+          const labels = group.labels
+            .map((tname) => labelByTable.get(tname) ?? "?")
+            .join(", ");
+          return `${value} (${labels})`;
+        })
+        .join(" | ");
+      lines.push(`  ${variation.field.padEnd(20)} ${groups}`);
+    }
+  }
+  return lines.join("\n") + "\n";
 }
 
 export function formatTenantTablesDiff(

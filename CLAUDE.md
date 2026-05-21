@@ -21,15 +21,193 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,595 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.attributes
+**56 packages + 1 app, 129 meta-schema tables, 8,616 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.add-table
+closes ADR-0180 Q1 by adding `--add-table <name>` repeated
+flag to `retention diff --cross-table` for N-way cross-
+table comparison across 3+ tables for one tenant.
+Mirrors ADR-0183's `--add-tenant` on the cross-table
+axis, completing the 2×2 N-way diff matrix (pair-wise vs
+N-way × cross-tenant vs cross-table). Operators running
+compliance audits across the substrate's 4 prunable
+tables (workflow_traces, llm_call_traces,
+tenant_retention_opt_out_history, llm_latency_samples)
+for one tenant previously ran 3 pair-wise commands and
+manually correlated. Now one command. New
+diffTenantTablesNway adapter composes on
+effectiveRetentionBatch — 2 queries total regardless of
+N. CLI surface `retention diff <tenant> <table-a>
+<table-b> --cross-table --add-table <table-c>
+[--add-table <table-d> ...]`; base call still requires 2
+positional tables matching ADR-0180's cross-table shape;
+--add-table repeatable via multiFlags from ADR-0183;
+--cross-table REQUIRED when --add-table is set
+(operators passing --add-table without --cross-table get
+exit 2 with '--add-table requires --cross-table' —
+strict-require pattern matching ADR-0184's --threshold
+requires --exit-on-divergence); mutually exclusive with
+--vs-platform and --add-tenant via existing conflict-
+detection (--add-tenant combo caught implicitly:
+--add-table requires --cross-table which excludes
+--add-tenant). FieldVariationValueGroup field rename
+breaking change — ADR-0183's computeFieldVariations
+helper output type carried tenantIds: ReadonlyArray<string>
+field on each FieldVariationValueGroup; for cross-table
+N-way the "labels" are table names not tenant IDs so
+field name semantically inaccurate; renamed
+FieldVariationValueGroup.tenantIds →
+FieldVariationValueGroup.labels + helper-input field
+tenantId → label; generic naming makes helper truly
+cross-axis reusable; breaking-change scope contained
+(1 type field + 1 helper-input field + ~15 test
+assertions across kernel-pg and architect-cli); no
+production consumers; new name is semantically correct
+for both N-way axes going forward; worth the one-time
+migration for forever-clean semantics. Dual JSON
+discriminator nway:true + crossTable:true — operators
+parsing JSON branch on nway to know N-way comparison +
+crossTable to know axis is tables; existing ADR-0183
+cross-tenant N-way has nway:true only; existing ADR-0180
+cross-table 2-way has crossTable:true only; 4 diff
+envelope discriminators now form 2×2 matrix (pair-wise
+vs N-way × cross-tenant vs cross-table) with
+--vs-platform separate (no N-way composition yet).
+Human output renders 'N-way diff across N tables for
+tenant <uuid>:' header + Table A/B/C... rows (labels
+from input order beyond 26 becomes T27, T28, ...) with
+table-name column padded to 36 chars (longer than 20-
+char tenant-UUID column to fit
+tenant_retention_opt_out_history), blank line, then
+either 'No differences — all N tables resolve to the
+same effective retention policy for this tenant.' OR
+'Field variations (M):' header + per-field
+'fieldname value1 (A) | value2 (B, C) | ...' with
+table labels. JSON envelope {action: "diff", nway:
+true, crossTable: true, result: DiffTenantTablesNwayResult
+with tenantId/tableNames/resolutions/fieldVariations}.
+--exit-on-divergence + --threshold from ADR-0181/0184
+integrate uniformly. Use cases unblocked — full-cohort
+cross-table audit for one tenant (compares all 4
+prunable tables in one command), legal-hold completeness
+across trace tables (--exit-on-divergence + --threshold
+fails CI when hold isn't uniformly applied), JSON-
+driven dashboard (jq filters on fieldVariations[]
+.field for quick visual), migration-script CI gate
+across all tables (--threshold 2 allows up to 1
+expected difference like llm_latency_samples=none
+fails on multi-field drift). Rejected alternatives —
+auto-imply --cross-table when --add-table is set (magic
+operators may pass --add-table thinking it'd do
+something for default cross-tenant shape; strict-
+require clearer), --add-table standalone without
+--cross-table (would require redesigning positional-arg
+parser since default shape is <tenant-a> <tenant-b>
+<table>; pairing cheaper), new action retention diff-
+tables-nway (adds CLI surface; flag-on-existing
+matches --add-tenant), combined --add-tenant +
+--add-table matrix N×M (complex output defer),
+--all-tables shorthand for "compare all prunable
+tables" (operator-policy concern substrate doesn't
+enumerate externally), keep tenantIds field name +
+tolerate semantic mismatch (operators reading cross-
+table N-way JSON would see tenantIds:[
+"workflow_traces",...] misleading rename cheap),
+parallel tableNames field with tenantIds deprecated
+(schema bloat rename better), --add-table comma-
+separated values (fragile to embedded commas;
+repeated-flag via multiFlags established pattern).
+Drawbacks — --add-table requires --cross-table
+operators must remember pairing (documented matches
+ADR-0184 --threshold precedent), dual JSON
+discriminator nway:true + crossTable:true operators
+write 'if (nway && crossTable)' branches (acceptable
+each flag tracks single dimension composition is
+natural), FieldVariationValueGroup.tenantIds → labels
+breaking rename operators relying on ADR-0183 field
+name need to migrate (contained scope no production
+consumers new name semantically correct), no
+--add-tenant + --add-table combination (defer
+cross-tenant × cross-table matrix), output dense at
+high N with long table names tenant_retention_opt_out_history
+is 32 chars padded to 36 line gets long (operators
+pipe to less -S or use JSON), table-label A..Z limit
+same as ADR-0183 beyond 26 becomes T27 (substrate has
+4 prunable tables today no realistic chance of
+exceeding alphabet). 8 new adapter tests in trace-
+retention.test.ts (rejects fewer than 2 tableNames
+with 'at least 2 tableNames' error, composes on
+effectiveRetentionBatch issuing exactly 2 queries for
+3 tables, returns resolutions ordered by input
+tableNames + empty fieldVariations when all match,
+returns fieldVariations when 3 tables have different
+retention covering retention_days + source fields,
+source variation distinctValues uses table names as
+labels (workflow_traces/llm_call_traces/llm_latency_samples
+verified), supports 2-table N-way degenerate-but-valid
+equivalent to diffTenantTables, handles all 4
+prunable tables (full-cohort cross-table audit),
+preserves duplicate tableNames in resolutions order);
+13 new CLI tests in retention.test.ts — exit 2 when
+--add-table without --cross-table with '--add-table
+requires --cross-table' error, exit 2 when --add-table
++ --add-tenant + --cross-table all set with 'mutually
+exclusive' error (caught by existing conflicts check),
+exit 2 missing required positionals with --add-table
+in error, calls diffTenantTablesNway with [table-a,
+table-b, table-c] from positionals + 1 --add-table
+verified via capture, collects multiple --add-table
+flags in order [a, b, c, d] via repeated flag
+occurrences, human-format 'No differences' when
+fieldVariations empty, human-format renders per-field
+variations with table labels A/B/C + table names
+padded + arrow-formatted lines '"tenant" (A) |
+"platform" (B, C)', JSON envelope includes both
+nway:true + crossTable:true discriminators,
+--exit-on-divergence + non-empty fieldVariations
+returns exit 3, adapter errors propagate exit 1;
+formatTenantTablesNwayDiff helper unit tests — 'No
+differences' message for empty, A/B/C labels in
+table rows + variation lines '"tenant" (A) |
+"platform" (B) | "none" (C)' across 3 distinct
+sources, 'absent' for undefined values in variation
+groups. Existing tests updated for the tenantIds →
+labels rename (sed bulk replacements affecting
+~15 lines across kernel-pg + architect-cli test
+files plus 1 manual fix for stray case). cli.ts
+helpText extended with retention diff <tenant>
+<table-a> <table-b> --cross-table --add-table <table-c>
+[--add-table <table-d> ...] usage line + 4-line
+description explaining N-way semantic + --cross-table
+requirement + mutual exclusivity with --vs-platform
+and --add-tenant. ADR-0188 documents the design + 8
+rejected alternatives + 7 future Qs (combined
+--add-tenant + --add-table matrix N×M, --all-tables
+shorthand enumerating PRUNABLE_TABLES, --exclude-
+table for set-subtraction, render variations grouped
+by table vs per-field, tagged-union JSON envelope
+consolidating 4 diff variant discriminators into
+one kind field pairing with similar deferred Qs from
+ADR-0178/0179/0180/0183, cross-tenant N-way +
+--vs-platform synthetic "N tenants vs platform
+default" different semantic, surface attributes from
+history-derived restore context in diff output
+different surface future ADR if requested). The
+retention CLI now has 17 actions with N-way diff
+matrix complete on both axes (cross-tenant N-way
+from ADR-0183 + cross-table N-way from this
+milestone) — operators have first-class comparison
+ergonomics across all 4 diff variants (default
+cross-tenant + --vs-platform + --cross-table +
+--add-tenant + --add-table) with --exit-on-
+divergence + --threshold CI-gate uniformity.
+M6.7.zz.tenant.opt-out.cli.history.attributes
 closes ADR-0170 Q10 by adding `--attributes '<json-object>'`
 flag to all 5 retention mutation/restore actions
 (opt-out, opt-in, set, delete, restore) for structured
@@ -6912,7 +7090,24 @@ attributes via substrate-side merge (system key wins on
 conflict — operators can't forge audit reference);
 completes the audit-metadata surface alongside actor
 (--actor) + actor display (ADR-0185) + actor filter
-(ADR-0186)).
+(ADR-0186)),
+ADR-0188 covers M6.7.zz.tenant.opt-out.cli.diff.add-table
+(`retention diff --cross-table --add-table <name>`
+repeated flag for N-way cross-table comparison —
+closes ADR-0180 Q1 — mirrors ADR-0183 --add-tenant on
+the cross-table axis completing the 2×2 N-way diff
+matrix (pair-wise vs N-way × cross-tenant vs cross-
+table); new diffTenantTablesNway adapter composes on
+effectiveRetentionBatch (2 queries regardless of N);
+--add-table requires --cross-table (strict-require
+matching ADR-0184 --threshold pattern); breaking
+rename FieldVariationValueGroup.tenantIds → labels +
+helper input tenantId → label for cross-axis semantic
+correctness (contained scope; new name forever-clean);
+dual JSON envelope discriminator nway:true +
+crossTable:true (4 envelope shapes now form 2×2
+matrix); --exit-on-divergence + --threshold integrate
+uniformly).
 
 ## Architecture in 90 seconds
 
@@ -10179,6 +10374,195 @@ from this milestone). Operators get who + human-
 readable name + filtering + arbitrary structured
 context flowing through every mutation into the
 append-only history audit log uniformly.
+ADR-0188 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff.add-table
+(`crossengin retention diff <tenant> <table-a>
+<table-b> --cross-table --add-table <table-c>
+[--add-table <table-d> ...]` repeated flag for N-way
+cross-table comparison — closes ADR-0180 Q1; mirrors
+ADR-0183's --add-tenant on the cross-table axis,
+completing the 2×2 N-way diff matrix (pair-wise vs
+N-way across cross-tenant vs cross-table axes).
+Operators running compliance audits across the
+substrate's 4 prunable tables for one tenant
+previously ran 3 pair-wise commands + manual
+correlation; one command now. CLI surface base call
+still requires 2 positional tables matching ADR-0180
+cross-table shape; --cross-table REQUIRED when
+--add-table is set (strict-require matching ADR-0184
+--threshold pattern); --add-table repeatable via
+multiFlags from ADR-0183; mutually exclusive with
+--vs-platform and --add-tenant via existing conflict-
+detection (--add-tenant combo caught implicitly).
+Adapter — new diffTenantTablesNway({tenantId,
+tableNames: ReadonlyArray<string>}) returning
+DiffTenantTablesNwayResult {tenantId, tableNames,
+resolutions: TableResolutionEntry[], fieldVariations:
+FieldVariation[]} where TableResolutionEntry =
+{tableName, resolution: EffectiveRetentionResolution};
+composes on effectiveRetentionBatch (canonical pattern
+from ADR-0177) passing N pairs all with same tenantId
+different tableNames → 2 queries total regardless of
+N; mirrors diffTenantPoliciesNway from ADR-0183 in
+shape but with axes swapped (one tenant multiple
+tables vs multiple tenants one table). Breaking
+rename FieldVariationValueGroup.tenantIds →
+FieldVariationValueGroup.labels — ADR-0183's
+computeFieldVariations helper output type carried
+tenantIds field; for cross-table N-way the labels are
+table names not tenant IDs semantically inaccurate;
+renamed plus helper-input field tenantId → label;
+generic naming makes helper truly cross-axis reusable;
+contained scope (1 type field + 1 helper-input field
++ ~15 test assertions); no production consumers; new
+name forever-clean for both N-way axes. JSON envelope
+dual discriminator nway:true + crossTable:true —
+operators parsing JSON branch on nway to know N-way +
+crossTable to know axis is tables; existing ADR-0183
+cross-tenant N-way has nway:true only; existing
+ADR-0180 cross-table 2-way has crossTable:true only;
+4 diff envelope discriminators now form 2×2 matrix
+(pair-wise/N-way × cross-tenant/cross-table) with
+--vs-platform separate (no N-way composition yet).
+Human output renders 'N-way diff across N tables for
+tenant <uuid>:' header + Table A/B/C... rows (labels
+from input order beyond 26 becomes T27 etc.) with
+table-name column padded to 36 chars (longer than
+20-char tenant-UUID column to fit tenant_retention_
+opt_out_history at 32 chars), blank line, then either
+'No differences — all N tables resolve to the same
+effective retention policy for this tenant.' OR
+'Field variations (M):' header + per-field
+'fieldname value1 (A) | value2 (B, C) | ...' lines
+with table labels. --exit-on-divergence +
+--threshold from ADR-0181/0184 integrate uniformly
+via divergenceExitCode(command, result.fieldVariations
+.length). Use cases unblocked — full-cohort cross-
+table audit for one tenant (one command compares all
+4 prunable tables), legal-hold completeness across
+trace tables (--exit-on-divergence fails CI when hold
+isn't uniformly applied), JSON-driven dashboard via
+jq filters on fieldVariations[] .field for quick
+visual, migration-script CI gate across all tables
+with --threshold N allowing expected single-field
+differences (like llm_latency_samples=none) while
+failing on multi-field drift. Rejected alternatives
+— auto-imply --cross-table when --add-table is set
+(magical operators may pass --add-table thinking it'd
+do something for default cross-tenant shape; strict-
+require clearer), --add-table standalone without
+--cross-table (would require redesigning positional-
+arg parser since default shape is <tenant-a>
+<tenant-b> <table>; pairing cheaper), new action
+retention diff-tables-nway (adds CLI surface; flag-
+on-existing matches --add-tenant precedent),
+combined --add-tenant + --add-table matrix N×M
+comparison (complex output defer until measured),
+--all-tables shorthand enumerating PRUNABLE_TABLES
+(operator-policy concern substrate doesn't enumerate
+externally), keep FieldVariationValueGroup.tenantIds
+name + tolerate semantic mismatch (operators reading
+cross-table N-way JSON would see tenantIds:
+['workflow_traces',...] misleading; rename cheap),
+parallel tableNames field with tenantIds deprecated
+(schema bloat; clean rename better), --add-table
+comma-separated values (fragile to embedded commas;
+repeated-flag via multiFlags established pattern).
+Drawbacks — --add-table requires --cross-table
+operators must remember pairing (documented matches
+ADR-0184 --threshold precedent), dual JSON
+discriminator nway:true + crossTable:true operators
+write 'if (nway && crossTable)' branches (acceptable
+each flag tracks single semantic dimension
+composition is natural), FieldVariationValueGroup
+.tenantIds → labels breaking rename operators
+relying on ADR-0183 field name need to migrate
+(contained scope no production consumers new name
+semantically correct), no way to combine
+--add-tenant + --add-table (cross-tenant × cross-
+table matrix not supported operators run multiple
+commands documented future Q), output dense at high
+N with long table names (tenant_retention_opt_out
+_history is 32 chars padded to 36 line gets long
+operators pipe to less -S or use JSON), table-label
+A..Z limit same as ADR-0183 beyond 26 becomes T27
+(substrate has 4 prunable tables today no realistic
+chance of exceeding alphabet). 8 new adapter tests
+in trace-retention.test.ts (rejects fewer than 2
+tableNames with 'at least 2 tableNames', composes
+on effectiveRetentionBatch issuing exactly 2 queries
+for 3 tables, returns resolutions ordered by input
+tableNames + empty fieldVariations when all match,
+returns fieldVariations when 3 tables have different
+retention covering retention_days + source,
+source variation distinctValues uses table names as
+labels verified ({tenant, [workflow_traces]},
+{platform, [llm_call_traces]}, {none,
+[llm_latency_samples]}), supports 2-table N-way
+degenerate-but-valid equivalent to diffTenantTables,
+handles all 4 prunable tables full-cohort cross-
+table audit, preserves duplicate tableNames in
+resolutions order [workflow_traces, workflow_traces,
+llm_call_traces]); 13 new CLI tests in retention.
+test.ts — exit 2 when --add-table without --cross-
+table with '--add-table requires --cross-table'
+error message, exit 2 when --add-table + --add-
+tenant + --cross-table all set with 'mutually
+exclusive' (caught by existing conflicts check
+since --cross-table + --add-tenant excluded), exit
+2 missing required positionals, calls
+diffTenantTablesNway with [table-a, table-b,
+table-c] from positionals + 1 --add-table verified
+via capture, collects multiple --add-table flags in
+order [a, b, c, d] via repeated flag occurrences,
+human-format 'No differences' message + 'N-way diff
+across N tables' header, human-format renders per-
+field variations with Table A/B/C labels + '30 (A) |
+90 (B, C)' format + '"tenant" (A) | "platform"
+(B, C)' format, JSON envelope includes BOTH
+nway:true + crossTable:true discriminators +
+result.tableNames + result.resolutions length 3,
+--exit-on-divergence + non-empty fieldVariations
+returns exit 3, adapter errors propagate exit 1;
+formatTenantTablesNwayDiff helper unit tests — 'No
+differences' message for empty, Table A/B/C labels
+in table rows + variation lines '"tenant" (A) |
+"platform" (B) | "none" (C)' across 3 distinct
+sources, 'absent' for undefined values in variation
+groups. Existing tests updated for tenantIds →
+labels rename (sed bulk replacements affecting ~15
+lines across kernel-pg + architect-cli test files
+plus 1 manual fix for stray case). fakeRetention
+harness extended with diffTenantTablesNway method +
+diffTenantTablesNwayResult + diffTenantTablesNwayCapture
+options. cli.ts helpText extended with retention
+diff <tenant> <table-a> <table-b> --cross-table
+--add-table <table-c> [--add-table <table-d> ...]
+usage line + 4-line description explaining N-way
+semantic + --cross-table requirement + mutual
+exclusivity. Future Qs cover combined --add-tenant
++ --add-table matrix N×M comparison defer until
+measured demand, --all-tables shorthand that
+enumerates all PRUNABLE_TABLES operator-policy
+concern defer, --exclude-table for set-subtraction
+defer, render variations grouped by table vs per-
+field for compact rendering at high N defer,
+tagged-union JSON envelope consolidating all 4 diff
+variant discriminators into one kind field pairing
+with similar deferred Qs from ADR-0178/0179/0180/0183,
+cross-tenant N-way + --vs-platform synthetic "N
+tenants vs platform default" different semantic
+defer, surface attributes from history-derived
+restore context in diff output different surface
+future ADR if requested. The retention CLI now has
+17 actions with N-way diff matrix complete on both
+axes (cross-tenant N-way from ADR-0183 + cross-
+table N-way from this milestone). Operators have
+first-class comparison ergonomics across all 4
+diff variants — default cross-tenant pair-wise,
+--vs-platform, --cross-table (pair-wise +
+--add-table N-way), --add-tenant N-way — uniformly
+supporting --exit-on-divergence + --threshold CI-
+gate semantics for graduated drift detection.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

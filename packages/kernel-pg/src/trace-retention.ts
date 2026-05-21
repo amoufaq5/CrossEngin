@@ -59,7 +59,7 @@ export function computeFieldDiffs(
 
 export function computeFieldVariations(
   entries: ReadonlyArray<{
-    readonly tenantId: string;
+    readonly label: string;
     readonly normalized: Record<string, unknown>;
   }>,
 ): ReadonlyArray<FieldVariation> {
@@ -70,15 +70,15 @@ export function computeFieldVariations(
   }
   const variations: FieldVariation[] = [];
   for (const field of [...keys].sort()) {
-    const byValue = new Map<string, { value: unknown; tenantIds: string[] }>();
+    const byValue = new Map<string, { value: unknown; labels: string[] }>();
     for (const e of entries) {
       const value = e.normalized[field];
       const key = JSON.stringify(value);
       const existing = byValue.get(key);
       if (existing !== undefined) {
-        existing.tenantIds.push(e.tenantId);
+        existing.labels.push(e.label);
       } else {
-        byValue.set(key, { value, tenantIds: [e.tenantId] });
+        byValue.set(key, { value, labels: [e.label] });
       }
     }
     if (byValue.size > 1) {
@@ -391,6 +391,23 @@ export interface DiffTenantTablesResult {
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
 }
 
+export interface DiffTenantTablesNwayInput {
+  readonly tenantId: string;
+  readonly tableNames: ReadonlyArray<string>;
+}
+
+export interface TableResolutionEntry {
+  readonly tableName: string;
+  readonly resolution: EffectiveRetentionResolution;
+}
+
+export interface DiffTenantTablesNwayResult {
+  readonly tenantId: string;
+  readonly tableNames: ReadonlyArray<string>;
+  readonly resolutions: ReadonlyArray<TableResolutionEntry>;
+  readonly fieldVariations: ReadonlyArray<FieldVariation>;
+}
+
 export interface DiffTenantPoliciesNwayInput {
   readonly tenantIds: ReadonlyArray<string>;
   readonly tableName: string;
@@ -403,7 +420,7 @@ export interface TenantResolutionEntry {
 
 export interface FieldVariationValueGroup {
   readonly value: unknown;
-  readonly tenantIds: ReadonlyArray<string>;
+  readonly labels: ReadonlyArray<string>;
 }
 
 export interface FieldVariation {
@@ -1504,6 +1521,47 @@ export class PostgresTraceRetention {
     };
   }
 
+  async diffTenantTablesNway(
+    input: DiffTenantTablesNwayInput,
+  ): Promise<DiffTenantTablesNwayResult> {
+    if (input.tableNames.length < 2) {
+      throw new Error(
+        `diffTenantTablesNway: requires at least 2 tableNames, got ${input.tableNames.length}`,
+      );
+    }
+    const resolutionsMap = await this.effectiveRetentionBatch({
+      pairs: input.tableNames.map((tableName) => ({
+        tenantId: input.tenantId,
+        tableName,
+      })),
+    });
+    const resolutions: TableResolutionEntry[] = input.tableNames.map(
+      (tableName) => {
+        const resolution = resolutionsMap.get(
+          effectiveRetentionKey(input.tenantId, tableName),
+        );
+        if (resolution === undefined) {
+          throw new Error(
+            `diffTenantTablesNway: failed to resolve table ${tableName}`,
+          );
+        }
+        return { tableName, resolution };
+      },
+    );
+    const fieldVariations = computeFieldVariations(
+      resolutions.map((entry) => ({
+        label: entry.tableName,
+        normalized: normalizeResolutionForDiff(entry.resolution),
+      })),
+    );
+    return {
+      tenantId: input.tenantId,
+      tableNames: input.tableNames,
+      resolutions,
+      fieldVariations,
+    };
+  }
+
   async diffTenantPoliciesNway(
     input: DiffTenantPoliciesNwayInput,
   ): Promise<DiffTenantPoliciesNwayResult> {
@@ -1533,7 +1591,7 @@ export class PostgresTraceRetention {
     );
     const fieldVariations = computeFieldVariations(
       resolutions.map((entry) => ({
-        tenantId: entry.tenantId,
+        label: entry.tenantId,
         normalized: normalizeResolutionForDiff(entry.resolution),
       })),
     );
