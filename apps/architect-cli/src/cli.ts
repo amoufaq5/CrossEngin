@@ -21,6 +21,7 @@ export interface ParsedCommand {
   readonly subcommand: Subcommand;
   readonly positional: readonly string[];
   readonly flags: ReadonlyMap<string, string | true>;
+  readonly multiFlags: ReadonlyMap<string, ReadonlyArray<string>>;
   readonly format: OutputFormat;
 }
 
@@ -37,6 +38,19 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   const args = argv.slice(2);
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
+  const multiFlags = new Map<string, string[]>();
+
+  function recordFlag(name: string, value: string | true): void {
+    flags.set(name, value);
+    if (typeof value === "string") {
+      const existing = multiFlags.get(name);
+      if (existing !== undefined) {
+        existing.push(value);
+      } else {
+        multiFlags.set(name, [value]);
+      }
+    }
+  }
 
   let subcommandRaw: string | null = null;
 
@@ -45,14 +59,14 @@ export function parseArgs(argv: readonly string[]): ParseResult {
     if (arg.startsWith("--")) {
       const eq = arg.indexOf("=");
       if (eq >= 0) {
-        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+        recordFlag(arg.slice(2, eq), arg.slice(eq + 1));
       } else {
         const next = args[i + 1];
         if (next !== undefined && !next.startsWith("--")) {
-          flags.set(arg.slice(2), next);
+          recordFlag(arg.slice(2), next);
           i += 1;
         } else {
-          flags.set(arg.slice(2), true);
+          recordFlag(arg.slice(2), true);
         }
       }
       continue;
@@ -65,7 +79,16 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   }
 
   if (subcommandRaw === null) {
-    return { ok: true, command: { subcommand: "help", positional, flags, format: "human" } };
+    return {
+      ok: true,
+      command: {
+        subcommand: "help",
+        positional,
+        flags,
+        multiFlags,
+        format: "human",
+      },
+    };
   }
   if (!isSubcommand(subcommandRaw)) {
     return {
@@ -86,7 +109,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   }
   return {
     ok: true,
-    command: { subcommand: subcommandRaw, positional, flags, format },
+    command: { subcommand: subcommandRaw, positional, flags, multiFlags, format },
   };
 }
 
@@ -106,6 +129,13 @@ export function getStringFlag(
 export function getBooleanFlag(command: ParsedCommand, name: string): boolean {
   const value = command.flags.get(name);
   return value === true || value === "true" || value === "1";
+}
+
+export function getMultiFlag(
+  command: ParsedCommand,
+  name: string,
+): ReadonlyArray<string> {
+  return command.multiFlags.get(name) ?? [];
 }
 
 export function helpText(): string {
@@ -205,6 +235,12 @@ export function helpText(): string {
     "                          total). Useful for 'is this tenant's retention consistent",
     "                          across all trace tables?' audits. Mutually exclusive with",
     "                          --vs-platform. (requires PG env)",
+    "  retention diff <a> <b> <table> --add-tenant <c> [--add-tenant <d> ...]",
+    "                          N-way comparison across 3+ tenants on the same table.",
+    "                          Renders per-field variation analysis (which tenants have",
+    "                          which value). Repeats --add-tenant for each extra tenant.",
+    "                          Mutually exclusive with --vs-platform and --cross-table.",
+    "                          (requires PG env)",
     "                          All three diff variants accept --exit-on-divergence which",
     "                          returns exit 3 (instead of 0) when fieldDiffs is non-empty —",
     "                          for CI gates that fail the build when retention drifts.",

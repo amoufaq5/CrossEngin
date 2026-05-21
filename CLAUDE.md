@@ -21,15 +21,170 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,502 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.effective-batch
+**56 packages + 1 app, 129 meta-schema tables, 8,530 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.add-tenant
+closes ADR-0178 Q2 by adding `--add-tenant <uuid>` repeated
+flag to `retention diff` for N-way cross-tenant comparison
+across 3+ tenants on the same table. Operators with 5-tenant
+compliance cohorts previously ran 10 pair-wise diff commands
+and manually correlated the outputs into a per-field
+variation matrix; now one command. New diffTenantPoliciesNway
+adapter method composes on effectiveRetentionBatch (canonical
+pattern from ADR-0177/0178/0180; only ADR-0179 deviated with
+documented reason); passes N pairs to batch resolver → 2
+queries total regardless of N. Variation analysis groups
+tenants by JSON-stringified value per field, filters to
+fields with 2+ distinct values, sorts alphabetically. New
+computeFieldVariations pure helper exported alongside
+existing computeFieldDiffs + normalizeResolutionForDiff;
+fully unit-testable with no DB dependency. parseArgs
+extended additively with multiFlags ReadonlyMap tracking
+repeated string-valued flag occurrences in argv order;
+new getMultiFlag helper reads from it; existing flags map
+keeps last-write-wins semantics so all extant callers
+unaffected. CLI dispatcher checks for --add-tenant
+presence + rejects combo with --vs-platform or
+--cross-table (3-way mutual exclusivity); base call still
+requires 2 positional tenants + 1 positional table
+matching cross-tenant default from ADR-0178. Result type
+DiffTenantPoliciesNwayResult carries tenantIds (input
+order), tableName, resolutions[] (one per input tenant),
+fieldVariations[] (per-field distinctValues with tenant
+attribution). Human output renders 'N-way diff between N
+tenants (table: <name>):' header + per-tenant row 'Tenant
+<label>: <uuid> <summary>' with labels A/B/C... (T27+ at
+high N), blank line, then either 'No differences — all N
+tenants have the same effective retention policy.' OR
+'Field variations (M):' header + per-field line
+'fieldname value1 (A) | value2 (B, C) | ...' with
+tenant labels by index. JSON envelope {action: "diff",
+nway: true, result: DiffTenantPoliciesNwayResult} where
+nway:true is the discriminator — operators now have 4
+diff envelope shapes (cross-tenant default no
+discriminator, vsPlatform:true, crossTable:true,
+nway:true) all mutually exclusive at CLI boundary.
+--exit-on-divergence from ADR-0181 integrates uniformly —
+passes result.fieldVariations.length to
+divergenceExitCode; non-zero → exit 3. Resolution-side no
+deduplication — input tenantIds=[A,A,B] returns 3
+resolutions matching input order (1:1 contract from
+ADR-0182). Use cases unblocked — compliance cohort drift
+detection in single CI command replacing 10 pair-wise
+commands + manual correlation for 5-tenant cohorts, tier
+migration verification across N tenants via jq filter
+on .result.fieldVariations[].field == "source", legal-
+hold cohort verification ensuring all hold-tenants
+opted out via length-0 check on filtered resolutions,
+operator dashboards rendering per-field cohort variation
+directly from JSON. Rejected alternatives — comma-
+separated --tenants <a,b,c,d> (fragile + breaks for
+embedded commas + harder shell quoting), auto-promote to
+N-way when more than 3 positional args (magical;
+operators may pass accidental args), new action
+retention diff-nway (adds CLI surface; --add-tenant
+matches --vs-platform/--cross-table precedent), pair-
+wise output for N tenants A vs B + A vs C + B vs C ...
+(operators read N×(N-1)/2 outputs manually correlating —
+per-field variation is right abstraction), JSON-only no
+human format (N-way visualizations useful in terminals),
+restrict to N <= 10 (arbitrary; PG IN list handles
+thousands), return Map<tenantId, Resolution> instead of
+ordered array (loses input order), --limit N to truncate
+variation rendering (operators pipe through head/jq),
+separate adapter method not composing on
+effectiveRetentionBatch (duplicates batch resolver
+logic). Drawbacks — output dense at high N (5 variations
+× many tenants per group wraps narrow terminals;
+operators pipe to less or jq), tenant labels A..Z then
+T27+ less readable above 26 (unusual case), parseArgs
+interface change adding multiFlags field (additive but
+existent ParsedCommand consumers see new field;
+backward compat preserved), no grouping in variation
+rendering fields sorted alphabetically each independent
+(operators wanting "group by retention_days then by
+source" use jq), no deduplication of duplicate tenantIds
+(1:1 contract may confuse), N-way is pair-wise-superset
+2-tenant N-way works but output wordier (operators
+deliberately use --add-tenant for N-way semantics),
+mutual-exclusivity error lists 3 flag candidates when
+more than one set (clear message but more complex
+error path). 15 new adapter tests + 13 new CLI tests =
+28 total covering: adapter rejects fewer than 2
+tenantIds with 'at least 2 tenantIds' error, composes
+on effectiveRetentionBatch with exactly 2 queries for 3
+tenants verified via capture.length, returns resolutions
+ordered by input + empty fieldVariations when all
+match, returns fieldVariations when 3 tenants have 3
+different sources covering source + retention_days +
+opt_out fields, source variation distinctValues
+includes tenant attribution verified ([TENANT_A] for
+tenant + [TENANT_B, TENANT_C] for platform), supports
+2-tenant N-way degenerate-but-valid call equivalent to
+diffTenantPolicies, handles 5-tenant comparison with
+all platform default no variations, clock-aware expiry
+preserved across N tenants (expired opt_out on TENANT_A
+falls through to platform), preserves duplicate
+tenantIds in resolutions order (input [A,A,B] →
+resolutions length 3 same order); computeFieldVariations
+helper unit tests — empty array for <2 entries, empty
+when all entries agree, single variation when one
+field differs, groups tenants by distinct value
+(tenant→[a], platform→[b,c]), treats absent field on
+one entry as undefined distinct from null on another,
+sorts variations alphabetically by field name; CLI
+tests — exit 2 when --add-tenant + --vs-platform both
+set with 'mutually exclusive' error, exit 2 when
+--add-tenant + --cross-table both set, exit 2 missing
+required positionals with --add-tenant in error
+message, calls diffTenantPoliciesNway with [A,B,C]
+from positionals + 1 --add-tenant verified via capture,
+collects multiple --add-tenant flags in order
+[A,B,C,D] via repeated flag occurrences, human-format
+'No differences' message when fieldVariations empty,
+human-format renders per-field variations with tenant
+attribution + A/B/C labels + retention_days '30 (A) |
+90 (B, C)' + source '"tenant" (A) | "platform" (B,
+C)', JSON envelope nway:true discriminator + result
+.tenantIds + result.resolutions length 3,
+--exit-on-divergence + non-empty fieldVariations
+returns exit 3, adapter errors propagate exit 1;
+formatTenantNwayDiff helper unit tests — 'No
+differences' message for empty, A/B/C labels in tenant
+rows + variation lines '"tenant" (A) | "platform" (B)
+| "none" (C)' across 3 distinct sources, 'absent' for
+undefined values in variation groups (e.g.,
+opt_out_reason variation has undefined for tenant on
+platform vs string for tenant opt_out). cli.ts
+helpText extended with retention diff <a> <b> <table>
+--add-tenant <c> [--add-tenant <d> ...] usage line +
+5-line description explaining N-way semantic + mutual
+exclusivity with --vs-platform/--cross-table. ADR-0183
+documents the design + 9 rejected alternatives + 8
+future Qs (--exclude-tenant for set-subtraction,
+--input-file reading tenant IDs from JSON/text file,
+--add-tenant <slug> resolving via meta.tenants.slug,
+render variations grouped by tenant in addition to
+per-field, --threshold N combined with --exit-on-
+divergence pairing with ADR-0181 Q2, N-way --vs-
+platform adding platform default as synthetic tenant,
+N-way --cross-table comparing one tenant across N
+tables pairing with ADR-0180 Q1, tagged-union JSON
+envelope across 4 diff variants would simplify jq
+scripts but break backward compat). The retention CLI
+now has 17 actions with 4 diff variants in 'diff'
+action (cross-tenant default + --vs-platform +
+--cross-table + --add-tenant) all supporting
+--exit-on-divergence — operators have first-class CI-
+gate ergonomics across pair-wise AND N-way comparison
+matrices.
+M6.7.zz.tenant.opt-out.cli.effective-batch
 closes ADR-0177 Q1 by adding `crossengin retention
 effective-batch --pairs-file <path>` action exposing the
 ADR-0177 batch adapter at the CLI. Pure CLI delivery — no
@@ -6185,7 +6340,22 @@ for 1:1 contract; envelope {action: "effective-batch",
 count, results[]}; replaces Node script boilerplate
 operators previously wrote; substrate-to-CLI gap from
 ADR-0177's substrate-only milestone now closed —
-all retention adapters have first-class CLI surfaces).
+all retention adapters have first-class CLI surfaces),
+ADR-0183 covers M6.7.zz.tenant.opt-out.cli.diff.add-tenant
+(`retention diff --add-tenant <uuid>` repeated flag for
+N-way cross-tenant comparison — closes ADR-0178 Q2 —
+new diffTenantPoliciesNway adapter composing on
+effectiveRetentionBatch (2 queries regardless of N);
+computeFieldVariations pure helper for per-field
+variation analysis with tenant attribution; parseArgs
+extended with multiFlags ReadonlyMap tracking repeated
+flag occurrences + getMultiFlag helper (backward
+compatible — existing flags map keeps last-write-wins);
+nway:true JSON discriminator (4 diff envelope shapes
+now mutually exclusive); A/B/C tenant labels in human
+output; replaces 10 pair-wise commands + manual
+correlation for 5-tenant cohorts; --exit-on-divergence
+from ADR-0181 integrates uniformly).
 
 ## Architecture in 90 seconds
 
@@ -8469,6 +8639,227 @@ pretty-printed JSON output operators currently use
 jq, per-pair source-attribution
 PostgresCostCeilingResolver style returning tier/
 override/global signal alongside resolution).
+ADR-0183 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff.add-tenant
+(`crossengin retention diff <a> <b> <table>
+--add-tenant <c> [--add-tenant <d> ...]` repeated flag
+for N-way cross-tenant comparison — closes ADR-0178
+Q2; pair-wise diff produced N×(N-1)/2 commands for N
+tenants and operators mentally assembled the per-field
+variation matrix from outputs — a 5-tenant compliance
+cohort meant 10 commands and 10 outputs to correlate by
+hand; single command now returns per-field variation
+analysis across N tenants. CLI surface — base call still
+requires 2 positional tenants + 1 positional table
+matching cross-tenant default from ADR-0178;
+--add-tenant <uuid> is repeatable each occurrence adds
+one tenant to the comparison; N total tenants = 2
+positional + count(--add-tenant); minimum N to trigger
+N-way mode = 3 (at least one --add-tenant); mutually
+exclusive with --vs-platform and --cross-table (those
+modes have different semantics);
+--exit-on-divergence from ADR-0181 works on N-way too
+exit 3 when fieldVariations.length > 0. Repeated-flag
+parsing — parseArgs extended additively to track
+repeated flag values via new multiFlags: ReadonlyMap
+<string, ReadonlyArray<string>> field on ParsedCommand
+recording every string-valued occurrence of each flag
+in argv order; existing flags map keeps last-write-
+wins semantics — backward compatible existing callers
+using getStringFlag unaffected; new getMultiFlag
+helper reads from multiFlags. Adapter — new method
+diffTenantPoliciesNway({tenantIds, tableName}) on
+PostgresTraceRetention; rejects fewer than 2
+tenantIds with explicit error; composes on
+effectiveRetentionBatch (the canonical pattern from
+ADR-0177 — same as ADR-0178's diffTenantPolicies and
+ADR-0180's diffTenantTables; only ADR-0179's
+diffTenantVsPlatform deviated with documented reason);
+passes N pairs to batch resolver → 2 queries total
+regardless of N; looks up each tenant's resolution
+from returned Map via effectiveRetentionKey;
+adapter does NOT deduplicate input tenantIds — if same
+tenant appears twice in input array it appears twice
+in resolutions[] matching input (mirrors ADR-0182
+1:1 contract). Variation analysis — for each field
+across all N normalized resolutions group tenants by
+JSON.stringify(value) handling primitives/null/
+undefined uniformly; if only 1 distinct value group
+field is uniform skip; if 2+ distinct value groups
+include in fieldVariations[]; sort alphabetically by
+field name matching ADR-0173 computeFieldDiffs;
+new computeFieldVariations(entries) pure helper
+exported alongside existing computeFieldDiffs +
+normalizeResolutionForDiff with same shape pure
+function over normalized records no DB dependency
+fully unit-testable. Per-field result lists every
+distinct value seen and which tenants have it —
+operators reading 'source: tenant (A) | platform
+(B, C)' know immediately Tenant A is on its own per-
+tenant policy and Tenants B and C share platform
+default. Result type DiffTenantPoliciesNwayResult
+{tenantIds (input order), tableName, resolutions[]
+(one per input tenant ordered), fieldVariations[]
+(per-field distinctValues with tenant attribution)}.
+Human output renders 'N-way diff between N tenants
+(table: <name>):' header + per-tenant row 'Tenant
+<label>: <uuid> <summary>' with labels A/B/C... from
+input index (beyond 26 labels become T27, T28, ...
+operators with >26-tenant cohorts unusual documented
+but not optimized), blank line, then either 'No
+differences — all N tenants have the same effective
+retention policy.' OR 'Field variations (M):' header
++ per-field 'fieldname value1 (A) | value2 (B, C) |
+...' lines with tenant labels by index; per-tenant
+summary line reuses shared summarizeResolutionForDiff
+helper from ADR-0178; 'absent' placeholder for
+undefined values in variation groups. JSON envelope
+{action: "diff", nway: true, result:
+DiffTenantPoliciesNwayResult} where nway:true is the
+discriminator distinguishing from existing 3 diff
+envelope shapes (cross-tenant default no discriminator
+from ADR-0178, vsPlatform:true from ADR-0179,
+crossTable:true from ADR-0180); all four boolean
+discriminators mutually exclusive at CLI boundary;
+JSON parsers branch on discriminator first.
+--exit-on-divergence integration — CLI passes
+result.fieldVariations.length to divergenceExitCode;
+non-zero variations → exit 3 (same semantic as
+fieldDiffs for pair-wise variants). Use cases
+unblocked — compliance cohort drift detection (single
+CI command replaces 10 pair-wise commands + manual
+correlation for 5-tenant cohorts: crossengin retention
+diff $ref $b workflow_traces --add-tenant $c
+--add-tenant $d --add-tenant $e --exit-on-divergence
+returns exit 3 if any drift), tier migration
+verification across N tenants via jq filter on
+.result.fieldVariations[].field=="source" returning
+empty array means migration succeeded all on same
+source, legal-hold cohort verification ensuring all
+hold-tenants opted out via length-0 check on
+filtered resolutions where source!="tenant_opt_out",
+operator dashboards rendering per-field cohort
+variation directly from JSON output. Rejected
+alternatives — comma-separated --tenants <a,b,c,d>
+(fragile + doesn't compose with shell-quoted UUIDs
+containing punctuation + breaks if operators have
+tenant IDs with embedded commas), auto-promote to
+N-way when more than 3 positional args supplied
+(magical operators may pass accidental args), new
+action retention diff-nway (adds CLI surface divides
+diff vocabulary across four action names —
+--add-tenant matches --vs-platform/--cross-table
+precedent operators already learned), pair-wise output
+for N tenants (A vs B + A vs C + B vs C ... operators
+read N×(N-1)/2 outputs manually correlate — per-field
+variation analysis is the right abstraction), JSON-
+only output no human format (N-way visualizations
+useful in terminals), restrict to N <= 10 (arbitrary
+PG IN list handles thousands no cap), return Map
+<tenantId, Resolution> instead of ordered array
+(loses input order), --limit N to truncate variation
+rendering at high N (operators pipe through head or
+jq out of scope), separate adapter method not
+composing on effectiveRetentionBatch (would
+duplicate batch resolver logic — composition is the
+established pattern). Drawbacks — output gets dense
+at high N a 20-tenant cohort with 5 variations renders
+5 lines of 'value (A, B, ...) | value (...)' that may
+wrap on narrow terminals (operators pipe to less or
+use JSON + jq), tenant labels A..Z then T27 T28 ...
+operators with >26 cohort tenants get less-readable
+label scheme (acceptable since >26-tenant N-way
+comparisons are unusual), parseArgs interface change
+ParsedCommand gained a multiFlags field (additive
+extant ParsedCommand consumers seeing new field;
+backward compat preserved existing fields unchanged),
+no grouping in variation rendering fields sorted
+alphabetically each rendered independently (operators
+wanting 'group by retention_days then by source' use
+jq on JSON), no de-duplication operators passing same
+tenant twice see it twice in output (by design 1:1
+input/output may confuse), N-way is pair-wise-superset
+2-tenant N-way call works but output wordier ('Field
+variations (1)' vs 'Field changes (1)') operators
+using --add-tenant deliberately get N-way semantics
+those using default cross-tenant path get pair-wise
+CLI doesn't auto-route, mutual-exclusivity error
+lists 3 flag candidates when more than one of
+--vs-platform/--cross-table/--add-tenant is set
+(clear message but error path more complex than
+previous 2-way exclusion). 15 new adapter tests in
+trace-retention.test.ts (rejects fewer than 2
+tenantIds with 'at least 2 tenantIds' error, composes
+on effectiveRetentionBatch with exactly 2 queries for
+3 tenants verified via capture.length, returns
+resolutions ordered by input + empty fieldVariations
+when all match, returns fieldVariations when 3 tenants
+have 3 different sources covering source +
+retention_days + opt_out fields, source variation
+distinctValues includes tenant attribution verified
+([TENANT_A] for tenant + [TENANT_B, TENANT_C] for
+platform), supports 2-tenant N-way degenerate-but-
+valid call equivalent to diffTenantPolicies, handles
+5-tenant comparison with all platform default no
+variations, clock-aware expiry preserved across N
+tenants, preserves duplicate tenantIds in resolutions
+input [A,A,B] → resolutions length 3 same order;
+computeFieldVariations helper unit tests — empty
+array for <2 entries, empty when all entries agree,
+single variation when one field differs, groups
+tenants by distinct value, treats absent field as
+undefined distinct from null, sorts variations
+alphabetically by field name); 13 new CLI tests in
+retention.test.ts — exit 2 when --add-tenant +
+--vs-platform both set with 'mutually exclusive'
+error, exit 2 when --add-tenant + --cross-table both
+set, exit 2 missing required positionals with
+--add-tenant in error message, calls
+diffTenantPoliciesNway with [A,B,C] from positionals
++ 1 --add-tenant verified via capture, collects
+multiple --add-tenant flags in order [A,B,C,D] via
+repeated flag occurrences, human-format 'No
+differences' message when fieldVariations empty,
+human-format renders per-field variations with tenant
+attribution + A/B/C labels + retention_days '30 (A) |
+90 (B, C)' + source '"tenant" (A) | "platform" (B,
+C)', JSON envelope nway:true discriminator + result
+.tenantIds + result.resolutions length 3,
+--exit-on-divergence + non-empty fieldVariations
+returns exit 3, adapter errors propagate exit 1;
+formatTenantNwayDiff helper unit tests — 'No
+differences' message for empty, A/B/C labels in
+tenant rows + variation lines '"tenant" (A) |
+"platform" (B) | "none" (C)' across 3 distinct
+sources, 'absent' for undefined values in variation
+groups. fakeRetention harness extended with
+diffTenantPoliciesNway method + diffTenantNwayResult
++ diffTenantNwayCapture options for test injection.
+cli.ts helpText extended with retention diff <a> <b>
+<table> --add-tenant <c> [--add-tenant <d> ...] usage
+line + 5-line description explaining N-way semantic +
+mutual exclusivity with --vs-platform and --cross-
+table + per-field variation analysis output.
+Future Qs cover --exclude-tenant for set-subtraction,
+--input-file reading tenant IDs from JSON/text file
+matching ADR-0182 --pairs-file pattern, --add-tenant
+<slug> resolving via meta.tenants.slug for human-
+readable input (substrate doesn't validate tenant IDs
+against meta), render variations grouped by tenant in
+addition to per-field, --threshold N combined with
+--exit-on-divergence pairing with ADR-0181 Q2, N-way
+--vs-platform adding platform default as synthetic
+tenant in comparison (different semantic from pair-
+wise), N-way --cross-table comparing one tenant
+across N tables pairing with ADR-0180 Q1, tagged-
+union JSON envelope across 4 diff variants would
+simplify operator jq scripts but break backward compat
+with ADR-0178/0179/0180/0183 envelopes — defer).
+The retention CLI now has 17 actions with 4 diff
+variants in 'diff' action (cross-tenant default +
+--vs-platform + --cross-table + --add-tenant) all
+supporting --exit-on-divergence — operators have
+first-class CI-gate ergonomics across pair-wise AND
+N-way comparison matrices.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

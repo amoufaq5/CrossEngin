@@ -7,9 +7,11 @@ import {
   parsePgEnvConfig,
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
+  type DiffTenantPoliciesNwayResult,
   type DiffTenantPoliciesResult,
   type DiffTenantTablesResult,
   type DiffTenantVsPlatformResult,
+  type FieldVariation,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
   type OptOutHistoryEntry,
@@ -24,7 +26,7 @@ import {
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
-import { getBooleanFlag, getStringFlag } from "./cli.js";
+import { getBooleanFlag, getMultiFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson, printSuccess } from "./format.js";
 
@@ -1284,18 +1286,29 @@ async function runRetentionDiff(
 ): Promise<number> {
   const vsPlatform = getBooleanFlag(command, "vs-platform");
   const crossTable = getBooleanFlag(command, "cross-table");
-  if (vsPlatform && crossTable) {
+  const addTenants = getMultiFlag(command, "add-tenant");
+  const hasAddTenant = addTenants.length > 0;
+
+  const conflicts: string[] = [];
+  if (vsPlatform) conflicts.push("--vs-platform");
+  if (crossTable) conflicts.push("--cross-table");
+  if (hasAddTenant) conflicts.push("--add-tenant");
+  if (conflicts.length > 1) {
     printError(
       ctx.io,
-      "retention diff: --vs-platform and --cross-table are mutually exclusive",
+      `retention diff: ${conflicts.join(", ")} are mutually exclusive`,
     );
     return 2;
   }
+
   if (vsPlatform) {
     return await runRetentionDiffVsPlatform(command, ctx, retention);
   }
   if (crossTable) {
     return await runRetentionDiffCrossTable(command, ctx, retention);
+  }
+  if (hasAddTenant) {
+    return await runRetentionDiffNway(command, ctx, retention, addTenants);
   }
 
   const tenantIdA = command.positional[1];
@@ -1413,6 +1426,47 @@ async function runRetentionDiffCrossTable(
   return divergenceExitCode(command, result.fieldDiffs.length);
 }
 
+async function runRetentionDiffNway(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+  addTenants: ReadonlyArray<string>,
+): Promise<number> {
+  const tenantIdA = command.positional[1];
+  const tenantIdB = command.positional[2];
+  const tableName = command.positional[3];
+  if (
+    tenantIdA === undefined ||
+    tenantIdB === undefined ||
+    tableName === undefined
+  ) {
+    printError(
+      ctx.io,
+      "retention diff --add-tenant: missing arguments. usage: crossengin retention diff <tenant-a> <tenant-b> <table-name> --add-tenant <tenant-c> [--add-tenant <tenant-d> ...]",
+    );
+    return 2;
+  }
+  const tenantIds: string[] = [tenantIdA, tenantIdB, ...addTenants];
+
+  let result: DiffTenantPoliciesNwayResult;
+  try {
+    result = await retention.diffTenantPoliciesNway({ tenantIds, tableName });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, { action: "diff", nway: true, result });
+  } else {
+    ctx.io.stdout.write(formatTenantNwayDiff(result));
+  }
+  return divergenceExitCode(command, result.fieldVariations.length);
+}
+
 function divergenceExitCode(
   command: ParsedCommand,
   fieldDiffsLength: number,
@@ -1464,6 +1518,56 @@ export function formatTenantDiff(result: DiffTenantPoliciesResult): string {
     }
   }
   return lines.join("\n") + "\n";
+}
+
+export function formatTenantNwayDiff(
+  result: DiffTenantPoliciesNwayResult,
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `N-way diff between ${result.resolutions.length} tenants (table: ${result.tableName}):`,
+  );
+  for (let i = 0; i < result.resolutions.length; i++) {
+    const entry = result.resolutions[i]!;
+    const label = labelForIndex(i);
+    lines.push(
+      `  Tenant ${label}: ${entry.tenantId}  ${summarizeResolutionForDiff(entry.resolution)}`,
+    );
+  }
+  lines.push("");
+  if (result.fieldVariations.length === 0) {
+    lines.push(
+      `No differences — all ${result.resolutions.length} tenants have the same effective retention policy.`,
+    );
+  } else {
+    lines.push(`Field variations (${result.fieldVariations.length}):`);
+    const labelByTenant = new Map<string, string>();
+    for (let i = 0; i < result.tenantIds.length; i++) {
+      const tid = result.tenantIds[i]!;
+      if (!labelByTenant.has(tid)) {
+        labelByTenant.set(tid, labelForIndex(i));
+      }
+    }
+    for (const variation of result.fieldVariations) {
+      const groups = variation.distinctValues
+        .map((group) => {
+          const value =
+            group.value === undefined ? "absent" : JSON.stringify(group.value);
+          const labels = group.tenantIds
+            .map((tid) => labelByTenant.get(tid) ?? "?")
+            .join(", ");
+          return `${value} (${labels})`;
+        })
+        .join(" | ");
+      lines.push(`  ${variation.field.padEnd(20)} ${groups}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+function labelForIndex(i: number): string {
+  if (i < 26) return String.fromCharCode(65 + i);
+  return `T${i + 1}`;
 }
 
 export function formatTenantTablesDiff(

@@ -57,6 +57,40 @@ export function computeFieldDiffs(
   return diffs;
 }
 
+export function computeFieldVariations(
+  entries: ReadonlyArray<{
+    readonly tenantId: string;
+    readonly normalized: Record<string, unknown>;
+  }>,
+): ReadonlyArray<FieldVariation> {
+  if (entries.length < 2) return [];
+  const keys = new Set<string>();
+  for (const e of entries) {
+    for (const k of Object.keys(e.normalized)) keys.add(k);
+  }
+  const variations: FieldVariation[] = [];
+  for (const field of [...keys].sort()) {
+    const byValue = new Map<string, { value: unknown; tenantIds: string[] }>();
+    for (const e of entries) {
+      const value = e.normalized[field];
+      const key = JSON.stringify(value);
+      const existing = byValue.get(key);
+      if (existing !== undefined) {
+        existing.tenantIds.push(e.tenantId);
+      } else {
+        byValue.set(key, { value, tenantIds: [e.tenantId] });
+      }
+    }
+    if (byValue.size > 1) {
+      variations.push({
+        field,
+        distinctValues: [...byValue.values()],
+      });
+    }
+  }
+  return variations;
+}
+
 interface PrunableTableSpec {
   readonly timeColumn: string;
   readonly hasTenantId: boolean;
@@ -351,6 +385,33 @@ export interface DiffTenantTablesResult {
   readonly resolutionA: EffectiveRetentionResolution;
   readonly resolutionB: EffectiveRetentionResolution;
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
+}
+
+export interface DiffTenantPoliciesNwayInput {
+  readonly tenantIds: ReadonlyArray<string>;
+  readonly tableName: string;
+}
+
+export interface TenantResolutionEntry {
+  readonly tenantId: string;
+  readonly resolution: EffectiveRetentionResolution;
+}
+
+export interface FieldVariationValueGroup {
+  readonly value: unknown;
+  readonly tenantIds: ReadonlyArray<string>;
+}
+
+export interface FieldVariation {
+  readonly field: string;
+  readonly distinctValues: ReadonlyArray<FieldVariationValueGroup>;
+}
+
+export interface DiffTenantPoliciesNwayResult {
+  readonly tenantIds: ReadonlyArray<string>;
+  readonly tableName: string;
+  readonly resolutions: ReadonlyArray<TenantResolutionEntry>;
+  readonly fieldVariations: ReadonlyArray<FieldVariation>;
 }
 
 interface RawPolicyRow {
@@ -1414,6 +1475,47 @@ export class PostgresTraceRetention {
         normalizeResolutionForDiff(resolutionA),
         normalizeResolutionForDiff(resolutionB),
       ),
+    };
+  }
+
+  async diffTenantPoliciesNway(
+    input: DiffTenantPoliciesNwayInput,
+  ): Promise<DiffTenantPoliciesNwayResult> {
+    if (input.tenantIds.length < 2) {
+      throw new Error(
+        `diffTenantPoliciesNway: requires at least 2 tenantIds, got ${input.tenantIds.length}`,
+      );
+    }
+    const resolutionsMap = await this.effectiveRetentionBatch({
+      pairs: input.tenantIds.map((tenantId) => ({
+        tenantId,
+        tableName: input.tableName,
+      })),
+    });
+    const resolutions: TenantResolutionEntry[] = input.tenantIds.map(
+      (tenantId) => {
+        const resolution = resolutionsMap.get(
+          effectiveRetentionKey(tenantId, input.tableName),
+        );
+        if (resolution === undefined) {
+          throw new Error(
+            `diffTenantPoliciesNway: failed to resolve tenant ${tenantId}`,
+          );
+        }
+        return { tenantId, resolution };
+      },
+    );
+    const fieldVariations = computeFieldVariations(
+      resolutions.map((entry) => ({
+        tenantId: entry.tenantId,
+        normalized: normalizeResolutionForDiff(entry.resolution),
+      })),
+    );
+    return {
+      tenantIds: input.tenantIds,
+      tableName: input.tableName,
+      resolutions,
+      fieldVariations,
     };
   }
 

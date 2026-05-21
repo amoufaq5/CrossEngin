@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
   computeFieldDiffs,
+  computeFieldVariations,
   effectiveRetentionKey,
   isOptOutHistoryEventKind,
   normalizeResolutionForDiff,
@@ -5302,6 +5303,317 @@ describe("PostgresTraceRetention.diffTenantVsPlatform (M6.7.zz.tenant.opt-out.cl
     expect(result.tenantResolution.source).toBe("platform");
     expect(result.platformResolution.source).toBe("platform");
     expect(result.fieldDiffs).toEqual([]);
+  });
+});
+
+describe("PostgresTraceRetention.diffTenantPoliciesNway (M6.7.zz.tenant.opt-out.cli.diff.add-tenant)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+
+  function tenantRow(
+    tenant_id: string,
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+      opt_out: boolean;
+      opt_out_reason: string | null;
+      opt_out_until: string | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      tenant_id,
+      table_name: "workflow_traces",
+      retention_days: 30,
+      enabled: true,
+      opt_out: false,
+      opt_out_reason: null,
+      opt_out_until: null,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  function platformRow(
+    overrides: Partial<{
+      retention_days: number;
+      enabled: boolean;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      table_name: "workflow_traces",
+      retention_days: 90,
+      enabled: true,
+      last_pruned_at: null,
+      ...overrides,
+    };
+  }
+
+  it("rejects fewer than 2 tenantIds", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffTenantPoliciesNway({
+        tenantIds: [TENANT_A],
+        tableName: "workflow_traces",
+      }),
+    ).rejects.toThrow("at least 2 tenantIds");
+  });
+
+  it("composes on effectiveRetentionBatch — issues exactly 2 queries for 3 tenants", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(capture).toHaveLength(2);
+  });
+
+  it("returns resolutions ordered by input tenantIds + empty fieldVariations when all match", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.includes("FROM meta.retention_policies") &&
+        !sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(result.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+    expect(result.tableName).toBe("workflow_traces");
+    expect(result.resolutions).toHaveLength(3);
+    expect(result.resolutions[0]!.tenantId).toBe(TENANT_A);
+    expect(result.resolutions[1]!.tenantId).toBe(TENANT_B);
+    expect(result.resolutions[2]!.tenantId).toBe(TENANT_C);
+    for (const e of result.resolutions) {
+      expect(e.resolution.source).toBe("platform");
+    }
+    expect(result.fieldVariations).toEqual([]);
+  });
+
+  it("returns fieldVariations when 3 tenants have 3 different sources", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantRow(TENANT_A, { retention_days: 30 }),
+            tenantRow(TENANT_C, {
+              enabled: false,
+              opt_out: true,
+              opt_out_reason: "legal_hold",
+              opt_out_until: "2099-01-01T00:00:00.000Z",
+            }),
+          ],
+          rowCount: 2,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [platformRow({ retention_days: 90 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(result.resolutions[0]!.resolution.source).toBe("tenant");
+    expect(result.resolutions[1]!.resolution.source).toBe("platform");
+    expect(result.resolutions[2]!.resolution.source).toBe("tenant_opt_out");
+    const fields = result.fieldVariations.map((v) => v.field);
+    expect(fields).toContain("source");
+    expect(fields).toContain("retention_days");
+    expect(fields).toContain("opt_out");
+  });
+
+  it("source variation distinctValues includes tenant attribution", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantRow(TENANT_A, { retention_days: 30 })],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [platformRow({ retention_days: 90 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    const sourceVar = result.fieldVariations.find((v) => v.field === "source");
+    expect(sourceVar).toBeDefined();
+    const tenantGroup = sourceVar!.distinctValues.find(
+      (g) => g.value === "tenant",
+    );
+    const platformGroup = sourceVar!.distinctValues.find(
+      (g) => g.value === "platform",
+    );
+    expect(tenantGroup?.tenantIds).toEqual([TENANT_A]);
+    expect(platformGroup?.tenantIds).toEqual([TENANT_B, TENANT_C]);
+  });
+
+  it("supports 2-tenant N-way call (degenerate; equivalent to diffTenantPolicies)", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+    });
+    expect(result.resolutions).toHaveLength(2);
+    expect(result.fieldVariations).toEqual([]);
+  });
+
+  it("handles 5-tenant comparison with all on platform default (no variations)", async () => {
+    const conn = mockConnection((sql) => {
+      if (
+        sql.includes("FROM meta.retention_policies") &&
+        !sql.includes("FROM meta.tenant_retention_policies")
+      ) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const t1 = TENANT_A;
+    const t2 = TENANT_B;
+    const t3 = TENANT_C;
+    const t4 = "00000000-0000-4000-8000-00000000000D";
+    const t5 = "00000000-0000-4000-8000-00000000000E";
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [t1, t2, t3, t4, t5],
+      tableName: "workflow_traces",
+    });
+    expect(result.resolutions).toHaveLength(5);
+    expect(result.fieldVariations).toEqual([]);
+  });
+
+  it("clock-aware expiry preserved across N tenants", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantRow(TENANT_A, {
+              enabled: true,
+              opt_out: true,
+              opt_out_reason: "expired",
+              opt_out_until: "2020-01-01T00:00:00.000Z",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return { rows: [platformRow()], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({
+      conn,
+      clock: () => Date.parse("2026-06-01T00:00:00Z"),
+    });
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(result.resolutions[0]!.resolution.source).toBe("tenant");
+    expect(result.resolutions[1]!.resolution.source).toBe("platform");
+    expect(result.resolutions[2]!.resolution.source).toBe("platform");
+  });
+
+  it("deduplicates duplicate tenantIds in resolutions (input order preserved at adapter call)", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffTenantPoliciesNway({
+      tenantIds: [TENANT_A, TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+    });
+    expect(result.resolutions).toHaveLength(3);
+    expect(result.resolutions[0]!.tenantId).toBe(TENANT_A);
+    expect(result.resolutions[1]!.tenantId).toBe(TENANT_A);
+    expect(result.resolutions[2]!.tenantId).toBe(TENANT_B);
+  });
+});
+
+describe("computeFieldVariations", () => {
+  it("returns empty array when fewer than 2 entries", () => {
+    expect(
+      computeFieldVariations([
+        { tenantId: "a", normalized: { source: "tenant" } },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("returns empty array when all entries agree on all fields", () => {
+    expect(
+      computeFieldVariations([
+        { tenantId: "a", normalized: { source: "platform", days: 90 } },
+        { tenantId: "b", normalized: { source: "platform", days: 90 } },
+        { tenantId: "c", normalized: { source: "platform", days: 90 } },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("returns variation when one field differs", () => {
+    const result = computeFieldVariations([
+      { tenantId: "a", normalized: { source: "tenant", days: 30 } },
+      { tenantId: "b", normalized: { source: "platform", days: 30 } },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.field).toBe("source");
+    expect(result[0]!.distinctValues).toHaveLength(2);
+  });
+
+  it("groups tenants by distinct value", () => {
+    const result = computeFieldVariations([
+      { tenantId: "a", normalized: { source: "tenant" } },
+      { tenantId: "b", normalized: { source: "platform" } },
+      { tenantId: "c", normalized: { source: "platform" } },
+    ]);
+    const sourceVar = result.find((v) => v.field === "source")!;
+    const tenantGroup = sourceVar.distinctValues.find(
+      (g) => g.value === "tenant",
+    );
+    const platformGroup = sourceVar.distinctValues.find(
+      (g) => g.value === "platform",
+    );
+    expect(tenantGroup?.tenantIds).toEqual(["a"]);
+    expect(platformGroup?.tenantIds).toEqual(["b", "c"]);
+  });
+
+  it("treats absent field on one entry as undefined distinct from null on another", () => {
+    const result = computeFieldVariations([
+      { tenantId: "a", normalized: { x: null } },
+      { tenantId: "b", normalized: {} },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.field).toBe("x");
+    expect(result[0]!.distinctValues).toHaveLength(2);
+  });
+
+  it("sorts variations alphabetically by field name", () => {
+    const result = computeFieldVariations([
+      { tenantId: "a", normalized: { z: 1, a: 1, m: 1 } },
+      { tenantId: "b", normalized: { z: 2, a: 2, m: 2 } },
+    ]);
+    const fields = result.map((v) => v.field);
+    expect(fields).toEqual(["a", "m", "z"]);
   });
 });
 

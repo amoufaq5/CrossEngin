@@ -4,6 +4,8 @@ import type {
   DiffHistoryEntriesInput,
   DiffHistoryEntriesResult,
   DiffTenantPoliciesInput,
+  DiffTenantPoliciesNwayInput,
+  DiffTenantPoliciesNwayResult,
   DiffTenantPoliciesResult,
   DiffTenantTablesInput,
   DiffTenantTablesResult,
@@ -43,6 +45,7 @@ import {
   formatPruneRun,
   formatRestorePreview,
   formatTenantDiff,
+  formatTenantNwayDiff,
   formatTenantTablesDiff,
   formatTenantVsPlatformDiff,
   runRetention,
@@ -110,6 +113,8 @@ function fakeRetention(opts: {
   diffTenantVsPlatformCapture?: DiffTenantVsPlatformInput[];
   diffTenantTablesResult?: DiffTenantTablesResult;
   diffTenantTablesCapture?: DiffTenantTablesInput[];
+  diffTenantNwayResult?: DiffTenantPoliciesNwayResult;
+  diffTenantNwayCapture?: DiffTenantPoliciesNwayInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -336,6 +341,26 @@ function fakeRetention(opts: {
           fieldDiffs: [],
         }
       );
+    },
+    diffTenantPoliciesNway: async (input: DiffTenantPoliciesNwayInput) => {
+      opts.diffTenantNwayCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      if (opts.diffTenantNwayResult !== undefined) {
+        return opts.diffTenantNwayResult;
+      }
+      return {
+        tenantIds: input.tenantIds,
+        tableName: input.tableName,
+        resolutions: input.tenantIds.map((tenantId) => ({
+          tenantId,
+          resolution: {
+            source: "none" as const,
+            retentionDays: null,
+            enabled: false,
+          },
+        })),
+        fieldVariations: [],
+      };
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -4550,6 +4575,467 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
     );
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-tenant)", () => {
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+  const TENANT_D = "00000000-0000-4000-8000-00000000000D";
+
+  it("returns exit 2 when --add-tenant + --vs-platform are both set", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("returns exit 2 when --add-tenant + --cross-table are both set", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("returns exit 2 when missing required positional args", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff", TENANT_A, "--add-tenant", TENANT_C),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("missing arguments");
+    expect(err()).toContain("--add-tenant");
+  });
+
+  it("calls diffTenantPoliciesNway with [a, b, c] from positionals + 1 --add-tenant", async () => {
+    const capture: DiffTenantPoliciesNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTenantNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]).toEqual({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+  });
+
+  it("collects multiple --add-tenant flags in order", async () => {
+    const capture: DiffTenantPoliciesNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--add-tenant",
+        TENANT_D,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTenantNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantIds).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      TENANT_D,
+    ]);
+  });
+
+  it("human-format renders 'No differences' message when fieldVariations empty", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [
+              {
+                tenantId: TENANT_A,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tenantId: TENANT_B,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tenantId: TENANT_C,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("N-way diff between 3 tenants");
+    expect(out()).toContain(
+      "No differences — all 3 tenants have the same effective retention policy.",
+    );
+  });
+
+  it("human-format renders per-field variations with tenant attribution", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [
+              {
+                tenantId: TENANT_A,
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tenantId: TENANT_B,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tenantId: TENANT_C,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "retention_days",
+                distinctValues: [
+                  { value: 30, tenantIds: [TENANT_A] },
+                  { value: 90, tenantIds: [TENANT_B, TENANT_C] },
+                ],
+              },
+              {
+                field: "source",
+                distinctValues: [
+                  { value: "tenant", tenantIds: [TENANT_A] },
+                  { value: "platform", tenantIds: [TENANT_B, TENANT_C] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Field variations (2):");
+    expect(out()).toContain(`Tenant A: ${TENANT_A}`);
+    expect(out()).toContain(`Tenant B: ${TENANT_B}`);
+    expect(out()).toContain(`Tenant C: ${TENANT_C}`);
+    expect(out()).toContain("30 (A) | 90 (B, C)");
+    expect(out()).toContain('"tenant" (A) | "platform" (B, C)');
+  });
+
+  it("JSON envelope includes nway:true discriminator + result", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.action).toBe("diff");
+    expect(parsedOut.nway).toBe(true);
+    expect(parsedOut.result.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+    expect(parsedOut.result.resolutions).toHaveLength(3);
+  });
+
+  it("--exit-on-divergence + non-empty fieldVariations returns exit 3", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [
+              {
+                tenantId: TENANT_A,
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tenantId: TENANT_B,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tenantId: TENANT_C,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "source",
+                distinctValues: [
+                  { value: "tenant", tenantIds: [TENANT_A] },
+                  { value: "platform", tenantIds: [TENANT_B, TENANT_C] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("adapter errors propagate as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatTenantNwayDiff", () => {
+  const TENANT_C2 = "00000000-0000-4000-8000-00000000000C";
+
+  it("renders 'No differences' message when fieldVariations empty", () => {
+    const out = formatTenantNwayDiff({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C2],
+      tableName: "workflow_traces",
+      resolutions: [
+        {
+          tenantId: TENANT_A,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tenantId: TENANT_B,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tenantId: TENANT_C2,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+      ],
+      fieldVariations: [],
+    });
+    expect(out).toContain("N-way diff between 3 tenants");
+    expect(out).toContain("No differences — all 3 tenants");
+  });
+
+  it("renders A/B/C labels in tenant rows + variation lines", () => {
+    const out = formatTenantNwayDiff({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C2],
+      tableName: "workflow_traces",
+      resolutions: [
+        {
+          tenantId: TENANT_A,
+          resolution: {
+            source: "tenant",
+            retentionDays: 30,
+            enabled: true,
+            tenantId: TENANT_A,
+          },
+        },
+        {
+          tenantId: TENANT_B,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tenantId: TENANT_C2,
+          resolution: { source: "none", retentionDays: null, enabled: false },
+        },
+      ],
+      fieldVariations: [
+        {
+          field: "source",
+          distinctValues: [
+            { value: "tenant", tenantIds: [TENANT_A] },
+            { value: "platform", tenantIds: [TENANT_B] },
+            { value: "none", tenantIds: [TENANT_C2] },
+          ],
+        },
+      ],
+    });
+    expect(out).toContain("Tenant A:");
+    expect(out).toContain("Tenant B:");
+    expect(out).toContain("Tenant C:");
+    expect(out).toContain('"tenant" (A) | "platform" (B) | "none" (C)');
+  });
+
+  it("renders 'absent' for undefined values in variation groups", () => {
+    const out = formatTenantNwayDiff({
+      tenantIds: [TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+      resolutions: [
+        {
+          tenantId: TENANT_A,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tenantId: TENANT_B,
+          resolution: {
+            source: "tenant_opt_out",
+            retentionDays: null,
+            enabled: false,
+            tenantId: TENANT_B,
+            optOutReason: "legal",
+            optOutUntil: null,
+          },
+        },
+      ],
+      fieldVariations: [
+        {
+          field: "opt_out_reason",
+          distinctValues: [
+            { value: undefined, tenantIds: [TENANT_A] },
+            { value: "legal", tenantIds: [TENANT_B] },
+          ],
+        },
+      ],
+    });
+    expect(out).toContain("absent (A)");
+    expect(out).toContain('"legal" (B)');
   });
 });
 
