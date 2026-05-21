@@ -21,15 +21,101 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,313 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.restore
+**56 packages + 1 app, 129 meta-schema tables, 8,318 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.history-retention
+closes ADR-0170 Q1 with the mechanically simplest change in
+the retention substrate — wires the new audit-log table
+into the existing retention machinery. Three additive
+changes: META_RETENTION_POLICIES.table_name CHECK widens
+from 3 to 4 values adding 'tenant_retention_opt_out_history';
+META_TENANT_RETENTION_POLICIES.table_name CHECK widens from
+2 to 3 values adding the same; PRUNABLE_TABLES map in
+PostgresTraceRetention gains entry {timeColumn:"occurred_at",
+hasTenantId:true}. No new adapter methods, no new CLI
+surface — the history table inherits the entire ADR-0143
++ ADR-0155 + ADR-0162 retention machinery (window-based
+DELETE, per-tenant overrides, opt-outs with expiry, dry-run
+preview, effectiveRetention resolver, complete CLI surface).
+hasTenantId:true so per-tenant DELETE fires on explicit
+overrides, platform DELETE uses tenant_id NOT IN exclusion
+for tenants with active overrides or opt-outs, and per-
+tenant policies CAN opt out of history pruning (operators
+with "retain forever for this tenant" requirements wrap via
+opt_out=true on tenant_retention_opt_out_history). Why
+include per-tenant retention allowlist not just platform:
+schema supports tenant scoping via tenant_id column, real
+use cases (VIP "retain 7 years" tier; free-tier "90 days";
+legal hold "retain forever for this tenant"); excluding
+would be artificial; CHECK widening is additive no
+migration friction. Why no retention-on-the-history-table:
+recursive concern (audit-log-of-audit-log gets its own
+audit log gets... loop); operators wanting that wrap PG
+pgaudit at the DB layer. Why no special event_kind for
+"history row pruned": pruning DELETEs are maintenance on
+the audit log not mutations on per-tenant policies; if we
+wrote one it would itself be subject to pruning (loop);
+operators auditing pruning runs use the RetentionRunResult[]
+return value identifying which tables were swept + row
+counts. Why no schema-level append-only enforcement:
+substrate documents history as append-only "by convention";
+pruning is the documented exception operators explicitly
+accept; future REVOKE pattern on hypothetical audit-write
+role would enforce except for system role that runs prune
+— pairs with deferred roles substrate. Use cases unblocked:
+platform-default history retention (INSERT INTO
+meta.retention_policies with table_name='tenant_retention_opt_out_history',
+retention_days=365), per-tenant VIP history-retention tier
+via `crossengin retention set <vip> tenant_retention_opt_out_history
+--days 2555` (7-year), opt-out from history pruning entirely
+for litigation hold via `crossengin retention opt-out <legal-
+hold-tenant> tenant_retention_opt_out_history --reason
+ongoing_litigation:case#42`, dry-run via existing
+previewPrune adapter (already invoked via scheduled jobs),
+effectiveRetention resolver works across all four prunable
+tables uniformly. Rejected alternatives: don't add to
+retention (table grows unbounded), platform-only not
+per-tenant (artificial — schema supports tenant scoping),
+special-case prune_history method (existing prune already
+does exactly what's needed; reuse > parallel structure),
+add pruned_at event to history table (recursive concern),
+separate history_retention_policies table (duplicates
+existing infrastructure), refuse enabled=false (operators
+legitimately want retain-forever), CHECK lower-bound on
+retention_days (operator policy choice), cascade pruning
+(wrong direction of causation — live policy is source of
+truth not history). 5 new tests in trace-retention.test.ts
+covering: knownPrunableTables now exposes 4 tables (was 3),
+tablesWithTenantId now exposes 3 tables (was 2; adds
+tenant_retention_opt_out_history alongside workflow_traces
++ llm_call_traces), prune issues DELETE against
+meta.tenant_retention_opt_out_history using occurred_at
+column, platform-default DELETE on history table uses
+tenant_id NOT IN subquery (hasTenantId=true), per-tenant
+retention applies to history table, effectiveRetention
+resolves for history table, previewPrune renders count.
+Existing tests updated: knownPrunableTables test (3→4),
+tablesWithTenantId test (2→3 entries), safety-properties
+test (allowed.length 3→4). meta-schema.ts CHECK constraints
+on both retention_policies tables widened additively.
+ADR-0172 documents the design + 8 rejected alternatives +
+6 future Qs (default platform retention shipped row,
+crossengin retention prune CLI action for ad-hoc invocation,
+meta.retention_pruning_runs audit table for prune-run
+metrics, REVOKE-enforced append-only pairing with deferred
+roles substrate, lower-bound CHECK on retention_days to
+prevent accidental aggressive pruning, compliance-regime-
+specific retention defaults HIPAA 6yr / SOX 7yr — operator
+encodes in deploy scripts). The retention substrate is now
+self-managing — the audit-log table it produces is itself
+subject to the retention machinery it provides.
+M6.7.zz.tenant.opt-out.cli.restore
 closes ADR-0169 Q7 + ADR-0170 Q4 by adding `crossengin
 retention restore <history-id>` action +
 restoreTenantPolicy adapter method. The audit-log table
@@ -4890,7 +4976,19 @@ otherwise); adds attributes.restored_from for forensic
 traceability; discriminated RestoreTenantPolicyResult
 covers kind="restored" + kind="deleted" variants;
 operational undo for accidental delete / wrong opt-out
-/ tier migration mistake recovery workflows).
+/ tier migration mistake recovery workflows),
+ADR-0172 covers M6.7.zz.tenant.opt-out.history-retention
+(history-table retention — closes ADR-0170 Q1 — the
+mechanically simplest retention milestone; three additive
+changes widen META_RETENTION_POLICIES + META_TENANT_RETENTION_POLICIES
+CHECK constraints from 3+2 to 4+3 values adding
+tenant_retention_opt_out_history, plus one PRUNABLE_TABLES
+entry; no new adapter methods, no new CLI surface — history
+table inherits the entire ADR-0143 + 0155 + 0162 retention
+machinery; hasTenantId:true so per-tenant overrides work;
+recursive-concern questions for audit-log-of-audit-log
+rejected; substrate now self-managing — the audit log
+produced by retention is itself subject to retention).
 
 ## Architecture in 90 seconds
 
@@ -6379,6 +6477,133 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0172 covers Phase 2 M6.7.zz.tenant.opt-out.history-retention
+(history-table retention — closes ADR-0170 Q1; the
+mechanically simplest retention milestone — three additive
+changes total: (1) META_RETENTION_POLICIES.table_name CHECK
+widens from 3 to 4 values adding 'tenant_retention_opt_out_history',
+(2) META_TENANT_RETENTION_POLICIES.table_name CHECK widens
+from 2 to 3 values adding the same, (3) PRUNABLE_TABLES
+map in PostgresTraceRetention gains one entry {timeColumn:
+"occurred_at", hasTenantId: true}; no new adapter methods,
+no new CLI surface, no new tests for actual pruning logic
+beyond the parameterized cases — history table inherits
+the entire ADR-0143 + ADR-0155 + ADR-0162 retention
+machinery (window-based DELETE, per-tenant overrides,
+opt-outs with expiry, dry-run preview, effectiveRetention
+resolver, complete CLI surface 10 actions all working);
+hasTenantId:true has three implications — per-tenant
+DELETE fires when tenant has explicit override, platform
+DELETE uses tenant_id NOT IN exclusion for tenants with
+active overrides or opt-outs, per-tenant policies CAN
+opt out of history pruning (operators with retain-forever
+audit requirements); why include per-tenant retention
+allowlist not just platform — schema supports tenant
+scoping via tenant_id column, real use cases (VIP retain-
+7-years tier; free-tier 90-days; legal-hold retain-
+forever-for-this-tenant), excluding would be artificial,
+CHECK widening additive no migration friction; why no
+retention-on-the-history-table — recursive concern (audit-
+log-of-audit-log gets its own audit log gets... infinite
+regress), substrate keeps it flat — history rows describe
+policy mutations but don't get their own meta-audit
+history, operators wanting that wrap PG pgaudit at DB
+layer; why no special event_kind for "history row pruned"
+— pruning DELETEs are maintenance on the audit log NOT
+mutations on per-tenant policies; if we wrote a
+history_pruned event it would itself be subject to
+pruning (loop); operators auditing pruning runs use the
+RetentionRunResult[] return value identifying which tables
+were swept and how many rows; why no schema-level append-
+only enforcement this milestone — substrate documents
+history as append-only "by convention", pruning is the
+documented exception operators explicitly accept, future
+REVOKE pattern on hypothetical audit-write role would
+enforce except for the system role that runs prune (pairs
+with deferred roles substrate); use cases unblocked —
+platform-default history retention via INSERT INTO
+meta.retention_policies (table_name='tenant_retention_opt_out_history',
+retention_days=365, enabled=true), per-tenant VIP history-
+retention tier via `crossengin retention set <vip-tenant>
+tenant_retention_opt_out_history --days 2555` (7-year),
+opt-out from history pruning entirely for litigation hold
+via `crossengin retention opt-out <legal-hold-tenant>
+tenant_retention_opt_out_history --reason ongoing_litigation:
+case#42`, dry-run via existing previewPrune adapter
+(invoked via scheduled jobs today; future `crossengin
+retention preview` CLI action would expose directly),
+effectiveRetention resolver works uniformly across all
+four prunable tables now; rejected alternatives — don't
+add to retention (table grows unbounded; operators have
+compliance need for bounded audit logs), platform-only
+not per-tenant (artificial — schema supports tenant
+scoping, real use cases for per-tenant override), special-
+case prune_history method with separate code path (
+existing prune mechanism already does exactly what's needed
+— window-based DELETE, per-tenant exclusion via NOT IN
+subquery; reuse > parallel structure), add pruned_at event
+to history table itself (recursive concern), separate
+history_retention_policies table (duplicates existing
+infrastructure — one retention substrate is correct),
+refuse enabled=false on history-table platform policy (
+operators legitimately want retain-forever for compliance),
+lower-bound CHECK on retention_days for history (e.g.,
+>= 30 — operator policy choice, substrate doesn't
+prescribe), cascade pruning where pruning per-tenant
+tenant_retention_opt_out_history rows triggers pruning
+of related tenant_retention_policies rows (wrong direction
+of causation — live policy rows are source of truth, history
+is the audit trail not vice versa); drawbacks — history
+pruning is destructive (once pruned audit context is gone;
+operators wanting indefinite retention set retention_days
+very large or enabled=false — documented as "retention
+pruning IS lossy for the audit log"), no event captures
+pruning runs themselves (prune action recorded only in
+live policy table's last_pruned_at + substrate's audit log
+if wired — future Q for meta.retention_pruning_runs
+table), no special restriction on aggressive retention
+(operators can set retention_days=1; substrate doesn't
+gate — operators choose), CHECK widening requires schema
+migration for production deployments (PG ALTER TABLE
+DROP/ADD CONSTRAINT is fast catalog-only update no row
+scan since new value is additive — documented), per-tenant
+overrides on history retention add small denormalization
+concern (a tenant's tenant_retention_opt_out_history
+retention policy is ITSELF a row in tenant_retention_policies
+with its own history row — operators navigate via same
+query surface, no special-case needed); 5 new tests in
+trace-retention.test.ts — knownPrunableTables exposes 4
+tables not 3 (adds tenant_retention_opt_out_history),
+tablesWithTenantId exposes 3 tables not 2 (adds the new
+table alongside workflow_traces + llm_call_traces), prune
+issues DELETE against meta.tenant_retention_opt_out_history
+using occurred_at column, platform-default DELETE on
+history table uses tenant_id NOT IN subquery (hasTenantId
+=true verified), per-tenant retention applies to history
+table (per-tenant DELETE issued with tenant_id=$1 param),
+effectiveRetention resolves for history table when platform
+policy is set (source="platform" + retentionDays), previewPrune
+renders count for history table; existing tests updated
+— knownPrunableTables test 3→4 entries, tablesWithTenantId
+test 2→3 entries, safety-properties test allowed.length
+3→4; meta-schema.ts CHECK constraints on both retention_policies
+tables widened additively (4-value + 3-value); future Qs —
+default platform retention shipped row (substrate ships
+empty by default matching opt-in pattern; defer), CLI
+`retention prune [--dry-run]` action for ad-hoc invocation
+(currently scheduled-job only; defer), meta.retention_pruning_runs
+audit table capturing every prune execution with affected-
+table list + row counts + duration (defer until operators
+ask), REVOKE-enforced append-only pairing with deferred
+roles substrate, lower-bound CHECK on retention_days to
+prevent accidental aggressive pruning (rejected for now —
+operator policy choice; revisit if accidental wipes
+become a problem), compliance-regime-specific retention
+defaults HIPAA 6yr / SOX 7yr (substrate doesn't enforce —
+operators encode in deploy scripts)). The retention
+substrate is now self-managing — the audit-log table it
+produces is itself subject to the retention machinery it
+provides.
 ADR-0171 covers Phase 2 M6.7.zz.tenant.opt-out.cli.restore
 (`crossengin retention restore <history-id>` CLI action +
 restoreTenantPolicy adapter method on PostgresTraceRetention

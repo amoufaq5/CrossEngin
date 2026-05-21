@@ -32,6 +32,10 @@ const PRUNABLE_TABLES: Readonly<Record<string, PrunableTableSpec>> = {
   workflow_traces: { timeColumn: "occurred_at", hasTenantId: true },
   llm_latency_samples: { timeColumn: "recorded_at", hasTenantId: false },
   llm_call_traces: { timeColumn: "occurred_at", hasTenantId: true },
+  tenant_retention_opt_out_history: {
+    timeColumn: "occurred_at",
+    hasTenantId: true,
+  },
 };
 
 export interface PostgresTraceRetentionOptions {

@@ -45,10 +45,15 @@ function policyRow(
 }
 
 describe("PostgresTraceRetention.knownPrunableTables", () => {
-  it("exposes the three trace tables the adapter knows how to prune", () => {
+  it("exposes the four trace tables the adapter knows how to prune", () => {
     const tables = PostgresTraceRetention.knownPrunableTables();
     expect(new Set(tables)).toEqual(
-      new Set(["workflow_traces", "llm_latency_samples", "llm_call_traces"]),
+      new Set([
+        "workflow_traces",
+        "llm_latency_samples",
+        "llm_call_traces",
+        "tenant_retention_opt_out_history",
+      ]),
     );
   });
 });
@@ -335,7 +340,7 @@ describe("PostgresTraceRetention — safety properties", () => {
     // This is a documentation test: the allowlist is private but exposed via
     // knownPrunableTables(). Any change to the allowlist requires source edits.
     const allowed = PostgresTraceRetention.knownPrunableTables();
-    expect(allowed.length).toBe(3);
+    expect(allowed.length).toBe(4);
     for (const t of allowed) {
       expect(t).toMatch(/^[a-z_]+$/);
     }
@@ -891,7 +896,11 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
   it("tablesWithTenantId exposes the prunable tables that can have per-tenant policies", () => {
     const tables = PostgresTraceRetention.tablesWithTenantId();
     expect(new Set(tables)).toEqual(
-      new Set(["workflow_traces", "llm_call_traces"]),
+      new Set([
+        "workflow_traces",
+        "llm_call_traces",
+        "tenant_retention_opt_out_history",
+      ]),
     );
     expect(tables).not.toContain("llm_latency_samples");
   });
@@ -3447,5 +3456,174 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
       tenantId: TENANT_A,
       tableName: "llm_call_traces",
     });
+  });
+});
+
+describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out.history-retention)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  it("prune issues DELETE against meta.tenant_retention_opt_out_history using occurred_at column", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+          return {
+            rows: [
+              {
+                table_name: "tenant_retention_opt_out_history",
+                retention_days: 90,
+                enabled: true,
+                last_pruned_at: null,
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn, clock: () => 1_700_000_000_000 });
+    await r.prune();
+    const delCall = capture.find((c) =>
+      c.sql.startsWith("DELETE FROM meta.tenant_retention_opt_out_history"),
+    );
+    expect(delCall?.sql).toContain("occurred_at < to_timestamp");
+  });
+
+  it("platform-default DELETE on history table uses tenant_id NOT IN subquery (hasTenantId=true)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+          return {
+            rows: [
+              {
+                table_name: "tenant_retention_opt_out_history",
+                retention_days: 30,
+                enabled: true,
+                last_pruned_at: null,
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const delCall = capture.find((c) =>
+      c.sql.startsWith("DELETE FROM meta.tenant_retention_opt_out_history"),
+    );
+    expect(delCall?.sql).toContain("tenant_id NOT IN");
+  });
+
+  it("per-tenant retention applies to history table (hasTenantId=true)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (
+          sql.startsWith("SELECT") &&
+          sql.includes("FROM meta.tenant_retention_policies")
+        ) {
+          return {
+            rows: [
+              {
+                tenant_id: TENANT_A,
+                table_name: "tenant_retention_opt_out_history",
+                retention_days: 365,
+                enabled: true,
+                opt_out: false,
+                opt_out_reason: null,
+                opt_out_until: null,
+                last_pruned_at: null,
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find(
+      (x) =>
+        x.tenantId === TENANT_A &&
+        x.tableName === "tenant_retention_opt_out_history",
+    );
+    expect(tenantResult?.status).toBe("pruned");
+    const tenantDelete = capture.find(
+      (c) =>
+        c.sql.startsWith(
+          "DELETE FROM meta.tenant_retention_opt_out_history",
+        ) && c.sql.includes("tenant_id = $1"),
+    );
+    expect(tenantDelete).toBeDefined();
+    expect(tenantDelete?.params?.[0]).toBe(TENANT_A);
+  });
+
+  it("effectiveRetention resolves for the history table when platform policy is set", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "tenant_retention_opt_out_history",
+              retention_days: 365,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(
+      TENANT_A,
+      "tenant_retention_opt_out_history",
+    );
+    expect(result.source).toBe("platform");
+    if (result.source === "platform") {
+      expect(result.retentionDays).toBe(365);
+    }
+  });
+
+  it("previewPrune renders count for history table", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      (sql) => {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+          return {
+            rows: [
+              {
+                table_name: "tenant_retention_opt_out_history",
+                retention_days: 30,
+                enabled: true,
+                last_pruned_at: null,
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("COUNT(*)") && sql.includes("tenant_retention_opt_out_history")) {
+          return { rows: [{ count: "42" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.previewPrune();
+    const result = results.find(
+      (x) => x.tableName === "tenant_retention_opt_out_history",
+    );
+    expect(result?.status).toBe("previewed");
+    expect(result?.wouldDeleteCount).toBe(42);
   });
 });
