@@ -1284,6 +1284,12 @@ async function runRetentionDiff(
   ctx: RunContext,
   retention: PostgresTraceRetention,
 ): Promise<number> {
+  const thresholdError = validateThresholdFlag(command);
+  if (thresholdError !== null) {
+    printError(ctx.io, `retention diff: ${thresholdError}`);
+    return 2;
+  }
+
   const vsPlatform = getBooleanFlag(command, "vs-platform");
   const crossTable = getBooleanFlag(command, "cross-table");
   const addTenants = getMultiFlag(command, "add-tenant");
@@ -1471,10 +1477,23 @@ function divergenceExitCode(
   command: ParsedCommand,
   fieldDiffsLength: number,
 ): number {
-  if (getBooleanFlag(command, "exit-on-divergence") && fieldDiffsLength > 0) {
-    return 3;
+  if (!getBooleanFlag(command, "exit-on-divergence")) return 0;
+  const thresholdRaw = getStringFlag(command, "threshold");
+  const threshold = thresholdRaw === null ? 1 : Number(thresholdRaw);
+  return fieldDiffsLength >= threshold ? 3 : 0;
+}
+
+function validateThresholdFlag(command: ParsedCommand): string | null {
+  const thresholdRaw = getStringFlag(command, "threshold");
+  if (thresholdRaw === null) return null;
+  if (!getBooleanFlag(command, "exit-on-divergence")) {
+    return "--threshold requires --exit-on-divergence";
   }
-  return 0;
+  const n = Number(thresholdRaw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+    return `--threshold must be a positive integer, got '${thresholdRaw}'`;
+  }
+  return null;
 }
 
 function summarizeResolutionForDiff(

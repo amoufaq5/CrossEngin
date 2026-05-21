@@ -21,15 +21,128 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,530 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.add-tenant
+**56 packages + 1 app, 129 meta-schema tables, 8,544 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.threshold
+closes ADR-0181 Q2 + ADR-0183 Q5 by adding `--threshold N`
+string flag to `retention diff` (all 4 variants) for fuzzy
+CI-gate thresholds — only fail when N+ fields/variations
+diverge. Tier-migration tolerance and cohort-consistency
+gates with minor-drift tolerance previously required jq +
+length-check post-processing; one flag now handles it.
+Without `--threshold` (default), `--exit-on-divergence`
+fires exit 3 on ANY drift (semantic from ADR-0181); with
+`--threshold N` it fires exit 3 only when fieldDiffs.length
+or fieldVariations.length >= N. N=1 is equivalent to
+default behavior; N>=2 enables fuzzy semantic. `>=` (at-or-
+above-threshold) comparison matches operator intuition
+"fail when at least N differ". Validation at the TOP of
+runRetentionDiff before dispatcher routes — invalid
+--threshold returns exit 2 (misuse) without any PG
+queries; --threshold without --exit-on-divergence rejected
+with 'requires --exit-on-divergence' error (strict rejection
+prevents silent no-op masking misuse); --threshold 0 /
+negative / non-integer / non-numeric → exit 2 with
+'positive integer' error. Pure CLI enhancement — single
+divergenceExitCode helper extended to read --threshold,
+no adapter changes, no result-type changes, no JSON
+envelope changes; same fieldDiffs/fieldVariations arrays
+emitted unchanged so operators inspecting JSON apply
+custom filter logic on top. Applies uniformly to all 4
+diff variants — cross-tenant default uses
+fieldDiffs.length, --vs-platform uses fieldDiffs.length,
+--cross-table uses fieldDiffs.length, --add-tenant N-way
+uses fieldVariations.length (number of fields with
+variation, not the cross-product of distinct value
+groups — matches operator intent "how many fields differ
+across the cohort"). Use cases unblocked — cohort drift
+gate tolerating minor variations (5-tenant cohort with
+--threshold 3 tolerates 1-2 minor field variations,
+fails on structural drift), tier migration tolerance
+(--threshold 2 tolerates single expected-field difference
+like updated_at timestamp, fails on multi-field drift),
+graduated CI gates with multiple --threshold values
+wired into staged pipelines (strict stage 1: --threshold
+1, lenient stage 2: --threshold 5). Rejected
+alternatives — --max-diffs N alternate name (--threshold
+more idiomatic for "fail when N+"), strict > semantic
+(counterintuitive — operators counting "fail when 2+
+fields differ" expect --threshold 2 not 1), silent no-op
+when --threshold without --exit-on-divergence (masks
+misuse), accept --threshold 0 to mean "fail on any"
+(equivalent to default redundant — reject to keep
+semantic clean), --ignore-fields <list> for per-field
+allowlist (broader feature defer — operators use jq for
+now), --threshold-percentage X% for fractional thresholds
+(operators compute expected count themselves defer),
+apply threshold per-field "fail when retention_days alone
+differs" (different mental model whole-record threshold
+matches user intent), default N=2 instead of N=1 (breaks
+backward compat with ADR-0181 callers — default of 1
+preserves prior semantics), N-way threshold against
+value-cell count sum of distinct values across varying
+fields (over-counts confuses operators thinking "how
+many fields differ"). Drawbacks — --threshold requires
+--exit-on-divergence operators passing --threshold 3
+without --exit-on-divergence get exit 2 (documented but
+could surprise; strict-rejection over silent no-op chosen
+deliberately), no per-field threshold or per-field
+allowlist operators wanting "ignore enabled field count
+everything else" wrap with jq on JSON then check length
+(threshold uniform across field types), >= semantic at-
+or-above operators wanting strict-above need --threshold
+N+1 (documented matches at-least-N intuition), no
+fractional threshold operators wanting "fail when 50%+
+of fields differ" compute expected count themselves (out
+of scope), N-way uses field-variation count not value-
+cell count for 10-tenant cohort with 3 fields each having
+2 distinct values fieldVariations.length is 3 not 6
+(documented matches operator intent), validation happens
+at parent dispatcher variant-specific helpers trust
+threshold is valid future variants must call
+divergenceExitCode at end. 14 new CLI tests in retention.
+test.ts — --threshold without --exit-on-divergence exit
+2 with 'requires --exit-on-divergence' message,
+--threshold 0 exit 2 with 'positive integer' message,
+--threshold -1 exit 2, --threshold 1.5 non-integer exit
+2, --threshold abc non-numeric exit 2, --threshold 1
+behaves like default (exit 3 on any diff = behavior from
+ADR-0181 preserved), --threshold 2 + fieldDiffs=1 exit 0
+(below threshold), --threshold 2 + fieldDiffs=2 exit 3
+(at threshold), --threshold 2 + fieldDiffs=3 exit 3
+(above threshold), --threshold 5 + fieldDiffs=0 exit 0
+(no drift at all), --threshold integrates with --vs-
+platform variant (threshold=3 + 2 diffs → exit 0),
+--threshold integrates with --cross-table variant
+(threshold=2 + 2 diffs → exit 3), --threshold integrates
+with --add-tenant N-way variant using fieldVariations.
+length not fieldDiffs.length (threshold=3 + 2 variations
+→ exit 0), validation happens BEFORE PG adapter call
+verified via diffTenantCapture length 0 with invalid
+--threshold 0. cli.ts helpText extended with 3-line note
+under existing exit-on-divergence note explaining
+--threshold N default 1 + requires --exit-on-divergence
++ invalid values exit 2. ADR-0184 documents the design +
+9 rejected alternatives + 7 future Qs (--ignore-field
+repeated flag using multiFlags from ADR-0183,
+--threshold-percentage X%, per-field severity weighting
+overcomplicated, --threshold on retention diff-history,
+--threshold semantic for retention prune separate ADR,
+output annotation 'threshold met X >= Y' defer,
+default threshold via environment variable defer). The
+retention CLI now has 17 actions with 4 diff variants
+in 'diff' action all supporting --exit-on-divergence
+[--threshold N] — operators have first-class CI-gate
+ergonomics with both strict (any drift) and fuzzy (N+
+fields) modes across pair-wise AND N-way comparison
+matrices.
+M6.7.zz.tenant.opt-out.cli.diff.add-tenant
 closes ADR-0178 Q2 by adding `--add-tenant <uuid>` repeated
 flag to `retention diff` for N-way cross-tenant comparison
 across 3+ tenants on the same table. Operators with 5-tenant
@@ -6355,7 +6468,21 @@ nway:true JSON discriminator (4 diff envelope shapes
 now mutually exclusive); A/B/C tenant labels in human
 output; replaces 10 pair-wise commands + manual
 correlation for 5-tenant cohorts; --exit-on-divergence
-from ADR-0181 integrates uniformly).
+from ADR-0181 integrates uniformly),
+ADR-0184 covers M6.7.zz.tenant.opt-out.cli.diff.threshold
+(`retention diff --threshold N` fuzzy CI-gate threshold
+— closes ADR-0181 Q2 + ADR-0183 Q5 — modifies
+--exit-on-divergence so exit 3 fires only when
+fieldDiffs.length or fieldVariations.length >= N;
+default N=1 preserves ADR-0181 behavior; --threshold
+without --exit-on-divergence rejected with strict
+exit 2; --threshold 0/negative/non-integer rejected;
+applies uniformly to all 4 diff variants; validation
+at top of runRetentionDiff before any PG queries;
+pure CLI enhancement single divergenceExitCode helper
+extended no adapter/result-type/envelope changes;
+operators get tier-migration tolerance + cohort
+minor-drift tolerance + graduated CI gates).
 
 ## Architecture in 90 seconds
 
@@ -8860,6 +8987,180 @@ variants in 'diff' action (cross-tenant default +
 supporting --exit-on-divergence — operators have
 first-class CI-gate ergonomics across pair-wise AND
 N-way comparison matrices.
+ADR-0184 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff.threshold
+(`crossengin retention diff --threshold N` fuzzy CI-
+gate threshold across all 4 diff variants — closes
+ADR-0181 Q2 + ADR-0183 Q5 in one milestone; after
+ADR-0181 shipped strict --exit-on-divergence ("any
+drift fails") and ADR-0183 extended it to N-way via
+fieldVariations counts, both ADRs explicitly listed
+--threshold N as future work because real operator
+use cases pile up (tier migration tolerance "fail CI
+when more than 1 field differs from reference small
+drifts during migration acceptable but multi-field
+drift signals bigger problem", cohort-consistency
+"in 10-tenant cohort fail when 3+ distinct fields
+varying minor variations like reason text wording
+tolerable structural drift not", compliance noise
+reduction "fail only when source + retention_days
+differ ignore enabled flag noise operators wrap with
+jq for now but want first-class support"); CLI surface
+`retention diff <...args> --exit-on-divergence
+--threshold <N>`; --threshold N is a string flag
+taking positive integer N>=1 default when omitted
+N=1 equivalent to current --exit-on-divergence
+behavior. Semantic table — fieldDiffs.length or
+fieldVariations.length 0 → exit 0 regardless,
+fieldDiffsLength 1 → exit 3 without --threshold/with
+--threshold 1 but exit 0 with --threshold 2,
+fieldDiffsLength 2 → exit 3 with --threshold 1 or 2
+but exit 0 with --threshold 5, fieldDiffsLength 5 →
+exit 3 with --threshold 1/2/5 same as fieldDiffsLength
+10; >= (at-or-above-threshold) comparison —
+--threshold 5 fails on EXACTLY 5 diffs not 6+ matches
+operator intuition "fail when at least N". Validation
+table — --threshold set without --exit-on-divergence
+exit 2 with '--threshold requires --exit-on-divergence'
+(strict-rejection over silent no-op prevents misuse
+masking), --threshold 0 (or negative) exit 2 with
+'--threshold must be a positive integer', --threshold
+1.5 (non-integer) exit 2 with same message,
+--threshold abc (non-numeric) exit 2 with same
+message; valid value 0/3 per semantic. Validation
+fires at TOP of runRetentionDiff before dispatcher
+routes to variant so invalid --threshold returns
+exit 2 without any PG queries — CI logs saying "exit
+2" immediately recognizable as CLI misuse not runtime
+errors. Why require --exit-on-divergence — without
+it --threshold would silently no-op operators passing
+--threshold 5 thinking gate is configured would get
+exit 0 regardless of diff; strict rejection catches
+misuse early. Single helper across 4 diff variants —
+existing divergenceExitCode(command, fieldDiffsLength)
+now reads --threshold from command.flags directly via
+getStringFlag returning Number(thresholdRaw) defaulting
+to 1; trusts validateThresholdFlag already ran
+successfully at parent dispatcher (no error paths
+inside exit-code computation); pure CLI no adapter
+changes. Applies uniformly to all 4 diff variants —
+cross-tenant default fieldDiffs.length, --vs-platform
+fieldDiffs.length, --cross-table fieldDiffs.length,
+--add-tenant N-way fieldVariations.length (number of
+fields with variation not cross-product of distinct
+value groups — for 10-tenant cohort with 3 fields
+each having 2 distinct values fieldVariations.length
+is 3 not 6 matches operator intent "how many fields
+differ"). Pure CLI enhancement — no adapter changes,
+no result-type changes, no JSON envelope changes;
+JSON output emits same fieldDiffs/fieldVariations
+arrays as before — operators inspecting JSON apply
+custom filter logic on top; threshold consumed at CLI
+exit-code layer. Use cases unblocked — cohort drift
+gate tolerating minor variations (5-tenant cohort
+with --threshold 3 fails CI only when 3+ fields vary
+across cohort), tier migration tolerance (--threshold
+2 tolerates single expected-field difference like
+updated_at timestamp fails on multi-field drift),
+compliance-only-source-and-retention gate via simpler
+"tolerate up to N differences" without per-field
+configuration, graduated CI gates with multiple
+--threshold values wired into staged pipelines
+(stage 1 strict --threshold 1, stage 2 lenient
+--threshold 5). Rejected alternatives — --max-diffs
+N alternate name (--threshold more idiomatic for
+"fail when N+"), strict > semantic (counterintuitive
+— operators counting "fail when 2+ fields differ"
+expect --threshold 2 not 1), silent no-op when
+--threshold without --exit-on-divergence (masks
+misuse), --threshold accepts 0 to mean "fail on any"
+(equivalent to default redundant reject to keep
+semantic clean), --ignore-fields <list> for per-field
+allowlist (broader feature defer — operators use jq),
+--threshold-percentage X% for fractional (operators
+compute expected count themselves defer), apply
+threshold per-field "fail when retention_days alone
+differs" (different mental model whole-record
+threshold matches user intent), make threshold default
+N=2 instead of N=1 (breaks backward compat with
+ADR-0181 callers — default 1 preserves prior
+semantics), N-way threshold against value-cell count
+sum of distinct values across all varying fields
+(over-counts confuses operators "how many fields
+differ"). Drawbacks — --threshold requires
+--exit-on-divergence operators passing --threshold 3
+without --exit-on-divergence get exit 2 (documented
+but could surprise; strict-rejection chosen over
+silent no-op), no per-field threshold or per-field
+allowlist operators wanting "ignore enabled field
+count everything else" wrap with jq on JSON output
+then check length (threshold uniform across all field
+types), >= semantic at-or-above operators wanting
+strict-above need --threshold N+1 (documented matches
+at-least-N intuition), no fractional threshold
+(operators compute expected count themselves out of
+scope), N-way uses field-variation count not value-
+cell count (matches operator intent documented),
+validation happens at parent dispatcher variant-
+specific helpers (runRetentionDiffVsPlatform etc.)
+trust threshold is valid — if new variants are added
+in the future they must call divergenceExitCode at
+end or they bypass threshold checking. 14 new CLI
+tests in retention.test.ts — --threshold without
+--exit-on-divergence exit 2 with 'requires
+--exit-on-divergence' in error message, --threshold
+0 exit 2 with 'positive integer' message,
+--threshold -1 exit 2 (via --threshold=-1 syntax),
+--threshold 1.5 non-integer exit 2 with 'positive
+integer' message, --threshold abc non-numeric exit 2,
+--threshold 1 behaves like default
+--exit-on-divergence (exit 3 on 1 diff = backward
+compat with ADR-0181 preserved), --threshold 2 +
+fieldDiffs=1 → exit 0 (below threshold), --threshold
+2 + fieldDiffs=2 → exit 3 (at threshold = >= matches
+operator intuition), --threshold 2 + fieldDiffs=3 →
+exit 3 (above threshold), --threshold 5 + fieldDiffs
+=0 → exit 0 (no drift at all regardless of
+threshold), --threshold integrates with --vs-platform
+variant (threshold=3 + 2 diffs → exit 0 below
+threshold), --threshold integrates with --cross-
+table variant (threshold=2 + 2 diffs → exit 3 at
+threshold), --threshold integrates with --add-tenant
+N-way variant using fieldVariations.length not
+fieldDiffs.length (threshold=3 + 2 variations → exit
+0 below threshold), validation happens BEFORE PG
+adapter call verified via diffTenantCapture length 0
+with invalid --threshold 0 (no DB query attempted on
+misuse). cli.ts helpText extended with 3-line note
+under existing exit-on-divergence note explaining
+--threshold N default 1 + requires --exit-on-
+divergence + invalid values exit 2 + applies to all
+4 diff variants. Future Qs cover --ignore-field
+<name> repeated flag for per-field allowlist using
+multiFlags infrastructure from ADR-0183 defer,
+--threshold-percentage X% for fractional thresholds
+in N-way comparisons across many fields defer, per-
+field severity weighting (source change = 10 points
+enabled change = 1 point fail when score >=
+threshold overcomplicated defer), --threshold on
+retention diff-history for cross-event analysis
+different workflow defer, --threshold semantic for
+retention prune (e.g., fail CI when N+ rows would be
+deleted) different context prune is destructive
+separate ADR if requested, output annotation showing
+'threshold met X >= Y' or 'threshold not met X < Y'
+in human format defer operators read fieldDiffs
+count directly, default threshold via environment
+variable CROSSENGIN_DIFF_THRESHOLD for pipeline-wide
+configuration defer operators set per-call for clarity.
+The retention CLI now has 17 actions with 4 diff
+variants in 'diff' action (cross-tenant default +
+--vs-platform + --cross-table + --add-tenant) all
+supporting --exit-on-divergence [--threshold N] —
+operators have first-class CI-gate ergonomics with
+both strict mode (--threshold 1 / default = fail on
+any drift) and fuzzy mode (--threshold N>=2 = fail
+on N+ field differences) across pair-wise AND N-way
+comparison matrices.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

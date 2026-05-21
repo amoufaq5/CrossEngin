@@ -5365,6 +5365,439 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
   });
 });
 
+describe("runRetention diff --threshold (M6.7.zz.tenant.opt-out.cli.diff.threshold)", () => {
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+
+  function makeDiffResult(
+    fieldDiffsLen: number,
+  ): DiffTenantPoliciesResult {
+    const fieldDiffs = Array.from({ length: fieldDiffsLen }, (_, i) => ({
+      field: `field_${i}`,
+      valueA: i,
+      valueB: i + 100,
+    }));
+    return {
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      resolutionA: {
+        source: "tenant",
+        retentionDays: 30,
+        enabled: true,
+        tenantId: TENANT_A,
+      },
+      resolutionB: {
+        source: "platform",
+        retentionDays: 90,
+        enabled: true,
+      },
+      fieldDiffs,
+    };
+  }
+
+  it("returns exit 2 when --threshold is set without --exit-on-divergence", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--threshold",
+        "2",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--threshold requires --exit-on-divergence");
+  });
+
+  it("returns exit 2 when --threshold value is 0", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "0",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--threshold must be a positive integer");
+  });
+
+  it("returns exit 2 when --threshold value is negative", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold=-1",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--threshold must be a positive integer");
+  });
+
+  it("returns exit 2 when --threshold value is non-integer (1.5)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "1.5",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--threshold must be a positive integer");
+  });
+
+  it("returns exit 2 when --threshold value is non-numeric", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "abc",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--threshold must be a positive integer");
+  });
+
+  it("--threshold 1 behaves like default --exit-on-divergence (exit 3 on any diff)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "1",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: makeDiffResult(1),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--threshold 2 + fieldDiffs=1 → exit 0 (below threshold)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "2",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: makeDiffResult(1),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("--threshold 2 + fieldDiffs=2 → exit 3 (at threshold)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "2",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: makeDiffResult(2),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--threshold 2 + fieldDiffs=3 → exit 3 (above threshold)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "2",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: makeDiffResult(3),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--threshold 5 + fieldDiffs=0 → exit 0 (no drift at all)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "5",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: makeDiffResult(0),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("--threshold integrates with --vs-platform variant", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+        "--exit-on-divergence",
+        "--threshold",
+        "3",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantVsPlatformResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tenantResolution: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            platformResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "f1", valueA: 1, valueB: 2 },
+              { field: "f2", valueA: 1, valueB: 2 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("--threshold integrates with --cross-table variant", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--exit-on-divergence",
+        "--threshold",
+        "2",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesResult: {
+            tenantId: TENANT_A,
+            tableNameA: "workflow_traces",
+            tableNameB: "llm_call_traces",
+            resolutionA: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "f1", valueA: 1, valueB: 2 },
+              { field: "f2", valueA: 1, valueB: 2 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--threshold integrates with --add-tenant N-way variant", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--exit-on-divergence",
+        "--threshold",
+        "3",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [
+              {
+                tenantId: TENANT_A,
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tenantId: TENANT_B,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+              {
+                tenantId: TENANT_C,
+                resolution: {
+                  source: "platform",
+                  retentionDays: 90,
+                  enabled: true,
+                },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "source",
+                distinctValues: [
+                  { value: "tenant", tenantIds: [TENANT_A] },
+                  { value: "platform", tenantIds: [TENANT_B, TENANT_C] },
+                ],
+              },
+              {
+                field: "retention_days",
+                distinctValues: [
+                  { value: 30, tenantIds: [TENANT_A] },
+                  { value: 90, tenantIds: [TENANT_B, TENANT_C] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("validation happens BEFORE PG adapter call (no PG queries on invalid --threshold)", async () => {
+    const capture: DiffTenantPoliciesInput[] = [];
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--threshold",
+        "0",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTenantCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("positive integer");
+    expect(capture).toHaveLength(0);
+  });
+});
+
 describe("formatTenantTablesDiff", () => {
   it("renders 'No differences' message when fieldDiffs is empty", () => {
     const out = formatTenantTablesDiff({
