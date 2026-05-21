@@ -118,7 +118,7 @@ import {
 
 describe("META_TABLES", () => {
   it("contains 128 tables", () => {
-    expect(META_TABLES).toHaveLength(128);
+    expect(META_TABLES).toHaveLength(129);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -243,6 +243,7 @@ describe("META_TABLES", () => {
       "tenant_credits",
       "tenant_data_exports",
       "tenant_lifecycle_events",
+      "tenant_retention_opt_out_history",
       "tenant_retention_policies",
       "tenant_storage_usage",
       "tenant_tombstones",

@@ -4,6 +4,8 @@ import type {
   EffectiveRetentionResolution,
   ExpiringOptOut,
   ExpiringOptOutsInput,
+  ListOptOutHistoryInput,
+  OptOutHistoryEntry,
   PostgresTraceRetention,
   RetentionPolicyRow,
   SetTenantOptOutInput,
@@ -64,6 +66,8 @@ function fakeRetention(opts: {
   setRetentionCapture?: SetTenantRetentionInput[];
   deleteResult?: boolean;
   deleteCapture?: DeleteTenantPolicyInput[];
+  historyEntries?: readonly OptOutHistoryEntry[];
+  historyCapture?: ListOptOutHistoryInput[];
 }): PostgresTraceRetention {
   return {
     expiringOptOuts: async (input: ExpiringOptOutsInput) => {
@@ -142,6 +146,11 @@ function fakeRetention(opts: {
       opts.deleteCapture?.push(input);
       if (opts.throws !== undefined) throw opts.throws;
       return opts.deleteResult ?? true;
+    },
+    listOptOutHistory: async (input: ListOptOutHistoryInput = {}) => {
+      opts.historyCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return opts.historyEntries ?? [];
     },
   } as unknown as PostgresTraceRetention;
 }
@@ -736,6 +745,7 @@ describe("runRetention opt-out", () => {
       retentionDays: undefined,
       optOutUntil: null,
       optOutReason: null,
+      actorId: null,
     });
   });
 
@@ -985,6 +995,7 @@ describe("runRetention opt-in", () => {
     expect(clearOptOutCapture[0]).toEqual({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
+      actorId: null,
     });
   });
 
@@ -1569,6 +1580,7 @@ describe("runRetention set", () => {
       tableName: "workflow_traces",
       retentionDays: 30,
       enabled: true,
+      actorId: null,
     });
   });
 
@@ -1787,6 +1799,7 @@ describe("runRetention delete", () => {
     expect(deleteCapture[0]).toEqual({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
+      actorId: null,
     });
   });
 
@@ -1890,5 +1903,358 @@ describe("runRetention delete", () => {
     );
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
+  const ACTOR = "11111111-1111-4111-8111-111111111111";
+
+  function entry(
+    overrides: Partial<OptOutHistoryEntry> = {},
+  ): OptOutHistoryEntry {
+    return {
+      id: "10000000-0000-4000-8000-000000000001",
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      eventKind: "opt_out_set",
+      actorId: null,
+      occurredAt: "2026-05-20T12:00:00.000Z",
+      prevState: null,
+      nextState: { opt_out: true, retention_days: 365 },
+      attributes: {},
+      ...overrides,
+    };
+  }
+
+  it("returns entries with no filters when run plain", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [entry()],
+        historyCapture,
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(historyCapture[0]).toEqual({
+      tenantId: undefined,
+      tableName: undefined,
+      eventKind: undefined,
+      since: undefined,
+      until: undefined,
+      limit: 100,
+    });
+  });
+
+  it("threads --tenant + --table + --kind + --limit through to adapter", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT_A,
+        "--table",
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--limit",
+        "50",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]).toEqual({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      eventKind: "opt_out_set",
+      since: undefined,
+      until: undefined,
+      limit: 50,
+    });
+  });
+
+  it("normalises --since and --until to canonical ISO 8601", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--since",
+        "2026-05-01",
+        "--until",
+        "2026-05-31",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]?.since).toMatch(
+      /^2026-05-01T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    expect(historyCapture[0]?.until).toMatch(
+      /^2026-05-31T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+  });
+
+  it("returns exit 2 on invalid --kind", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--kind", "bogus"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind");
+  });
+
+  it("returns exit 2 on invalid --since", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--since", "not-a-date"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --since");
+  });
+
+  it("returns exit 2 on invalid --until", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--until", "not-a-date"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --until");
+  });
+
+  it("returns exit 2 on non-integer --limit", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--limit", "abc"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --limit");
+  });
+
+  it("returns exit 2 on --limit < 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--limit", "0"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --limit");
+  });
+
+  it("human-format empty result prints clear message", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("no history entries");
+  });
+
+  it("human-format renders table with event_kind + tenant + table + actor", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          entry({
+            eventKind: "policy_deleted",
+            actorId: ACTOR,
+          }),
+        ],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("policy_deleted");
+    expect(out()).toContain(TENANT_A);
+    expect(out()).toContain("workflow_traces");
+    expect(out()).toContain(ACTOR);
+  });
+
+  it("renders '<system>' for null actorId", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [entry({ actorId: null })],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(out()).toContain("<system>");
+  });
+
+  it("json-format emits envelope with filters + count + entries", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT_A,
+        "--kind",
+        "opt_out_set",
+        "--limit",
+        "10",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [entry(), entry()],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.tenantFilter).toBe(TENANT_A);
+    expect(parsedJson.eventKind).toBe("opt_out_set");
+    expect(parsedJson.limit).toBe(10);
+    expect(parsedJson.count).toBe(2);
+    expect(parsedJson.entries).toHaveLength(2);
+  });
+
+  it("propagates adapter errors as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("PG connection refused"),
+      }),
+    } as RetentionContext);
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () => {
+  const ACTOR = "11111111-1111-4111-8111-111111111111";
+
+  it("opt-out threads --actor to setTenantOptOut", async () => {
+    const { ctx } = buffers();
+    const setOptOutCapture: SetTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-out",
+        TENANT_A,
+        "workflow_traces",
+        "--actor",
+        ACTOR,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setOptOutCapture[0]?.actorId).toBe(ACTOR);
+  });
+
+  it("opt-in threads --actor to clearTenantOptOut", async () => {
+    const { ctx } = buffers();
+    const clearOptOutCapture: ClearTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "opt-in",
+        TENANT_A,
+        "workflow_traces",
+        "--actor",
+        ACTOR,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ clearOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(clearOptOutCapture[0]?.actorId).toBe(ACTOR);
+  });
+
+  it("set threads --actor to setTenantRetention", async () => {
+    const { ctx } = buffers();
+    const setRetentionCapture: SetTenantRetentionInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "set",
+        TENANT_A,
+        "workflow_traces",
+        "--days",
+        "30",
+        "--actor",
+        ACTOR,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setRetentionCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setRetentionCapture[0]?.actorId).toBe(ACTOR);
+  });
+
+  it("delete threads --actor to deleteTenantPolicy", async () => {
+    const { ctx } = buffers();
+    const deleteCapture: DeleteTenantPolicyInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "delete",
+        TENANT_A,
+        "workflow_traces",
+        "--actor",
+        ACTOR,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ deleteCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(deleteCapture[0]?.actorId).toBe(ACTOR);
+  });
+
+  it("opt-out omitting --actor passes null to adapter", async () => {
+    const { ctx } = buffers();
+    const setOptOutCapture: SetTenantOptOutInput[] = [];
+    const code = await runRetention(
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ setOptOutCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(setOptOutCapture[0]?.actorId).toBeNull();
   });
 });

@@ -9373,6 +9373,62 @@ export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
   },
 };
 
+export const META_TENANT_RETENTION_OPT_OUT_HISTORY: TableDefinition = {
+  schema: "meta",
+  name: "tenant_retention_opt_out_history",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "table_name", type: "TEXT", notNull: true },
+    {
+      name: "event_kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "event_kind IN ('opt_out_set', 'opt_out_cleared', 'retention_set', 'policy_deleted')",
+    },
+    { name: "actor_id", type: "UUID" },
+    {
+      name: "occurred_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      default: "now()",
+    },
+    { name: "prev_state", type: "JSONB" },
+    { name: "next_state", type: "JSONB" },
+    {
+      name: "attributes",
+      type: "JSONB",
+      notNull: true,
+      default: "'{}'::jsonb",
+    },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "tenant_retention_opt_out_history_tenant_idx",
+      columns: ["tenant_id", "occurred_at"],
+    },
+    {
+      name: "tenant_retention_opt_out_history_table_idx",
+      columns: ["table_name", "occurred_at"],
+    },
+    {
+      name: "tenant_retention_opt_out_history_kind_idx",
+      columns: ["event_kind", "occurred_at"],
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_retention_opt_out_history_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_LLM_CALL_TRACES: TableDefinition = {
   schema: "meta",
   name: "llm_call_traces",
@@ -9615,4 +9671,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_LLM_CALL_TRACES,
   META_RETENTION_POLICIES,
   META_TENANT_RETENTION_POLICIES,
+  META_TENANT_RETENTION_OPT_OUT_HISTORY,
 ];

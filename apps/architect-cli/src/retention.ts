@@ -1,9 +1,12 @@
 import {
   createNodePgConnection,
+  isOptOutHistoryEventKind,
   parsePgEnvConfig,
   PostgresTraceRetention,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
+  type OptOutHistoryEntry,
+  type OptOutHistoryEventKind,
   type PgConnection,
   type RetentionPolicyRow,
   type TenantRetentionPolicyRow,
@@ -33,7 +36,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|opt-out|opt-in|set|delete|list-policies|history> [args]",
     );
     return 2;
   }
@@ -55,10 +58,12 @@ export async function runRetention(
         return await runRetentionDelete(command, ctx, handle.retention);
       case "list-policies":
         return await runRetentionListPolicies(command, ctx, handle.retention);
+      case "history":
+        return await runRetentionHistory(command, ctx, handle.retention);
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, opt-out, opt-in, set, delete, list-policies, history`,
         );
         return 2;
     }
@@ -296,6 +301,8 @@ async function runRetentionOptOut(
     retentionDays = parsed;
   }
 
+  const actorId = getStringFlag(command, "actor");
+
   let policy: TenantRetentionPolicyRow;
   try {
     policy = await retention.setTenantOptOut({
@@ -304,6 +311,7 @@ async function runRetentionOptOut(
       retentionDays,
       optOutUntil,
       optOutReason,
+      actorId,
     });
   } catch (err) {
     printError(
@@ -336,9 +344,15 @@ async function runRetentionOptIn(
     return 2;
   }
 
+  const actorId = getStringFlag(command, "actor");
+
   let policy: TenantRetentionPolicyRow | null;
   try {
-    policy = await retention.clearTenantOptOut({ tenantId, tableName });
+    policy = await retention.clearTenantOptOut({
+      tenantId,
+      tableName,
+      actorId,
+    });
   } catch (err) {
     printError(
       ctx.io,
@@ -547,6 +561,8 @@ async function runRetentionSet(
     }
   }
 
+  const actorId = getStringFlag(command, "actor");
+
   let policy: TenantRetentionPolicyRow;
   try {
     policy = await retention.setTenantRetention({
@@ -554,6 +570,7 @@ async function runRetentionSet(
       tableName,
       retentionDays: days,
       enabled,
+      actorId,
     });
   } catch (err) {
     printError(
@@ -571,6 +588,127 @@ async function runRetentionSet(
   return 0;
 }
 
+async function runRetentionHistory(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantFilter = getStringFlag(command, "tenant");
+  const tableFilter = getStringFlag(command, "table");
+  const kindFlag = getStringFlag(command, "kind");
+  const sinceFlag = getStringFlag(command, "since");
+  const untilFlag = getStringFlag(command, "until");
+  const limitFlag = getStringFlag(command, "limit");
+
+  let kind: OptOutHistoryEventKind | undefined;
+  if (kindFlag !== null) {
+    if (!isOptOutHistoryEventKind(kindFlag)) {
+      printError(
+        ctx.io,
+        `retention history: invalid --kind '${kindFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    kind = kindFlag;
+  }
+
+  let since: string | undefined;
+  if (sinceFlag !== null) {
+    const ms = Date.parse(sinceFlag);
+    if (!Number.isFinite(ms)) {
+      printError(
+        ctx.io,
+        `retention history: invalid --since '${sinceFlag}' (must be an ISO 8601 timestamp)`,
+      );
+      return 2;
+    }
+    since = new Date(ms).toISOString();
+  }
+
+  let until: string | undefined;
+  if (untilFlag !== null) {
+    const ms = Date.parse(untilFlag);
+    if (!Number.isFinite(ms)) {
+      printError(
+        ctx.io,
+        `retention history: invalid --until '${untilFlag}' (must be an ISO 8601 timestamp)`,
+      );
+      return 2;
+    }
+    until = new Date(ms).toISOString();
+  }
+
+  let limit = 100;
+  if (limitFlag !== null) {
+    const parsed = Number.parseInt(limitFlag, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      printError(
+        ctx.io,
+        `retention history: invalid --limit '${limitFlag}' (must be an integer >= 1)`,
+      );
+      return 2;
+    }
+    limit = parsed;
+  }
+
+  let entries: ReadonlyArray<OptOutHistoryEntry>;
+  try {
+    entries = await retention.listOptOutHistory({
+      tenantId: tenantFilter ?? undefined,
+      tableName: tableFilter ?? undefined,
+      eventKind: kind,
+      since,
+      until,
+      limit,
+    });
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention history: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      tenantFilter: tenantFilter ?? null,
+      tableFilter: tableFilter ?? null,
+      eventKind: kind ?? null,
+      since: since ?? null,
+      until: until ?? null,
+      limit,
+      count: entries.length,
+      entries,
+    });
+    return 0;
+  }
+
+  if (entries.length === 0) {
+    printSuccess(ctx.io, "no history entries match the given filters");
+    return 0;
+  }
+
+  ctx.io.stdout.write(formatHistoryList(entries, limit));
+  return 0;
+}
+
+export function formatHistoryList(
+  entries: ReadonlyArray<OptOutHistoryEntry>,
+  limit: number,
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `Retention history (${entries.length} entries, limit ${limit}):`,
+  );
+  for (const e of entries) {
+    const actor = e.actorId ?? "<system>";
+    lines.push(
+      `  ${e.occurredAt}  ${e.eventKind.padEnd(16)} tenant=${e.tenantId}  table=${e.tableName}  actor=${actor}`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
 async function runRetentionDelete(
   command: ParsedCommand,
   ctx: RunContext,
@@ -586,9 +724,15 @@ async function runRetentionDelete(
     return 2;
   }
 
+  const actorId = getStringFlag(command, "actor");
+
   let deleted: boolean;
   try {
-    deleted = await retention.deleteTenantPolicy({ tenantId, tableName });
+    deleted = await retention.deleteTenantPolicy({
+      tenantId,
+      tableName,
+      actorId,
+    });
   } catch (err) {
     printError(
       ctx.io,

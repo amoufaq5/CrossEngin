@@ -3,6 +3,25 @@ import type { PgConnection } from "./connection.js";
 const SCHEMA = "meta";
 const POLICIES_TABLE = "retention_policies";
 const TENANT_POLICIES_TABLE = "tenant_retention_policies";
+const HISTORY_TABLE = "tenant_retention_opt_out_history";
+
+export const OPT_OUT_HISTORY_EVENT_KINDS = [
+  "opt_out_set",
+  "opt_out_cleared",
+  "retention_set",
+  "policy_deleted",
+] as const;
+export type OptOutHistoryEventKind =
+  (typeof OPT_OUT_HISTORY_EVENT_KINDS)[number];
+
+export function isOptOutHistoryEventKind(
+  value: unknown,
+): value is OptOutHistoryEventKind {
+  return (
+    typeof value === "string" &&
+    (OPT_OUT_HISTORY_EVENT_KINDS as readonly string[]).includes(value)
+  );
+}
 
 interface PrunableTableSpec {
   readonly timeColumn: string;
@@ -119,11 +138,15 @@ export interface SetTenantOptOutInput {
   readonly retentionDays?: number;
   readonly optOutUntil?: string | null;
   readonly optOutReason?: string | null;
+  readonly actorId?: string | null;
+  readonly attributes?: Record<string, unknown>;
 }
 
 export interface ClearTenantOptOutInput {
   readonly tenantId: string;
   readonly tableName: string;
+  readonly actorId?: string | null;
+  readonly attributes?: Record<string, unknown>;
 }
 
 export interface SetTenantRetentionInput {
@@ -131,11 +154,36 @@ export interface SetTenantRetentionInput {
   readonly tableName: string;
   readonly retentionDays: number;
   readonly enabled?: boolean;
+  readonly actorId?: string | null;
+  readonly attributes?: Record<string, unknown>;
 }
 
 export interface DeleteTenantPolicyInput {
   readonly tenantId: string;
   readonly tableName: string;
+  readonly actorId?: string | null;
+  readonly attributes?: Record<string, unknown>;
+}
+
+export interface OptOutHistoryEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly tableName: string;
+  readonly eventKind: OptOutHistoryEventKind;
+  readonly actorId: string | null;
+  readonly occurredAt: string;
+  readonly prevState: Record<string, unknown> | null;
+  readonly nextState: Record<string, unknown> | null;
+  readonly attributes: Record<string, unknown>;
+}
+
+export interface ListOptOutHistoryInput {
+  readonly tenantId?: string;
+  readonly tableName?: string;
+  readonly eventKind?: OptOutHistoryEventKind;
+  readonly since?: string;
+  readonly until?: string;
+  readonly limit?: number;
 }
 
 interface RawPolicyRow {
@@ -559,20 +607,49 @@ export class PostgresTraceRetention {
     }
     const optOutUntil = input.optOutUntil ?? null;
     const optOutReason = input.optOutReason ?? null;
+    const actorId = input.actorId ?? null;
+    const attributes = JSON.stringify(input.attributes ?? {});
     const result = await this.conn.query<RawTenantPolicyRow>(
-      `INSERT INTO ${SCHEMA}.${TENANT_POLICIES_TABLE}
-         (tenant_id, table_name, retention_days, enabled, opt_out,
-          opt_out_reason, opt_out_until, updated_at)
-       VALUES ($1, $2, $3, false, true, $4, $5, now())
-       ON CONFLICT (tenant_id, table_name) DO UPDATE SET
-         enabled = false,
-         opt_out = true,
-         opt_out_reason = EXCLUDED.opt_out_reason,
-         opt_out_until = EXCLUDED.opt_out_until,
-         updated_at = now()
-       RETURNING tenant_id, table_name, retention_days, enabled,
-                 opt_out, opt_out_reason, opt_out_until, last_pruned_at`,
-      [input.tenantId, input.tableName, retentionDays, optOutReason, optOutUntil],
+      `WITH existing AS (
+         SELECT tenant_id, table_name, retention_days, enabled, opt_out,
+                opt_out_reason, opt_out_until, last_pruned_at
+         FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE tenant_id = $1 AND table_name = $2
+       ),
+       mutation AS (
+         INSERT INTO ${SCHEMA}.${TENANT_POLICIES_TABLE}
+           (tenant_id, table_name, retention_days, enabled, opt_out,
+            opt_out_reason, opt_out_until, updated_at)
+         VALUES ($1, $2, $3, false, true, $4, $5, now())
+         ON CONFLICT (tenant_id, table_name) DO UPDATE SET
+           enabled = false,
+           opt_out = true,
+           opt_out_reason = EXCLUDED.opt_out_reason,
+           opt_out_until = EXCLUDED.opt_out_until,
+           updated_at = now()
+         RETURNING tenant_id, table_name, retention_days, enabled,
+                   opt_out, opt_out_reason, opt_out_until, last_pruned_at
+       ),
+       history AS (
+         INSERT INTO ${SCHEMA}.${HISTORY_TABLE}
+           (tenant_id, table_name, event_kind, actor_id,
+            prev_state, next_state, attributes)
+         SELECT m.tenant_id, m.table_name, 'opt_out_set', $6,
+                (SELECT to_jsonb(e.*) FROM existing e),
+                to_jsonb(m.*),
+                $7::jsonb
+         FROM mutation m
+       )
+       SELECT * FROM mutation`,
+      [
+        input.tenantId,
+        input.tableName,
+        retentionDays,
+        optOutReason,
+        optOutUntil,
+        actorId,
+        attributes,
+      ],
     );
     const r = result.rows[0];
     if (r === undefined) {
@@ -593,15 +670,36 @@ export class PostgresTraceRetention {
   async clearTenantOptOut(
     input: ClearTenantOptOutInput,
   ): Promise<TenantRetentionPolicyRow | null> {
+    const actorId = input.actorId ?? null;
+    const attributes = JSON.stringify(input.attributes ?? {});
     const result = await this.conn.query<RawTenantPolicyRow>(
-      `UPDATE ${SCHEMA}.${TENANT_POLICIES_TABLE}
-       SET opt_out = false,
-           opt_out_until = NULL,
-           updated_at = now()
-       WHERE tenant_id = $1 AND table_name = $2 AND opt_out = true
-       RETURNING tenant_id, table_name, retention_days, enabled,
-                 opt_out, opt_out_reason, opt_out_until, last_pruned_at`,
-      [input.tenantId, input.tableName],
+      `WITH existing AS (
+         SELECT tenant_id, table_name, retention_days, enabled, opt_out,
+                opt_out_reason, opt_out_until, last_pruned_at
+         FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE tenant_id = $1 AND table_name = $2 AND opt_out = true
+       ),
+       mutation AS (
+         UPDATE ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         SET opt_out = false,
+             opt_out_until = NULL,
+             updated_at = now()
+         WHERE tenant_id = $1 AND table_name = $2 AND opt_out = true
+         RETURNING tenant_id, table_name, retention_days, enabled,
+                   opt_out, opt_out_reason, opt_out_until, last_pruned_at
+       ),
+       history AS (
+         INSERT INTO ${SCHEMA}.${HISTORY_TABLE}
+           (tenant_id, table_name, event_kind, actor_id,
+            prev_state, next_state, attributes)
+         SELECT m.tenant_id, m.table_name, 'opt_out_cleared', $3,
+                (SELECT to_jsonb(e.*) FROM existing e),
+                to_jsonb(m.*),
+                $4::jsonb
+         FROM mutation m
+       )
+       SELECT * FROM mutation`,
+      [input.tenantId, input.tableName, actorId, attributes],
     );
     const r = result.rows[0];
     if (r === undefined) return null;
@@ -618,12 +716,30 @@ export class PostgresTraceRetention {
   }
 
   async deleteTenantPolicy(input: DeleteTenantPolicyInput): Promise<boolean> {
-    const result = await this.conn.query(
-      `DELETE FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
-       WHERE tenant_id = $1 AND table_name = $2`,
-      [input.tenantId, input.tableName],
+    const actorId = input.actorId ?? null;
+    const attributes = JSON.stringify(input.attributes ?? {});
+    const result = await this.conn.query<{ deleted: string }>(
+      `WITH del AS (
+         DELETE FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE tenant_id = $1 AND table_name = $2
+         RETURNING tenant_id, table_name, retention_days, enabled,
+                   opt_out, opt_out_reason, opt_out_until, last_pruned_at
+       ),
+       history AS (
+         INSERT INTO ${SCHEMA}.${HISTORY_TABLE}
+           (tenant_id, table_name, event_kind, actor_id,
+            prev_state, next_state, attributes)
+         SELECT d.tenant_id, d.table_name, 'policy_deleted', $3,
+                to_jsonb(d.*),
+                NULL,
+                $4::jsonb
+         FROM del d
+       )
+       SELECT COUNT(*)::TEXT AS deleted FROM del`,
+      [input.tenantId, input.tableName, actorId, attributes],
     );
-    return result.rowCount > 0;
+    const count = Number(result.rows[0]?.deleted ?? 0);
+    return count > 0;
   }
 
   async setTenantRetention(
@@ -635,20 +751,48 @@ export class PostgresTraceRetention {
       );
     }
     const enabled = input.enabled ?? true;
+    const actorId = input.actorId ?? null;
+    const attributes = JSON.stringify(input.attributes ?? {});
     const result = await this.conn.query<RawTenantPolicyRow>(
-      `INSERT INTO ${SCHEMA}.${TENANT_POLICIES_TABLE}
-         (tenant_id, table_name, retention_days, enabled, opt_out,
-          opt_out_reason, opt_out_until, updated_at)
-       VALUES ($1, $2, $3, $4, false, NULL, NULL, now())
-       ON CONFLICT (tenant_id, table_name) DO UPDATE SET
-         retention_days = EXCLUDED.retention_days,
-         enabled = EXCLUDED.enabled,
-         opt_out = false,
-         opt_out_until = NULL,
-         updated_at = now()
-       RETURNING tenant_id, table_name, retention_days, enabled,
-                 opt_out, opt_out_reason, opt_out_until, last_pruned_at`,
-      [input.tenantId, input.tableName, input.retentionDays, enabled],
+      `WITH existing AS (
+         SELECT tenant_id, table_name, retention_days, enabled, opt_out,
+                opt_out_reason, opt_out_until, last_pruned_at
+         FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
+         WHERE tenant_id = $1 AND table_name = $2
+       ),
+       mutation AS (
+         INSERT INTO ${SCHEMA}.${TENANT_POLICIES_TABLE}
+           (tenant_id, table_name, retention_days, enabled, opt_out,
+            opt_out_reason, opt_out_until, updated_at)
+         VALUES ($1, $2, $3, $4, false, NULL, NULL, now())
+         ON CONFLICT (tenant_id, table_name) DO UPDATE SET
+           retention_days = EXCLUDED.retention_days,
+           enabled = EXCLUDED.enabled,
+           opt_out = false,
+           opt_out_until = NULL,
+           updated_at = now()
+         RETURNING tenant_id, table_name, retention_days, enabled,
+                   opt_out, opt_out_reason, opt_out_until, last_pruned_at
+       ),
+       history AS (
+         INSERT INTO ${SCHEMA}.${HISTORY_TABLE}
+           (tenant_id, table_name, event_kind, actor_id,
+            prev_state, next_state, attributes)
+         SELECT m.tenant_id, m.table_name, 'retention_set', $5,
+                (SELECT to_jsonb(e.*) FROM existing e),
+                to_jsonb(m.*),
+                $6::jsonb
+         FROM mutation m
+       )
+       SELECT * FROM mutation`,
+      [
+        input.tenantId,
+        input.tableName,
+        input.retentionDays,
+        enabled,
+        actorId,
+        attributes,
+      ],
     );
     const r = result.rows[0];
     if (r === undefined) {
@@ -664,6 +808,77 @@ export class PostgresTraceRetention {
       optOutUntil: r.opt_out_until,
       lastPrunedAt: r.last_pruned_at,
     };
+  }
+
+  async listOptOutHistory(
+    input: ListOptOutHistoryInput = {},
+  ): Promise<ReadonlyArray<OptOutHistoryEntry>> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (input.tenantId !== undefined) {
+      params.push(input.tenantId);
+      conditions.push(`tenant_id = $${params.length}`);
+    }
+    if (input.tableName !== undefined) {
+      params.push(input.tableName);
+      conditions.push(`table_name = $${params.length}`);
+    }
+    if (input.eventKind !== undefined) {
+      params.push(input.eventKind);
+      conditions.push(`event_kind = $${params.length}`);
+    }
+    if (input.since !== undefined) {
+      params.push(input.since);
+      conditions.push(`occurred_at >= $${params.length}`);
+    }
+    if (input.until !== undefined) {
+      params.push(input.until);
+      conditions.push(`occurred_at <= $${params.length}`);
+    }
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`limit must be an integer >= 1, got ${limit}`);
+    }
+    params.push(limit);
+    const where =
+      conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const result = await this.conn.query<{
+      id: string;
+      tenant_id: string;
+      table_name: string;
+      event_kind: string;
+      actor_id: string | null;
+      occurred_at: string;
+      prev_state: Record<string, unknown> | null;
+      next_state: Record<string, unknown> | null;
+      attributes: Record<string, unknown>;
+    }>(
+      `SELECT id, tenant_id, table_name, event_kind, actor_id, occurred_at,
+              prev_state, next_state, attributes
+       FROM ${SCHEMA}.${HISTORY_TABLE}
+       ${where}
+       ORDER BY occurred_at DESC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return result.rows.map((r) => {
+      if (!isOptOutHistoryEventKind(r.event_kind)) {
+        throw new Error(
+          `listOptOutHistory: unknown event_kind '${r.event_kind}'`,
+        );
+      }
+      return {
+        id: r.id,
+        tenantId: r.tenant_id,
+        tableName: r.table_name,
+        eventKind: r.event_kind,
+        actorId: r.actor_id,
+        occurredAt: r.occurred_at,
+        prevState: r.prev_state,
+        nextState: r.next_state,
+        attributes: r.attributes,
+      };
+    });
   }
 
   static knownPrunableTables(): ReadonlyArray<string> {

@@ -21,15 +21,106 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 128 meta-schema tables, 8,256 tests**,
-all green, no type errors. M6.7.zz.tenant.retention-delete
+**56 packages + 1 app, 129 meta-schema tables, 8,295 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.history
+closes six prior ADR Qs (ADR-0161 alt-1 + ADR-0162 Q7 +
+ADR-0166 Q1+Q2 + ADR-0167 Q3 + ADR-0168 Q6 + ADR-0169 audit
++ restore Qs) by shipping META_TENANT_RETENTION_OPT_OUT_HISTORY
+as the 129th meta-schema table + atomic history writes from
+all four mutation methods + listOptOutHistory query method
++ `crossengin retention history` CLI action +
+`--actor <uuid>` flag threading on all four mutation CLI
+actions. New table append-only by convention with id UUID
+v7 PK + tenant_id FK CASCADE + table_name + event_kind
+CHECK ('opt_out_set'|'opt_out_cleared'|'retention_set'|
+'policy_deleted') + actor_id nullable UUID + occurred_at +
+prev_state JSONB + next_state JSONB + attributes JSONB
+NOT NULL default '{}'; three indexes (tenant timeline +
+table timeline + kind analytics) all ordered by
+occurred_at; tenant-isolated RLS. Atomic history writes
+via CTE chain (existing → mutation → history → SELECT
+mutation) — same SQL statement, PG single-statement
+atomicity, no race window, no transaction overhead, no
+two-round-trip cost. prev_state captured from existing
+CTE snapshot at statement start (NULL for new-row INSERT,
+populated for UPDATE), next_state from RETURNING (NULL
+for DELETE, populated for INSERT/UPDATE). Four mutation
+inputs gain optional actorId + attributes fields;
+attributes defaults to '{}' JSONB matching workflow_traces
++ llm_call_traces convention. New listOptOutHistory
+adapter method with five orthogonal filters (tenantId,
+tableName, eventKind, since, until) + LIMIT (default 100,
+validated >= 1); ORDER BY occurred_at DESC; strict
+event_kind validation on returned rows throwing on
+unknown values (defensive against schema drift). New CLI
+action `retention history` with --tenant + --table +
+--kind + --since + --until + --limit flags; all
+validated at boundary (kind against tuple, dates parsed
++ normalised to canonical ISO 8601, limit integer >= 1);
+human output renders single-row-per-event table with
+'<system>' placeholder for null actorId; JSON envelope
+echoes all filters + count + entries for jq correlation.
+--actor flag added to opt-out + opt-in + set + delete
+actions threading actorId through to history rows.
+Why separate table vs columns on live row: only captures
+most-recent event in column form, column proliferation
+(4 kinds × set_by/set_at/prev = 12 columns of dead weight
+on rarely-changed rows), no event-kind distinction.
+Why CTE atomic write vs transaction(): same atomicity
+guarantee, single round-trip, simpler test mocks. Why
+default attributes='{}'::jsonb NOT NULL: matches workflow_traces
++ llm_call_traces convention so downstream jq pipes
+always see a JSON object. Why PK on id UUID v7 not
+(tenant_id, table_name, occurred_at): concurrent CLI
+runs can share an instant; UUID v7 gives time-ordered
+collision-free identity. Why append-only by convention
+not enforced: REVOKE on audit-write role would enforce
+but couples to a not-yet-shipped roles substrate; deferred.
+Six prior ADRs converge into this design. 21 new adapter
+tests + 18 new CLI tests = 39 total covering: each
+mutation SQL contains correct event_kind literal,
+captures prev_state via existing CTE for INSERT/UPDATE,
+captures prev_state via DELETE...RETURNING for delete,
+threads actorId param + attributes JSONB through every
+mutation, listOptOutHistory returns entries with no
+filters, maps snake_case → camelCase, filters by each
+flag dimension, ORDER BY occurred_at DESC + LIMIT $N,
+default limit 100, rejects limit < 1 + non-integer,
+throws on unknown event_kind in row, CLI history returns
+entries, threads all five filter flags through to adapter,
+normalises --since + --until to canonical ISO 8601, exit
+2 on invalid kind/since/until/limit, human-format empty
+result message + table rendering with '<system>'
+placeholder for null actor, JSON envelope with all filters,
+adapter errors propagate exit 1; --actor flag threading
+verified on all four mutation actions; omitting --actor
+passes null to adapter. cli.ts helpText extended with
+retention history usage line + --actor / --kind / --since
+/ --until / --limit flag docs. meta-schema.test.ts table
+count 128 → 129 + tenant_retention_opt_out_history added
+to alphabetical name list. ADR-0170 documents the design
++ 10 rejected alternatives (audit columns on live row,
+transactions vs CTE, PG trigger-based, separate schema,
+mandatory actorId, per-field diff, pg_audit WAL, materialized
+view, strict CHECK on actor_id format, policy_state enum)
++ 10 future Qs (history-table retention pruning, FK to
+meta.users, REVOKE-enforced append-only, retention restore
+action, retention diff-history action, backfill tool,
+SIEM ingestion hooks, cursor pagination, actor display
+join, --attributes CLI flag). The retention CLI now has
+9 actions (3 read: expiring/effective/list-policies + 4
+write: opt-out/opt-in/set/delete + 1 audit:
+history + the implicit `--actor` cross-cutting flag);
+substrate-side, 8 PostgresTraceRetention methods backing
+them + the new history-table CTE pattern that future
+substrate audit-tables can copy. M6.7.zz.tenant.retention-delete
 closes ADR-0168 Q1 by adding `crossengin retention delete
 <tenant> <table>` action + deleteTenantPolicy adapter
 method. The retention CLI is now CRUD-complete on per-
@@ -4690,7 +4781,20 @@ preservation pattern); idempotent — false is success
 exit 0 so scripts safely re-run; JSON envelope {action,
 deleted, tenantId, tableName} echoes queried fields for
 correlation; retention CLI surface now CRUD-complete
-on per-tenant policies).
+on per-tenant policies),
+ADR-0170 covers M6.7.zz.tenant.opt-out.history
+(META_TENANT_RETENTION_OPT_OUT_HISTORY append-only audit
+table (129th) + atomic history writes via CTE chain in
+all 4 mutation methods + listOptOutHistory adapter +
+`crossengin retention history` CLI action + --actor flag
+threading — closes 6 prior ADR Qs in one milestone;
+4-value event_kind tuple opt_out_set/opt_out_cleared/
+retention_set/policy_deleted; prev_state JSONB from
+existing-CTE snapshot or DELETE RETURNING + next_state
+JSONB from INSERT/UPDATE RETURNING + nullable actor_id;
+five filter dimensions on the query method + history
+CLI; substrate gains audit-log pattern future audit tables
+can copy).
 
 ## Architecture in 90 seconds
 
@@ -6179,6 +6283,128 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0170 covers Phase 2 M6.7.zz.tenant.opt-out.history
+(META_TENANT_RETENTION_OPT_OUT_HISTORY append-only audit
+log + atomic history writes from all 4 mutation methods +
+query method + CLI action — closes six prior ADR Qs in
+one milestone: ADR-0161 alt-1 separate audit table,
+ADR-0162 Q7 history-aware queries, ADR-0166 Q1+Q2 audit
+columns + history table, ADR-0167 Q3 --include-history,
+ADR-0168 Q6 audit columns, ADR-0169 audit-log + restore
+Qs; new 129th meta-schema table with id UUID v7 PK +
+tenant_id FK CASCADE + table_name + event_kind CHECK
+('opt_out_set'|'opt_out_cleared'|'retention_set'|
+'policy_deleted') + actor_id nullable UUID + occurred_at
+default now() + prev_state JSONB + next_state JSONB +
+attributes JSONB NOT NULL default '{}'::jsonb; three
+indexes (tenant_id+occurred_at, table_name+occurred_at,
+event_kind+occurred_at) all ordered DESC for latest-first
+pagination; tenant-isolated RLS; PK on id not composite
+because concurrent CLI runs can share occurred_at instant
+and UUID v7 gives time-ordered collision-free identity;
+append-only by convention not enforced — REVOKE on audit-
+write role would enforce but couples to not-yet-shipped
+roles substrate; atomic history writes via CTE chain in
+SAME SQL statement as the policy mutation (existing CTE
+captures pre-state snapshot at statement start, mutation
+CTE does INSERT...ON CONFLICT DO UPDATE / DELETE
+RETURNING, history CTE INSERTs new row, outer SELECT
+returns mutation result) — PG single-statement atomicity,
+no race window, no transaction overhead, no two-round-
+trip cost, simpler test mocks than transaction(); prev_state
+is NULL for new-row INSERT (existing CTE returns empty),
+populated for UPDATE (snapshot of pre-mutation row),
+populated for DELETE (RETURNING d.* before deletion);
+next_state populated for INSERT/UPDATE, NULL for DELETE;
+four mutation inputs (setTenantOptOut, clearTenantOptOut,
+setTenantRetention, deleteTenantPolicy) gain optional
+actorId + attributes fields with attributes defaulting
+to {} JSONB matching workflow_traces + llm_call_traces
+convention so downstream jq always sees an object;
+listOptOutHistory adapter method with five orthogonal
+filters (tenantId, tableName, eventKind, since, until)
++ LIMIT (default 100, validated integer >= 1) all
+optional combining via WHERE-clause AND; ORDER BY
+occurred_at DESC for latest-first; strict event_kind
+validation on returned rows throws on unknown values
+(defensive against schema drift); OPT_OUT_HISTORY_EVENT_KINDS
+const tuple + OptOutHistoryEventKind type +
+isOptOutHistoryEventKind predicate mirror workflow runtime
++ router instrumentation kind patterns; new CLI action
+`retention history` with --tenant + --table + --kind +
+--since + --until + --limit flags all optional; CLI-
+boundary validation — --kind against the 4-value tuple
+(exit 2 on invalid), --since/--until parsed via
+Date.parse and normalised to canonical ISO 8601 (exit 2
+on invalid), --limit integer >= 1 (exit 2 on invalid);
+human output single-row-per-event table format showing
+occurred_at + event_kind padded + tenant + table + actor
+with '<system>' placeholder for null actorId
+distinguishing operator changes from system events;
+JSON envelope {tenantFilter, tableFilter, eventKind,
+since, until, limit, count, entries} echoes every filter
+for jq correlation; --actor <uuid> flag added to opt-out
++ opt-in + set + delete mutation actions threading
+actorId through to history rows (omitted = null = system
+actor); rejected alternatives — audit columns on live
+policy row set_by/set_at/prev_state JSONB (only captures
+most-recent event; column proliferation 4 kinds × 3
+fields = 12 dead-weight columns; no event-kind
+distinction), transactions wrapping mutation+history
+(two round-trips, more test mock boilerplate, same
+atomicity outcome as CTE), PG trigger on policies table
+writing history (hidden behavior, debugging harder,
+doesn't access SQL-parameter-level actorId/attributes),
+separate schema for history (breaks established meta-
+schema topology), mandatory actorId (system actors have
+no human attribution; null is canonical), per-field diff
+in history row (JSONB diff easy app-side; both states
+maximally reconstructable), pg_audit WAL-based (extension
+dependency, harder tenant-scoped queries, no
+actorId/attributes), materialized view aggregating into
+current state (live policy table IS current state),
+strict CHECK on actor_id UUID format (already TYPED
+UUID, PG enforces shape), policy_state enum on history
+row (can be derived from next_state; storing redundant
+fields invites drift); use cases unblocked — forensic
+audit who-set-this-opt-out via tenant+table filter,
+compliance report all-opt-outs-in-Q3-2026 via kind+since
++until+--format json export, tier-migration audit trail
+via --kind retention_set filter, operator attribution
+via --actor flag on mutations flowing to history rows,
+policy-state reconstruction at point-in-time via
+--until + --limit 1 returning next_state JSONB, drift
+detection via prev_state vs next_state diff;
+21 new adapter tests + 18 new CLI tests = 39 covering
+each mutation SQL contains correct event_kind literal,
+captures prev_state via existing CTE for INSERT/UPDATE,
+captures via DELETE RETURNING d.* for delete, threads
+actorId + attributes through every mutation, listOptOutHistory
+no-filter + per-filter + limit + invalid-limit error +
+default 100 + unknown event_kind throws, CLI history
+no-flags + threads-flags + ISO normalisation + invalid-
+kind/since/until/limit exit 2 + empty result message +
+table rendering + '<system>' placeholder + JSON envelope
++ adapter-errors-exit-1, --actor threading verified on
+all four mutation actions + omitted=null;
+meta-schema.test.ts updated table count 128 → 129 +
+tenant_retention_opt_out_history added to alphabetical
+name list; cli.ts helpText extended with retention
+history usage line + --actor / --kind / --since / --until
+/ --limit flag docs; future Qs cover history-table
+retention pruning (add to meta.retention_policies allowlist
++ adapter logic), actor_id FK to meta.users when users
+substrate lands, REVOKE-enforced append-only when roles
+substrate lands, retention restore <history-id> action
+using prev_state for rollback (closes ADR-0169 Q7),
+retention diff-history <id-a> <id-b> for event comparison,
+backfill tool synthesizing events from current rows for
+pre-existing policies, SIEM ingestion hooks streaming
+events to Splunk/Datadog, history query cursor pagination
+via --after-id <uuid> for >100K-event tenants, actor
+display join surfacing human names from meta.users,
+--attributes CLI flag exposing structured audit context
+from mutation commands).
 ADR-0169 covers Phase 2 M6.7.zz.tenant.retention-delete
 (`crossengin retention delete <tenant-id> <table-name>`
 CLI action + deleteTenantPolicy adapter method on
