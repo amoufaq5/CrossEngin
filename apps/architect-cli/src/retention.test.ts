@@ -2006,6 +2006,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
       since: undefined,
       until: undefined,
       limit: 100,
+      afterId: undefined,
     });
   });
 
@@ -2037,6 +2038,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
       eventKind: "opt_out_set",
       since: undefined,
       until: undefined,
+      afterId: undefined,
       limit: 50,
     });
   });
@@ -2214,6 +2216,118 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
+  });
+
+  it("threads --after-id through to adapter (cursor pagination)", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+    const code = await runRetention(
+      parsed("retention", "history", "--after-id", AFTER_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]?.afterId).toBe(AFTER_ID);
+  });
+
+  it("human-format prints next-page hint when results.length === limit", async () => {
+    const { ctx, out } = buffers();
+    const LAST_ID = "60000000-0000-4000-8000-000000000099";
+    const code = await runRetention(
+      parsed("retention", "history", "--limit", "2"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            entry({ id: "60000000-0000-4000-8000-000000000001" }),
+            entry({ id: LAST_ID }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`--after-id ${LAST_ID}`);
+    expect(out()).toContain("next page");
+  });
+
+  it("human-format omits next-page hint when results.length < limit", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--limit", "100"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [entry()],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).not.toContain("next page");
+    expect(out()).not.toContain("--after-id");
+  });
+
+  it("json-format emits afterId + nextAfterId fields", async () => {
+    const { ctx, out } = buffers();
+    const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+    const LAST_ID = "60000000-0000-4000-8000-000000000099";
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--after-id",
+        AFTER_ID,
+        "--limit",
+        "2",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            entry({ id: "60000000-0000-4000-8000-000000000001" }),
+            entry({ id: LAST_ID }),
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.afterId).toBe(AFTER_ID);
+    expect(parsedJson.nextAfterId).toBe(LAST_ID);
+  });
+
+  it("json-format nextAfterId is null when results.length < limit (no more pages)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--limit", "100", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [entry()],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.nextAfterId).toBeNull();
+  });
+
+  it("json-format afterId is null when --after-id is not provided", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.afterId).toBeNull();
+    expect(parsedJson.nextAfterId).toBeNull();
   });
 });
 

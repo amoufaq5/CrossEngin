@@ -609,6 +609,7 @@ async function runRetentionHistory(
   const sinceFlag = getStringFlag(command, "since");
   const untilFlag = getStringFlag(command, "until");
   const limitFlag = getStringFlag(command, "limit");
+  const afterIdFlag = getStringFlag(command, "after-id");
 
   let kind: OptOutHistoryEventKind | undefined;
   if (kindFlag !== null) {
@@ -670,6 +671,7 @@ async function runRetentionHistory(
       since,
       until,
       limit,
+      afterId: afterIdFlag ?? undefined,
     });
   } catch (err) {
     printError(
@@ -679,6 +681,9 @@ async function runRetentionHistory(
     return 1;
   }
 
+  const nextAfterId =
+    entries.length === limit ? (entries[entries.length - 1]?.id ?? null) : null;
+
   if (command.format === "json") {
     printJson(ctx.io, {
       tenantFilter: tenantFilter ?? null,
@@ -686,9 +691,11 @@ async function runRetentionHistory(
       eventKind: kind ?? null,
       since: since ?? null,
       until: until ?? null,
+      afterId: afterIdFlag ?? null,
       limit,
       count: entries.length,
       entries,
+      nextAfterId,
     });
     return 0;
   }
@@ -698,13 +705,14 @@ async function runRetentionHistory(
     return 0;
   }
 
-  ctx.io.stdout.write(formatHistoryList(entries, limit));
+  ctx.io.stdout.write(formatHistoryList(entries, limit, nextAfterId));
   return 0;
 }
 
 export function formatHistoryList(
   entries: ReadonlyArray<OptOutHistoryEntry>,
   limit: number,
+  nextAfterId?: string | null,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -714,6 +722,12 @@ export function formatHistoryList(
     const actor = e.actorId ?? "<system>";
     lines.push(
       `  ${e.occurredAt}  ${e.eventKind.padEnd(16)} tenant=${e.tenantId}  table=${e.tableName}  actor=${actor}`,
+    );
+  }
+  if (nextAfterId !== undefined && nextAfterId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — next page: crossengin retention history --after-id ${nextAfterId} ...`,
     );
   }
   return lines.join("\n") + "\n";

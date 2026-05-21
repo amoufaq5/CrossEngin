@@ -206,6 +206,7 @@ export interface ListOptOutHistoryInput {
   readonly since?: string;
   readonly until?: string;
   readonly limit?: number;
+  readonly afterId?: string;
 }
 
 export interface RestoreTenantPolicyInput {
@@ -897,6 +898,16 @@ export class PostgresTraceRetention {
       params.push(input.until);
       conditions.push(`occurred_at <= $${params.length}`);
     }
+    if (input.afterId !== undefined) {
+      params.push(input.afterId);
+      const afterIdParam = params.length;
+      conditions.push(
+        `(occurred_at, id) < (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
+           $${afterIdParam}
+         )`,
+      );
+    }
     const limit = input.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error(`limit must be an integer >= 1, got ${limit}`);
@@ -919,7 +930,7 @@ export class PostgresTraceRetention {
               prev_state, next_state, attributes
        FROM ${SCHEMA}.${HISTORY_TABLE}
        ${where}
-       ORDER BY occurred_at DESC
+       ORDER BY occurred_at DESC, id DESC
        LIMIT $${params.length}`,
       params,
     );

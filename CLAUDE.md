@@ -21,15 +21,105 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,357 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.prune
+**56 packages + 1 app, 129 meta-schema tables, 8,370 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.cursor
+closes ADR-0170 Q8 by adding cursor pagination to retention
+history via --after-id <uuid> flag. At low-scale deployments
+the default limit=100 was fine; at >100K-event tenants
+operators needed pagination + OFFSET-based pagination is
+unstable under concurrent inserts. New compound-cursor SQL
+uses `(occurred_at, id) < ((SELECT occurred_at FROM ... WHERE
+id = $N), $N)` — single $N param reused for both occurred_at
+inline subquery lookup and tiebreaker; (occurred_at, id)
+ordered lexicographically handles ties when multiple rows
+share occurred_at (concurrent CLI runs producing events at
+same wall-clock instant); UUID v7 id is the tiebreaker.
+ORDER BY widened from `occurred_at DESC` to `occurred_at
+DESC, id DESC` — ensures result rows match cursor's order;
+without id tiebreaker PG could return rows sharing
+occurred_at in arbitrary order causing same row to appear
+on two consecutive pages or skip across pages. When afterId
+doesn't exist in the table, the inline subquery returns NULL
+→ outer comparison evaluates NULL → row filtered out →
+empty result set (operators detect end-of-pagination via
+this OR via results.length < limit). Backward compatible —
+omitting --after-id produces identical query shape
+(modulo new id DESC tiebreaker which is a stability
+improvement). CLI adds --after-id <uuid> flag to retention
+history action; no boundary validation since PG enforces
+UUID format at query time with clearer error than CLI
+substring match. JSON envelope gains two new fields:
+afterId echoes the cursor passed in (null when omitted),
+nextAfterId is the last row's id when results.length ===
+limit indicating more pages may exist (null otherwise —
+operators interpret as "no more pages"). Human output
+gains footer hint when results.length === limit: 'Page
+full — next page: crossengin retention history --after-id
+<last-id> ...'; omitted when results.length < limit (end
+of pagination). nextAfterId is best-effort — accurate at
+query time but concurrent inserts may add events later,
+operators paginating typically don't care (snapshot
+semantics). Why compound cursor (occurred_at, id) over
+just occurred_at: ties on shared occurred_at would cause
+rows to skip pages. Why occurred_at + id instead of just
+id: UUID v7 is mostly time-ordered but PG's index choice
++ concurrent writes could produce out-of-order rows for
+same occurred_at; compound cursor is bulletproof. Why
+inline subquery for cursor's occurred_at: avoids requiring
+operator to pass both id AND occurred_at; substrate
+resolves the timestamp server-side from the id. Why no
+--before-id for reverse pagination: single forward
+direction covers the common case; bidirectional needs
+operator-driven demand. Why no totalAvailable count in
+envelope: separate COUNT(*) query if needed; not worth
+the extra round-trip per page. Why no validate UUID format
+at CLI boundary: PG enforces with clearer error. Why no
+auto-paginate flag: operators want explicit page control;
+shell loops cover the bulk-pagination pattern; auto-
+streaming hides pagination from scripts. 7 new adapter
+tests + 6 new CLI tests = 13 total covering: --after-id
+threads as $N param into compound cursor subquery (single
+$N reused twice — verified via regex count $1 appears
+twice), compound cursor handles ties via id DESC
+tiebreaker in ORDER BY, combines --after-id with other
+filters via WHERE AND, returns empty when cursor row
+doesn't exist (PG NULL semantic), backward compat omitting
+--after-id produces identical query shape; combined-flag
+test verifying tenantId + tableName + eventKind + since
++ until + afterId + limit all threaded correctly; CLI
+threads --after-id to adapter, human-format prints next-
+page hint when results.length === limit, human-format
+omits hint when results.length < limit, JSON envelope
+emits afterId + nextAfterId fields, JSON nextAfterId is
+null when results.length < limit (no more pages), JSON
+afterId is null when --after-id not provided. Existing
+history tests updated — addedId: undefined now expected
+in the captured input shape; the SQL substring assertion
+'ORDER BY occurred_at DESC' still passes (new clause is
+'ORDER BY occurred_at DESC, id DESC' — contains old as
+prefix). cli.ts helpText extended with --after-id flag
+doc + retention history usage line gains optional
+[--after-id <uuid>] entry; description widened to mention
+ORDER BY now includes 'id DESC' tiebreaker + --after-id
+semantic. ADR-0175 documents the design + 8 rejected
+alternatives (OFFSET-based pagination via --page N,
+two-cursor --after-id + --before-id, single-key
+occurred_at cursor, single-key id cursor, totalAvailable
+count in envelope, CLI-boundary UUID validation, auto-
+paginate via streaming, inline subquery rewritten as
+JOIN) + 7 future Qs (--before-id reverse pagination,
+--page-size alias, server-side opaque cursor encoding,
+totalAvailable count, cross-process cursor stability via
+PIT snapshot, --all auto-paginate flag, CLI integration
+with --since for between-cursor-id-and-timestamp).
+M6.7.zz.tenant.opt-out.cli.prune
 closes ADR-0172 Q2 by adding `crossengin retention prune
 [--dry-run]` action — pure CLI delivery, no new substrate
 code. The pruning machinery already existed via
@@ -5192,7 +5282,17 @@ two distinct formatters keep run vs dry-run terminology
 distinct ('deleted=N' vs 'would_delete=N'); summary line
 aggregates pruned count + row count + categorised skip
 counts; --confirm + filter flags rejected matching
-existing scheduled-job semantics).
+existing scheduled-job semantics),
+ADR-0175 covers M6.7.zz.tenant.opt-out.cli.history.cursor
+(`retention history --after-id <uuid>` cursor pagination
+— closes ADR-0170 Q8 — compound cursor (occurred_at, id)
+with single $N param reused for both inline subquery
+lookup + tiebreaker; ORDER BY widened to include id DESC
+tiebreaker for stable pagination; backward compatible
+omitting --after-id; nextAfterId field in JSON envelope
++ human-format next-page hint when results.length === limit;
+operators paginate dashboards / stream compliance exports
+/ replay incident timelines without OFFSET instability).
 
 ## Architecture in 90 seconds
 
@@ -6681,6 +6781,120 @@ function for resolution (deploys server-side functions
 unnecessarily), resolve via previewPrune (semantics drift),
 split getTenantPolicy + getPlatformPolicy methods (leaks
 resolution to caller).
+ADR-0175 covers Phase 2 M6.7.zz.tenant.opt-out.cli.history.cursor
+(`retention history --after-id <uuid>` cursor pagination
+— closes ADR-0170 Q8; at low-scale deployments default
+limit=100 was fine but at >100K-event tenants operators
+needed pagination and OFFSET-based pagination is unstable
+under concurrent inserts (PG scans + discards rows
+causing linear cost growth + rows shift between pages as
+new events land at top); new compound-cursor SQL uses
+`(occurred_at, id) < ((SELECT occurred_at FROM
+meta.tenant_retention_opt_out_history WHERE id = $N),
+$N)` — single $N param reused for both occurred_at inline
+subquery lookup and tiebreaker; (occurred_at, id) ordered
+lexicographically handles ties when multiple rows share
+occurred_at (concurrent CLI runs producing events at
+same wall-clock instant); UUID v7 id is the tiebreaker;
+ORDER BY widened from 'occurred_at DESC' to 'occurred_at
+DESC, id DESC' — ensures result rows match cursor's
+order; without id tiebreaker PG could return rows sharing
+occurred_at in arbitrary order causing same row to appear
+on two consecutive pages or skip across pages;
+'occurred_at DESC, id DESC' naturally consistent with
+'(occurred_at, id) <' (returns rows strictly less-than
+in compound-order walking timeline backwards); when
+afterId doesn't exist in the table inline subquery
+returns NULL → outer comparison evaluates NULL → row
+filtered out → empty result set (operators detect end-
+of-pagination via empty OR via results.length < limit);
+backward compatible — omitting --after-id produces
+identical query shape modulo new id DESC tiebreaker
+(stability improvement not behavior change); existing
+test 'ORDER BY occurred_at DESC' substring assertion
+still passes (new clause contains old as prefix); CLI
+adds --after-id <uuid> flag to existing retention
+history action; no boundary validation since PG enforces
+UUID format at query time with clearer error than CLI
+substring match; JSON envelope gains two new fields —
+afterId echoes the cursor passed in (null when omitted)
++ nextAfterId is the last row's id when results.length
+=== limit indicating more pages may exist (null
+otherwise — operators interpret as "no more pages");
+human output gains footer hint when results.length ===
+limit 'Page full — next page: crossengin retention
+history --after-id <last-id> ...'; omitted when
+results.length < limit; nextAfterId is best-effort
+accurate at query time but concurrent inserts may add
+events later — operators paginating typically don't
+care (snapshot semantics); why compound cursor
+(occurred_at, id) over just occurred_at — ties on shared
+occurred_at would cause rows to skip pages; why
+occurred_at + id instead of just id — UUID v7 is mostly
+time-ordered but PG's index choice + concurrent writes
+could produce out-of-order rows for same occurred_at,
+compound cursor is bulletproof; why inline subquery for
+cursor's occurred_at — avoids requiring operator to pass
+both id AND occurred_at, substrate resolves timestamp
+server-side from id; rejected alternatives — OFFSET-
+based pagination via --page N (unstable under concurrent
+inserts, PG scans+discards rows linear cost growth),
+two-cursor --after-id + --before-id (single forward
+direction covers common case; bidirectional needs
+operator-driven demand), single-key occurred_at cursor
+(ties cause skipped pages), single-key id cursor (UUID
+v7 mostly but not strictly time-ordered for concurrent
+writes), totalAvailable count in envelope (separate
+COUNT(*) query; not worth extra round-trip per page),
+validate --after-id UUID format at CLI boundary (PG
+enforces with clearer error), auto-paginate via
+streaming generator (operators want explicit page
+control; shell loops cover bulk-pagination pattern;
+streaming hides pagination from scripts), inline
+subquery rewritten as JOIN (current shape clearer; PG
+optimizer handles efficiently); drawbacks — compound
+cursor is asymmetric (--after-id walks backwards in
+time, operators wanting "newer than X" use --since
+<iso> instead), no --before-id for ascending pagination
+(chain via --since + --limit instead, defer), cursor
+row need not be in result set (passing arbitrary UUID
+produces empty silently — documented), no total-count
+field (operators run separate COUNT query), nextAfterId
+null is best-effort (standard caveat for paginated
+queries on live tables), one extra ORDER BY column
+(occurred_at primary sort, id DESC only when ties
+which are rare given UUID v7 time-ordering); 7 new
+adapter tests in trace-retention.test.ts — --after-id
+threads as $N param into compound cursor subquery,
+compound cursor handles ties via id DESC tiebreaker in
+ORDER BY, combines --after-id with other filters via
+WHERE AND, returns empty when cursor row doesn't exist
+(PG NULL semantic verified via shape), compound cursor
+uses same $N param for both occurred_at lookup and
+tiebreaker (verified via regex count $1 appears twice),
+combined-flag test verifying tenantId + tableName +
+eventKind + since + until + afterId + limit all threaded
+correctly in seven-param array, backward compat omitting
+--after-id produces identical query shape; 6 new CLI
+tests in retention.test.ts — threads --after-id through
+to adapter, human-format prints next-page hint when
+results.length === limit, human-format omits hint when
+results.length < limit, JSON envelope emits afterId +
+nextAfterId fields, JSON nextAfterId null when
+results.length < limit, JSON afterId null when not
+provided; existing history tests updated — afterId:
+undefined now expected in captured input shape; cli.ts
+helpText extended — retention history usage line gains
+[--after-id <uuid>] entry, description widened to
+mention ORDER BY now includes 'id DESC' tiebreaker +
+--after-id semantic, --after-id flag doc added in
+Flags section; future Qs cover --before-id reverse
+pagination, --page-size as --limit alias, server-side
+opaque base64 cursor encoding, totalAvailable count in
+envelope, cross-process cursor stability via point-in-
+time snapshot, --all flag to auto-paginate, CLI
+integration with --since for events between cursor-id
+and timestamp).
 ADR-0174 covers Phase 2 M6.7.zz.tenant.opt-out.cli.prune
 (`crossengin retention prune [--dry-run]` CLI action —
 closes ADR-0172 Q2; pure CLI delivery wrapping the two

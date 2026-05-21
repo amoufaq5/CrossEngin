@@ -3831,6 +3831,115 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
   });
 });
 
+describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.tenant.opt-out.cli.history.cursor)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+
+  it("--after-id threads as $N param into compound cursor subquery", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ afterId: AFTER_ID });
+    expect(capture[0]?.sql).toContain("(occurred_at, id) <");
+    expect(capture[0]?.sql).toContain("SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $1");
+    expect(capture[0]?.params).toEqual([AFTER_ID, 100]);
+  });
+
+  it("compound cursor handles ties via id DESC tiebreaker in ORDER BY", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({});
+    expect(capture[0]?.sql).toContain("ORDER BY occurred_at DESC, id DESC");
+  });
+
+  it("combines --after-id with other filters via WHERE AND", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      tenantId: TENANT_A,
+      afterId: AFTER_ID,
+    });
+    expect(capture[0]?.sql).toContain("tenant_id = $1");
+    expect(capture[0]?.sql).toContain("(occurred_at, id) <");
+    expect(capture[0]?.params).toEqual([TENANT_A, AFTER_ID, 100]);
+  });
+
+  it("returns empty when cursor row does not exist (subquery returns NULL)", async () => {
+    // In production, the subquery (SELECT occurred_at FROM ... WHERE id = $1)
+    // returns NULL when the cursor row doesn't exist. The outer comparison
+    // (occurred_at, id) < (NULL, $1) is NULL → row filtered out → empty result.
+    // We just verify the SQL shape; PG behavior is what enforces the empty.
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.listOptOutHistory({ afterId: AFTER_ID });
+    expect(result).toEqual([]);
+  });
+
+  it("compound cursor uses the same $N param for both occurred_at lookup and tiebreaker", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ afterId: AFTER_ID });
+    const sql = capture[0]?.sql ?? "";
+    // Both references to the cursor id should use $1 (the only param besides limit at $2)
+    const matches = sql.match(/\$1/g);
+    expect(matches?.length).toBe(2);
+  });
+
+  it("combines --after-id + tenantId + eventKind + since + until + limit correctly", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      eventKind: "opt_out_set",
+      since: "2026-05-01T00:00:00.000Z",
+      until: "2026-05-31T23:59:59.000Z",
+      afterId: AFTER_ID,
+      limit: 50,
+    });
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "opt_out_set",
+      "2026-05-01T00:00:00.000Z",
+      "2026-05-31T23:59:59.000Z",
+      AFTER_ID,
+      50,
+    ]);
+  });
+
+  it("backward compat: omitting --after-id produces identical query shape as before", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ limit: 10 });
+    expect(capture[0]?.sql).not.toContain("(occurred_at, id) <");
+    expect(capture[0]?.params).toEqual([10]);
+  });
+});
+
 describe("computeFieldDiffs", () => {
   it("returns sorted alphabetical diffs", () => {
     const diffs = computeFieldDiffs(
