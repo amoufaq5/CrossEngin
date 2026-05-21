@@ -1151,10 +1151,10 @@ async function runRetentionDiff(
 
   if (command.format === "json") {
     printJson(ctx.io, { action: "diff", result });
-    return 0;
+  } else {
+    ctx.io.stdout.write(formatTenantDiff(result));
   }
-  ctx.io.stdout.write(formatTenantDiff(result));
-  return 0;
+  return divergenceExitCode(command, result.fieldDiffs.length);
 }
 
 async function runRetentionDiffVsPlatform(
@@ -1185,10 +1185,10 @@ async function runRetentionDiffVsPlatform(
 
   if (command.format === "json") {
     printJson(ctx.io, { action: "diff", vsPlatform: true, result });
-    return 0;
+  } else {
+    ctx.io.stdout.write(formatTenantVsPlatformDiff(result));
   }
-  ctx.io.stdout.write(formatTenantVsPlatformDiff(result));
-  return 0;
+  return divergenceExitCode(command, result.fieldDiffs.length);
 }
 
 async function runRetentionDiffCrossTable(
@@ -1228,9 +1228,19 @@ async function runRetentionDiffCrossTable(
 
   if (command.format === "json") {
     printJson(ctx.io, { action: "diff", crossTable: true, result });
-    return 0;
+  } else {
+    ctx.io.stdout.write(formatTenantTablesDiff(result));
   }
-  ctx.io.stdout.write(formatTenantTablesDiff(result));
+  return divergenceExitCode(command, result.fieldDiffs.length);
+}
+
+function divergenceExitCode(
+  command: ParsedCommand,
+  fieldDiffsLength: number,
+): number {
+  if (getBooleanFlag(command, "exit-on-divergence") && fieldDiffsLength > 0) {
+    return 3;
+  }
   return 0;
 }
 

@@ -21,15 +21,116 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,476 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.cross-table
+**56 packages + 1 app, 129 meta-schema tables, 8,485 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
+closes ADR-0179 Q6 + ADR-0180 Q3 by adding `--exit-on-
+divergence` boolean flag to `retention diff` (all three
+variants — cross-tenant default + --vs-platform +
+--cross-table). When set, exit code 0 if fieldDiffs is
+empty (no drift) or exit code 3 if fieldDiffs is non-
+empty (drift detected; CI gate fail). When NOT set,
+diff returns exit 0 regardless — backward compatible.
+Output (human or JSON) STILL emitted on exit 3 — flag
+controls only the exit code, operators reading scripts
+see what diverged. Exit code 3 chosen deliberately —
+existing CLI codes are 0 (success), 1 (runtime error),
+2 (misuse); exit 3 for "completed successfully but
+CI-gate fail" stays distinguishable from runtime errors
+so CI logs differentiate "drift detected" from "PG
+connection refused" — operators route exit 1 to on-call
++ exit 3 to compliance. Single flag for all 3 diff
+variants — no per-variant naming
+(--cross-tenant-exit-on-divergence etc.); uniform
+contract. Runtime errors take precedence — existing
+`return 1` from catch blocks fires before
+divergenceExitCode is reached. Pure CLI enhancement,
+no adapter changes — each runner now branches output
+emission then returns divergenceExitCode(command,
+result.fieldDiffs.length); shared private helper checks
+getBooleanFlag(command, "exit-on-divergence") &&
+fieldDiffsLength > 0. Workaround being replaced —
+operators currently wrap with `jq -e '.result.fieldDiffs
+| length > 0'` whose exit-1 collides with retention-
+diff's runtime-error exit-1 making CI logs ambiguous
+between "drift detected" and "PG connection refused" +
+the wrap is boilerplate replicated per CI pipeline +
+operators write 3 jq branches across the 3 envelope
+shapes. Use cases unblocked — direct bash idiom for CI
+cohort consistency gate (`if ! crossengin retention
+diff --exit-on-divergence; then ...`), per-tenant drift
+detection from platform default for regulated tenants
+that MUST stay on default (exit 3 → tenant has its own
+override which violates policy), per-tenant cross-table
+consistency gate for legal-hold completeness (exit 3 →
+hold applied to one table but not the other), pipeline
+runners differentiate exit 1 vs exit 3 via bash case
+statement routing to on-call vs compliance team
+respectively. Rejected alternatives — exit code 1
+matching diff(1) (collides with existing runtime-error
+exit 1), exit code 2 matching git diff --exit-code
+(collides with existing misuse exit 2), --ci flag
+naming (too vague doesn't name semantic),
+three per-variant flags --cross-tenant-exit-on-
+divergence etc (verbose; one flag works on all 3
+variants), implicit exit-on-divergence when stdout
+isn't a TTY (magical), stderr "drift detected" warning
+in addition to exit code (noisy when piped; output
+already shows diff), --threshold N parameter for N+
+field-diff exit (overkill for v1; operators chain with
+jq), adapter-side method returning exit signal (exit
+codes are CLI concern; adapter stays uncoupled from
+process exit). Drawbacks — new exit code 3 added to
+substrate's CLI vocabulary operators reading existing
+scripts may not realize the new code exists (mitigated
+by opt-in flag — pre-M6.7.zz.tenant.opt-out.cli.diff.exit-
+on-divergence callers never see exit 3), no
+--exit-on-no-divergence inverse flag (operators wrap
+with bash !), no --threshold N for fuzzy thresholds
+(jq covers), no per-field allowlist (jq filter then
+check length), exit code 3 is CrossEngin-specific
+convention operators porting scripts from diff(1) which
+uses exit 1 need to translate (documented in helpText),
+output still emitted on exit 3 CI systems grepping
+stderr for errors won't see drift output on stdout
+(operators redirect appropriately). 9 new CLI tests
+covering: cross-tenant exit 0 when fieldDiffs empty
+and --exit-on-divergence set, cross-tenant exit 3 when
+fieldDiffs non-empty and flag set, cross-tenant exit 0
+when fieldDiffs non-empty but flag NOT set (backward
+compat verified), cross-tenant output still emitted on
+exit 3 in JSON mode (parsed envelope checked +
+fieldDiffs length 1), --vs-platform exit 3 on non-empty
+fieldDiffs with flag, --vs-platform exit 0 on empty
+fieldDiffs with flag, --cross-table exit 3 on non-empty
+fieldDiffs with flag, --cross-table exit 0 on empty
+fieldDiffs with flag, runtime errors exit 1 take
+precedence over --exit-on-divergence (adapter throws
+PG connection refused returns exit 1 even with flag
+set). cli.ts helpText extended with 3-line note after
+the three diff usage lines explaining all three
+variants accept --exit-on-divergence returning exit 3
+instead of 0 when fieldDiffs non-empty for CI gates.
+ADR-0181 documents the design + 8 rejected alternatives
++ 7 future Qs (--exit-on-no-divergence inverse,
+--threshold N, --field allowlist, --quiet to suppress
+output, distinguished exit codes per variant,
+--exit-on-divergence on retention diff-history,
+apply same flag to retention list-policies). The
+retention CLI now has 16 actions with all 3 diff
+variants supporting --exit-on-divergence — operators
+have first-class CI-gate ergonomics across the full
+diff matrix (cross-tenant + tenant-vs-platform +
+cross-table-within-tenant), with the deliberate exit-3
+convention keeping drift-detection signal distinguishable
+from runtime errors.
+M6.7.zz.tenant.opt-out.cli.diff.cross-table
 closes ADR-0178 Q3 by adding `--cross-table` flag to
 `retention diff` + diffTenantTables adapter method.
 Completes the diff matrix — after ADR-0173 (same-tenant
@@ -5922,7 +6023,20 @@ cross-table-within-tenant new; one-command "is this
 tenant's retention consistent across all trace tables?"
 audit; legal-hold completeness check + compliance
 migration verification + CI cohort consistency
-workflows).
+workflows),
+ADR-0181 covers M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
+(`retention diff --exit-on-divergence` boolean flag on
+all 3 diff variants — closes ADR-0179 Q6 + ADR-0180 Q3
+— exit code 3 (distinguishable from exit 1 runtime
+errors / exit 2 misuse) when fieldDiffs non-empty;
+output still emitted; pure CLI enhancement no adapter
+changes; backward compatible — flag opt-in so pre-
+M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
+callers never see exit 3; replaces fragile `jq -e`
+wrapping whose exit-1 collides with runtime-error exit-
+1 making CI logs ambiguous; single flag uniform across
+all 3 variants; operators route exit 1 to on-call +
+exit 3 to compliance team).
 
 ## Architecture in 90 seconds
 
@@ -7903,6 +8017,143 @@ tenant + diff with cross-tenant default + --vs-
 platform variant + --cross-table variant) + 1
 maintenance (prune with --dry-run) + 1 batch
 substrate-only (effectiveRetentionBatch).
+ADR-0181 covers Phase 2 M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
+(`crossengin retention diff --exit-on-divergence`
+boolean flag for CI-gate ergonomics across all 3 diff
+variants — closes ADR-0179 Q6 + ADR-0180 Q3; after
+the diff matrix completion (cross-tenant default from
+ADR-0178 + --vs-platform from ADR-0179 + --cross-
+table from ADR-0180), three of those four ADRs
+explicitly listed --exit-on-divergence as future work
+because operators wiring `retention diff` into CI
+pipelines as drift detectors hit the same workaround:
+`DIFF=$(crossengin retention diff ... --format json);
+if echo "$DIFF" | jq -e '.result.fieldDiffs | length
+> 0'; then exit 1; fi` — fragile because jq -e exit-1
+collides with retention-diff's runtime-error exit-1
+making CI logs ambiguous between "drift detected" and
+"PG connection refused", boilerplate replicated per CI
+pipeline, and operators need 3 jq branches across the
+3 envelope shapes (though .result.fieldDiffs path
+happens to be uniform); single --exit-on-divergence
+flag covers all 3 variants uniformly. Flag semantic
+applies to ALL three variants — cross-tenant default,
+--vs-platform, --cross-table — when set fieldDiffs.length
+=== 0 → exit code 0 (no drift; CI gate passes),
+fieldDiffs.length > 0 → exit code 3 (drift detected;
+CI gate fails); when NOT set diff returns exit 0
+regardless of fieldDiffs (backward compatible — pre-
+M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence
+callers see identical behavior). Why exit code 3 —
+existing CLI exit codes across the substrate are 0
+(success), 1 (runtime error like adapter throws / PG
+connection refused / etc), 2 (misuse like missing args
+/ invalid flag value / mutually-exclusive flags); exit
+3 for "completed successfully but CI-gate fail" stays
+distinguishable from runtime errors so CI logs reading
+exit codes get clean signal — exit 1 means "something
+is broken fix and rerun", exit 3 means "retention
+drift detected on configured tenants cohort-consistency
+check failed"; bash gates work the same way regardless
+(`if ! crossengin retention diff ... --exit-on-
+divergence; then`) but operators differentiating signal
+from noise get it for free; GNU diff(1) uses exit 1
+for "files differ" and 2 for "error" — different
+convention; we diverge deliberately because exit 1 is
+already meaningful in CrossEngin CLI. Output unchanged
+— result (human or JSON) STILL emitted on exit 3
+operators reading scripts see what diverged; flag
+controls only the exit code. Single flag for all 3
+variants — no per-variant naming
+(--cross-tenant-exit-on-divergence etc); uniform
+contract. Implementation pure CLI enhancement no
+adapter changes — each of the 3 runner functions now
+branches output emission then returns
+divergenceExitCode(command, result.fieldDiffs.length);
+shared private helper checks
+getBooleanFlag(command, "exit-on-divergence") &&
+fieldDiffsLength > 0 returning 3 else 0; runtime
+errors take precedence — existing `return 1` from
+catch blocks fires before divergenceExitCode is
+reached. Use cases unblocked — CI cohort consistency
+gate via direct bash idiom replacing jq -e wrap, per-
+tenant drift detection from platform default for
+regulated tenants that MUST stay on default (exit 3
+→ tenant has its own override violating policy), per-
+tenant cross-table consistency gate for legal-hold
+completeness (exit 3 → hold applied to one table but
+not the other = incomplete hold), pipeline runners
+differentiate exit 1 vs exit 3 via bash case statement
+routing to on-call vs compliance team respectively
+(case $? in 0) "no drift"; 1) "runtime error
+investigate"; 3) "drift detected alert team" ;; esac).
+Rejected alternatives — exit code 1 matching diff(1)
+(collides with existing runtime-error exit 1 in
+CrossEngin CLI — distinguishability is the point),
+exit code 2 matching git diff --exit-code (collides
+with existing misuse exit 2), --ci flag naming (too
+vague doesn't name the semantic), three per-variant
+flags (verbose; one flag works on all 3), implicit
+exit-on-divergence when stdout isn't a TTY (magical;
+operators want explicit), print "drift detected"
+warning on stderr in addition to exit code (noisy when
+piped through pipelines; output already shows diff),
+--threshold N parameter for N+ field-diff exit
+(overkill for v1; operators chain with jq for now;
+deferred to future Q), adapter-side method returning
+exit signal (exit codes are CLI concern; adapter stays
+uncoupled from process exit). Drawbacks — new exit
+code 3 added to substrate's CLI vocabulary operators
+reading existing scripts may not realize new code
+exists (mitigated by opt-in — pre-flag callers never
+see exit 3), no --exit-on-no-divergence inverse flag
+for "fail CI when tenants stop diverging" unusual but
+conceivable for A/B-test migration gates (operators
+wrap with bash ! — single direction covers common
+case), no --threshold N for fuzzy thresholds (jq
+covers; deferred), no per-field allowlist
+(retention_days drift vs enabled drift — jq filter +
+length check covers; deferred), exit code 3 is
+CrossEngin-specific convention operators porting from
+diff(1) need to translate (documented in helpText
+3-line note covering all 3 diff variants accept the
+flag), output still emitted on exit 3 CI systems
+grepping stderr for errors won't see drift output on
+stdout (operators redirect appropriately). 9 new CLI
+tests in retention.test.ts — cross-tenant exit 0 when
+fieldDiffs empty and --exit-on-divergence set
+(diffTenantResult with empty fieldDiffs + flag → exit
+0 + "No differences" in output), cross-tenant exit 3
+when fieldDiffs non-empty with flag (fieldDiffs len 1
+with retention_days 30→90 + flag → exit 3 + "Field
+changes (1)" in output), cross-tenant exit 0 when
+fieldDiffs non-empty but flag NOT set (backward compat
+— pre-flag callers see identical behavior), cross-
+tenant output still emitted on exit 3 in JSON mode
+(parsed envelope checked + fieldDiffs length 1
+verified), --vs-platform exit 3 on non-empty
+fieldDiffs with flag (tenant=30d vs platform=90d +
+flag → exit 3), --vs-platform exit 0 on empty
+fieldDiffs with flag (both platform 90d), --cross-
+table exit 3 on non-empty fieldDiffs with flag
+(workflow_traces tenant vs llm_call_traces platform +
+flag → exit 3), --cross-table exit 0 on empty
+fieldDiffs with flag, runtime errors exit 1 take
+precedence over --exit-on-divergence (adapter throws
+PG connection refused returns exit 1 even with flag
+set — verified via fakeRetention throws option). cli.
+ts helpText extended with 3-line note after the three
+diff usage lines explaining all three variants accept
+--exit-on-divergence returning exit 3 (instead of 0)
+when fieldDiffs non-empty for CI gates that fail the
+build when retention drifts. The retention CLI now
+has 16 actions with all 3 diff variants supporting
+--exit-on-divergence — operators have first-class CI-
+gate ergonomics across the full diff matrix (cross-
+tenant + tenant-vs-platform + cross-table-within-
+tenant), with deliberate exit-3 convention keeping
+drift-detection signal distinguishable from runtime
+errors.
 ADR-0177 covers Phase 2 M6.7.zz.tenant.batch
 (`effectiveRetentionBatch(pairs)` adapter method on
 PostgresTraceRetention + exported effectiveRetentionKey

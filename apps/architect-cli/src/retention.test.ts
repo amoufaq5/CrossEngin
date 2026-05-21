@@ -4162,6 +4162,332 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
   });
 });
 
+describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence)", () => {
+  it("cross-tenant: exit 0 when fieldDiffs empty and --exit-on-divergence set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            resolutionA: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("No differences");
+  });
+
+  it("cross-tenant: exit 3 when fieldDiffs non-empty and --exit-on-divergence set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            resolutionA: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "retention_days", valueA: 30, valueB: 90 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    expect(out()).toContain("Field changes (1):");
+  });
+
+  it("cross-tenant: exit 0 when fieldDiffs non-empty but flag NOT set (backward compat)", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            resolutionA: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "retention_days", valueA: 30, valueB: 90 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("cross-tenant: output still emitted on exit 3 (JSON mode)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantResult: {
+            tenantIdA: TENANT_A,
+            tenantIdB: TENANT_B,
+            tableName: "workflow_traces",
+            resolutionA: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "retention_days", valueA: 30, valueB: 90 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.action).toBe("diff");
+    expect(parsedOut.result.fieldDiffs).toHaveLength(1);
+  });
+
+  it("--vs-platform: exit 3 on non-empty fieldDiffs with flag", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantVsPlatformResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tenantResolution: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            platformResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "retention_days", valueA: 30, valueB: 90 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--vs-platform: exit 0 on empty fieldDiffs with flag", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "--vs-platform",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantVsPlatformResult: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            tenantResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            platformResolution: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("--cross-table: exit 3 on non-empty fieldDiffs with flag", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesResult: {
+            tenantId: TENANT_A,
+            tableNameA: "workflow_traces",
+            tableNameB: "llm_call_traces",
+            resolutionA: {
+              source: "tenant",
+              retentionDays: 30,
+              enabled: true,
+              tenantId: TENANT_A,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [
+              { field: "retention_days", valueA: 30, valueB: 90 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--cross-table: exit 0 on empty fieldDiffs with flag", async () => {
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesResult: {
+            tenantId: TENANT_A,
+            tableNameA: "workflow_traces",
+            tableNameB: "llm_call_traces",
+            resolutionA: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            resolutionB: {
+              source: "platform",
+              retentionDays: 90,
+              enabled: true,
+            },
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("runtime errors (exit 1) take precedence over --exit-on-divergence", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--exit-on-divergence",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
 describe("formatTenantTablesDiff", () => {
   it("renders 'No differences' message when fieldDiffs is empty", () => {
     const out = formatTenantTablesDiff({
