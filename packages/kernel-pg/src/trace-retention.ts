@@ -423,6 +423,41 @@ export interface DiffHistoryTimelineResult {
   readonly entries: ReadonlyArray<TimelineEntry>;
 }
 
+export interface DiffHistoryTimelineNwayInput {
+  readonly tenantIds: ReadonlyArray<string>;
+  readonly tableName: string;
+  readonly since?: string;
+  readonly until?: string;
+  readonly limit?: number;
+  readonly joinActor?: boolean;
+}
+
+export interface NwayTimelineEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly tenantLabel: string;
+  readonly tableName: string;
+  readonly eventKind: OptOutHistoryEventKind;
+  readonly actorId: string | null;
+  readonly occurredAt: string;
+  readonly prevState: Record<string, unknown> | null;
+  readonly nextState: Record<string, unknown> | null;
+  readonly attributes: Record<string, unknown>;
+  readonly actorDisplayName?: string | null;
+  readonly actorEmail?: string | null;
+}
+
+export interface DiffHistoryTimelineNwayResult {
+  readonly tenantIds: ReadonlyArray<string>;
+  readonly tableName: string;
+  readonly entries: ReadonlyArray<NwayTimelineEntry>;
+}
+
+export function labelForIndex(index: number): string {
+  if (index < 26) return String.fromCharCode(65 + index);
+  return `T${index + 1}`;
+}
+
 export interface DiffTenantTablesNwayInput {
   readonly tenantId: string;
   readonly tableNames: ReadonlyArray<string>;
@@ -1571,6 +1606,107 @@ export class PostgresTraceRetention {
     return {
       tenantIdA: input.tenantIdA,
       tenantIdB: input.tenantIdB,
+      tableName: input.tableName,
+      entries,
+    };
+  }
+
+  async diffHistoryTimelineNway(
+    input: DiffHistoryTimelineNwayInput,
+  ): Promise<DiffHistoryTimelineNwayResult> {
+    if (input.tenantIds.length < 2) {
+      throw new Error(
+        `diffHistoryTimelineNway: at least 2 tenantIds required, got ${input.tenantIds.length}`,
+      );
+    }
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`limit must be an integer >= 1, got ${limit}`);
+    }
+    const params: unknown[] = [...input.tenantIds];
+    const tenantPlaceholders = input.tenantIds
+      .map((_, i) => `$${i + 1}`)
+      .join(", ");
+    params.push(input.tableName);
+    const tableParamIdx = params.length;
+    const conditions: string[] = [
+      `h.tenant_id IN (${tenantPlaceholders})`,
+      `h.table_name = $${tableParamIdx}`,
+    ];
+    if (input.since !== undefined) {
+      params.push(input.since);
+      conditions.push(`h.occurred_at >= $${params.length}`);
+    }
+    if (input.until !== undefined) {
+      params.push(input.until);
+      conditions.push(`h.occurred_at <= $${params.length}`);
+    }
+    params.push(limit);
+    const joinActor = input.joinActor === true;
+    const selectActorCols = joinActor
+      ? ", u.display_name AS actor_display_name, u.email AS actor_email"
+      : "";
+    const joinClause = joinActor
+      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
+      : "";
+    const result = await this.conn.query<{
+      id: string;
+      tenant_id: string;
+      table_name: string;
+      event_kind: string;
+      actor_id: string | null;
+      actor_display_name?: string | null;
+      actor_email?: string | null;
+      occurred_at: string;
+      prev_state: Record<string, unknown> | null;
+      next_state: Record<string, unknown> | null;
+      attributes: Record<string, unknown>;
+    }>(
+      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
+              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY h.occurred_at ASC, h.id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    const labelByTenantId = new Map<string, string>();
+    input.tenantIds.forEach((id, i) => {
+      if (!labelByTenantId.has(id)) {
+        labelByTenantId.set(id, labelForIndex(i));
+      }
+    });
+    const entries: NwayTimelineEntry[] = result.rows.map((r) => {
+      if (!isOptOutHistoryEventKind(r.event_kind)) {
+        throw new Error(
+          `diffHistoryTimelineNway: unknown event_kind '${r.event_kind}'`,
+        );
+      }
+      const tenantLabel = labelByTenantId.get(r.tenant_id) ?? "?";
+      const entry: NwayTimelineEntry = {
+        id: r.id,
+        tenantId: r.tenant_id,
+        tenantLabel,
+        tableName: r.table_name,
+        eventKind: r.event_kind,
+        actorId: r.actor_id,
+        occurredAt: r.occurred_at,
+        prevState: r.prev_state,
+        nextState: r.next_state,
+        attributes: r.attributes,
+      };
+      if (joinActor) {
+        return {
+          ...entry,
+          actorDisplayName: r.actor_display_name ?? null,
+          actorEmail: r.actor_email ?? null,
+        };
+      }
+      return entry;
+    });
+    return {
+      tenantIds: input.tenantIds,
       tableName: input.tableName,
       entries,
     };

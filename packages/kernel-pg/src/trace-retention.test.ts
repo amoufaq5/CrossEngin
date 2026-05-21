@@ -4185,6 +4185,220 @@ describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli
   });
 });
 
+describe("PostgresTraceRetention.diffHistoryTimelineNway (M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+  const TENANT_D = "00000000-0000-4000-8000-00000000000D";
+
+  function rawRow(
+    tenant_id: string,
+    overrides: Partial<{
+      id: string;
+      event_kind: string;
+      occurred_at: string;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id: "h1",
+      tenant_id,
+      table_name: "workflow_traces",
+      event_kind: "opt_out_set",
+      actor_id: null,
+      occurred_at: "2026-01-01T00:00:00.000Z",
+      prev_state: null,
+      next_state: { opt_out: true, retention_days: 365 },
+      attributes: {},
+      ...overrides,
+    };
+  }
+
+  it("rejects fewer than 2 tenantIds", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimelineNway({
+        tenantIds: [TENANT_A],
+        tableName: "workflow_traces",
+      }),
+    ).rejects.toThrow("at least 2 tenantIds required");
+  });
+
+  it("issues a single query with h.tenant_id IN ($1, $2, $3) for 3 tenants", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.sql).toContain("h.tenant_id IN ($1, $2, $3)");
+    expect(capture[0]?.sql).toContain("h.table_name = $4");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      "workflow_traces",
+      100,
+    ]);
+  });
+
+  it("tags each entry with tenantLabel A/B/C from input order", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawRow(TENANT_A, { id: "h1" }),
+        rawRow(TENANT_B, { id: "h2" }),
+        rawRow(TENANT_C, { id: "h3" }),
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(result.entries).toHaveLength(3);
+    expect(result.entries[0]?.tenantLabel).toBe("A");
+    expect(result.entries[1]?.tenantLabel).toBe("B");
+    expect(result.entries[2]?.tenantLabel).toBe("C");
+  });
+
+  it("assigns T27, T28, ... labels for indices beyond 26", async () => {
+    const tenantIds: string[] = [];
+    for (let i = 0; i < 28; i++) {
+      tenantIds.push(`00000000-0000-4000-8000-0000000000${i.toString(16).padStart(2, "0")}`);
+    }
+    const conn = mockConnection(() => ({
+      rows: [rawRow(tenantIds[26]!, { id: "h-27" }), rawRow(tenantIds[27]!, { id: "h-28" })],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineNway({
+      tenantIds,
+      tableName: "workflow_traces",
+    });
+    expect(result.entries[0]?.tenantLabel).toBe("T27");
+    expect(result.entries[1]?.tenantLabel).toBe("T28");
+  });
+
+  it("orders by h.occurred_at ASC, h.id ASC (chronological)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).toContain("ORDER BY h.occurred_at ASC, h.id ASC");
+  });
+
+  it("returns empty entries when no rows match", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(result.entries).toEqual([]);
+    expect(result.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+    expect(result.tableName).toBe("workflow_traces");
+  });
+
+  it("threads --since + --until + --limit through (param positions after tenant IN list)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C, TENANT_D],
+      tableName: "workflow_traces",
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-06-01T00:00:00.000Z",
+      limit: 50,
+    });
+    expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
+    expect(capture[0]?.sql).toContain("h.occurred_at <= $7");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      TENANT_D,
+      "workflow_traces",
+      "2026-01-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+      50,
+    ]);
+  });
+
+  it("composes with joinActor=true emitting LEFT JOIN + actor cols", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({
+        rows: [
+          {
+            ...rawRow(TENANT_A),
+            actor_id: "11111111-1111-1111-1111-111111111111",
+            actor_display_name: "Alice Smith",
+            actor_email: "alice@example.com",
+          },
+        ],
+        rowCount: 1,
+      }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      joinActor: true,
+    });
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
+    const entry = result.entries[0]!;
+    expect(entry.actorDisplayName).toBe("Alice Smith");
+    expect(entry.actorEmail).toBe("alice@example.com");
+  });
+
+  it("rejects limit < 1", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimelineNway({
+        tenantIds: [TENANT_A, TENANT_B],
+        tableName: "workflow_traces",
+        limit: 0,
+      }),
+    ).rejects.toThrow("limit must be an integer >= 1");
+  });
+
+  it("throws on unknown event_kind in returned row (schema-drift guard)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [rawRow(TENANT_A, { event_kind: "unknown_kind" })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryTimelineNway({
+        tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+        tableName: "workflow_traces",
+      }),
+    ).rejects.toThrow("unknown event_kind 'unknown_kind'");
+  });
+
+  it("preserves duplicate tenantIds — first occurrence wins the label", async () => {
+    const conn = mockConnection(() => ({
+      rows: [rawRow(TENANT_A, { id: "h-dup" })],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+    });
+    expect(result.entries[0]?.tenantLabel).toBe("A");
+  });
+});
+
 describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.tenant.opt-out.cli.history.cursor)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";

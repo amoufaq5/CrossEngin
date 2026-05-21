@@ -4,9 +4,11 @@ import {
   createNodePgConnection,
   effectiveRetentionKey,
   isOptOutHistoryEventKind,
+  labelForIndex,
   parsePgEnvConfig,
   PostgresTraceRetention,
   type DiffHistoryEntriesResult,
+  type DiffHistoryTimelineNwayResult,
   type DiffHistoryTimelineResult,
   type DiffTenantPoliciesNwayResult,
   type DiffTenantPoliciesResult,
@@ -1392,6 +1394,43 @@ async function runRetentionDiffTimeline(
   }
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+  const addTenants = getMultiFlag(command, "add-tenant");
+
+  if (addTenants.length > 0) {
+    const tenantIds = [tenantIdA, tenantIdB, ...addTenants];
+    let nwayResult: DiffHistoryTimelineNwayResult;
+    try {
+      nwayResult = await retention.diffHistoryTimelineNway({
+        tenantIds,
+        tableName,
+        since,
+        until,
+        limit,
+        joinActor: withActorNames || undefined,
+      });
+    } catch (err) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        action: "diff-timeline",
+        nway: true,
+        since: since ?? null,
+        until: until ?? null,
+        limit,
+        withActorNames,
+        result: nwayResult,
+      });
+      return 0;
+    }
+    ctx.io.stdout.write(formatTimelineNwayDiff(nwayResult, { withActorNames }));
+    return 0;
+  }
 
   let result: DiffHistoryTimelineResult;
   try {
@@ -1448,6 +1487,35 @@ export function formatTimelineDiff(
       : "";
     lines.push(
       `  ${e.occurredAt}  [${e.tenantSide}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function formatTimelineNwayDiff(
+  result: DiffHistoryTimelineNwayResult,
+  opts: { readonly withActorNames?: boolean } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `N-way timeline for ${result.tenantIds.length} tenants on ${result.tableName}:`,
+  );
+  result.tenantIds.forEach((id, i) => {
+    lines.push(`  Tenant ${labelForIndex(i)}: ${id}`);
+  });
+  lines.push("");
+  if (result.entries.length === 0) {
+    lines.push("No history events for any of these tenants on this table.");
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`Events (${result.entries.length}):`);
+  for (const e of result.entries) {
+    const stateSummary = summarizeTimelineEntry(e);
+    const actorSuffix = opts.withActorNames
+      ? `  by ${formatActor(e)}`
+      : "";
+    lines.push(
+      `  ${e.occurredAt}  [${e.tenantLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
   }
   return lines.join("\n") + "\n";

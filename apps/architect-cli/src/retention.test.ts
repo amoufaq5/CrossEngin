@@ -4,6 +4,8 @@ import type {
   DiffHistoryEntriesInput,
   DiffHistoryEntriesResult,
   DiffHistoryTimelineInput,
+  DiffHistoryTimelineNwayInput,
+  DiffHistoryTimelineNwayResult,
   DiffHistoryTimelineResult,
   DiffTenantPoliciesInput,
   DiffTenantPoliciesNwayInput,
@@ -54,6 +56,7 @@ import {
   formatTenantTablesDiff,
   formatTenantTablesNwayDiff,
   formatTimelineDiff,
+  formatTimelineNwayDiff,
   formatTenantVsPlatformDiff,
   runRetention,
   type RetentionContext,
@@ -110,6 +113,8 @@ function fakeRetention(opts: {
   diffCapture?: DiffHistoryEntriesInput[];
   diffTimelineResult?: DiffHistoryTimelineResult;
   diffTimelineCapture?: DiffHistoryTimelineInput[];
+  diffTimelineNwayResult?: DiffHistoryTimelineNwayResult;
+  diffTimelineNwayCapture?: DiffHistoryTimelineNwayInput[];
   pruneResults?: readonly RetentionRunResult[];
   previewResults?: readonly RetentionPreviewResult[];
   pruneCalled?: { count: number };
@@ -271,6 +276,17 @@ function fakeRetention(opts: {
         opts.diffTimelineResult ?? {
           tenantIdA: input.tenantIdA,
           tenantIdB: input.tenantIdB,
+          tableName: input.tableName,
+          entries: [],
+        }
+      );
+    },
+    diffHistoryTimelineNway: async (input: DiffHistoryTimelineNwayInput) => {
+      opts.diffTimelineNwayCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.diffTimelineNwayResult ?? {
+          tenantIds: input.tenantIds,
           tableName: input.tableName,
           entries: [],
         }
@@ -4936,6 +4952,354 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.withActorNames).toBe(false);
+  });
+});
+
+describe("runRetention diff-timeline N-way (M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant)", () => {
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+  const TENANT_D = "00000000-0000-4000-8000-00000000000D";
+
+  it("dispatches to N-way path when --add-tenant is present", async () => {
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+    expect(capture[0]?.tableName).toBe("workflow_traces");
+  });
+
+  it("collects multiple --add-tenant flags in argv order [A, B, C, D]", async () => {
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--add-tenant",
+        TENANT_D,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantIds).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      TENANT_D,
+    ]);
+  });
+
+  it("does NOT call diffHistoryTimelineNway when --add-tenant is absent", async () => {
+    const pairCapture: DiffHistoryTimelineInput[] = [];
+    const nwayCapture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCapture: pairCapture,
+          diffTimelineNwayCapture: nwayCapture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(pairCapture).toHaveLength(1);
+    expect(nwayCapture).toHaveLength(0);
+  });
+
+  it("threads --with-actor-names + --since + --limit through to N-way adapter", async () => {
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--with-actor-names",
+        "--since",
+        "2026-01-01",
+        "--limit",
+        "50",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBe(true);
+    expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
+    expect(capture[0]?.limit).toBe(50);
+  });
+
+  it("human-format renders 'N-way timeline for N tenants on <table>:' header", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("N-way timeline for 3 tenants on workflow_traces");
+    expect(out()).toContain(`Tenant A: ${TENANT_A}`);
+    expect(out()).toContain(`Tenant B: ${TENANT_B}`);
+    expect(out()).toContain(`Tenant C: ${TENANT_C}`);
+  });
+
+  it("human-format renders [A]/[B]/[C] tagged events", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantLabel: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: null,
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+              },
+              {
+                id: "h2",
+                tenantId: TENANT_B,
+                tenantLabel: "B",
+                tableName: "workflow_traces",
+                eventKind: "retention_set",
+                actorId: null,
+                occurredAt: "2026-01-15T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: false, retention_days: 90, enabled: true },
+                attributes: {},
+              },
+              {
+                id: "h3",
+                tenantId: TENANT_C,
+                tenantLabel: "C",
+                tableName: "workflow_traces",
+                eventKind: "policy_deleted",
+                actorId: null,
+                occurredAt: "2026-02-01T00:00:00.000Z",
+                prevState: { retention_days: 30 },
+                nextState: null,
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("[A] opt_out_set");
+    expect(out()).toContain("[B] retention_set");
+    expect(out()).toContain("[C] policy_deleted");
+    expect(out()).toContain("(policy deleted)");
+  });
+
+  it("JSON envelope includes nway:true discriminator + result.tenantIds + entries with tenantLabel", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            entries: [
+              {
+                id: "h1",
+                tenantId: TENANT_A,
+                tenantLabel: "A",
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: null,
+                occurredAt: "2026-01-01T00:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true, retention_days: 365 },
+                attributes: {},
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.action).toBe("diff-timeline");
+    expect(parsed_.nway).toBe(true);
+    expect(parsed_.result.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
+    expect(parsed_.result.entries[0].tenantLabel).toBe("A");
+  });
+
+  it("adapter errors on N-way path propagate as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("PG connection refused"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("PG connection refused");
+  });
+});
+
+describe("formatTimelineNwayDiff", () => {
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+
+  it("renders 'No history events for any of these tenants' when entries empty", () => {
+    const out = formatTimelineNwayDiff({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      entries: [],
+    });
+    expect(out).toContain("N-way timeline for 3 tenants on workflow_traces");
+    expect(out).toContain(`Tenant A: ${TENANT_A}`);
+    expect(out).toContain(`Tenant B: ${TENANT_B}`);
+    expect(out).toContain(`Tenant C: ${TENANT_C}`);
+    expect(out).toContain("No history events for any of these tenants");
+  });
+
+  it("renders [A]/[B]/[C] tagged event lines with state summary", () => {
+    const out = formatTimelineNwayDiff({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h1",
+          tenantId: TENANT_C,
+          tenantLabel: "C",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          actorId: null,
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          prevState: null,
+          nextState: {
+            opt_out: true,
+            retention_days: 365,
+            opt_out_reason: "legal-hold",
+          },
+          attributes: {},
+        },
+      ],
+    });
+    expect(out).toContain("Events (1):");
+    expect(out).toContain("[C] opt_out_set");
+    expect(out).toContain("retention=365");
+    expect(out).toContain("opt_out=true");
+    expect(out).toContain("reason=legal-hold");
+  });
+
+  it("renders 'by Alice (uuid)' suffix when withActorNames=true opt", () => {
+    const out = formatTimelineNwayDiff(
+      {
+        tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h1",
+            tenantId: TENANT_A,
+            tenantLabel: "A",
+            tableName: "workflow_traces",
+            eventKind: "opt_out_set",
+            actorId: "11111111-1111-1111-1111-111111111111",
+            occurredAt: "2026-01-01T00:00:00.000Z",
+            prevState: null,
+            nextState: { opt_out: true, retention_days: 365 },
+            attributes: {},
+            actorDisplayName: "Alice Smith",
+            actorEmail: "alice@example.com",
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(out).toContain(
+      "by Alice Smith (11111111-1111-1111-1111-111111111111)",
+    );
   });
 });
 
