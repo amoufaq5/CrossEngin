@@ -1210,6 +1210,19 @@ async function runRetentionDiffHistory(
     eventKind = kindFlag;
   }
 
+  const kindNotFlag = getStringFlag(command, "kind-not");
+  let eventKindNot: OptOutHistoryEventKind | undefined;
+  if (kindNotFlag !== null) {
+    if (!isOptOutHistoryEventKind(kindNotFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-history: invalid --kind-not '${kindNotFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    eventKindNot = kindNotFlag;
+  }
+
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
   const actorIdNotFlag = getStringFlag(command, "actor-id-not");
@@ -1222,6 +1235,7 @@ async function runRetentionDiffHistory(
       idA,
       idB,
       eventKind,
+      eventKindNot,
       actorId,
       actorIdNot,
       joinActor: withActorNames ? true : undefined,
@@ -1238,6 +1252,7 @@ async function runRetentionDiffHistory(
     printJson(ctx.io, {
       action: "diff-history",
       kind: eventKind ?? null,
+      kindNot: eventKindNot ?? null,
       actorId: actorId ?? null,
       actorIdNot: actorIdNot ?? null,
       withActorNames,
