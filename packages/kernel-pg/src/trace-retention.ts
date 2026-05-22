@@ -418,6 +418,7 @@ export interface DiffHistoryTimelineInput {
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
   readonly actorIdsNot?: ReadonlyArray<string>;
+  readonly actorPresence?: ActorPresenceFilter;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -454,6 +455,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
   readonly actorIdsNot?: ReadonlyArray<string>;
+  readonly actorPresence?: ActorPresenceFilter;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -489,6 +491,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
   readonly actorIdsNot?: ReadonlyArray<string>;
+  readonly actorPresence?: ActorPresenceFilter;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -1761,6 +1764,11 @@ export class PostgresTraceRetention {
         `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
       );
     }
+    if (input.actorPresence === "system_only") {
+      conditions.push(`h.actor_id IS NULL`);
+    } else if (input.actorPresence === "no_system") {
+      conditions.push(`h.actor_id IS NOT NULL`);
+    }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const kindPlaceholders = input.eventKinds
         .map((kind) => {
@@ -1904,6 +1912,11 @@ export class PostgresTraceRetention {
       conditions.push(
         `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
       );
+    }
+    if (input.actorPresence === "system_only") {
+      conditions.push(`h.actor_id IS NULL`);
+    } else if (input.actorPresence === "no_system") {
+      conditions.push(`h.actor_id IS NOT NULL`);
     }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const kindPlaceholders = input.eventKinds
@@ -2054,6 +2067,11 @@ export class PostgresTraceRetention {
       conditions.push(
         `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
       );
+    }
+    if (input.actorPresence === "system_only") {
+      conditions.push(`h.actor_id IS NULL`);
+    } else if (input.actorPresence === "no_system") {
+      conditions.push(`h.actor_id IS NOT NULL`);
     }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const kindPlaceholders = input.eventKinds

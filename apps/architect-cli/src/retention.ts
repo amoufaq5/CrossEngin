@@ -1592,6 +1592,23 @@ async function runRetentionDiffTimeline(
   const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
   const actorIdsNot =
     actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
+  const systemOnlyFlag = getBooleanFlag(command, "system-only");
+  const noSystemFlag = getBooleanFlag(command, "no-system");
+  if (systemOnlyFlag && noSystemFlag) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: --system-only and --no-system are mutually exclusive",
+    );
+    return 2;
+  }
+  const actorPresence:
+    | "system_only"
+    | "no_system"
+    | undefined = systemOnlyFlag
+    ? "system_only"
+    : noSystemFlag
+      ? "no_system"
+      : undefined;
 
   const kindFlags = getMultiFlag(command, "kind");
   const validatedKinds: OptOutHistoryEventKind[] = [];
@@ -1662,6 +1679,7 @@ async function runRetentionDiffTimeline(
         joinActor: withActorNames || undefined,
         actorIds,
         actorIdsNot,
+        actorPresence,
         eventKinds,
         afterId,
         beforeId,
@@ -1693,6 +1711,8 @@ async function runRetentionDiffTimeline(
         withActorNames,
         actorIds: actorIds ?? null,
         actorIdsNot: actorIdsNot ?? null,
+        systemOnly: systemOnlyFlag,
+        noSystem: noSystemFlag,
         kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
@@ -1730,6 +1750,7 @@ async function runRetentionDiffTimeline(
         joinActor: withActorNames || undefined,
         actorIds,
         actorIdsNot,
+        actorPresence,
         eventKinds,
         afterId,
         beforeId,
@@ -1761,6 +1782,8 @@ async function runRetentionDiffTimeline(
         withActorNames,
         actorIds: actorIds ?? null,
         actorIdsNot: actorIdsNot ?? null,
+        systemOnly: systemOnlyFlag,
+        noSystem: noSystemFlag,
         kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
@@ -1793,6 +1816,7 @@ async function runRetentionDiffTimeline(
       joinActor: withActorNames || undefined,
       actorIds,
       actorIdsNot,
+      actorPresence,
       eventKinds,
       afterId,
       beforeId,
@@ -1823,6 +1847,8 @@ async function runRetentionDiffTimeline(
       withActorNames,
       actorIds: actorIds ?? null,
       actorIdsNot: actorIdsNot ?? null,
+      systemOnly: systemOnlyFlag,
+      noSystem: noSystemFlag,
       kinds: eventKinds ?? null,
       afterId: afterId ?? null,
       beforeId: beforeId ?? null,
