@@ -274,7 +274,7 @@ export interface ListOptOutHistoryInput {
   readonly tableName?: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly actorId?: string;
-  readonly actorIdNot?: string;
+  readonly actorIdsNot?: ReadonlyArray<string>;
   readonly actorPresence?: ActorPresenceFilter;
   readonly since?: string;
   readonly until?: string;
@@ -1309,10 +1309,15 @@ export class PostgresTraceRetention {
       params.push(input.actorId);
       conditions.push(`h.actor_id = $${params.length}`);
     }
-    if (input.actorIdNot !== undefined) {
-      params.push(input.actorIdNot);
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const actorNotPlaceholders = input.actorIdsNot
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
       conditions.push(
-        `(h.actor_id IS NULL OR h.actor_id != $${params.length})`,
+        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
       );
     }
     if (input.actorPresence === "system_only") {

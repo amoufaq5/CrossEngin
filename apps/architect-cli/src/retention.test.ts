@@ -3262,11 +3262,12 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
   });
 });
 
-describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.history.actor-not)", () => {
+describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.history.actor-not + actor-not.multi)", () => {
   const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
   const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+  const ACTOR_CAROL = "33333333-0000-4000-8000-000000000003";
 
-  it("threads actorIdNot to adapter when --actor-id-not set", async () => {
+  it("threads actorIdsNot as single-element array when --actor-id-not set once", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -3277,10 +3278,31 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE]);
   });
 
-  it("omits actorIdNot when --actor-id-not NOT set (backward compat)", async () => {
+  it("threads multi-element actorIdsNot when --actor-id-not repeated", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+  });
+
+  it("omits actorIdsNot when --actor-id-not NOT set (backward compat)", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(parsed("retention", "history"), {
@@ -3288,10 +3310,10 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
       retentionOverride: fakeRetention({ historyCapture: capture }),
     } as RetentionContext);
     expect(code).toBe(0);
-    expect(capture[0]?.actorIdNot).toBeUndefined();
+    expect(capture[0]?.actorIdsNot).toBeUndefined();
   });
 
-  it("composes with --actor-id (both threaded independently — contradictory but adapter doesn't enforce)", async () => {
+  it("composes with --actor-id (positive + negative both threaded independently)", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -3310,10 +3332,10 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
     );
     expect(code).toBe(0);
     expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_BOB);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_BOB]);
   });
 
-  it("composes with --tenant + --with-actor-names + --actor-id-not", async () => {
+  it("composes with --tenant + --with-actor-names + multi --actor-id-not", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -3324,6 +3346,8 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
         TENANT_A,
         "--actor-id-not",
         ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_CAROL,
         "--with-actor-names",
       ),
       {
@@ -3333,11 +3357,11 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
     );
     expect(code).toBe(0);
     expect(capture[0]?.tenantId).toBe(TENANT_A);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE, ACTOR_CAROL]);
     expect(capture[0]?.joinActor).toBe(true);
   });
 
-  it("JSON envelope echoes actorIdNot field when --actor-id-not set", async () => {
+  it("JSON envelope echoes actorIdsNot array when --actor-id-not set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -3355,10 +3379,33 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.actorIdNot).toBe(ACTOR_ALICE);
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_ALICE]);
   });
 
-  it("JSON envelope actorIdNot=null when --actor-id-not NOT set", async () => {
+  it("JSON envelope echoes multi-element actorIdsNot when --actor-id-not repeated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_BOB,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+  });
+
+  it("JSON envelope actorIdsNot=null when --actor-id-not NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed("retention", "history", "--format", "json"),
@@ -3369,7 +3416,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.actorIdNot).toBeNull();
+    expect(parsed_.actorIdsNot).toBeNull();
   });
 });
 
@@ -3468,7 +3515,7 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE]);
     expect(capture[0]?.actorPresence).toBe("no_system");
   });
 
