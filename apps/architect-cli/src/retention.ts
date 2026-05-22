@@ -1163,9 +1163,22 @@ async function runRetentionDiffHistory(
     return 2;
   }
 
+  const kindFlag = getStringFlag(command, "kind");
+  let eventKind: OptOutHistoryEventKind | undefined;
+  if (kindFlag !== null) {
+    if (!isOptOutHistoryEventKind(kindFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-history: invalid --kind '${kindFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    eventKind = kindFlag;
+  }
+
   let result: DiffHistoryEntriesResult;
   try {
-    result = await retention.diffHistoryEntries({ idA, idB });
+    result = await retention.diffHistoryEntries({ idA, idB, eventKind });
   } catch (err) {
     printError(
       ctx.io,
@@ -1175,7 +1188,11 @@ async function runRetentionDiffHistory(
   }
 
   if (command.format === "json") {
-    printJson(ctx.io, { action: "diff-history", result });
+    printJson(ctx.io, {
+      action: "diff-history",
+      kind: eventKind ?? null,
+      result,
+    });
     return 0;
   }
   ctx.io.stdout.write(formatHistoryDiff(result));

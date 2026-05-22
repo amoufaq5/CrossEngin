@@ -21,15 +21,106 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,798 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id
+**56 packages + 1 app, 129 meta-schema tables, 8,809 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter
+closes ADR-0194 Q6 by threading `--kind <event-kind>` through
+`retention diff-history` as an expectation check (not a filter,
+since diff-history takes exactly two IDs not a list query).
+Adapter loads both events as before, then if eventKind is set
+validates entryA.event_kind === input.eventKind AND
+entryB.event_kind === input.eventKind, throwing with explicit
+error naming the offending side(s) on mismatch — error message
+'expected both events to have event_kind <X> but A is <Y> and
+B is <Z>' depending on which side(s) violate. CLI validates
+--kind against the 4-value OPT_OUT_HISTORY_EVENT_KINDS tuple
+from ADR-0170 (invalid value exits 2 with explicit valid-
+values list mirroring ADR-0194 pattern); valid value but
+mismatch exits 1 (runtime path matches existing cross-tenant/
+cross-table mismatch error propagation in diff-history).
+DiffHistoryEntriesInput gains optional eventKind?:
+OptOutHistoryEventKind field. JSON envelope gains kind:
+OptOutHistoryEventKind | null field echoing operator's
+expectation matches ADR-0194 envelope convention. No human-
+format change — formatHistoryDiff already renders eventKindA +
+eventKindB in metadata header so when --kind set and both
+match operators visually verify expectation was met; when
+kinds mismatch adapter throws before formatter is reached.
+Use cases unblocked — compliance script asserting kind match
+('--kind opt_out_set' diff fails when accidentally comparing
+across kinds), forensic analysis gated on kind, CI gate
+verifying migration script behavior ('--kind retention_set'
+exits 1 if migration accidentally fired different mutation
+kind). Why expectation-check not filter — diff-history takes
+exactly two IDs nothing to filter; flag semantic shifts from
+filter to expectation check; matches substrate's existing
+validation-throwing pattern for cross-tenant + cross-table
+mismatches. Rejected alternatives — --kind as filter limiting
+fieldDiffs (doesn't match per-event semantic of event_kind
+which is row-level not field-level), make mismatch warn not
+throw (silent gates lose safety property), two flags --kind-a
++ --kind-b for per-side expectations (overkill for v1 defer),
+validate but operator doesn't specify which (substrate can't
+auto-pick), PG side validation only (PG can't know operator's
+expectation), type adapter input as string (loses TypeScript
+narrowing matches ADR-0194), JSON envelope field named
+expectedKind (verbose; kind matches ADR-0194 convention),
+render mismatch as fieldDiff (operators wouldn't expect to
+see event_kind mismatch in fieldDiffs throwing is loud and
+clear). Drawbacks — semantic shift from filter to expectation
+check operators familiar with --kind elsewhere may expect
+filter semantics (mitigated by adapter error message which
+is explicit about expectation check), no per-event expectation
+(operators with different per-side expectations jq-filter
+JSON defer), single-kind only no multi-value tuple (operators
+run multiple commands defer), two adapter errors with similar
+shape (same-tenant/same-table mismatch + --kind mismatch
+acceptable structural consistency). 5 new adapter tests in
+trace-retention.test.ts in a new "PostgresTraceRetention.
+diffHistoryEntries --kind expectation check" describe block
+— accepts when both events have expected kind, throws when
+event A's kind doesn't match expected with explicit error
+naming side A + actual kind, throws when event B's kind
+doesn't match with side B in error, throws naming both sides
+when neither matches expected, omits the check when
+eventKind not set backward compat verified. 6 new CLI tests
+in retention.test.ts in a new "runRetention diff-history
+--kind" describe block — exit 2 when --kind is invalid
+value with explicit valid-values list, threads eventKind to
+adapter when --kind set, omits eventKind when --kind NOT
+set backward compat, adapter mismatch error propagates exit
+1 with explicit error including expected + actual kinds,
+JSON envelope echoes kind field when --kind set with
+action:"diff-history", JSON envelope kind=null when --kind
+NOT set. cli.ts helpText extended for retention diff-history
+usage line with [--kind <event-kind>] flag + 3-line
+description explaining expectation-check semantic + 4 valid
+event_kind values + mismatch-exits-1 contract. ADR-0198
+documents the design + 8 rejected alternatives + 6 future
+Qs (per-side --kind-a + --kind-b for asymmetric
+expectations, --kind <a>|<b>|<c> multi-value expectation,
+--actor-id expectation check on diff-history same shape,
+--actor-id + --kind composition for fine-grained checks,
+--with-actor-names on diff-history LEFT JOIN for the two
+events' actors, inline diff annotation showing when events
+are different kinds without throwing for operators who
+want diff anyway opt-in via separate flag). The retention
+CLI now has 18 actions with --kind support uniform across
+THREE retention diff family members — retention history
+(filter from ADR-0170), retention diff-timeline (filter
+from ADR-0194 across all three paths), retention diff-
+history (expectation check from this milestone) — semantics
+adapt to the surface (list-style filter vs cross-event
+expectation check) but the flag name + 4-value tuple +
+helpText valid-values list are consistent across the
+family.
+M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id
 closes ADR-0195 Q1 + ADR-0196 Q1 by adding `--before-id <uuid>`
 reverse cursor pagination to all three `retention diff-timeline`
 dispatch paths uniformly — pair-wise cross-tenant + N-way cross-
@@ -8260,7 +8351,30 @@ reversal + anchor-based bidirectional audit on
 cohort timeline + cross-table backward audit +
 resume from saved cursor either direction
 workflows now CLI-native across all three
-diff-timeline paths).
+diff-timeline paths),
+ADR-0198 covers M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter
+(`retention diff-history --kind <event-kind>`
+event-kind expectation check — closes ADR-0194 Q6
+— diff-history takes exactly two IDs not a list
+query so --kind shifts from filter to expectation
+check; adapter loads both events as before then
+if eventKind set validates both events match
+throwing 'expected both events to have event_kind
+<X> but A is <Y> and B is <Z>' on mismatch
+naming the offending side(s); DiffHistoryEntriesInput
+gains optional eventKind?: OptOutHistoryEventKind
+field; CLI validates against 4-value tuple
+(invalid exits 2 with valid-values list mirrors
+ADR-0194 pattern; mismatch exits 1 matching
+existing cross-tenant/cross-table mismatch
+runtime path); JSON envelope echoes kind field
+matches ADR-0194 envelope convention; no human-
+format change since formatHistoryDiff already
+renders eventKindA + eventKindB in metadata
+header; compliance script asserting kind match
++ forensic analysis gated on kind + CI gate
+verifying migration script behavior workflows
+now CLI-native).
 
 ## Architecture in 90 seconds
 

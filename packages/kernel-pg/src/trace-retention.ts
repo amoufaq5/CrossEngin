@@ -329,6 +329,7 @@ export interface PreviewRestoreTenantPolicyInput {
 export interface DiffHistoryEntriesInput {
   readonly idA: string;
   readonly idB: string;
+  readonly eventKind?: OptOutHistoryEventKind;
 }
 
 export interface HistoryEntryFieldDiff {
@@ -1565,6 +1566,20 @@ export class PostgresTraceRetention {
       throw new Error(
         `diffHistoryEntries: event B has unknown event_kind '${entryB.event_kind}'`,
       );
+    }
+    if (input.eventKind !== undefined) {
+      const mismatches: string[] = [];
+      if (entryA.event_kind !== input.eventKind) {
+        mismatches.push(`A is '${entryA.event_kind}'`);
+      }
+      if (entryB.event_kind !== input.eventKind) {
+        mismatches.push(`B is '${entryB.event_kind}'`);
+      }
+      if (mismatches.length > 0) {
+        throw new Error(
+          `diffHistoryEntries: expected both events to have event_kind '${input.eventKind}' but ${mismatches.join(" and ")}`,
+        );
+      }
     }
     return {
       idA: input.idA,
