@@ -331,6 +331,7 @@ export interface DiffHistoryEntriesInput {
   readonly idB: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly actorId?: string;
+  readonly joinActor?: boolean;
 }
 
 export interface HistoryEntryFieldDiff {
@@ -348,6 +349,12 @@ export interface DiffHistoryEntriesResult {
   readonly occurredAtB: string;
   readonly eventKindA: OptOutHistoryEventKind;
   readonly eventKindB: OptOutHistoryEventKind;
+  readonly actorIdA: string | null;
+  readonly actorIdB: string | null;
+  readonly actorDisplayNameA?: string | null;
+  readonly actorDisplayNameB?: string | null;
+  readonly actorEmailA?: string | null;
+  readonly actorEmailB?: string | null;
   readonly fieldDiffs: ReadonlyArray<HistoryEntryFieldDiff>;
 }
 
@@ -1526,6 +1533,13 @@ export class PostgresTraceRetention {
   async diffHistoryEntries(
     input: DiffHistoryEntriesInput,
   ): Promise<DiffHistoryEntriesResult> {
+    const joinActor = input.joinActor === true;
+    const selectCols = joinActor
+      ? "h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at, h.next_state, u.display_name AS actor_display_name, u.email AS actor_email"
+      : "h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at, h.next_state";
+    const joinClause = joinActor
+      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
+      : "";
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
@@ -1534,10 +1548,13 @@ export class PostgresTraceRetention {
       actor_id: string | null;
       occurred_at: string;
       next_state: Record<string, unknown> | null;
+      actor_display_name?: string | null;
+      actor_email?: string | null;
     }>(
-      `SELECT id, tenant_id, table_name, event_kind, actor_id, occurred_at, next_state
-       FROM ${SCHEMA}.${HISTORY_TABLE}
-       WHERE id IN ($1, $2)`,
+      `SELECT ${selectCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE h.id IN ($1, $2)`,
       [input.idA, input.idB],
     );
     const found = new Map(result.rows.map((r) => [r.id, r]));
@@ -1601,7 +1618,7 @@ export class PostgresTraceRetention {
         );
       }
     }
-    return {
+    const base: DiffHistoryEntriesResult = {
       idA: input.idA,
       idB: input.idB,
       tenantId: entryA.tenant_id,
@@ -1610,8 +1627,20 @@ export class PostgresTraceRetention {
       occurredAtB: entryB.occurred_at,
       eventKindA: entryA.event_kind,
       eventKindB: entryB.event_kind,
+      actorIdA: entryA.actor_id,
+      actorIdB: entryB.actor_id,
       fieldDiffs: computeFieldDiffs(entryA.next_state, entryB.next_state),
     };
+    if (joinActor) {
+      return {
+        ...base,
+        actorDisplayNameA: entryA.actor_display_name ?? null,
+        actorDisplayNameB: entryB.actor_display_name ?? null,
+        actorEmailA: entryA.actor_email ?? null,
+        actorEmailB: entryB.actor_email ?? null,
+      };
+    }
+    return base;
   }
 
   async diffHistoryTimeline(

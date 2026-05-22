@@ -3829,7 +3829,7 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
     expect(capture[0]?.sql).toContain(
       "FROM meta.tenant_retention_opt_out_history",
     );
-    expect(capture[0]?.sql).toContain("WHERE id IN ($1, $2)");
+    expect(capture[0]?.sql).toContain("WHERE h.id IN ($1, $2)");
     expect(capture[0]?.params).toEqual([ID_A, ID_B]);
   });
 });
@@ -4118,6 +4118,205 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
     });
     expect(result.idA).toBe(ID_A);
     expect(result.idB).toBe(ID_B);
+  });
+});
+
+describe("PostgresTraceRetention.diffHistoryEntries --with-actor-names (M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names)", () => {
+  const TENANT = "00000000-0000-4000-8000-00000000000A";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  function rawEntry(
+    id: string,
+    overrides: Partial<{
+      actor_id: string | null;
+      actor_display_name: string | null;
+      actor_email: string | null;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id,
+      tenant_id: TENANT,
+      table_name: "workflow_traces",
+      event_kind: "opt_out_set",
+      actor_id: ACTOR_ALICE,
+      occurred_at: "2026-05-22T12:00:00.000Z",
+      next_state: { opt_out: true, retention_days: 365 },
+      ...overrides,
+    };
+  }
+
+  it("omits LEFT JOIN when joinActor not set (backward compat)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [rawEntry(ID_A), rawEntry(ID_B)], rowCount: 2 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(capture[0]?.sql).not.toContain("LEFT JOIN meta.users");
+    expect(capture[0]?.sql).not.toContain("actor_display_name");
+    expect(capture[0]?.sql).not.toContain("actor_email");
+  });
+
+  it("emits LEFT JOIN meta.users when joinActor=true with display_name + email in SELECT", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [rawEntry(ID_A), rawEntry(ID_B)], rowCount: 2 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryEntries({ idA: ID_A, idB: ID_B, joinActor: true });
+    expect(capture[0]?.sql).toContain(
+      "LEFT JOIN meta.users u ON u.id = h.actor_id",
+    );
+    expect(capture[0]?.sql).toContain("u.display_name AS actor_display_name");
+    expect(capture[0]?.sql).toContain("u.email AS actor_email");
+  });
+
+  it("returns actor info for both events when joinActor=true + users exist", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, {
+          actor_id: ACTOR_ALICE,
+          actor_display_name: "Alice Smith",
+          actor_email: "alice@example.com",
+        }),
+        rawEntry(ID_B, {
+          actor_id: ACTOR_BOB,
+          actor_display_name: "Bob Jones",
+          actor_email: "bob@example.com",
+        }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      joinActor: true,
+    });
+    expect(result.actorIdA).toBe(ACTOR_ALICE);
+    expect(result.actorIdB).toBe(ACTOR_BOB);
+    expect(result.actorDisplayNameA).toBe("Alice Smith");
+    expect(result.actorDisplayNameB).toBe("Bob Jones");
+    expect(result.actorEmailA).toBe("alice@example.com");
+    expect(result.actorEmailB).toBe("bob@example.com");
+  });
+
+  it("returns null actorDisplayName + actorEmail when actor has no user row (orphan FK)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, {
+          actor_id: ACTOR_ALICE,
+          actor_display_name: "Alice Smith",
+          actor_email: "alice@example.com",
+        }),
+        rawEntry(ID_B, {
+          actor_id: ACTOR_BOB,
+          actor_display_name: null,
+          actor_email: null,
+        }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      joinActor: true,
+    });
+    expect(result.actorIdB).toBe(ACTOR_BOB);
+    expect(result.actorDisplayNameB).toBeNull();
+    expect(result.actorEmailB).toBeNull();
+  });
+
+  it("returns null for system actor (actor_id is null)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, {
+          actor_id: null,
+          actor_display_name: null,
+          actor_email: null,
+        }),
+        rawEntry(ID_B, {
+          actor_id: ACTOR_ALICE,
+          actor_display_name: "Alice Smith",
+          actor_email: "alice@example.com",
+        }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      joinActor: true,
+    });
+    expect(result.actorIdA).toBeNull();
+    expect(result.actorDisplayNameA).toBeNull();
+    expect(result.actorEmailA).toBeNull();
+    expect(result.actorIdB).toBe(ACTOR_ALICE);
+    expect(result.actorDisplayNameB).toBe("Alice Smith");
+  });
+
+  it("omits actor display fields when joinActor is false (TypeScript undefined)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [rawEntry(ID_A), rawEntry(ID_B)],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.actorIdA).toBe(ACTOR_ALICE);
+    expect(result.actorIdB).toBe(ACTOR_ALICE);
+    expect(result.actorDisplayNameA).toBeUndefined();
+    expect(result.actorDisplayNameB).toBeUndefined();
+    expect(result.actorEmailA).toBeUndefined();
+    expect(result.actorEmailB).toBeUndefined();
+  });
+
+  it("always populates actorIdA + actorIdB even without joinActor (from actor_id column)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.actorIdA).toBe(ACTOR_ALICE);
+    expect(result.actorIdB).toBeNull();
+  });
+
+  it("composes with --actor-id expectation check (joinActor + actorId)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, {
+          actor_id: ACTOR_ALICE,
+          actor_display_name: "Alice Smith",
+          actor_email: "alice@example.com",
+        }),
+        rawEntry(ID_B, {
+          actor_id: ACTOR_ALICE,
+          actor_display_name: "Alice Smith",
+          actor_email: "alice@example.com",
+        }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      actorId: ACTOR_ALICE,
+      joinActor: true,
+    });
+    expect(result.actorIdA).toBe(ACTOR_ALICE);
+    expect(result.actorDisplayNameA).toBe("Alice Smith");
   });
 });
 

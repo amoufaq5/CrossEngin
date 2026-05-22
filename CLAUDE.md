@@ -21,15 +21,116 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,859 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter
+**56 packages + 1 app, 129 meta-schema tables, 8,876 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names
+closes ADR-0203 Q3 + ADR-0198 Q5 by adding `--with-actor-names`
+boolean flag to `retention diff-history`, composing ADR-0185's
+LEFT JOIN meta.users infrastructure with the diff-history surface.
+Adapter `DiffHistoryEntriesInput` gains `joinActor?: boolean`;
+when set the SELECT widens to include u.display_name + u.email
+via LEFT JOIN on actor_id; result type
+`DiffHistoryEntriesResult` gains required `actorIdA` +
+`actorIdB` fields (always populated since ADR-0203 added the
+actor_id column to the SELECT) and optional `actorDisplayNameA/B`
++ `actorEmailA/B` populated only when joinActor=true. SQL is
+aliased h. consistently (with or without JOIN) matching ADR-0185
++ ADR-0190 pattern. CLI runRetentionDiffHistory reads
+--with-actor-names via getBooleanFlag, threads joinActor to
+adapter, passes opts.withActorNames into formatHistoryDiff which
+appends `by <actor>` suffix on each event line using the
+generalized formatActor helper from ADR-0190 (display_name
+(uuid) → email (uuid) → raw uuid → <system> for null actor_id —
+same rendering rules as ADR-0185/0190). Composes with --kind
+(ADR-0198) + --actor-id (ADR-0203) without restriction. JSON
+envelope gains withActorNames boolean discriminator + result
+conditionally carries actorDisplayName/Email fields when set.
+Minor breaking change in DiffHistoryEntriesResult — actorIdA +
+actorIdB are now required where they were absent in ADR-0173;
+data has always been available (actor_id column existed since
+ADR-0170, SELECT widened in ADR-0203); making them required
+reflects reality and gives operators always-on access for the
+no-JOIN path; contained-scope no production consumer. Use cases
+unblocked — one-command "who made each change" diff audit,
+compliance review with named actor attribution, compose with
+--actor-id expectation check + display for forensic discipline,
+incident post-mortems with named actor timelines. Rejected
+alternatives — always-on JOIN no flag (adds query cost defeats
+opt-in pattern matches ADR-0185/0190), new action
+diff-history-with-actors (adds CLI surface flag-on-existing
+matches established pattern), INNER JOIN (drops orphan-FK +
+null-actor events loses audit context), display_name only
+without UUID (strips forensic disambiguation matches ADR-0185
+stance), separate --actor-names-format flag (overkill formatActor
+falls back naturally), conditional actorIdA/B only when JOIN set
+(splits path between always-available data and conditional;
+making required cleaner), required null display fields when
+joinActor=false (changes JSON shape backward-compat broken),
+cache user lookups across paginated calls (substrate stateless
+operators wrap at their layer bounded JOIN cost makes
+unnecessary at 2 rows per call). Drawbacks —
+DiffHistoryEntriesResult minor breaking change (contained scope
+new actorId* fields reflect always-available data), conditional
+display fields on result (matches ADR-0185 OptOutHistoryEntry +
+ADR-0190 TimelineEntry convention consumers branch via
+result.actorDisplayNameA !== undefined), LEFT JOIN cost per
+query when flag set (meta.users.id PK index-only + LEFT JOIN
+doesn't expand rows + bounded by 2 rows negligible at typical
+scale), cross-schema dependency on meta.users when joinActor
+=true (substrate ships both tables together not regression), no
+human-format change to field diffs (only metadata header gains
+actor suffix; per-field actor attribution different surface
+defer), no multi-tenant scoping on meta.users (same caveat as
+ADR-0185/0190 cross-tenant actor renders with canonical
+display_name matches operator intent "who did this?"). 8 new
+adapter tests in trace-retention.test.ts in a new
+"PostgresTraceRetention.diffHistoryEntries --with-actor-names"
+describe block — omits LEFT JOIN when joinActor not set
+backward compat verified, emits LEFT JOIN meta.users when
+joinActor=true with display_name + email columns in SELECT,
+returns actor info for both events when joinActor=true + users
+exist (Alice + Bob both populated), returns null
+actorDisplayName + actorEmail when actor has no user row
+(orphan FK case for B only), returns null for system actor
+(null actor_id for A), omits actor display fields when
+joinActor is false (TypeScript undefined), always populates
+actorIdA + actorIdB even without joinActor (from existing
+actor_id column), composes with --actor-id expectation check
+(joinActor + actorId both threaded). 9 new CLI tests in
+retention.test.ts in a new "runRetention diff-history
+--with-actor-names" describe block — threads joinActor=true to
+adapter when --with-actor-names is set, omits joinActor when
+flag NOT set backward compat, human-format renders 'by Alice
+Smith (uuid)' suffix when names populated for each event,
+renders <system> for null actor_id, falls back to email when
+display_name is null, omits 'by ...' suffix when flag NOT set,
+JSON envelope echoes withActorNames=true + actor fields when
+set, JSON withActorNames=false when NOT set, composes with
+--actor-id + --kind (all three flags threaded). Test count:
+8,859 → 8,876 (+17: adapter +8, CLI +9). cli.ts helpText
+extended for retention diff-history usage line with
+[--with-actor-names] flag + 3-line description explaining LEFT
+JOIN meta.users semantic + fallback rendering. ADR-0204
+documents the design + 8 rejected alternatives + 6 future Qs
+(--actor-name-equals filter, show user status alongside name,
+display tenant_membership role would need additional JOIN,
+per-field actor attribution different surface, --actor-id-not
+exclusion to compose with display, apply --with-actor-names
+pattern uniformly to other diff-* surfaces). The retention CLI
+now has 18 actions with --with-actor-names support uniform
+across THREE retention audit-log surfaces — retention history
+(ADR-0185), retention diff-timeline (ADR-0190 across all three
+paths), retention diff-history (this milestone) — operators get
+human-readable actor attribution uniformly across single-tenant
+audit-log + cross-tenant timeline diff + cross-event policy
+diff workflows.
+M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter
 closes ADR-0198 Q3 by threading `--actor-id <uuid>` through
 `retention diff-history` as an expectation check (not a filter,
 since diff-history takes exactly two IDs not a list query) —
@@ -8958,6 +9059,70 @@ diff-history (expectation check from this milestone)
 — semantics adapt to surface but flag name + UUID
 input + helpText behavioral note are consistent
 across the family).
+ADR-0204 covers M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names
+(`retention diff-history --with-actor-names` actor
+display name surfacing — closes ADR-0203 Q3 +
+ADR-0198 Q5; composes ADR-0185's LEFT JOIN
+meta.users infrastructure with diff-history surface;
+DiffHistoryEntriesInput gains joinActor?: boolean;
+when set adapter widens SELECT to include
+u.display_name + u.email via LEFT JOIN on actor_id;
+result type gains required actorIdA + actorIdB
+fields (always populated from existing actor_id
+SELECT column since ADR-0203) and optional
+actorDisplayNameA/B + actorEmailA/B fields populated
+only when joinActor=true; SQL aliased h. consistently
+matching ADR-0185/0190 pattern; CLI threads
+--with-actor-names via getBooleanFlag passes
+joinActor to adapter passes opts.withActorNames to
+formatHistoryDiff which appends 'by <actor>' suffix
+on each event line using generalized formatActor
+helper from ADR-0190 (display_name (uuid) → email
+(uuid) → raw uuid → <system> for null actor_id);
+composes with --kind (ADR-0198) + --actor-id
+(ADR-0203) without restriction; JSON envelope gains
+withActorNames discriminator + result conditionally
+carries display fields when set; minor breaking
+change in DiffHistoryEntriesResult — actorIdA +
+actorIdB now required where they were absent in
+ADR-0173 (contained scope reflects always-available
+data); use cases unblocked — one-command "who made
+each change" diff audit, compliance review with
+named actor attribution, compose with --actor-id +
+--with-actor-names for forensic discipline, incident
+post-mortems with named actor timelines; 8 new
+adapter tests in a new "PostgresTraceRetention.diffHistoryEntries
+--with-actor-names" describe block (omits JOIN
+backward compat, emits LEFT JOIN meta.users with
+display_name + email cols, returns actor info both
+events, returns null for orphan FK, null for system
+actor, omits display fields when joinActor false,
+always populates actorIdA + actorIdB even without
+join, composes with --actor-id expectation check);
+9 new CLI tests in a new "runRetention diff-history
+--with-actor-names" describe block (threads
+joinActor when --with-actor-names set, omits
+joinActor backward compat, human-format renders 'by
+Name (uuid)' for both events, <system> for null
+actor_id, email fallback when display_name null,
+omits 'by ...' suffix when flag NOT set, JSON
+envelope withActorNames + actor fields when set,
+JSON withActorNames=false when NOT set, composes
+with --actor-id + --kind); cli.ts helpText extended
+with [--with-actor-names] flag note + 3-line
+description; future Qs cover --actor-name-equals
+filter, show user status, display tenant_membership
+role, per-field actor attribution, --actor-id-not
+exclusion to compose with display, apply pattern
+uniformly to other diff-* surfaces. The retention
+CLI now has 18 actions with --with-actor-names
+support uniform across THREE retention audit-log
+surfaces — retention history (ADR-0185), retention
+diff-timeline (ADR-0190 across all three paths),
+retention diff-history (this milestone) — operators
+get human-readable actor attribution uniformly
+across single-tenant audit-log + cross-tenant
+timeline diff + cross-event policy diff workflows).
 
 ## Architecture in 90 seconds
 

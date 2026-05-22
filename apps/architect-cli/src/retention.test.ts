@@ -270,6 +270,8 @@ function fakeRetention(opts: {
           occurredAtB: "2026-05-21T12:00:00.000Z",
           eventKindA: "opt_out_set",
           eventKindB: "retention_set",
+          actorIdA: null,
+          actorIdB: null,
           fieldDiffs: [],
         }
       );
@@ -4737,6 +4739,272 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.actorId).toBeNull();
+  });
+});
+
+describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names)", () => {
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  it("threads joinActor=true to adapter when --with-actor-names is set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBe(true);
+  });
+
+  it("omits joinActor when --with-actor-names NOT set (backward compat)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.joinActor).toBeUndefined();
+  });
+
+  it("human-format renders 'by Alice Smith (uuid)' suffix for each event when names populated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            actorIdA: ACTOR_ALICE,
+            actorIdB: ACTOR_BOB,
+            actorDisplayNameA: "Alice Smith",
+            actorDisplayNameB: "Bob Jones",
+            actorEmailA: "alice@example.com",
+            actorEmailB: "bob@example.com",
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`by Alice Smith (${ACTOR_ALICE})`);
+    expect(out()).toContain(`by Bob Jones (${ACTOR_BOB})`);
+  });
+
+  it("human-format renders <system> for null actor_id with --with-actor-names", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            actorIdA: null,
+            actorIdB: ACTOR_BOB,
+            actorDisplayNameA: null,
+            actorDisplayNameB: "Bob Jones",
+            actorEmailA: null,
+            actorEmailB: "bob@example.com",
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("by <system>");
+    expect(out()).toContain(`by Bob Jones (${ACTOR_BOB})`);
+  });
+
+  it("human-format falls back to email when display_name is null", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            actorIdA: ACTOR_ALICE,
+            actorIdB: ACTOR_BOB,
+            actorDisplayNameA: null,
+            actorDisplayNameB: null,
+            actorEmailA: "alice@example.com",
+            actorEmailB: null,
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain(`by alice@example.com (${ACTOR_ALICE})`);
+    expect(out()).toContain(`by ${ACTOR_BOB}`);
+  });
+
+  it("human-format omits 'by ...' suffix when --with-actor-names NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            actorIdA: ACTOR_ALICE,
+            actorIdB: ACTOR_BOB,
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).not.toContain("by Alice");
+    expect(out()).not.toContain("by <system>");
+    expect(out()).not.toMatch(/\)\s*by\s+/);
+  });
+
+  it("JSON envelope echoes withActorNames=true and actor fields when set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--with-actor-names",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffResult: {
+            idA: ID_A,
+            idB: ID_B,
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            occurredAtA: "2026-05-20T12:00:00.000Z",
+            occurredAtB: "2026-05-21T12:00:00.000Z",
+            eventKindA: "opt_out_set",
+            eventKindB: "retention_set",
+            actorIdA: ACTOR_ALICE,
+            actorIdB: ACTOR_BOB,
+            actorDisplayNameA: "Alice Smith",
+            actorDisplayNameB: "Bob Jones",
+            actorEmailA: "alice@example.com",
+            actorEmailB: "bob@example.com",
+            fieldDiffs: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.withActorNames).toBe(true);
+    expect(parsed_.result.actorDisplayNameA).toBe("Alice Smith");
+    expect(parsed_.result.actorDisplayNameB).toBe("Bob Jones");
+  });
+
+  it("JSON envelope withActorNames=false when NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.withActorNames).toBe(false);
+  });
+
+  it("composes with --actor-id and --kind", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind",
+        "opt_out_set",
+        "--actor-id",
+        ACTOR_ALICE,
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.joinActor).toBe(true);
   });
 });
 

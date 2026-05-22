@@ -1209,6 +1209,7 @@ async function runRetentionDiffHistory(
 
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
+  const withActorNames = getBooleanFlag(command, "with-actor-names");
 
   let result: DiffHistoryEntriesResult;
   try {
@@ -1217,6 +1218,7 @@ async function runRetentionDiffHistory(
       idB,
       eventKind,
       actorId,
+      joinActor: withActorNames ? true : undefined,
     });
   } catch (err) {
     printError(
@@ -1231,22 +1233,40 @@ async function runRetentionDiffHistory(
       action: "diff-history",
       kind: eventKind ?? null,
       actorId: actorId ?? null,
+      withActorNames,
       result,
     });
     return 0;
   }
-  ctx.io.stdout.write(formatHistoryDiff(result));
+  ctx.io.stdout.write(formatHistoryDiff(result, { withActorNames }));
   return 0;
 }
 
-export function formatHistoryDiff(result: DiffHistoryEntriesResult): string {
+export function formatHistoryDiff(
+  result: DiffHistoryEntriesResult,
+  opts: { readonly withActorNames?: boolean } = {},
+): string {
   const lines: string[] = [];
   lines.push("Diff between history events:");
+  const actorSuffixA = opts.withActorNames
+    ? ` by ${formatActor({
+        actorId: result.actorIdA,
+        actorDisplayName: result.actorDisplayNameA,
+        actorEmail: result.actorEmailA,
+      })}`
+    : "";
+  const actorSuffixB = opts.withActorNames
+    ? ` by ${formatActor({
+        actorId: result.actorIdB,
+        actorDisplayName: result.actorDisplayNameB,
+        actorEmail: result.actorEmailB,
+      })}`
+    : "";
   lines.push(
-    `  A: ${result.idA} at ${result.occurredAtA} (event_kind=${result.eventKindA})`,
+    `  A: ${result.idA} at ${result.occurredAtA} (event_kind=${result.eventKindA})${actorSuffixA}`,
   );
   lines.push(
-    `  B: ${result.idB} at ${result.occurredAtB} (event_kind=${result.eventKindB})`,
+    `  B: ${result.idB} at ${result.occurredAtB} (event_kind=${result.eventKindB})${actorSuffixB}`,
   );
   lines.push(`  Tenant: ${result.tenantId}`);
   lines.push(`  Table:  ${result.tableName}`);
