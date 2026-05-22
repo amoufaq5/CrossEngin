@@ -21,15 +21,76 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,815 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor
+**56 packages + 1 app, 129 meta-schema tables, 8,822 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind
+closes ADR-0194 Q1 by making `--kind <event-kind>` repeatable on
+`retention diff-timeline` across all three dispatch paths via the
+multiFlags infrastructure — mirror of ADR-0199's multi-actor
+shape on the kind filter dimension. Single value scopes to one
+event_kind; multiple values build OR-semantic IN clause ("every
+opt_out_set OR opt_out_cleared event"). Zero values preserves
+no-filter behavior. Breaking adapter type rename — all three
+diff-timeline input types rename eventKind?: OptOutHistoryEventKind
+→ eventKinds?: ReadonlyArray<OptOutHistoryEventKind>; contained
+scope matches ADR-0199's one-shot break pattern. CLI uses
+getMultiFlag("kind") + validates each occurrence individually
+via isOptOutHistoryEventKind (exit 2 with the offending value
+named on any invalid); single-element validates → IN ($N),
+multi-element validates → IN ($N1, $N2, ...). Retention history
++ retention diff-history keep eventKind: single intentionally
+— history is list-style with single-kind filter common,
+diff-history is per-event-pair expectation check (different
+semantic). JSON envelope renames kind: OptOutHistoryEventKind |
+null → kinds: OptOutHistoryEventKind[] | null across all three
+diff-timeline envelope shapes (pair-wise no-discriminator,
+nway:true, crossTable:true). Use cases unblocked — opt-out
+lifecycle audit (--kind opt_out_set --kind opt_out_cleared
+across cohort), per-actor per-kinds forensics (Alice OR Bob ×
+opt_out_set OR opt_out_cleared), positive exclusion of noise
+kinds (3-of-4 kinds in one filter), compliance attestation
+across cohort × kinds. Rejected alternatives — keep eventKind
++ add eventKinds alongside (two-field surface; matches ADR-0199
+decision), --kind a|b|c pipe-separated (shell-quoting concern),
+--kinds plural alias (adds CLI surface), validate batch all at
+once (per-value validation gives crisper error), reject
+duplicates at CLI (PG handles fine), PG enum-array
+`= ANY($N::text[])` (inconsistent with substrate's positional-
+placeholder pattern). Drawbacks — breaking type + envelope
+rename (contained scope same one-shot pattern as ADR-0199),
+retention history eventKind stays single divergence
+(intentional documented), retention diff-history eventKind
+stays single different semantic (expectation check ADR-0198
+Q2 covers multi-kind), OR-semantic only no NOT filter (defer),
+no duplicate dedup (PG handles). Adapter test block rewritten +
+expanded from 7 to 11 tests covering single + multi-kind across
+all three dispatch paths + empty-array edge case + composition
+with actorIds. CLI test block rewritten + expanded from 9 to
+12 tests covering invalid-on-any-occurrence exit 2 + single +
+multi-kind threading + JSON envelope echoes on all three paths
++ composition with multi-actor. Test count: 8,815 → 8,822 (+7
+net: adapter +4, CLI +3). cli.ts helpText extended for both
+diff-timeline usage lines noting --actor-id + --kind both
+repeatable with OR-semantic filter behavior. ADR-0200 documents
+the design + 6 rejected alternatives + 5 future Qs (widen
+retention history's eventKind to eventKinds for consistency,
+--kind-not exclusion, multi-kind expectation on diff-history
+pairing with ADR-0198 Q2, composite index on (event_kind,
+occurred_at) for scale, --kind @file.txt overkill since only 4
+valid values exist). The retention CLI now has 18 actions with
+multi-value OR filters uniform across both actor + kind
+dimensions on the diff-timeline surface — operators get cohort-
+based forensics composing (N tenants OR M actors) × (P kinds)
+× (time window) × (cursor pagination) × (cross-table or N-way
+or pair-wise dispatch) in a single command across the three
+diff-timeline paths.
+M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor
 closes ADR-0193 Q1 by making `--actor-id <uuid>` repeatable on
 `retention diff-timeline` across all three dispatch paths (pair-
 wise + N-way via --add-tenant + cross-table via --cross-table)
@@ -8496,7 +8557,36 @@ workflows now CLI-native; existing actor-filter
 test block rewritten + expanded from 7→11
 adapter tests and 8→11 CLI tests to cover both
 single and multi-actor cases across all three
-dispatch paths).
+dispatch paths),
+ADR-0200 covers M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind
+(`retention diff-timeline --kind <event-kind>`
+repeatable for OR-semantic multi-kind filter —
+closes ADR-0194 Q1 — mirror of ADR-0199's multi-
+actor shape applied to the kind filter dimension
+across all three diff-timeline dispatch paths;
+breaking adapter type rename eventKind?:
+OptOutHistoryEventKind → eventKinds?:
+ReadonlyArray<OptOutHistoryEventKind> matching
+ADR-0199's one-shot break pattern; CLI uses
+getMultiFlag("kind") + per-value validation
+against 4-value OPT_OUT_HISTORY_EVENT_KINDS tuple
+(exit 2 with offending value named on any
+invalid); single → IN ($N), multi → IN ($N1,
+$N2, ...); JSON envelope renames kind to kinds
+on all three diff-timeline envelope shapes;
+retention history + retention diff-history keep
+eventKind: single intentionally (history is
+list-style with single-kind filter common;
+diff-history is per-event-pair expectation check
+ADR-0198 Q2 covers multi-kind there); opt-out
+lifecycle audit + per-actor per-kinds forensics
++ positive exclusion of noise kinds + compliance
+attestation across cohort × kinds workflows now
+CLI-native; existing kind-filter test block
+rewritten + expanded from 7→11 adapter tests
+and 9→12 CLI tests to cover single + multi-kind
+across all three dispatch paths + composition
+with multi-actor from ADR-0199).
 
 ## Architecture in 90 seconds
 

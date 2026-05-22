@@ -6320,7 +6320,7 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
   });
 });
 
-describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter)", () => {
+describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + .multi-kind)", () => {
   it("returns exit 2 when --kind is invalid value", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
@@ -6343,7 +6343,30 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
     expect(err()).toContain("opt_out_set");
   });
 
-  it("pair-wise: threads eventKind to adapter when --kind set", async () => {
+  it("returns exit 2 when any of multiple --kind values is invalid", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "bogus_kind",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind 'bogus_kind'");
+  });
+
+  it("pair-wise: threads eventKinds as single-element array to adapter when --kind set once", async () => {
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6362,10 +6385,37 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
   });
 
-  it("pair-wise: omits eventKind when --kind NOT set (backward compat)", async () => {
+  it("pair-wise: --kind repeated builds multi-kind array (OR semantic)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "opt_out_cleared",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKinds).toEqual([
+      "opt_out_set",
+      "opt_out_cleared",
+    ]);
+  });
+
+  it("pair-wise: omits eventKinds when --kind NOT set (backward compat)", async () => {
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6382,10 +6432,10 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKind).toBeUndefined();
+    expect(capture[0]?.eventKinds).toBeUndefined();
   });
 
-  it("N-way: threads eventKind alongside --add-tenant", async () => {
+  it("N-way: threads eventKinds alongside --add-tenant (multi-kind)", async () => {
     const TENANT_C = "00000000-0000-4000-8000-00000000000C";
     const capture: DiffHistoryTimelineNwayInput[] = [];
     const { ctx } = buffers();
@@ -6400,6 +6450,8 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
         TENANT_C,
         "--kind",
         "policy_deleted",
+        "--kind",
+        "retention_set",
       ),
       {
         ...ctx,
@@ -6407,10 +6459,13 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKind).toBe("policy_deleted");
+    expect(capture[0]?.eventKinds).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
   });
 
-  it("cross-table: threads eventKind alongside --cross-table", async () => {
+  it("cross-table: threads eventKinds alongside --cross-table (multi-kind)", async () => {
     const capture: DiffHistoryTimelineCrossTableInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6423,6 +6478,8 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
         "--cross-table",
         "--kind",
         "retention_set",
+        "--kind",
+        "policy_deleted",
       ),
       {
         ...ctx,
@@ -6432,11 +6489,15 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKind).toBe("retention_set");
+    expect(capture[0]?.eventKinds).toEqual([
+      "retention_set",
+      "policy_deleted",
+    ]);
   });
 
-  it("composes with --actor-id + --with-actor-names + --since", async () => {
+  it("composes with --actor-id + --with-actor-names + --since (multi-actor + multi-kind)", async () => {
     const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+    const ACTOR_B = "22222222-2222-2222-2222-222222222222";
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6448,8 +6509,12 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
         "workflow_traces",
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
         "--kind",
         "opt_out_set",
+        "--kind",
+        "opt_out_cleared",
         "--with-actor-names",
         "--since",
         "2026-01-01",
@@ -6460,13 +6525,16 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
-    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
+    expect(capture[0]?.eventKinds).toEqual([
+      "opt_out_set",
+      "opt_out_cleared",
+    ]);
     expect(capture[0]?.joinActor).toBe(true);
     expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
   });
 
-  it("JSON envelope echoes kind field when --kind set (pair-wise)", async () => {
+  it("JSON envelope echoes kinds field when --kind set (pair-wise, single)", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -6487,10 +6555,36 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.kind).toBe("opt_out_set");
+    expect(parsed_.kinds).toEqual(["opt_out_set"]);
   });
 
-  it("JSON envelope kind=null when --kind NOT set", async () => {
+  it("JSON envelope echoes kinds array when --kind repeated (multi-kind)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "opt_out_cleared",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kinds).toEqual(["opt_out_set", "opt_out_cleared"]);
+  });
+
+  it("JSON envelope kinds=null when --kind NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -6509,10 +6603,10 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.kind).toBeNull();
+    expect(parsed_.kinds).toBeNull();
   });
 
-  it("JSON envelope echoes kind on N-way path", async () => {
+  it("JSON envelope echoes kinds on N-way path", async () => {
     const TENANT_C = "00000000-0000-4000-8000-00000000000C";
     const { ctx, out } = buffers();
     const code = await runRetention(
@@ -6526,30 +6620,6 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
         TENANT_C,
         "--kind",
         "policy_deleted",
-        "--format",
-        "json",
-      ),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
-    expect(code).toBe(0);
-    const parsed_ = JSON.parse(out());
-    expect(parsed_.nway).toBe(true);
-    expect(parsed_.kind).toBe("policy_deleted");
-  });
-
-  it("JSON envelope echoes kind on cross-table path", async () => {
-    const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        "workflow_traces",
-        "llm_call_traces",
-        "--cross-table",
         "--kind",
         "retention_set",
         "--format",
@@ -6562,8 +6632,36 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
+    expect(parsed_.nway).toBe(true);
+    expect(parsed_.kinds).toEqual(["policy_deleted", "retention_set"]);
+  });
+
+  it("JSON envelope echoes kinds on cross-table path", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--kind",
+        "retention_set",
+        "--kind",
+        "policy_deleted",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
     expect(parsed_.crossTable).toBe(true);
-    expect(parsed_.kind).toBe("retention_set");
+    expect(parsed_.kinds).toEqual(["retention_set", "policy_deleted"]);
   });
 });
 

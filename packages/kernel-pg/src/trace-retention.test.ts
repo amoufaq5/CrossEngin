@@ -4930,12 +4930,12 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
   });
 });
 
-describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter)", () => {
+describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + .multi-kind)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";
   const TENANT_C = "00000000-0000-4000-8000-00000000000C";
 
-  it("pair-wise: adds h.event_kind = $N WHERE clause when eventKind is set", async () => {
+  it("pair-wise: adds h.event_kind IN ($N) WHERE clause when single eventKinds is set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4943,9 +4943,9 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       tenantIdA: TENANT_A,
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
     });
-    expect(capture[0]?.sql).toContain("h.event_kind = $4");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($4)");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       TENANT_B,
@@ -4955,7 +4955,28 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
     ]);
   });
 
-  it("pair-wise: omits h.event_kind WHERE when eventKind not set", async () => {
+  it("pair-wise: builds h.event_kind IN ($N1, $N2, ...) for multi-kind OR filter", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      eventKinds: ["opt_out_set", "opt_out_cleared"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($4, $5)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      "opt_out_set",
+      "opt_out_cleared",
+      100,
+    ]);
+  });
+
+  it("pair-wise: omits h.event_kind WHERE clause when eventKinds not set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4964,19 +4985,32 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).not.toContain("h.event_kind =");
+    expect(capture[0]?.sql).not.toContain("h.event_kind IN");
   });
 
-  it("N-way: adds h.event_kind WHERE positioned after tenant IN list", async () => {
+  it("pair-wise: omits h.event_kind WHERE clause when eventKinds is empty array", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      eventKinds: [],
+    });
+    expect(capture[0]?.sql).not.toContain("h.event_kind IN");
+  });
+
+  it("N-way: adds h.event_kind IN WHERE positioned after tenant IN list", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.diffHistoryTimelineNway({
       tenantIds: [TENANT_A, TENANT_B, TENANT_C],
       tableName: "workflow_traces",
-      eventKind: "policy_deleted",
+      eventKinds: ["policy_deleted"],
     });
-    expect(capture[0]?.sql).toContain("h.event_kind = $5");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($5)");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       TENANT_B,
@@ -4987,16 +5021,37 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
     ]);
   });
 
-  it("cross-table: adds h.event_kind WHERE positioned after table IN list", async () => {
+  it("N-way: multi-kind IN clause threads after tenant list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      eventKinds: ["retention_set", "policy_deleted"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($5, $6)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      "workflow_traces",
+      "retention_set",
+      "policy_deleted",
+      100,
+    ]);
+  });
+
+  it("cross-table: adds h.event_kind IN WHERE positioned after table IN list", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.diffHistoryTimelineCrossTable({
       tenantId: TENANT_A,
       tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
-      eventKind: "retention_set",
+      eventKinds: ["retention_set"],
     });
-    expect(capture[0]?.sql).toContain("h.event_kind = $5");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($5)");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       "workflow_traces",
@@ -5007,7 +5062,27 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
     ]);
   });
 
-  it("pair-wise: composes eventKind with actorIds + --since + --until + --limit + joinActor", async () => {
+  it("cross-table: multi-kind IN clause threads after table list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+      eventKinds: ["opt_out_set", "opt_out_cleared"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($4, $5)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "llm_call_traces",
+      "opt_out_set",
+      "opt_out_cleared",
+      100,
+    ]);
+  });
+
+  it("pair-wise: composes eventKinds with actorIds + --since + --until + --limit + joinActor", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -5017,7 +5092,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
       actorIds: [ACTOR_A],
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
       limit: 50,
@@ -5025,7 +5100,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
     });
     expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
-    expect(capture[0]?.sql).toContain("h.event_kind = $5");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($5)");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $7");
     expect(capture[0]?.params).toEqual([
@@ -5040,7 +5115,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
     ]);
   });
 
-  it("N-way: omits h.event_kind WHERE when eventKind not set", async () => {
+  it("N-way: omits h.event_kind WHERE when eventKinds not set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -5048,10 +5123,10 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       tenantIds: [TENANT_A, TENANT_B, TENANT_C],
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).not.toContain("h.event_kind =");
+    expect(capture[0]?.sql).not.toContain("h.event_kind IN");
   });
 
-  it("cross-table: omits h.event_kind WHERE when eventKind not set", async () => {
+  it("cross-table: omits h.event_kind WHERE when eventKinds not set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -5059,7 +5134,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       tenantId: TENANT_A,
       tableNames: ["workflow_traces", "llm_call_traces"],
     });
-    expect(capture[0]?.sql).not.toContain("h.event_kind =");
+    expect(capture[0]?.sql).not.toContain("h.event_kind IN");
   });
 });
 
@@ -5169,14 +5244,14 @@ describe("PostgresTraceRetention diff-timeline --after-id cursor pagination (M6.
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
       actorIds: [ACTOR_A],
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
       afterId: AFTER_ID,
       limit: 50,
     });
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
-    expect(capture[0]?.sql).toContain("h.event_kind = $5");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($5)");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $7");
     expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");

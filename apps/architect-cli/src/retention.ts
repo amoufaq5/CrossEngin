@@ -1462,9 +1462,9 @@ async function runRetentionDiffTimeline(
   const actorIdFlags = getMultiFlag(command, "actor-id");
   const actorIds = actorIdFlags.length > 0 ? actorIdFlags : undefined;
 
-  const kindFlag = getStringFlag(command, "kind");
-  let eventKind: OptOutHistoryEventKind | undefined;
-  if (kindFlag !== null) {
+  const kindFlags = getMultiFlag(command, "kind");
+  const validatedKinds: OptOutHistoryEventKind[] = [];
+  for (const kindFlag of kindFlags) {
     if (!isOptOutHistoryEventKind(kindFlag)) {
       printError(
         ctx.io,
@@ -1472,8 +1472,9 @@ async function runRetentionDiffTimeline(
       );
       return 2;
     }
-    eventKind = kindFlag;
+    validatedKinds.push(kindFlag);
   }
+  const eventKinds = validatedKinds.length > 0 ? validatedKinds : undefined;
 
   const afterIdFlag = getStringFlag(command, "after-id");
   const afterId = afterIdFlag !== null ? afterIdFlag : undefined;
@@ -1502,7 +1503,7 @@ async function runRetentionDiffTimeline(
         limit,
         joinActor: withActorNames || undefined,
         actorIds,
-        eventKind,
+        eventKinds,
         afterId,
         beforeId,
       });
@@ -1532,7 +1533,7 @@ async function runRetentionDiffTimeline(
         limit,
         withActorNames,
         actorIds: actorIds ?? null,
-        kind: eventKind ?? null,
+        kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
         nextAfterId: nextAfterIdCross,
@@ -1567,7 +1568,7 @@ async function runRetentionDiffTimeline(
         limit,
         joinActor: withActorNames || undefined,
         actorIds,
-        eventKind,
+        eventKinds,
         afterId,
         beforeId,
       });
@@ -1597,7 +1598,7 @@ async function runRetentionDiffTimeline(
         limit,
         withActorNames,
         actorIds: actorIds ?? null,
-        kind: eventKind ?? null,
+        kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
         nextAfterId: nextAfterIdNway,
@@ -1627,7 +1628,7 @@ async function runRetentionDiffTimeline(
       limit,
       joinActor: withActorNames || undefined,
       actorIds,
-      eventKind,
+      eventKinds,
       afterId,
       beforeId,
     });
@@ -1656,7 +1657,7 @@ async function runRetentionDiffTimeline(
       limit,
       withActorNames,
       actorIds: actorIds ?? null,
-      kind: eventKind ?? null,
+      kinds: eventKinds ?? null,
       afterId: afterId ?? null,
       beforeId: beforeId ?? null,
       nextAfterId: nextAfterIdPair,

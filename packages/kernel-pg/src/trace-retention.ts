@@ -402,7 +402,7 @@ export interface DiffHistoryTimelineInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
-  readonly eventKind?: OptOutHistoryEventKind;
+  readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
 }
@@ -437,7 +437,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
-  readonly eventKind?: OptOutHistoryEventKind;
+  readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
 }
@@ -471,7 +471,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
-  readonly eventKind?: OptOutHistoryEventKind;
+  readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
 }
@@ -1615,9 +1615,14 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
-    if (input.eventKind !== undefined) {
-      params.push(input.eventKind);
-      conditions.push(`h.event_kind = $${params.length}`);
+    if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
+      const kindPlaceholders = input.eventKinds
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
     if (input.since !== undefined) {
       params.push(input.since);
@@ -1743,9 +1748,14 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
-    if (input.eventKind !== undefined) {
-      params.push(input.eventKind);
-      conditions.push(`h.event_kind = $${params.length}`);
+    if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
+      const kindPlaceholders = input.eventKinds
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
     if (input.since !== undefined) {
       params.push(input.since);
@@ -1877,9 +1887,14 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
-    if (input.eventKind !== undefined) {
-      params.push(input.eventKind);
-      conditions.push(`h.event_kind = $${params.length}`);
+    if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
+      const kindPlaceholders = input.eventKinds
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
     if (input.since !== undefined) {
       params.push(input.since);
