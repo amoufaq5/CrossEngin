@@ -823,7 +823,9 @@ async function runRetentionHistory(
   const afterIdFlag = getStringFlag(command, "after-id");
   const beforeIdFlag = getStringFlag(command, "before-id");
   const rangeFlag = getStringFlag(command, "range");
-  const actorIdFlag = getStringFlag(command, "actor-id");
+  const actorIdsFlags = getMultiFlag(command, "actor-id");
+  const actorIds: ReadonlyArray<string> | undefined =
+    actorIdsFlags.length > 0 ? actorIdsFlags : undefined;
   const actorIdsNotFlags = getMultiFlag(command, "actor-id-not");
   const actorIdsNot: ReadonlyArray<string> | undefined =
     actorIdsNotFlags.length > 0 ? actorIdsNotFlags : undefined;
@@ -941,7 +943,7 @@ async function runRetentionHistory(
       tenantId: tenantFilter ?? undefined,
       tableName: tableFilter ?? undefined,
       eventKind: kind,
-      actorId: actorIdFlag ?? undefined,
+      actorIds,
       actorIdsNot,
       actorPresence,
       since,
@@ -969,7 +971,7 @@ async function runRetentionHistory(
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
       eventKind: kind ?? null,
-      actorId: actorIdFlag ?? null,
+      actorIds: actorIds ?? null,
       actorIdsNot: actorIdsNot ?? null,
       systemOnly: systemOnlyFlag,
       noSystem: noSystemFlag,

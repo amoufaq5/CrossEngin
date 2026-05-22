@@ -21,15 +21,103 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,960 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.actor-not.multi
+**56 packages + 1 app, 129 meta-schema tables, 8,966 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi
+closes ADR-0186 Q1 by widening `--actor-id <uuid>` from single-
+value to repeated flag (OR-semantic IN positive filter) on
+`retention history` using the multiFlags infrastructure from
+ADR-0183. Restores the within-surface symmetry that ADR-0210
+explicitly documented as a future Q — both positive --actor-id
+and negative --actor-id-not are now multi-value on retention
+history matching diff-timeline's symmetric design (ADR-0199
+positive multi + ADR-0207 negative multi). Real cohort-inclusion
+use cases — multi-actor cohort audit (auditor + reviewer +
+approver triad), multi-admin attestation ("show every mutation
+made by ANY of these 4 platform admins"), multi-SA observability
+(monitor 3 migration SAs simultaneously), composed positive
+cohort + exclusion ("any of these N expected actors EXCEPT
+these M noise actors"). Breaking adapter rename
+ListOptOutHistoryInput.actorId?: string → actorIds?:
+ReadonlyArray<string>; session-recent code from ADR-0186, no
+external consumers, contained scope matches ADR-0199 + ADR-0210
+one-shot break precedent. SQL changes from single-value
+h.actor_id = $N to multi-value h.actor_id IN ($N1, $N2, ...);
+single-element IN ($N) is PG-equivalent to = $N so no observable
+behavior change for single-value callers (same query plan).
+Empty array treated as filter-not-set matching ADR-0199/0207/
+0210 convention. No IS NULL OR prefix on positive filter unlike
+negative — operators wanting "match these actors" do NOT mean
+"and also include all system events"; PG IN returns NULL for
+null actor_id which is correctly filtered out; operators wanting
+mixed cohort + system compose with --no-system / --system-only
+from ADR-0209 explicitly (mixed mode deferred as future Q). Why
+duplicates not deduplicated at adapter — operators passing
+--actor-id <a> --actor-id <a> get duplicate placeholders
+verbatim; PG handles fine via IN semantic; substrate doesn't
+dedup matches ADR-0207/0210 stance. CLI runRetentionHistory
+reads via getMultiFlag("actor-id") instead of getStringFlag;
+threads actorIds to adapter; JSON envelope renamed actorId:
+string | null → actorIds: string[] | null matching ADR-0210
+array-or-null canonical shape across the family. Within-surface
+symmetry restored — before this milestone retention history had
+asymmetric single-positive + multi-negative (positive --actor-id
+stayed single-value from ADR-0186 while ADR-0210 widened
+negative --actor-id-not to multi-value); after this milestone
+both are multi-value matching diff-timeline's symmetric design.
+cli.ts helpText updated from [--actor-id <uuid>] to [--actor-id
+<uuid> ...] indicating repeatable + description extended
+explaining repeatable + OR-semantic IN. Adapter test block
+rewritten + expanded from 7 to 11 tests under renamed "actorIds
+filter (M6.7.zz.tenant.opt-out.cli.history.actor-filter +
+actor-filter.multi)" describe block — single-element IN ($1),
+multi-element IN ($1, $2), omits clause when not set, empty
+array filter-not-set (NEW), composes with tenantId (multi-actor
++ tenant filter), composes with joinActor (LEFT JOIN + IN both
+present), composes with actorIdsNot positive + negative both
+threaded (NEW), composes with all filter dimensions (full param
+array verified), returns rows matching the actors, returns empty
+array when no rows match, duplicate actorIds values produce
+duplicate placeholders (NEW) PG dedupes via IN semantic. Plus
+updates to two cross-reference tests in the before-id + range
+describe blocks (actorId: ACTOR_A → actorIds: [ACTOR_A] in
+composition tests) and one cross-reference in actor-not block
+(positive+negative composition test). CLI test block rewritten
++ expanded from 7 to 9 tests under renamed "runRetention history
+--actor-id (M6.7.zz.tenant.opt-out.cli.history.actor-filter +
+actor-filter.multi)" describe block — threads single-element
+array when set once, threads multi-element array when --actor-id
+repeated (NEW), omits when not set backward compat, composes
+with --tenant + multi --actor-id + --kind, composes with
+--with-actor-names (multi actor + LEFT JOIN), JSON envelope
+echoes single-element array, JSON envelope echoes multi-element
+array (NEW), JSON envelope actorIds=null when not set, human-
+format empty-result message preserved. Test count: 8,960 →
+8,966 (+6 net: adapter +4, CLI +2). ADR-0211 documents the
+design + 8 rejected alternatives + 8 future Qs (--actor-id
+@file.txt for very large cohorts, CLI-side UUID validation per
+occurrence, substrate-side dedup of duplicates, composite index
+on (actor_id, occurred_at) for scale, --actor-name via meta.users
+JOIN, PG IN-list chunking for 1K+ actors, mixed cohort + system
+mode requiring (actor_id IN OR IS NULL), apply multi-value
+widening to retention history's --kind defer since 4-value enum
+makes multi less compelling). The actor filter family on
+retention history is now symmetric multi-value matching diff-
+timeline; diff-history stays single-value because per-event-pair
+expectation check has different semantic (multi-value tuple
+expectation deferred to ADR-0205 Q1 / ADR-0203 Q2). The retention
+CLI now has 18 actions with multi-value --actor-id +
+--actor-id-not support on the two list-style audit-log filter
+surfaces (retention history + retention diff-timeline); operators
+get cohort-inclusion + cohort-exclusion ergonomics with surface-
+appropriate semantics under one consistent flag-name family.
+M6.7.zz.tenant.opt-out.cli.history.actor-not.multi
 closes ADR-0206 Q1 by widening `--actor-id-not <uuid>` from
 single-value to repeated flag (OR-semantic NOT IN exclusion) on
 `retention history` using the multiFlags infrastructure from
@@ -10225,6 +10313,100 @@ retention CLI now has 18 actions with multi-value
 log filter surfaces; widening --actor-id to multi-
 value on retention history (closes ADR-0186 future
 Q) is the natural symmetric follow-up milestone).
+ADR-0211 covers M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi
+(`crossengin retention history --actor-id <uuid>`
+repeatable for multi-value OR-semantic positive
+filter — closes ADR-0186 Q1 by widening single-value
+--actor-id to multi-value via repeated flag using
+multiFlags from ADR-0183; restores within-surface
+symmetry that ADR-0210 explicitly documented as a
+future Q — both positive --actor-id and negative
+--actor-id-not are now multi-value on retention
+history matching diff-timeline's symmetric design
+(ADR-0199 positive multi + ADR-0207 negative multi);
+real cohort-inclusion use cases — multi-actor cohort
+audit (auditor + reviewer + approver triad), multi-
+admin attestation ("every mutation by ANY of these 4
+admins"), multi-SA observability (3 migration SAs
+simultaneously), composed positive cohort + exclusion
+("any of these N expected actors EXCEPT these M noise
+actors"); breaking adapter rename
+ListOptOutHistoryInput.actorId?: string → actorIds?:
+ReadonlyArray<string> session-recent code from
+ADR-0186 with no external consumers contained scope
+matches ADR-0199 + ADR-0210 one-shot break precedent;
+SQL changes from single-value h.actor_id = $N to
+multi-value h.actor_id IN ($N1, $N2, ...); single-
+element IN ($N) is PG-equivalent to = $N no
+observable behavior change for single-value callers;
+empty array treated as filter-not-set matching
+ADR-0199/0207/0210 convention; no IS NULL OR prefix
+on positive filter unlike negative — operators
+wanting "match these actors" do NOT mean "and also
+include all system events"; PG IN returns NULL for
+null actor_id correctly filtered out; operators
+wanting mixed cohort + system compose with --no-system
+/ --system-only from ADR-0209 explicitly (mixed mode
+deferred); CLI reads via getMultiFlag instead of
+getStringFlag; JSON envelope renamed actorId →
+actorIds string[] | null matching ADR-0210 array-or-
+null canonical shape; adapter test block rewritten +
+expanded from 7 to 11 tests under renamed describe
+block — single-element IN ($1), multi-element IN
+($1, $2), omits clause when not set, empty array
+filter-not-set (NEW), composes with tenantId multi-
+actor + tenant, composes with joinActor LEFT JOIN +
+IN, composes with actorIdsNot positive + negative
+both threaded (NEW), composes with all filter
+dimensions full param array, returns rows matching
+actors, returns empty when no rows match, duplicate
+actorIds values produce duplicate placeholders (NEW)
+PG dedupes via IN; plus updates to two cross-
+reference tests in before-id + range describe blocks
+and one in actor-not block; CLI test block rewritten
++ expanded from 7 to 9 tests under renamed describe
+block — threads single-element array when set once,
+threads multi-element array when --actor-id repeated
+(NEW), omits when not set backward compat, composes
+with --tenant + multi --actor-id + --kind, composes
+with --with-actor-names multi actor + LEFT JOIN,
+JSON envelope echoes single-element array, JSON
+envelope echoes multi-element array (NEW), JSON
+envelope actorIds=null when not set, human-format
+empty-result message preserved; test count 8,960 →
+8,966 (+6 net: adapter +4, CLI +2); cli.ts helpText
+updated from [--actor-id <uuid>] to [--actor-id
+<uuid> ...] indicating repeatable + description
+extended explaining repeatable + OR-semantic IN;
+rejected alternatives — ship in same milestone as
+ADR-0210 (exceeded user scope for prior milestone;
+shipping as follow-up respects per-request scope
+discipline), two-field adapter surface (permanent
+invites operator confusion one-shot rename cleaner),
+--actor-id <a,b,c> comma-separated (fragile),
+keep single-value document asymmetry as permanent
+(ignoring entrenches asymmetry restoring symmetry
+operator-friendly), include null actor_id in IN-list
+match (semantic unclear keep IN pure operators
+compose with system flags explicitly), @file.txt
+substitution defer, CLI-side dedup of duplicates
+(PG handles fine), --actor-name via meta.users JOIN
+defer; future Qs — --actor-id @file.txt for very
+large cohorts, CLI-side UUID validation per
+occurrence, substrate-side dedup, composite index
+for scale, --actor-name JOIN, PG IN-list chunking
+for 1K+ actors, mixed cohort + system mode (actor_id
+IN OR IS NULL), apply multi-value widening to
+retention history's --kind defer since 4-value enum
+makes multi less compelling. The retention history
+surface's actor filter family is now symmetric multi-
+value matching diff-timeline; diff-history stays
+single-value because per-event-pair expectation check
+has different semantic (multi-value tuple expectation
+deferred to ADR-0205 Q1 / ADR-0203 Q2). The retention
+CLI now has 18 actions with multi-value --actor-id +
+--actor-id-not support on the two list-style audit-
+log filter surfaces.
 
 ## Architecture in 90 seconds
 

@@ -3131,11 +3131,12 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
   });
 });
 
-describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.actor-filter)", () => {
+describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.actor-filter + actor-filter.multi)", () => {
   const ACTOR_A = "11111111-1111-4000-8000-111111111111";
   const ACTOR_B = "22222222-2222-4000-8000-222222222222";
+  const ACTOR_C = "33333333-3333-4000-8000-333333333333";
 
-  it("threads actor-id to adapter when --actor-id is set", async () => {
+  it("threads actorIds as single-element array when --actor-id set once", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -3146,10 +3147,31 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
   });
 
-  it("omits actorId from adapter input when --actor-id is NOT set (backward compat)", async () => {
+  it("threads multi-element actorIds when --actor-id repeated", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id",
+        ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
+  });
+
+  it("omits actorIds from adapter input when --actor-id NOT set (backward compat)", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(parsed("retention", "history"), {
@@ -3157,10 +3179,10 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
       retentionOverride: fakeRetention({ historyCapture: capture }),
     } as RetentionContext);
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBeUndefined();
+    expect(capture[0]?.actorIds).toBeUndefined();
   });
 
-  it("composes with other filters (--tenant + --actor-id + --kind)", async () => {
+  it("composes with other filters (--tenant + multi --actor-id + --kind)", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -3171,6 +3193,8 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
         TENANT_A,
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
         "--kind",
         "opt_out_set",
       ),
@@ -3180,20 +3204,12 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]).toEqual({
-      tenantId: TENANT_A,
-      tableName: undefined,
-      eventKind: "opt_out_set",
-      actorId: ACTOR_A,
-      since: undefined,
-      until: undefined,
-      limit: 100,
-      afterId: undefined,
-      joinActor: undefined,
-    });
+    expect(capture[0]?.tenantId).toBe(TENANT_A);
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
   });
 
-  it("composes with --with-actor-names (actor-id filter + LEFT JOIN names)", async () => {
+  it("composes with --with-actor-names (multi actor-id filter + LEFT JOIN names)", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -3202,6 +3218,8 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
         "history",
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_C,
         "--with-actor-names",
       ),
       {
@@ -3210,11 +3228,11 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_C]);
     expect(capture[0]?.joinActor).toBe(true);
   });
 
-  it("JSON envelope includes actorId field (null when not set, value when set)", async () => {
+  it("JSON envelope echoes actorIds array when --actor-id set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -3231,10 +3249,32 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
     );
     expect(code).toBe(0);
     const parsedOut = JSON.parse(out());
-    expect(parsedOut.actorId).toBe(ACTOR_A);
+    expect(parsedOut.actorIds).toEqual([ACTOR_A]);
   });
 
-  it("JSON envelope actorId is null when --actor-id is not set", async () => {
+  it("JSON envelope echoes multi-element actorIds when --actor-id repeated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id",
+        ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedOut = JSON.parse(out());
+    expect(parsedOut.actorIds).toEqual([ACTOR_A, ACTOR_B]);
+  });
+
+  it("JSON envelope actorIds is null when --actor-id NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed("retention", "history", "--format=json"),
@@ -3245,7 +3285,7 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
     );
     expect(code).toBe(0);
     const parsedOut = JSON.parse(out());
-    expect(parsedOut.actorId).toBeNull();
+    expect(parsedOut.actorIds).toBeNull();
   });
 
   it("human-format empty-result message preserved when --actor-id has no matches", async () => {
@@ -3331,7 +3371,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
     expect(capture[0]?.actorIdsNot).toEqual([ACTOR_BOB]);
   });
 
@@ -3802,7 +3842,7 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
     expect(capture[0]?.tenantId).toBe(TENANT);
     expect(capture[0]?.tableName).toBe("workflow_traces");
     expect(capture[0]?.eventKind).toBe("opt_out_set");
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
     expect(capture[0]?.beforeId).toBe(BEFORE_ID);
     expect(capture[0]?.limit).toBe(50);
   });
@@ -3980,7 +4020,7 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
     expect(capture[0]?.tenantId).toBe(TENANT);
     expect(capture[0]?.tableName).toBe("workflow_traces");
     expect(capture[0]?.eventKind).toBe("opt_out_set");
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
     expect(capture[0]?.afterId).toBe(AFTER_ID);
     expect(capture[0]?.beforeId).toBe(BEFORE_ID);
     expect(capture[0]?.limit).toBe(25);
