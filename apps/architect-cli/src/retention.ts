@@ -1459,8 +1459,8 @@ async function runRetentionDiffTimeline(
   }
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
-  const actorIdFlag = getStringFlag(command, "actor-id");
-  const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
+  const actorIdFlags = getMultiFlag(command, "actor-id");
+  const actorIds = actorIdFlags.length > 0 ? actorIdFlags : undefined;
 
   const kindFlag = getStringFlag(command, "kind");
   let eventKind: OptOutHistoryEventKind | undefined;
@@ -1501,7 +1501,7 @@ async function runRetentionDiffTimeline(
         until,
         limit,
         joinActor: withActorNames || undefined,
-        actorId,
+        actorIds,
         eventKind,
         afterId,
         beforeId,
@@ -1531,7 +1531,7 @@ async function runRetentionDiffTimeline(
         until: until ?? null,
         limit,
         withActorNames,
-        actorId: actorId ?? null,
+        actorIds: actorIds ?? null,
         kind: eventKind ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
@@ -1566,7 +1566,7 @@ async function runRetentionDiffTimeline(
         until,
         limit,
         joinActor: withActorNames || undefined,
-        actorId,
+        actorIds,
         eventKind,
         afterId,
         beforeId,
@@ -1596,7 +1596,7 @@ async function runRetentionDiffTimeline(
         until: until ?? null,
         limit,
         withActorNames,
-        actorId: actorId ?? null,
+        actorIds: actorIds ?? null,
         kind: eventKind ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
@@ -1626,7 +1626,7 @@ async function runRetentionDiffTimeline(
       until,
       limit,
       joinActor: withActorNames || undefined,
-      actorId,
+      actorIds,
       eventKind,
       afterId,
       beforeId,
@@ -1655,7 +1655,7 @@ async function runRetentionDiffTimeline(
       until: until ?? null,
       limit,
       withActorNames,
-      actorId: actorId ?? null,
+      actorIds: actorIds ?? null,
       kind: eventKind ?? null,
       afterId: afterId ?? null,
       beforeId: beforeId ?? null,

@@ -4724,13 +4724,14 @@ describe("PostgresTraceRetention.diffHistoryTimelineCrossTable (M6.7.zz.tenant.o
   });
 });
 
-describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter)", () => {
+describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + .multi-actor)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";
   const TENANT_C = "00000000-0000-4000-8000-00000000000C";
   const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+  const ACTOR_B = "22222222-2222-2222-2222-222222222222";
 
-  it("pair-wise: adds h.actor_id = $N WHERE clause when actorId is set", async () => {
+  it("pair-wise: adds h.actor_id IN ($N) WHERE clause when single actorIds is set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4738,9 +4739,9 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
       tenantIdA: TENANT_A,
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
-      actorId: ACTOR_A,
+      actorIds: [ACTOR_A],
     });
-    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       TENANT_B,
@@ -4750,7 +4751,28 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
     ]);
   });
 
-  it("pair-wise: omits h.actor_id WHERE clause when actorId not set", async () => {
+  it("pair-wise: builds h.actor_id IN ($N1, $N2, ...) for multi-actor OR filter", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIds: [ACTOR_A, ACTOR_B],
+    });
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4, $5)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      ACTOR_A,
+      ACTOR_B,
+      100,
+    ]);
+  });
+
+  it("pair-wise: omits h.actor_id WHERE clause when actorIds not set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4759,19 +4781,32 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).not.toContain("h.actor_id =");
+    expect(capture[0]?.sql).not.toContain("h.actor_id IN");
   });
 
-  it("N-way: adds h.actor_id WHERE clause positioned after tenant IN list", async () => {
+  it("pair-wise: omits h.actor_id WHERE clause when actorIds is empty array", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIds: [],
+    });
+    expect(capture[0]?.sql).not.toContain("h.actor_id IN");
+  });
+
+  it("N-way: adds h.actor_id IN WHERE positioned after tenant IN list", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.diffHistoryTimelineNway({
       tenantIds: [TENANT_A, TENANT_B, TENANT_C],
       tableName: "workflow_traces",
-      actorId: ACTOR_A,
+      actorIds: [ACTOR_A],
     });
-    expect(capture[0]?.sql).toContain("h.actor_id = $5");
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($5)");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       TENANT_B,
@@ -4782,16 +4817,37 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
     ]);
   });
 
-  it("cross-table: adds h.actor_id WHERE clause positioned after table IN list", async () => {
+  it("N-way: multi-actor IN clause threads after tenant list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      actorIds: [ACTOR_A, ACTOR_B],
+    });
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($5, $6)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      "workflow_traces",
+      ACTOR_A,
+      ACTOR_B,
+      100,
+    ]);
+  });
+
+  it("cross-table: adds h.actor_id IN WHERE positioned after table IN list", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.diffHistoryTimelineCrossTable({
       tenantId: TENANT_A,
       tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
-      actorId: ACTOR_A,
+      actorIds: [ACTOR_A],
     });
-    expect(capture[0]?.sql).toContain("h.actor_id = $5");
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($5)");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       "workflow_traces",
@@ -4802,7 +4858,27 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
     ]);
   });
 
-  it("pair-wise: composes actorId with --since + --until + --limit + joinActor", async () => {
+  it("cross-table: multi-actor IN clause threads after table list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces"],
+      actorIds: [ACTOR_A, ACTOR_B],
+    });
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4, $5)");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "llm_call_traces",
+      ACTOR_A,
+      ACTOR_B,
+      100,
+    ]);
+  });
+
+  it("pair-wise: composes actorIds with --since + --until + --limit + joinActor", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4810,14 +4886,14 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
       tenantIdA: TENANT_A,
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
-      actorId: ACTOR_A,
+      actorIds: [ACTOR_A],
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
       limit: 50,
       joinActor: true,
     });
     expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
-    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $5");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $6");
     expect(capture[0]?.params).toEqual([
@@ -4831,7 +4907,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
     ]);
   });
 
-  it("N-way: omits h.actor_id WHERE clause when actorId not set", async () => {
+  it("N-way: omits h.actor_id WHERE clause when actorIds not set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4839,10 +4915,10 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
       tenantIds: [TENANT_A, TENANT_B, TENANT_C],
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).not.toContain("h.actor_id =");
+    expect(capture[0]?.sql).not.toContain("h.actor_id IN");
   });
 
-  it("cross-table: omits h.actor_id WHERE clause when actorId not set", async () => {
+  it("cross-table: omits h.actor_id WHERE clause when actorIds not set", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4850,7 +4926,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
       tenantId: TENANT_A,
       tableNames: ["workflow_traces", "llm_call_traces"],
     });
-    expect(capture[0]?.sql).not.toContain("h.actor_id =");
+    expect(capture[0]?.sql).not.toContain("h.actor_id IN");
   });
 });
 
@@ -4931,7 +5007,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
     ]);
   });
 
-  it("pair-wise: composes eventKind with actorId + --since + --until + --limit + joinActor", async () => {
+  it("pair-wise: composes eventKind with actorIds + --since + --until + --limit + joinActor", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
@@ -4940,7 +5016,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       tenantIdA: TENANT_A,
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
-      actorId: ACTOR_A,
+      actorIds: [ACTOR_A],
       eventKind: "opt_out_set",
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
@@ -4948,7 +5024,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       joinActor: true,
     });
     expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
-    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
     expect(capture[0]?.sql).toContain("h.event_kind = $5");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $7");
@@ -5092,14 +5168,14 @@ describe("PostgresTraceRetention diff-timeline --after-id cursor pagination (M6.
       tenantIdA: TENANT_A,
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
-      actorId: ACTOR_A,
+      actorIds: [ACTOR_A],
       eventKind: "opt_out_set",
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
       afterId: AFTER_ID,
       limit: 50,
     });
-    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
     expect(capture[0]?.sql).toContain("h.event_kind = $5");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $7");

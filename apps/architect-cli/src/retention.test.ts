@@ -6034,10 +6034,11 @@ describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.dif
   });
 });
 
-describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter)", () => {
+describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + .multi-actor)", () => {
   const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+  const ACTOR_B = "22222222-2222-2222-2222-222222222222";
 
-  it("pair-wise: threads actor-id to adapter when --actor-id set", async () => {
+  it("pair-wise: threads actorIds as single-element array to adapter when --actor-id set once", async () => {
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6056,10 +6057,34 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
   });
 
-  it("pair-wise: omits actorId when --actor-id NOT set (backward compat)", async () => {
+  it("pair-wise: --actor-id repeated builds multi-actor array (OR semantic)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
+  });
+
+  it("pair-wise: omits actorIds when --actor-id NOT set (backward compat)", async () => {
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6076,10 +6101,10 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBeUndefined();
+    expect(capture[0]?.actorIds).toBeUndefined();
   });
 
-  it("N-way: threads actor-id alongside --add-tenant", async () => {
+  it("N-way: threads actorIds alongside --add-tenant (single + multi-actor)", async () => {
     const TENANT_C = "00000000-0000-4000-8000-00000000000C";
     const capture: DiffHistoryTimelineNwayInput[] = [];
     const { ctx } = buffers();
@@ -6094,6 +6119,8 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
         TENANT_C,
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
       ),
       {
         ...ctx,
@@ -6101,11 +6128,11 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
     expect(capture[0]?.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C]);
   });
 
-  it("cross-table: threads actor-id alongside --cross-table", async () => {
+  it("cross-table: threads actorIds alongside --cross-table (multi-actor)", async () => {
     const capture: DiffHistoryTimelineCrossTableInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -6118,6 +6145,8 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
         "--cross-table",
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
       ),
       {
         ...ctx,
@@ -6127,7 +6156,7 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
   });
 
   it("composes with --with-actor-names + --since + --limit", async () => {
@@ -6154,13 +6183,13 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
     expect(capture[0]?.joinActor).toBe(true);
     expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
     expect(capture[0]?.limit).toBe(50);
   });
 
-  it("JSON envelope echoes actorId field when --actor-id set (pair-wise)", async () => {
+  it("JSON envelope echoes actorIds field when --actor-id set (pair-wise, single)", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -6181,10 +6210,36 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.actorId).toBe(ACTOR_A);
+    expect(parsed_.actorIds).toEqual([ACTOR_A]);
   });
 
-  it("JSON envelope actorId=null when --actor-id NOT set", async () => {
+  it("JSON envelope echoes actorIds array when --actor-id repeated (multi-actor)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIds).toEqual([ACTOR_A, ACTOR_B]);
+  });
+
+  it("JSON envelope actorIds=null when --actor-id NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -6203,10 +6258,10 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.actorId).toBeNull();
+    expect(parsed_.actorIds).toBeNull();
   });
 
-  it("JSON envelope echoes actorId on N-way path", async () => {
+  it("JSON envelope echoes actorIds on N-way path", async () => {
     const TENANT_C = "00000000-0000-4000-8000-00000000000C";
     const { ctx, out } = buffers();
     const code = await runRetention(
@@ -6220,6 +6275,8 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
         TENANT_C,
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
         "--format",
         "json",
       ),
@@ -6231,10 +6288,10 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.nway).toBe(true);
-    expect(parsed_.actorId).toBe(ACTOR_A);
+    expect(parsed_.actorIds).toEqual([ACTOR_A, ACTOR_B]);
   });
 
-  it("JSON envelope echoes actorId on cross-table path", async () => {
+  it("JSON envelope echoes actorIds on cross-table path", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -6246,6 +6303,8 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
         "--cross-table",
         "--actor-id",
         ACTOR_A,
+        "--actor-id",
+        ACTOR_B,
         "--format",
         "json",
       ),
@@ -6257,7 +6316,7 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.crossTable).toBe(true);
-    expect(parsed_.actorId).toBe(ACTOR_A);
+    expect(parsed_.actorIds).toEqual([ACTOR_A, ACTOR_B]);
   });
 });
 
@@ -6401,7 +6460,7 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
     expect(capture[0]?.eventKind).toBe("opt_out_set");
     expect(capture[0]?.joinActor).toBe(true);
     expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");

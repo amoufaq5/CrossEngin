@@ -401,7 +401,7 @@ export interface DiffHistoryTimelineInput {
   readonly until?: string;
   readonly limit?: number;
   readonly joinActor?: boolean;
-  readonly actorId?: string;
+  readonly actorIds?: ReadonlyArray<string>;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -436,7 +436,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly until?: string;
   readonly limit?: number;
   readonly joinActor?: boolean;
-  readonly actorId?: string;
+  readonly actorIds?: ReadonlyArray<string>;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -470,7 +470,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly until?: string;
   readonly limit?: number;
   readonly joinActor?: boolean;
-  readonly actorId?: string;
+  readonly actorIds?: ReadonlyArray<string>;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -1606,9 +1606,14 @@ export class PostgresTraceRetention {
       "h.table_name = $3",
     ];
     const params: unknown[] = [input.tenantIdA, input.tenantIdB, input.tableName];
-    if (input.actorId !== undefined) {
-      params.push(input.actorId);
-      conditions.push(`h.actor_id = $${params.length}`);
+    if (input.actorIds !== undefined && input.actorIds.length > 0) {
+      const actorPlaceholders = input.actorIds
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
     if (input.eventKind !== undefined) {
       params.push(input.eventKind);
@@ -1729,9 +1734,14 @@ export class PostgresTraceRetention {
       `h.tenant_id IN (${tenantPlaceholders})`,
       `h.table_name = $${tableParamIdx}`,
     ];
-    if (input.actorId !== undefined) {
-      params.push(input.actorId);
-      conditions.push(`h.actor_id = $${params.length}`);
+    if (input.actorIds !== undefined && input.actorIds.length > 0) {
+      const actorPlaceholders = input.actorIds
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
     if (input.eventKind !== undefined) {
       params.push(input.eventKind);
@@ -1858,9 +1868,14 @@ export class PostgresTraceRetention {
       `h.tenant_id = $1`,
       `h.table_name IN (${tablePlaceholders})`,
     ];
-    if (input.actorId !== undefined) {
-      params.push(input.actorId);
-      conditions.push(`h.actor_id = $${params.length}`);
+    if (input.actorIds !== undefined && input.actorIds.length > 0) {
+      const actorPlaceholders = input.actorIds
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
     if (input.eventKind !== undefined) {
       params.push(input.eventKind);
