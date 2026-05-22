@@ -21,15 +21,125 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,761 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor
+**56 packages + 1 app, 129 meta-schema tables, 8,777 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.history.before-id
+closes ADR-0175 Q1 by adding `--before-id <uuid>` reverse cursor
+pagination to `retention history` — walking BACKWARD through the
+DESC-ordered audit log toward newer entries. After ADR-0175
+shipped `--after-id` forward pagination (DESC ordering walks
+backward in time toward older entries) and ADR-0195 just shipped
+`--after-id` across all three diff-timeline paths, operators now
+have genuine bidirectional pagination needs — resume from saved
+cursor in either direction, page reversal after overshooting,
+sliding-window audit anchored on a specific event id, stream-
+tail polling for newer events. CLI surface — `--after-id` and
+`--before-id` are mutually exclusive at the CLI boundary (both
+set → exit 2 with clear error); both compose with every existing
+filter (--tenant + --table + --kind + --actor-id +
+--with-actor-names + --since + --until + --limit). Adapter
+ListOptOutHistoryInput gains optional beforeId?: string field;
+adapter accepts BOTH afterId and beforeId simultaneously
+(substrate-level range-cursor semantic preserved for
+programmatic consumers) while CLI rejects both — documented
+flexibility/restriction split. SQL — compound cursor
+`(h.occurred_at, h.id) > ((SELECT occurred_at FROM ... WHERE
+id = $N), $N)` flips ADR-0175's `<` operator since walking
+forward (up the DESC list) means returning NEWER entries; same
+inline subquery + tiebreaker pattern. ORDER BY remains
+unchanged at `h.occurred_at DESC, h.id DESC` regardless of
+cursor direction — operators see latest entries first in every
+page. nextBeforeId computed at CLI layer as the FIRST entry's
+id when entries.length === limit (boundary for going-newer in
+DESC ordering); when entries.length < limit, no more newer
+entries exist nextBeforeId is null. JSON envelope gains
+beforeId: string | null + nextBeforeId: string | null fields
+alongside existing afterId + nextAfterId. Human-format adds
+'Page full — previous page: crossengin retention history
+--before-id <id> ...' hint when nextBeforeId !== null. Both
+cursor fields can be populated when page is full — operators
+navigate either direction from any page; on first-page queries
+the nextBeforeId points at the absolute newest entry and
+follow-up --before-id <that> returns empty (correct end-of-
+pagination signal in backward direction); matches GitHub REST
+Link-header convention. Use cases unblocked — page reversal
+after walking back too far (--before-id <first-id-from-current-
+page>), stream-tail mode (polling --before-id <latest-known>
+every 30s discovers new events without re-scanning), sliding-
+window audit anchored on a specific event id (two queries one
+each direction), resume from saved cursor in either direction.
+Rejected alternatives — flip ORDER BY direction on --before-id
+(would confuse operators expecting DESC; single consistent
+ORDER BY matches convention), reject both --after-id and
+--before-id at adapter boundary (overzealous substrate-level
+range-cursor is sound), single --cursor + --direction flag
+(verbose explicit named flags clearer), nextBeforeId named
+prevBeforeId (abbreviates inconsistently with nextAfterId), use
+LAST entry id for nextBeforeId (would point at oldest entry
+useless for backward pagination), compute nextBeforeId only
+when --before-id explicitly set (would require operators know
+direction availability before trying), reverse-direction
+reverse-mode with --before-id + ASC ordering (semantic stretch
+DESC is expected), server-side opaque cursor encoding (UUID is
+simple). Drawbacks — adapter accepts both flags simultaneously
+but CLI rejects (substrate-flexibility/CLI-restriction split
+documented), both nextAfterId + nextBeforeId populated on every
+full page (first-page nextBeforeId points at absolute newest
+entry follow-up returns empty as end-of-pagination signal), no
+--before-id on retention diff-timeline this milestone (defer
+to future session), no CLI-side UUID validation (matches
+ADR-0175/0186/0193/0195 deferred decision), nextBeforeId best-
+effort under concurrent inserts (walked correctly on next
+backward page via compound cursor), DESC ordering constant
+regardless of cursor direction (matches GitHub REST and most
+paginated APIs convention). 6 new adapter tests in trace-
+retention.test.ts in a new "PostgresTraceRetention.listOptOutHistory
+--before-id reverse cursor" describe block — threads as $N
+param into compound cursor with > operator verified, same $N
+reused for both subquery lookup and tiebreaker verified via
+regex count appears twice, omits when not set, composes with
+afterId in SAME query both cursor clauses present + both
+params threaded (range semantic), composes with all 7 other
+filters with afterId positioned before beforeId in WHERE
+clause order, ORDER BY remains h.occurred_at DESC + h.id DESC
+no direction reversal. 10 new CLI tests in retention.test.ts
+in a new "runRetention history --before-id" describe block —
+threads beforeId to adapter, omits when not set backward
+compat, exit 2 when --after-id + --before-id both set mutually
+exclusive with explicit error, JSON envelope echoes beforeId
+when set, JSON envelope beforeId=null when not set, JSON
+nextBeforeId is FIRST entry id when length === limit (with
+nextAfterId verifying both populated), JSON nextBeforeId=null
+when length < limit, human-format prints previous-page hint
+when length === limit, human-format omits hint when length <
+limit, composes with all 7 other filters (--tenant + --table
++ --kind + --actor-id + --since + --until + --before-id +
+--limit). cli.ts helpText extended with [--before-id <uuid>]
+flag note on retention history usage line + 5-line description
+explaining bidirectional pagination + mutual exclusivity with
+--after-id + nextAfterId + nextBeforeId bidirectional
+navigation when page is full. ADR-0196 documents the design +
+8 rejected alternatives + 7 future Qs (--before-id on retention
+diff-timeline all three paths, --range <after-id>..<before-id>
+range-cursor flag at CLI boundary leveraging adapter's both-
+cursors-set support, --before-id on retention diff-history,
+cross-process cursor stability via point-in-time snapshot,
+--watch flag auto-polling for stream-tail mode, --include-
+cursor-row for >=/<= semantic, composite indexes). The
+retention CLI now has 18 actions with bidirectional cursor
+pagination on the canonical audit-log surface — operators
+walk forward (--after-id, older) and backward (--before-id,
+newer) on retention history symmetrically without OFFSET
+drift under concurrent inserts; diff-timeline still has
+forward-only --after-id from ADR-0195 with --before-id
+deferred to future session.
+M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor
 closes ADR-0189 Q5 by threading `--after-id <uuid>` cursor
 pagination through all three `retention diff-timeline` dispatch
 paths uniformly — pair-wise cross-tenant + N-way cross-tenant via
@@ -7970,7 +8080,31 @@ non-null; composes with every existing flag without
 restriction; streaming cohort audit + resume
 interrupted audit + per-actor per-kind paginated
 forensics workflows now CLI-native without OFFSET
-drift under concurrent inserts).
+drift under concurrent inserts),
+ADR-0196 covers M6.7.zz.tenant.opt-out.history.before-id
+(`retention history --before-id <uuid>` reverse
+cursor pagination — closes ADR-0175 Q1 — walks
+BACKWARD through DESC-ordered audit log toward
+NEWER entries (vs --after-id forward toward older);
+compound cursor `(h.occurred_at, h.id) > ((SELECT
+occurred_at FROM ... WHERE id = $N), $N)` flips
+ADR-0175's `<` operator since walking up the DESC
+list returns newer entries; ListOptOutHistoryInput
+gains optional beforeId?: string field; adapter
+accepts both afterId + beforeId simultaneously
+substrate-level range-cursor semantic preserved
+while CLI enforces mutual exclusivity (--after-id
++ --before-id both set → exit 2); ORDER BY remains
+DESC unchanged regardless of cursor direction
+matches GitHub REST convention; nextBeforeId
+computed at CLI layer as FIRST entry id when
+length === limit (boundary for going-newer);
+JSON envelope echoes beforeId + nextBeforeId;
+human-format adds 'Page full — previous page:
+--before-id <id>' hint; page reversal + stream-
+tail polling + sliding-window audit + resume from
+saved cursor either direction workflows now CLI-
+native).
 
 ## Architecture in 90 seconds
 

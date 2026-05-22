@@ -821,6 +821,7 @@ async function runRetentionHistory(
   const untilFlag = getStringFlag(command, "until");
   const limitFlag = getStringFlag(command, "limit");
   const afterIdFlag = getStringFlag(command, "after-id");
+  const beforeIdFlag = getStringFlag(command, "before-id");
   const actorIdFlag = getStringFlag(command, "actor-id");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
 
@@ -834,6 +835,14 @@ async function runRetentionHistory(
       return 2;
     }
     kind = kindFlag;
+  }
+
+  if (afterIdFlag !== null && beforeIdFlag !== null) {
+    printError(
+      ctx.io,
+      "retention history: --after-id and --before-id are mutually exclusive",
+    );
+    return 2;
   }
 
   let since: string | undefined;
@@ -886,6 +895,7 @@ async function runRetentionHistory(
       until,
       limit,
       afterId: afterIdFlag ?? undefined,
+      beforeId: beforeIdFlag ?? undefined,
       joinActor: withActorNames || undefined,
     });
   } catch (err) {
@@ -898,6 +908,8 @@ async function runRetentionHistory(
 
   const nextAfterId =
     entries.length === limit ? (entries[entries.length - 1]?.id ?? null) : null;
+  const nextBeforeId =
+    entries.length === limit ? (entries[0]?.id ?? null) : null;
 
   if (command.format === "json") {
     printJson(ctx.io, {
@@ -908,10 +920,12 @@ async function runRetentionHistory(
       since: since ?? null,
       until: until ?? null,
       afterId: afterIdFlag ?? null,
+      beforeId: beforeIdFlag ?? null,
       limit,
       count: entries.length,
       entries,
       nextAfterId,
+      nextBeforeId,
     });
     return 0;
   }
@@ -921,7 +935,9 @@ async function runRetentionHistory(
     return 0;
   }
 
-  ctx.io.stdout.write(formatHistoryList(entries, limit, nextAfterId));
+  ctx.io.stdout.write(
+    formatHistoryList(entries, limit, nextAfterId, nextBeforeId),
+  );
   return 0;
 }
 
@@ -929,6 +945,7 @@ export function formatHistoryList(
   entries: ReadonlyArray<OptOutHistoryEntry>,
   limit: number,
   nextAfterId?: string | null,
+  nextBeforeId?: string | null,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -943,6 +960,12 @@ export function formatHistoryList(
     lines.push("");
     lines.push(
       `Page full — next page: crossengin retention history --after-id ${nextAfterId} ...`,
+    );
+  }
+  if (nextBeforeId !== undefined && nextBeforeId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — previous page: crossengin retention history --before-id ${nextBeforeId} ...`,
     );
   }
   return lines.join("\n") + "\n";

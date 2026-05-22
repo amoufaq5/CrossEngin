@@ -3260,6 +3260,249 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
   });
 });
 
+describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.before-id)", () => {
+  const BEFORE_ID = "70000000-0000-4000-8000-000000000007";
+  const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+  const FIRST_ID = "ff000000-0000-4000-8000-0000000000ff";
+  const LAST_ID = "11000000-0000-4000-8000-000000000011";
+
+  it("threads beforeId to adapter when --before-id set", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--before-id", BEFORE_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("omits beforeId when --before-id NOT set (backward compat)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(capture[0]?.beforeId).toBeUndefined();
+  });
+
+  it("returns exit 2 when --after-id and --before-id are both set (mutually exclusive)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--after-id",
+        AFTER_ID,
+        "--before-id",
+        BEFORE_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("JSON envelope echoes beforeId field when --before-id set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--before-id",
+        BEFORE_ID,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("JSON envelope beforeId=null when --before-id NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.beforeId).toBeNull();
+  });
+
+  it("JSON envelope nextBeforeId is the FIRST entry id when entries.length === limit", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--limit",
+        "2",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: FIRST_ID,
+              tenantId: "00000000-0000-4000-8000-00000000000A",
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: null,
+              occurredAt: "2026-06-01T00:00:00.000Z",
+              prevState: null,
+              nextState: { opt_out: true },
+              attributes: {},
+            },
+            {
+              id: LAST_ID,
+              tenantId: "00000000-0000-4000-8000-00000000000A",
+              tableName: "workflow_traces",
+              eventKind: "retention_set",
+              actorId: null,
+              occurredAt: "2026-01-01T00:00:00.000Z",
+              prevState: null,
+              nextState: { retention_days: 90 },
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.nextBeforeId).toBe(FIRST_ID);
+    expect(parsed_.nextAfterId).toBe(LAST_ID);
+  });
+
+  it("JSON envelope nextBeforeId=null when entries.length < limit", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.nextBeforeId).toBeNull();
+  });
+
+  it("human-format prints previous-page hint when entries.length === limit", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--limit", "1"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: FIRST_ID,
+              tenantId: "00000000-0000-4000-8000-00000000000A",
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: null,
+              occurredAt: "2026-06-01T00:00:00.000Z",
+              prevState: null,
+              nextState: { opt_out: true },
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("previous page: crossengin retention history --before-id");
+    expect(out()).toContain(FIRST_ID);
+  });
+
+  it("human-format omits previous-page hint when entries.length < limit", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: FIRST_ID,
+              tenantId: "00000000-0000-4000-8000-00000000000A",
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: null,
+              occurredAt: "2026-06-01T00:00:00.000Z",
+              prevState: null,
+              nextState: { opt_out: true },
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).not.toContain("previous page");
+  });
+
+  it("composes with all other filters (--tenant + --table + --kind + --actor-id + --since + --until + --before-id + --limit)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const TENANT = "00000000-0000-4000-8000-00000000000A";
+    const ACTOR_A = "11111111-1111-4000-8000-111111111111";
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT,
+        "--table",
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--actor-id",
+        ACTOR_A,
+        "--since",
+        "2026-01-01",
+        "--until",
+        "2026-06-01",
+        "--before-id",
+        BEFORE_ID,
+        "--limit",
+        "50",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantId).toBe(TENANT);
+    expect(capture[0]?.tableName).toBe("workflow_traces");
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+    expect(capture[0]?.limit).toBe(50);
+  });
+});
+
 describe("formatActor (M6.7.zz.tenant.opt-out.history.actor-join)", () => {
   const ACTOR = "11111111-1111-4000-8000-111111111111";
 

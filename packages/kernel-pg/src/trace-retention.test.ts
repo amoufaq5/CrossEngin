@@ -5130,6 +5130,97 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
   });
 });
 
+describe("PostgresTraceRetention.listOptOutHistory --before-id reverse cursor (M6.7.zz.tenant.opt-out.history.before-id)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const BEFORE_ID = "70000000-0000-4000-8000-000000000007";
+
+  it("--before-id threads as $N param into compound cursor with > operator (reverse direction on DESC ordering)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ beforeId: BEFORE_ID });
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.sql).toContain(
+      "SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $1",
+    );
+    expect(capture[0]?.params).toEqual([BEFORE_ID, 100]);
+  });
+
+  it("compound cursor same $N param reused for both subquery lookup and tiebreaker", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ beforeId: BEFORE_ID });
+    const sql = capture[0]?.sql ?? "";
+    const matches = sql.match(/\$1/g) ?? [];
+    expect(matches.length).toBe(2);
+  });
+
+  it("omits beforeId cursor WHERE when not set (backward compat)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({});
+    expect(capture[0]?.sql).not.toContain("(h.occurred_at, h.id) >");
+  });
+
+  it("composes with afterId in the SAME query — both cursor clauses present (range semantic)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ afterId: AFTER_ID, beforeId: BEFORE_ID });
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) <");
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.params).toEqual([AFTER_ID, BEFORE_ID, 100]);
+  });
+
+  it("composes with all other filters (tenant + table + kind + actor + since + until + beforeId + limit)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      eventKind: "opt_out_set",
+      actorId: ACTOR_A,
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-06-01T00:00:00.000Z",
+      beforeId: BEFORE_ID,
+      limit: 50,
+    });
+    expect(capture[0]?.sql).toContain("h.tenant_id = $1");
+    expect(capture[0]?.sql).toContain("h.table_name = $2");
+    expect(capture[0]?.sql).toContain("h.event_kind = $3");
+    expect(capture[0]?.sql).toContain("h.actor_id = $4");
+    expect(capture[0]?.sql).toContain("h.occurred_at >= $5");
+    expect(capture[0]?.sql).toContain("h.occurred_at <= $6");
+    expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "opt_out_set",
+      ACTOR_A,
+      "2026-01-01T00:00:00.000Z",
+      "2026-06-01T00:00:00.000Z",
+      BEFORE_ID,
+      50,
+    ]);
+  });
+
+  it("ORDER BY remains h.occurred_at DESC, h.id DESC (no direction reversal)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ beforeId: BEFORE_ID });
+    expect(capture[0]?.sql).toContain("ORDER BY h.occurred_at DESC, h.id DESC");
+  });
+});
+
 describe("PostgresTraceRetention.listOptOutHistory actorId filter (M6.7.zz.tenant.opt-out.cli.history.actor-filter)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const ACTOR_A = "11111111-1111-4000-8000-111111111111";

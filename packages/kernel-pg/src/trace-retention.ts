@@ -276,6 +276,7 @@ export interface ListOptOutHistoryInput {
   readonly until?: string;
   readonly limit?: number;
   readonly afterId?: string;
+  readonly beforeId?: string;
   readonly joinActor?: boolean;
 }
 
@@ -1302,6 +1303,16 @@ export class PostgresTraceRetention {
         `(h.occurred_at, h.id) < (
            (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
            $${afterIdParam}
+         )`,
+      );
+    }
+    if (input.beforeId !== undefined) {
+      params.push(input.beforeId);
+      const beforeIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) > (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${beforeIdParam}),
+           $${beforeIdParam}
          )`,
       );
     }
