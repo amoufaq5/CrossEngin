@@ -1252,7 +1252,25 @@ async function runRetentionDiffHistory(
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
   const actorIdNotFlag = getStringFlag(command, "actor-id-not");
   const actorIdNot = actorIdNotFlag !== null ? actorIdNotFlag : undefined;
+  const systemOnlyFlag = getBooleanFlag(command, "system-only");
+  const noSystemFlag = getBooleanFlag(command, "no-system");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+
+  if (systemOnlyFlag && noSystemFlag) {
+    printError(
+      ctx.io,
+      "retention diff-history: --system-only and --no-system are mutually exclusive",
+    );
+    return 2;
+  }
+  const actorPresence:
+    | "system_only"
+    | "no_system"
+    | undefined = systemOnlyFlag
+    ? "system_only"
+    : noSystemFlag
+      ? "no_system"
+      : undefined;
 
   let result: DiffHistoryEntriesResult;
   try {
@@ -1263,6 +1281,7 @@ async function runRetentionDiffHistory(
       eventKindNot,
       actorId,
       actorIdNot,
+      actorPresence,
       joinActor: withActorNames ? true : undefined,
     });
   } catch (err) {
@@ -1280,6 +1299,8 @@ async function runRetentionDiffHistory(
       kindNot: eventKindNot ?? null,
       actorId: actorId ?? null,
       actorIdNot: actorIdNot ?? null,
+      systemOnly: systemOnlyFlag,
+      noSystem: noSystemFlag,
       withActorNames,
       result,
     });

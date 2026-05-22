@@ -4670,6 +4670,222 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
   });
 });
 
+describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation check (M6.7.zz.tenant.opt-out.cli.diff-history.system-only)", () => {
+  const TENANT = "00000000-0000-4000-8000-00000000000A";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  function rawEntry(
+    id: string,
+    overrides: Partial<{
+      actor_id: string | null;
+      event_kind: string;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id,
+      tenant_id: TENANT,
+      table_name: "workflow_traces",
+      event_kind: "opt_out_set",
+      actor_id: ACTOR_ALICE,
+      occurred_at: "2026-05-22T12:00:00.000Z",
+      next_state: { opt_out: true, retention_days: 365 },
+      ...overrides,
+    };
+  }
+
+  it("system_only: accepts when both events are system-authored (null actor_id)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null }),
+        rawEntry(ID_B, { actor_id: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      actorPresence: "system_only",
+    });
+    expect(result.actorIdA).toBeNull();
+    expect(result.actorIdB).toBeNull();
+  });
+
+  it("system_only: throws when A has actor_id with explicit error naming side A", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorPresence: "system_only",
+      }),
+    ).rejects.toThrow(
+      `expected both events to be system-authored (actor_id IS NULL) but A is '${ACTOR_ALICE}'`,
+    );
+  });
+
+  it("system_only: throws when B has actor_id with explicit error naming side B", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorPresence: "system_only",
+      }),
+    ).rejects.toThrow(
+      `expected both events to be system-authored (actor_id IS NULL) but B is '${ACTOR_BOB}'`,
+    );
+  });
+
+  it("system_only: throws naming both sides when neither is system-authored", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorPresence: "system_only",
+      }),
+    ).rejects.toThrow(
+      "expected both events to be system-authored (actor_id IS NULL)",
+    );
+  });
+
+  it("no_system: accepts when both events have non-null actor_id", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      actorPresence: "no_system",
+    });
+    expect(result.actorIdA).toBe(ACTOR_ALICE);
+    expect(result.actorIdB).toBe(ACTOR_BOB);
+  });
+
+  it("no_system: throws when A is system-authored with explicit '<system>' error", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorPresence: "no_system",
+      }),
+    ).rejects.toThrow(
+      "expected neither event to be system-authored (actor_id IS NULL) but A is <system>",
+    );
+  });
+
+  it("no_system: throws when B is system-authored", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorPresence: "no_system",
+      }),
+    ).rejects.toThrow(
+      "expected neither event to be system-authored (actor_id IS NULL) but B is <system>",
+    );
+  });
+
+  it("no_system: throws naming both when both events are system-authored", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null }),
+        rawEntry(ID_B, { actor_id: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorPresence: "no_system",
+      }),
+    ).rejects.toThrow(
+      "expected neither event to be system-authored (actor_id IS NULL) but both A and B are <system>",
+    );
+  });
+
+  it("omits the check when actorPresence not set (backward compat)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.actorIdA).toBeNull();
+    expect(result.actorIdB).toBe(ACTOR_BOB);
+  });
+
+  it("composes with --kind expectation check (both pass when actor + kind expectations met)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null, event_kind: "opt_out_set" }),
+        rawEntry(ID_B, { actor_id: null, event_kind: "opt_out_set" }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      eventKind: "opt_out_set",
+      actorPresence: "system_only",
+    });
+    expect(result.actorIdA).toBeNull();
+  });
+});
+
 describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";

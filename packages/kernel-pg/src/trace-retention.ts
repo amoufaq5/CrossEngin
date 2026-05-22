@@ -337,6 +337,7 @@ export interface DiffHistoryEntriesInput {
   readonly eventKindNot?: OptOutHistoryEventKind;
   readonly actorId?: string;
   readonly actorIdNot?: string;
+  readonly actorPresence?: ActorPresenceFilter;
   readonly joinActor?: boolean;
 }
 
@@ -1673,6 +1674,33 @@ export class PostgresTraceRetention {
             : "both A and B match";
         throw new Error(
           `diffHistoryEntries: expected neither event to have actor_id '${input.actorIdNot}' but ${suffix}`,
+        );
+      }
+    }
+    if (input.actorPresence === "system_only") {
+      const mismatches: string[] = [];
+      if (entryA.actor_id !== null) {
+        mismatches.push(`A is '${entryA.actor_id}'`);
+      }
+      if (entryB.actor_id !== null) {
+        mismatches.push(`B is '${entryB.actor_id}'`);
+      }
+      if (mismatches.length > 0) {
+        throw new Error(
+          `diffHistoryEntries: expected both events to be system-authored (actor_id IS NULL) but ${mismatches.join(" and ")}`,
+        );
+      }
+    } else if (input.actorPresence === "no_system") {
+      const matches: string[] = [];
+      if (entryA.actor_id === null) matches.push("A");
+      if (entryB.actor_id === null) matches.push("B");
+      if (matches.length > 0) {
+        const suffix =
+          matches.length === 1
+            ? `${matches[0]} is <system>`
+            : "both A and B are <system>";
+        throw new Error(
+          `diffHistoryEntries: expected neither event to be system-authored (actor_id IS NULL) but ${suffix}`,
         );
       }
     }

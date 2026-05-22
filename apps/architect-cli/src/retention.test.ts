@@ -5632,6 +5632,179 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
   });
 });
 
+describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.opt-out.cli.diff-history.system-only)", () => {
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+  it("returns exit 2 when --system-only AND --no-system both set", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--system-only",
+        "--no-system",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain(
+      "--system-only and --no-system are mutually exclusive",
+    );
+  });
+
+  it("threads actorPresence='system_only' when --system-only set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorPresence).toBe("system_only");
+  });
+
+  it("threads actorPresence='no_system' when --no-system set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--no-system"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorPresence).toBe("no_system");
+  });
+
+  it("omits actorPresence when neither flag set (backward compat)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorPresence).toBeUndefined();
+  });
+
+  it("composes with --actor-id-not + --no-system (both threaded independently)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--no-system",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorPresence).toBe("no_system");
+  });
+
+  it("adapter expectation error propagates as exit 1 with explicit error", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error(
+            "diffHistoryEntries: expected both events to be system-authored (actor_id IS NULL) but A is '11111111-0000-4000-8000-000000000001'",
+          ),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain(
+      "expected both events to be system-authored (actor_id IS NULL)",
+    );
+    expect(err()).toContain("A is '11111111-0000-4000-8000-000000000001'");
+  });
+
+  it("JSON envelope echoes systemOnly=true + noSystem=false when --system-only set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--system-only",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.action).toBe("diff-history");
+    expect(parsed_.systemOnly).toBe(true);
+    expect(parsed_.noSystem).toBe(false);
+  });
+
+  it("JSON envelope echoes noSystem=true + systemOnly=false when --no-system set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--no-system",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.systemOnly).toBe(false);
+    expect(parsed_.noSystem).toBe(true);
+  });
+
+  it("JSON envelope both false when neither flag set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.systemOnly).toBe(false);
+    expect(parsed_.noSystem).toBe(false);
+  });
+});
+
 describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
   it("default (no flag) calls prune (not previewPrune)", async () => {
     const { ctx } = buffers();
