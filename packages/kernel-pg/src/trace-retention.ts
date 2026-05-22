@@ -267,12 +267,15 @@ export function effectiveRetentionKey(
   return `${tenantId}:${tableName}`;
 }
 
+export type ActorPresenceFilter = "system_only" | "no_system";
+
 export interface ListOptOutHistoryInput {
   readonly tenantId?: string;
   readonly tableName?: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly actorId?: string;
   readonly actorIdNot?: string;
+  readonly actorPresence?: ActorPresenceFilter;
   readonly since?: string;
   readonly until?: string;
   readonly limit?: number;
@@ -1311,6 +1314,11 @@ export class PostgresTraceRetention {
       conditions.push(
         `(h.actor_id IS NULL OR h.actor_id != $${params.length})`,
       );
+    }
+    if (input.actorPresence === "system_only") {
+      conditions.push(`h.actor_id IS NULL`);
+    } else if (input.actorPresence === "no_system") {
+      conditions.push(`h.actor_id IS NOT NULL`);
     }
     if (input.since !== undefined) {
       params.push(input.since);

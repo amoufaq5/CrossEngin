@@ -3373,6 +3373,151 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
   });
 });
 
+describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-out.cli.history.system-only)", () => {
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+  it("returns exit 2 when --system-only AND --no-system both set", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--system-only", "--no-system"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain(
+      "--system-only and --no-system are mutually exclusive",
+    );
+  });
+
+  it("threads actorPresence='system_only' when --system-only set", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--system-only"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorPresence).toBe("system_only");
+  });
+
+  it("threads actorPresence='no_system' when --no-system set", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--no-system"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorPresence).toBe("no_system");
+  });
+
+  it("omits actorPresence when neither flag set (backward compat)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(capture[0]?.actorPresence).toBeUndefined();
+  });
+
+  it("composes with --tenant + --system-only", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT_A,
+        "--system-only",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantId).toBe(TENANT_A);
+    expect(capture[0]?.actorPresence).toBe("system_only");
+  });
+
+  it("composes with --actor-id-not + --no-system (redundant but valid)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--no-system",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorPresence).toBe("no_system");
+  });
+
+  it("JSON envelope echoes systemOnly=true + noSystem=false when --system-only set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--system-only", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.systemOnly).toBe(true);
+    expect(parsed_.noSystem).toBe(false);
+  });
+
+  it("JSON envelope echoes noSystem=true + systemOnly=false when --no-system set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--no-system", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.systemOnly).toBe(false);
+    expect(parsed_.noSystem).toBe(true);
+  });
+
+  it("JSON envelope systemOnly=false + noSystem=false when neither flag set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.systemOnly).toBe(false);
+    expect(parsed_.noSystem).toBe(false);
+  });
+});
+
 describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.before-id)", () => {
   const BEFORE_ID = "70000000-0000-4000-8000-000000000007";
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";

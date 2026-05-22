@@ -21,15 +21,117 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,938 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.kind-not
+**56 packages + 1 app, 129 meta-schema tables, 8,955 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.system-only
+closes ADR-0186 + ADR-0206 + ADR-0205/0207 future Qs by adding
+`--system-only` / `--no-system` boolean flag pair to `retention
+history` for explicit null-actor filtering on the audit-log
+surface. `--system-only` filters to events where actor_id IS NULL
+(substrate-authored maintenance — prune sweeps, scheduled jobs,
+expiry auto-lifts); `--no-system` filters to events where actor_id
+IS NOT NULL (human / service-account authored deliberate
+mutations). Operators wanting these queries previously jq-filtered
+post-fetch which broke LIMIT correctness + cursor-pagination
+correctness + index-usage parity — substrate-side WHERE is the
+only way to get all three right (same reasoning as ADR-0186 +
+ADR-0206 for value-based actor filtering). Mutually exclusive at
+CLI boundary — both set returns exit 2 before any PG query with
+"--system-only and --no-system are mutually exclusive" error.
+Composes with every existing filter (--tenant + --table + --kind
++ --actor-id + --actor-id-not + --since + --until + --limit +
+--after-id + --before-id + --range + --with-actor-names) without
+restriction. Adapter changes — new exported ActorPresenceFilter
+discriminated string union ("system_only" | "no_system");
+ListOptOutHistoryInput gains optional actorPresence?:
+ActorPresenceFilter field. Discriminated string union over two
+booleans because (1) mutual exclusivity enforced at the type
+level — impossible to express "both at once" in adapter input,
+(2) adapter consumers see clean 3-state choice, (3) CLI translates
+the two boolean flags into the single union value after the
+mutual-exclusivity check. SQL adds one of two conditional WHERE
+clauses (no parameters needed — IS NULL / IS NOT NULL are SQL
+constructs not value comparisons): system_only adds h.actor_id
+IS NULL; no_system adds h.actor_id IS NOT NULL. Position —
+immediately after actorIdNot filter, before --since / --until
+time-range clauses (matches existing actor-dimension grouping in
+WHERE-clause assembly). CLI threads systemOnlyFlag + noSystemFlag
+via getBooleanFlag, mutual-exclusivity check, translate to
+actorPresence single value, thread to adapter, echo systemOnly +
+noSystem booleans in JSON envelope (matching existing
+withActorNames boolean-echo pattern from ADR-0185 — every CLI
+flag has corresponding envelope field with same shape; mutual
+exclusivity at CLI guarantees both are never true simultaneously).
+Composition with existing actor filters — --system-only +
+--actor-id is contradictory at data layer (system events have
+actor_id IS NULL; --actor-id requires UUID; substrate returns
+empty silently SQL natural outcome), --system-only + --actor-id-
+not is redundant but valid (system events are NEITHER any specific
+UUID by definition), --no-system + --actor-id is canonical "human
+X's mutations" idiom (--no-system redundant since actor_id = $N
+implies IS NOT NULL but harmless), --no-system + --actor-id-not
+is canonical "human mutations excluding X" idiom (distinguished
+from --actor-id-not alone which includes system events). Why
+substrate-side not jq-side — LIMIT correctness, cursor-pagination
+correctness, index usage parity (matches ADR-0186 + ADR-0206
+reasoning). 8 new adapter tests in a new "PostgresTraceRetention
+.listOptOutHistory actorPresence filter" describe block: adds
+h.actor_id IS NULL when system_only, adds h.actor_id IS NOT NULL
+when no_system, omits clause when not set, adds no params for
+IS NULL/IS NOT NULL clauses (no placeholder pollution; LIMIT
+param position correct), composes with tenantId + tableName
+(system_only), composes with actorIdNot + no_system (redundant
+but valid; both clauses present), composes with joinActor +
+actorPresence (LEFT JOIN + IS NULL both present), returns rows
+with null actor_id when system_only matches. 9 new CLI tests in
+a new "runRetention history --system-only / --no-system" describe
+block: exit 2 when both flags set with explicit error message,
+threads actorPresence='system_only' when --system-only set,
+threads actorPresence='no_system' when --no-system set, omits
+actorPresence when neither set backward compat, composes with
+--tenant + --system-only, composes with --actor-id-not +
+--no-system (both threaded independently), JSON envelope echoes
+systemOnly=true + noSystem=false when --system-only set, JSON
+envelope echoes noSystem=true + systemOnly=false when --no-system
+set, JSON envelope echoes both false when neither set. Test
+count: 8,938 → 8,955 (+17: adapter +8, CLI +9). cli.ts helpText
+extended for retention history usage line with [--system-only |
+--no-system] notation indicating mutual exclusivity + 3-line
+description added explaining IS NULL / IS NOT NULL semantic +
+mutual exclusivity. ADR-0209 documents the design + 10 rejected
+alternatives + 6 future Qs (--system-only/--no-system on diff-
+history as expectation check pairing with ADR-0205 Q3,
+--system-only/--no-system on diff-timeline across all 3 paths
+pairing with ADR-0193 + ADR-0207 future Qs, partial index on
+actor_id IS NULL for scale, short-circuit LEFT JOIN when
+actorPresence='system_only' since system events have no user
+row, per-side --system-only-a/--system-only-b on diff-history,
+overloading --actor-id null sentinel rejected). The retention
+history surface now has FIVE actor-related filter dimensions —
+specific actor positive (--actor-id from ADR-0186) + specific
+actor negative (--actor-id-not from ADR-0206) + system presence
+positive (--system-only from this milestone) + system presence
+negative (--no-system from this milestone) + actor display
+(--with-actor-names from ADR-0185) — operators get first-class
+system-vs-human + specific-actor inclusion/exclusion audit-log
+workflows without LIMIT + pagination + index-usage correctness
+problems of jq-filter workarounds. The `--system-only` /
+`--no-system` family is now 1-of-3 surfaces: retention history
+(substrate-side filter from this milestone); retention diff-
+history (expectation check from ADR-0205 Q3 deferred); retention
+diff-timeline (substrate-side filter across all 3 paths from
+ADR-0207 Q3 + ADR-0193 future Q deferred). Subsequent milestones
+close the remaining two surfaces mechanically following the
+established per-surface precedent from --actor-id-not (ADR-0205
+expectation check + ADR-0206 history filter + ADR-0207 diff-
+timeline multi-value filter).
+M6.7.zz.tenant.opt-out.cli.diff-history.kind-not
 closes ADR-0205 Q4 + ADR-0198 Q5 in spirit by adding `--kind-not
 <event-kind>` exclusion expectation check on `retention diff-
 history`. Inverse of ADR-0198's positive --kind expectation;
@@ -9757,6 +9859,165 @@ filter-side variants remain as ADR-0206 Q4 + ADR-0207
 Q4 deferred future work following the established
 --actor-id-not precedent from ADR-0205 + ADR-0206 +
 ADR-0207).
+ADR-0209 covers M6.7.zz.tenant.opt-out.cli.history.system-only
+(`crossengin retention history --system-only` /
+`--no-system` boolean flag pair — closes ADR-0186 +
+ADR-0206 + ADR-0205/0207 future Qs that listed this
+across 4 retention ADRs; the retention history audit
+log distinguishes two actor kinds — UUID-bearing rows
+(human or service-account authored) and actor_id IS
+NULL rows (system-initiated substrate background jobs
+— prune sweeps, scheduled retention runs, automated
+expiry lifts); operators have legitimate "show only X"
+and "exclude all X" workflows for both kinds (system-
+only audit for substrate-job health monitoring, no-
+system audit for compliance attestation excluding
+automation, forensic discipline during incidents,
+human-only attestation for HIPAA/SOC 2/21 CFR 11);
+until this milestone operators jq-filtered post-fetch
+breaking LIMIT correctness + cursor-pagination
+correctness + index-usage parity — substrate-side
+WHERE the only way to get all three right (same
+reasoning as ADR-0186 actor filter + ADR-0206 actor-
+not filter); CLI surface `--system-only` boolean flag
+filters to actor_id IS NULL events; `--no-system`
+boolean flag filters to actor_id IS NOT NULL events;
+mutually exclusive at CLI boundary both set returns
+exit 2 with `--system-only and --no-system are
+mutually exclusive` error before any PG query (CI logs
+recognize as misuse); composes with every existing
+filter without restriction; new exported
+ActorPresenceFilter discriminated string union
+`"system_only" | "no_system"` over two-boolean
+adapter shape because (1) mutual exclusivity enforced
+at type level — impossible to express "both at once"
+in adapter input, (2) adapter consumers see clean
+3-state choice, (3) CLI translates two boolean flags
+into single union value after mutual-exclusivity
+check; ListOptOutHistoryInput gains optional
+actorPresence?: ActorPresenceFilter field; SQL adds
+one of two conditional WHERE clauses NO PARAMS needed
+(IS NULL / IS NOT NULL are SQL constructs not value
+comparisons): system_only adds h.actor_id IS NULL;
+no_system adds h.actor_id IS NOT NULL; position
+immediately after actorIdNot filter clause before
+--since/--until time-range clauses matching existing
+actor-dimension grouping in WHERE-clause assembly;
+JSON envelope gains two boolean fields systemOnly +
+noSystem matching existing withActorNames boolean-
+echo convention from ADR-0185 (every CLI flag has
+corresponding envelope field with same shape;
+operators read literal flag state; mutual exclusivity
+at CLI guarantees both never true simultaneously);
+composition with existing actor filters — --system-
+only + --actor-id is contradictory at data layer
+(system events have actor_id IS NULL; --actor-id
+requires UUID; substrate returns empty silently
+natural outcome), --system-only + --actor-id-not is
+redundant but valid (system events are NEITHER any
+specific UUID), --no-system + --actor-id is canonical
+"human X's mutations" idiom (--no-system redundant
+since actor_id = $N implies IS NOT NULL but
+harmless), --no-system + --actor-id-not is canonical
+"human mutations excluding X" idiom (distinguished
+from --actor-id-not alone which includes system
+events); use cases unblocked — system-authored
+maintenance audit (count system events by kind for
+dashboard), human-only compliance attestation
+(quarterly audit excluding automation), forensic
+incident scoping (was this state change human-
+driven?), substrate-job health monitoring (count by
+event_kind grouped), compose with actor exclusion
+(human mutations excluding migration SA); rejected
+alternatives — two separate boolean fields on
+adapter (allows invalid both-true state), --actor-
+presence single flag with enum value (operators
+remember enum vocab vs natural boolean flags),
+--system / --human flag names ("human" misleading
+since SAs also non-system), --actor-id null sentinel
+(overloads --actor-id UUID semantic), CLI-side
+--actor-id X + --system-only contradiction error
+(would block valid edge cases), substrate-side both-
+flag mutual-exclusivity error in adapter (type union
+makes invalid unrepresentable), two-value enum
+--actor-presence required|excluded (operator vocab
+unusual), PG partial index on actor_id IS NULL in
+this milestone (premature optimization defer),
+--system-only without --no-system companion
+(operators wanting exclude system jq-filter post-
+fetch with same LIMIT/pagination correctness problems;
+ship both for symmetry), default --no-system=true
+silent behavior change for existing callers backward-
+incompatible; 8 new adapter tests in a new
+"PostgresTraceRetention.listOptOutHistory
+actorPresence filter" describe block — adds
+h.actor_id IS NULL WHERE clause when system_only,
+adds h.actor_id IS NOT NULL WHERE clause when
+no_system, omits clause when not set, adds no params
+for IS NULL/IS NOT NULL clauses no placeholder
+pollution LIMIT param position correctly assigned,
+composes with tenantId + tableName (system_only),
+composes with actorIdNot + no_system (redundant but
+valid both clauses present), composes with joinActor
++ actorPresence (LEFT JOIN + IS NULL both present),
+returns rows with null actor_id when system_only
+matches; 9 new CLI tests in a new "runRetention
+history --system-only / --no-system" describe block
+— exit 2 when both flags set with explicit error
+message, threads actorPresence='system_only' to
+adapter when --system-only set, threads
+actorPresence='no_system' when --no-system set,
+omits actorPresence when neither flag set backward
+compat, composes with --tenant + --system-only,
+composes with --actor-id-not + --no-system both
+threaded independently, JSON envelope echoes
+systemOnly=true + noSystem=false when --system-only
+set, JSON envelope echoes noSystem=true +
+systemOnly=false when --no-system set, JSON envelope
+echoes both false when neither set; cli.ts helpText
+extended for retention history usage line with
+[--system-only | --no-system] notation indicating
+mutual exclusivity + 3-line description added
+explaining IS NULL / IS NOT NULL semantic + mutual
+exclusivity. Future Qs cover --system-only/--no-
+system on diff-history as expectation check ("both
+events must be system" / "neither is system") pairing
+with ADR-0205 Q3 deferred, --system-only/--no-system
+on diff-timeline across all 3 dispatch paths pairing
+with ADR-0193 + ADR-0207 future Qs deferred, partial
+index on actor_id IS NULL for scale defer until
+measured, short-circuit LEFT JOIN when
+actorPresence='system_only' since system events have
+no user row defer optimization, per-side
+--system-only-a/--system-only-b on diff-history
+defer pairs with deferred per-side --actor-id-a/
+--actor-id-b from ADR-0203 Q1, --actor-id null
+sentinel rejected for overload concerns. The
+retention history surface now has FIVE actor-related
+filter dimensions — specific actor positive
+(--actor-id from ADR-0186) + specific actor negative
+(--actor-id-not from ADR-0206) + system presence
+positive (--system-only from this milestone) + system
+presence negative (--no-system from this milestone)
++ actor display (--with-actor-names from ADR-0185)
+— operators get first-class system-vs-human +
+specific-actor inclusion/exclusion audit-log
+workflows without LIMIT + pagination + index-usage
+correctness problems of jq-filter workarounds. The
+`--system-only` / `--no-system` family is now 1-of-3
+surfaces: retention history (substrate-side filter
+from this milestone); retention diff-history
+(expectation check from ADR-0205 Q3 deferred);
+retention diff-timeline (substrate-side filter
+across all 3 paths from ADR-0207 Q3 + ADR-0193
+future Q deferred). Subsequent milestones close the
+remaining two surfaces mechanically following the
+established per-surface precedent from --actor-id-
+not (ADR-0205 expectation check + ADR-0206 history
+filter + ADR-0207 diff-timeline multi-value filter).
+The retention CLI now has 18 actions with --system-
+only / --no-system support shipped on the retention
+history surface).
 
 ## Architecture in 90 seconds
 

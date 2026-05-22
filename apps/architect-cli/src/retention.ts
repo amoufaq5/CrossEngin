@@ -825,7 +825,25 @@ async function runRetentionHistory(
   const rangeFlag = getStringFlag(command, "range");
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorIdNotFlag = getStringFlag(command, "actor-id-not");
+  const systemOnlyFlag = getBooleanFlag(command, "system-only");
+  const noSystemFlag = getBooleanFlag(command, "no-system");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+
+  if (systemOnlyFlag && noSystemFlag) {
+    printError(
+      ctx.io,
+      "retention history: --system-only and --no-system are mutually exclusive",
+    );
+    return 2;
+  }
+  const actorPresence:
+    | "system_only"
+    | "no_system"
+    | undefined = systemOnlyFlag
+    ? "system_only"
+    : noSystemFlag
+      ? "no_system"
+      : undefined;
 
   let kind: OptOutHistoryEventKind | undefined;
   if (kindFlag !== null) {
@@ -923,6 +941,7 @@ async function runRetentionHistory(
       eventKind: kind,
       actorId: actorIdFlag ?? undefined,
       actorIdNot: actorIdNotFlag ?? undefined,
+      actorPresence,
       since,
       until,
       limit,
@@ -950,6 +969,8 @@ async function runRetentionHistory(
       eventKind: kind ?? null,
       actorId: actorIdFlag ?? null,
       actorIdNot: actorIdNotFlag ?? null,
+      systemOnly: systemOnlyFlag,
+      noSystem: noSystemFlag,
       since: since ?? null,
       until: until ?? null,
       afterId: effectiveAfterId ?? null,
