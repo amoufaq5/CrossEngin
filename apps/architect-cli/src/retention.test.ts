@@ -4609,6 +4609,137 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
   });
 });
 
+describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter)", () => {
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  it("threads actorId to adapter when --actor-id set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+  });
+
+  it("omits actorId when --actor-id NOT set (backward compat)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBeUndefined();
+  });
+
+  it("composes with --kind threading both eventKind and actorId", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind",
+        "opt_out_set",
+        "--actor-id",
+        ACTOR_ALICE,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+  });
+
+  it("adapter mismatch error propagates as exit 1 with explicit error", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error(
+            `diffHistoryEntries: expected both events to have actor_id '${ACTOR_ALICE}' but A is '${ACTOR_BOB}'`,
+          ),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain(
+      `expected both events to have actor_id '${ACTOR_ALICE}'`,
+    );
+    expect(err()).toContain(`A is '${ACTOR_BOB}'`);
+  });
+
+  it("JSON envelope echoes actorId field when --actor-id set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.action).toBe("diff-history");
+    expect(parsed_.actorId).toBe(ACTOR_ALICE);
+  });
+
+  it("JSON envelope actorId=null when --actor-id NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorId).toBeNull();
+  });
+});
+
 describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
   it("default (no flag) calls prune (not previewPrune)", async () => {
     const { ctx } = buffers();

@@ -330,6 +330,7 @@ export interface DiffHistoryEntriesInput {
   readonly idA: string;
   readonly idB: string;
   readonly eventKind?: OptOutHistoryEventKind;
+  readonly actorId?: string;
 }
 
 export interface HistoryEntryFieldDiff {
@@ -1530,10 +1531,11 @@ export class PostgresTraceRetention {
       tenant_id: string;
       table_name: string;
       event_kind: string;
+      actor_id: string | null;
       occurred_at: string;
       next_state: Record<string, unknown> | null;
     }>(
-      `SELECT id, tenant_id, table_name, event_kind, occurred_at, next_state
+      `SELECT id, tenant_id, table_name, event_kind, actor_id, occurred_at, next_state
        FROM ${SCHEMA}.${HISTORY_TABLE}
        WHERE id IN ($1, $2)`,
       [input.idA, input.idB],
@@ -1578,6 +1580,24 @@ export class PostgresTraceRetention {
       if (mismatches.length > 0) {
         throw new Error(
           `diffHistoryEntries: expected both events to have event_kind '${input.eventKind}' but ${mismatches.join(" and ")}`,
+        );
+      }
+    }
+    if (input.actorId !== undefined) {
+      const mismatches: string[] = [];
+      if (entryA.actor_id !== input.actorId) {
+        mismatches.push(
+          `A is ${entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`}`,
+        );
+      }
+      if (entryB.actor_id !== input.actorId) {
+        mismatches.push(
+          `B is ${entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`}`,
+        );
+      }
+      if (mismatches.length > 0) {
+        throw new Error(
+          `diffHistoryEntries: expected both events to have actor_id '${input.actorId}' but ${mismatches.join(" and ")}`,
         );
       }
     }

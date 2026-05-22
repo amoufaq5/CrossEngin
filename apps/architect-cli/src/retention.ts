@@ -1207,9 +1207,17 @@ async function runRetentionDiffHistory(
     eventKind = kindFlag;
   }
 
+  const actorIdFlag = getStringFlag(command, "actor-id");
+  const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
+
   let result: DiffHistoryEntriesResult;
   try {
-    result = await retention.diffHistoryEntries({ idA, idB, eventKind });
+    result = await retention.diffHistoryEntries({
+      idA,
+      idB,
+      eventKind,
+      actorId,
+    });
   } catch (err) {
     printError(
       ctx.io,
@@ -1222,6 +1230,7 @@ async function runRetentionDiffHistory(
     printJson(ctx.io, {
       action: "diff-history",
       kind: eventKind ?? null,
+      actorId: actorId ?? null,
       result,
     });
     return 0;
