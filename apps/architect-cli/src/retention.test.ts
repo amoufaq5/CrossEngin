@@ -3262,6 +3262,117 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
   });
 });
 
+describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.history.actor-not)", () => {
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  it("threads actorIdNot to adapter when --actor-id-not set", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--actor-id-not", ACTOR_ALICE),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+  });
+
+  it("omits actorIdNot when --actor-id-not NOT set (backward compat)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNot).toBeUndefined();
+  });
+
+  it("composes with --actor-id (both threaded independently — contradictory but adapter doesn't enforce)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_BOB);
+  });
+
+  it("composes with --tenant + --with-actor-names + --actor-id-not", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT_A,
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--with-actor-names",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantId).toBe(TENANT_A);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.joinActor).toBe(true);
+  });
+
+  it("JSON envelope echoes actorIdNot field when --actor-id-not set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdNot).toBe(ACTOR_ALICE);
+  });
+
+  it("JSON envelope actorIdNot=null when --actor-id-not NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyResults: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdNot).toBeNull();
+  });
+});
+
 describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.before-id)", () => {
   const BEFORE_ID = "70000000-0000-4000-8000-000000000007";
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";
