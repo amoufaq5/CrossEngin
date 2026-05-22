@@ -5482,7 +5482,7 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
   });
 });
 
-describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-history.kind-not)", () => {
+describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + .multi)", () => {
   const ID_A = "aa000000-0000-4000-8000-0000000000aa";
   const ID_B = "bb000000-0000-4000-8000-0000000000bb";
 
@@ -5507,7 +5507,29 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
     expect(err()).toContain("opt_out_set");
   });
 
-  it("threads eventKindNot to adapter when --kind-not set", async () => {
+  it("returns exit 2 on FIRST invalid --kind-not occurrence when multiple flags supplied", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "bogus_kind",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-not 'bogus_kind'");
+  });
+
+  it("threads eventKindsNot as single-element array when --kind-not set once", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5525,10 +5547,36 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKindNot).toBe("policy_deleted");
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
   });
 
-  it("omits eventKindNot when --kind-not NOT set (backward compat)", async () => {
+  it("threads multi-element eventKindsNot when --kind-not repeated", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNot).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
+  });
+
+  it("omits eventKindsNot when --kind-not NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5539,10 +5587,10 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKindNot).toBeUndefined();
+    expect(capture[0]?.eventKindsNot).toBeUndefined();
   });
 
-  it("composes with --kind (both threaded independently)", async () => {
+  it("composes with --kind (both threaded independently, multi-value kind-not)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5555,6 +5603,8 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
         "opt_out_set",
         "--kind-not",
         "policy_deleted",
+        "--kind-not",
+        "retention_set",
       ),
       {
         ...ctx,
@@ -5563,10 +5613,13 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
     );
     expect(code).toBe(0);
     expect(capture[0]?.eventKind).toBe("opt_out_set");
-    expect(capture[0]?.eventKindNot).toBe("policy_deleted");
+    expect(capture[0]?.eventKindsNot).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
   });
 
-  it("adapter exclusion error propagates as exit 1 with explicit error", async () => {
+  it("adapter exclusion error propagates as exit 1 with multi-value error", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
       parsed(
@@ -5576,24 +5629,26 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
         ID_B,
         "--kind-not",
         "policy_deleted",
+        "--kind-not",
+        "retention_set",
       ),
       {
         ...ctx,
         retentionOverride: fakeRetention({
           throws: new Error(
-            "diffHistoryEntries: expected neither event to have event_kind 'policy_deleted' but A matches",
+            "diffHistoryEntries: expected neither event to have event_kind in ['policy_deleted', 'retention_set'] but A matches",
           ),
         }),
       } as RetentionContext,
     );
     expect(code).toBe(1);
     expect(err()).toContain(
-      "expected neither event to have event_kind 'policy_deleted'",
+      "expected neither event to have event_kind in ['policy_deleted', 'retention_set']",
     );
     expect(err()).toContain("A matches");
   });
 
-  it("JSON envelope echoes kindNot field when --kind-not set", async () => {
+  it("JSON envelope echoes kindsNot single-element array when --kind-not set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -5614,10 +5669,35 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.action).toBe("diff-history");
-    expect(parsed_.kindNot).toBe("policy_deleted");
+    expect(parsed_.kindsNot).toEqual(["policy_deleted"]);
   });
 
-  it("JSON envelope kindNot=null when --kind-not NOT set", async () => {
+  it("JSON envelope echoes multi-element kindsNot when --kind-not repeated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kindsNot).toEqual(["policy_deleted", "retention_set"]);
+  });
+
+  it("JSON envelope kindsNot=null when --kind-not NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed("retention", "diff-history", ID_A, ID_B, "--format", "json"),
@@ -5628,7 +5708,7 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.kindNot).toBeNull();
+    expect(parsed_.kindsNot).toBeNull();
   });
 });
 

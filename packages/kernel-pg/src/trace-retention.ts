@@ -334,7 +334,7 @@ export interface DiffHistoryEntriesInput {
   readonly idA: string;
   readonly idB: string;
   readonly eventKind?: OptOutHistoryEventKind;
-  readonly eventKindNot?: OptOutHistoryEventKind;
+  readonly eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly actorId?: string;
   readonly actorIdNot?: string;
   readonly actorPresence?: ActorPresenceFilter;
@@ -1634,17 +1634,24 @@ export class PostgresTraceRetention {
         );
       }
     }
-    if (input.eventKindNot !== undefined) {
+    if (
+      input.eventKindsNot !== undefined &&
+      input.eventKindsNot.length > 0
+    ) {
+      const excludedSet = new Set<string>(input.eventKindsNot);
       const matches: string[] = [];
-      if (entryA.event_kind === input.eventKindNot) matches.push("A");
-      if (entryB.event_kind === input.eventKindNot) matches.push("B");
+      if (excludedSet.has(entryA.event_kind)) matches.push("A");
+      if (excludedSet.has(entryB.event_kind)) matches.push("B");
       if (matches.length > 0) {
         const suffix =
           matches.length === 1
             ? `${matches[0]} matches`
             : "both A and B match";
+        const kindList = input.eventKindsNot
+          .map((k) => `'${k}'`)
+          .join(", ");
         throw new Error(
-          `diffHistoryEntries: expected neither event to have event_kind '${input.eventKindNot}' but ${suffix}`,
+          `diffHistoryEntries: expected neither event to have event_kind in [${kindList}] but ${suffix}`,
         );
       }
     }

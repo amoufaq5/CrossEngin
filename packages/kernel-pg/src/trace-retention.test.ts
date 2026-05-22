@@ -4496,7 +4496,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
   });
 });
 
-describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (M6.7.zz.tenant.opt-out.cli.diff-history.kind-not)", () => {
+describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + .multi)", () => {
   const TENANT = "00000000-0000-4000-8000-00000000000A";
   const ID_A = "aa000000-0000-4000-8000-0000000000aa";
   const ID_B = "bb000000-0000-4000-8000-0000000000bb";
@@ -4519,7 +4519,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
     };
   }
 
-  it("accepts when neither event has the excluded event_kind", async () => {
+  it("single-value: accepts when neither event has the excluded event_kind", async () => {
     const conn = mockConnection(() => ({
       rows: [
         rawEntry(ID_A, { event_kind: "opt_out_set" }),
@@ -4531,13 +4531,13 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
     const result = await r.diffHistoryEntries({
       idA: ID_A,
       idB: ID_B,
-      eventKindNot: "policy_deleted",
+      eventKindsNot: ["policy_deleted"],
     });
     expect(result.eventKindA).toBe("opt_out_set");
     expect(result.eventKindB).toBe("retention_set");
   });
 
-  it("throws when event A matches the excluded event_kind", async () => {
+  it("single-value: throws when event A matches the excluded event_kind", async () => {
     const conn = mockConnection(() => ({
       rows: [
         rawEntry(ID_A, { event_kind: "policy_deleted" }),
@@ -4550,14 +4550,14 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
       r.diffHistoryEntries({
         idA: ID_A,
         idB: ID_B,
-        eventKindNot: "policy_deleted",
+        eventKindsNot: ["policy_deleted"],
       }),
     ).rejects.toThrow(
-      "expected neither event to have event_kind 'policy_deleted' but A matches",
+      "expected neither event to have event_kind in ['policy_deleted'] but A matches",
     );
   });
 
-  it("throws when event B matches the excluded event_kind", async () => {
+  it("single-value: throws when event B matches the excluded event_kind", async () => {
     const conn = mockConnection(() => ({
       rows: [
         rawEntry(ID_A, { event_kind: "opt_out_set" }),
@@ -4570,14 +4570,14 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
       r.diffHistoryEntries({
         idA: ID_A,
         idB: ID_B,
-        eventKindNot: "policy_deleted",
+        eventKindsNot: ["policy_deleted"],
       }),
     ).rejects.toThrow(
-      "expected neither event to have event_kind 'policy_deleted' but B matches",
+      "expected neither event to have event_kind in ['policy_deleted'] but B matches",
     );
   });
 
-  it("throws naming both when both events match the excluded event_kind", async () => {
+  it("single-value: throws naming both when both events match the excluded event_kind", async () => {
     const conn = mockConnection(() => ({
       rows: [
         rawEntry(ID_A, { event_kind: "policy_deleted" }),
@@ -4590,14 +4590,72 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
       r.diffHistoryEntries({
         idA: ID_A,
         idB: ID_B,
-        eventKindNot: "policy_deleted",
+        eventKindsNot: ["policy_deleted"],
       }),
     ).rejects.toThrow(
-      "expected neither event to have event_kind 'policy_deleted' but both A and B match",
+      "expected neither event to have event_kind in ['policy_deleted'] but both A and B match",
     );
   });
 
-  it("omits the check when eventKindNot not set (backward compat)", async () => {
+  it("multi-value: accepts when neither event has any of the excluded event_kinds", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { event_kind: "opt_out_set" }),
+        rawEntry(ID_B, { event_kind: "opt_out_cleared" }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      eventKindsNot: ["policy_deleted", "retention_set"],
+    });
+    expect(result.eventKindA).toBe("opt_out_set");
+    expect(result.eventKindB).toBe("opt_out_cleared");
+  });
+
+  it("multi-value: throws when A matches one of N excluded kinds with multi-value error format", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { event_kind: "retention_set" }),
+        rawEntry(ID_B, { event_kind: "opt_out_set" }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        eventKindsNot: ["policy_deleted", "retention_set"],
+      }),
+    ).rejects.toThrow(
+      "expected neither event to have event_kind in ['policy_deleted', 'retention_set'] but A matches",
+    );
+  });
+
+  it("multi-value: throws naming both when both events match different kinds in the exclusion list", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { event_kind: "policy_deleted" }),
+        rawEntry(ID_B, { event_kind: "retention_set" }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        eventKindsNot: ["policy_deleted", "retention_set"],
+      }),
+    ).rejects.toThrow(
+      "expected neither event to have event_kind in ['policy_deleted', 'retention_set'] but both A and B match",
+    );
+  });
+
+  it("omits the check when eventKindsNot not set (backward compat)", async () => {
     const conn = mockConnection(() => ({
       rows: [
         rawEntry(ID_A, { event_kind: "policy_deleted" }),
@@ -4611,7 +4669,25 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
     expect(result.eventKindB).toBe("policy_deleted");
   });
 
-  it("composes with --kind expectation check (both pass when distinct)", async () => {
+  it("treats empty eventKindsNot array as filter-not-set", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { event_kind: "policy_deleted" }),
+        rawEntry(ID_B, { event_kind: "policy_deleted" }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      eventKindsNot: [],
+    });
+    expect(result.eventKindA).toBe("policy_deleted");
+    expect(result.eventKindB).toBe("policy_deleted");
+  });
+
+  it("composes with --kind expectation check (both pass when distinct kinds)", async () => {
     const conn = mockConnection(() => ({
       rows: [
         rawEntry(ID_A, { event_kind: "opt_out_set" }),
@@ -4624,7 +4700,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
       idA: ID_A,
       idB: ID_B,
       eventKind: "opt_out_set",
-      eventKindNot: "policy_deleted",
+      eventKindsNot: ["policy_deleted", "retention_set"],
     });
     expect(result.eventKindA).toBe("opt_out_set");
   });
@@ -4643,7 +4719,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
         idA: ID_A,
         idB: ID_B,
         eventKind: "opt_out_set",
-        eventKindNot: "policy_deleted",
+        eventKindsNot: ["policy_deleted"],
       }),
     ).rejects.toThrow(
       "expected both events to have event_kind 'opt_out_set'",
@@ -4663,7 +4739,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
     const result = await r.diffHistoryEntries({
       idA: ID_A,
       idB: ID_B,
-      eventKindNot: "policy_deleted",
+      eventKindsNot: ["policy_deleted", "retention_set"],
       actorIdNot: ACTOR_BOB,
     });
     expect(result.eventKindA).toBe("opt_out_set");

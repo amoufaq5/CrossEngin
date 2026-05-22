@@ -1235,9 +1235,9 @@ async function runRetentionDiffHistory(
     eventKind = kindFlag;
   }
 
-  const kindNotFlag = getStringFlag(command, "kind-not");
-  let eventKindNot: OptOutHistoryEventKind | undefined;
-  if (kindNotFlag !== null) {
+  const kindNotFlags = getMultiFlag(command, "kind-not");
+  const validatedKindsNot: OptOutHistoryEventKind[] = [];
+  for (const kindNotFlag of kindNotFlags) {
     if (!isOptOutHistoryEventKind(kindNotFlag)) {
       printError(
         ctx.io,
@@ -1245,8 +1245,10 @@ async function runRetentionDiffHistory(
       );
       return 2;
     }
-    eventKindNot = kindNotFlag;
+    validatedKindsNot.push(kindNotFlag);
   }
+  const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
 
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
@@ -1278,7 +1280,7 @@ async function runRetentionDiffHistory(
       idA,
       idB,
       eventKind,
-      eventKindNot,
+      eventKindsNot,
       actorId,
       actorIdNot,
       actorPresence,
@@ -1296,7 +1298,7 @@ async function runRetentionDiffHistory(
     printJson(ctx.io, {
       action: "diff-history",
       kind: eventKind ?? null,
-      kindNot: eventKindNot ?? null,
+      kindsNot: eventKindsNot ?? null,
       actorId: actorId ?? null,
       actorIdNot: actorIdNot ?? null,
       systemOnly: systemOnlyFlag,
