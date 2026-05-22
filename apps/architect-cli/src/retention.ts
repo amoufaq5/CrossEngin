@@ -822,6 +822,7 @@ async function runRetentionHistory(
   const limitFlag = getStringFlag(command, "limit");
   const afterIdFlag = getStringFlag(command, "after-id");
   const beforeIdFlag = getStringFlag(command, "before-id");
+  const rangeFlag = getStringFlag(command, "range");
   const actorIdFlag = getStringFlag(command, "actor-id");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
 
@@ -837,10 +838,39 @@ async function runRetentionHistory(
     kind = kindFlag;
   }
 
-  if (afterIdFlag !== null && beforeIdFlag !== null) {
+  let effectiveAfterId: string | undefined =
+    afterIdFlag !== null ? afterIdFlag : undefined;
+  let effectiveBeforeId: string | undefined =
+    beforeIdFlag !== null ? beforeIdFlag : undefined;
+
+  if (rangeFlag !== null) {
+    if (afterIdFlag !== null || beforeIdFlag !== null) {
+      printError(
+        ctx.io,
+        "retention history: --range cannot be combined with --after-id or --before-id",
+      );
+      return 2;
+    }
+    const parts = rangeFlag.split("..");
+    if (
+      parts.length !== 2 ||
+      parts[0] === undefined ||
+      parts[0].length === 0 ||
+      parts[1] === undefined ||
+      parts[1].length === 0
+    ) {
+      printError(
+        ctx.io,
+        `retention history: invalid --range '${rangeFlag}' (expected <after-id>..<before-id>)`,
+      );
+      return 2;
+    }
+    effectiveAfterId = parts[0];
+    effectiveBeforeId = parts[1];
+  } else if (afterIdFlag !== null && beforeIdFlag !== null) {
     printError(
       ctx.io,
-      "retention history: --after-id and --before-id are mutually exclusive",
+      "retention history: --after-id and --before-id are mutually exclusive (use --range <after-id>..<before-id> for window cursor)",
     );
     return 2;
   }
@@ -894,8 +924,8 @@ async function runRetentionHistory(
       since,
       until,
       limit,
-      afterId: afterIdFlag ?? undefined,
-      beforeId: beforeIdFlag ?? undefined,
+      afterId: effectiveAfterId,
+      beforeId: effectiveBeforeId,
       joinActor: withActorNames || undefined,
     });
   } catch (err) {
@@ -919,8 +949,9 @@ async function runRetentionHistory(
       actorId: actorIdFlag ?? null,
       since: since ?? null,
       until: until ?? null,
-      afterId: afterIdFlag ?? null,
-      beforeId: beforeIdFlag ?? null,
+      afterId: effectiveAfterId ?? null,
+      beforeId: effectiveBeforeId ?? null,
+      range: rangeFlag ?? null,
       limit,
       count: entries.length,
       entries,

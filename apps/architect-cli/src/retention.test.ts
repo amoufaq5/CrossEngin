@@ -3503,6 +3503,206 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
   });
 });
 
+describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range)", () => {
+  const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+  const BEFORE_ID = "70000000-0000-4000-8000-000000000007";
+
+  it("parses --range <after>..<before> and threads both cursors to adapter", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.afterId).toBe(AFTER_ID);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("returns exit 2 when --range is missing the separator", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--range", AFTER_ID),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --range");
+    expect(err()).toContain("<after-id>..<before-id>");
+  });
+
+  it("returns exit 2 when --range has empty after-id half", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--range", `..${BEFORE_ID}`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --range");
+  });
+
+  it("returns exit 2 when --range has empty before-id half", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--range", `${AFTER_ID}..`),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --range");
+  });
+
+  it("returns exit 2 when --range combined with --after-id", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--after-id",
+        AFTER_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--range cannot be combined with --after-id or --before-id");
+  });
+
+  it("returns exit 2 when --range combined with --before-id", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--before-id",
+        BEFORE_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--range cannot be combined with");
+  });
+
+  it("JSON envelope echoes range field + afterId + beforeId when --range set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.range).toBe(`${AFTER_ID}..${BEFORE_ID}`);
+    expect(parsed_.afterId).toBe(AFTER_ID);
+    expect(parsed_.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("JSON envelope range=null when --range not set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.range).toBeNull();
+  });
+
+  it("composes with all other filters (--tenant + --kind + --limit + --range)", async () => {
+    const capture: ListOptOutHistoryInput[] = [];
+    const TENANT = "00000000-0000-4000-8000-00000000000A";
+    const ACTOR_A = "11111111-1111-4000-8000-111111111111";
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--tenant",
+        TENANT,
+        "--table",
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--actor-id",
+        ACTOR_A,
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--limit",
+        "25",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantId).toBe(TENANT);
+    expect(capture[0]?.tableName).toBe("workflow_traces");
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.actorId).toBe(ACTOR_A);
+    expect(capture[0]?.afterId).toBe(AFTER_ID);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+    expect(capture[0]?.limit).toBe(25);
+  });
+
+  it("bare --after-id + --before-id (without --range) still mutually exclusive with helpful message pointing at --range", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--after-id",
+        AFTER_ID,
+        "--before-id",
+        BEFORE_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+    expect(err()).toContain("--range");
+  });
+});
+
 describe("formatActor (M6.7.zz.tenant.opt-out.history.actor-join)", () => {
   const ACTOR = "11111111-1111-4000-8000-111111111111";
 

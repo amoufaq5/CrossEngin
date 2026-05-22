@@ -21,15 +21,82 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,822 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind
+**56 packages + 1 app, 129 meta-schema tables, 8,832 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.range
+closes ADR-0196 Q2 by adding `--range <after-id>..<before-id>`
+single-flag window-cursor pagination to `retention history`. ADR-
+0196 documented that ListOptOutHistoryInput accepts BOTH afterId
+AND beforeId simultaneously at the adapter layer (substrate-level
+range-cursor preserved for programmatic consumers) while the CLI
+rejected both flags at boundary as "operators almost always meant
+one of them"; --range is the explicit operator-side gesture
+saying "I deliberately want both" leveraging the existing adapter
+support. Pure CLI delivery — no adapter changes. Format `<after-
+id>..<before-id>` uses git-like commit-range syntax (UUIDs don't
+contain dots so no ambiguity; single-flag value is shell-quote-
+friendly). Mutually exclusive with bare --after-id / --before-id
+(combining is operator confusion since --range is already setting
+both → exit 2 with clear error). Parse validation rejects missing
+separator, empty halves, or more than 2 parts. No CLI-side UUID
+validation matches deferred decision across cursor work. JSON
+envelope gains range: string | null field echoing operator's
+literal input; afterId + beforeId fields ALSO populate when
+--range is set so jq scripts reading either path get correct
+values; range:null when not set. Existing mutual-exclusivity
+error for bare --after-id + --before-id (without --range) updated
+to suggest --range as the proper window-cursor flag. Use cases
+unblocked — investigation window between two known events
+(--range <trigger>..<resolution>), tier-migration audit window,
+two-pass forensic narrowing (page through wide window then zoom
+with --range on suspect cursors), CI gate for audit-log emptiness
+in a window. Rejected alternatives — two flags --from + --to
+(verbose; loses single-flag ergonomic value), positional pair
+syntax (unusual flag form), : separator (less mnemonic than git's
+..), auto-relax bare flags mutual exclusivity (silently changes
+ADR-0196 behavior), add to diff-timeline in same milestone
+(scope creep matches ADR-0197 Q1 documentation), validate parts
+as UUIDs at CLI (matches deferred-validation pattern), partial
+range syntax (collapses with existing bare flags). Drawbacks —
+single-surface delivery (only retention history this milestone;
+diff-timeline --range deferred to future milestone), `..`
+separator requires exactly 2 dots (3 dots `...` like git's other
+syntax errors out), no CLI-side UUID validation, range envelope
+echoes raw operator input (parsed object form deferred), no
+partial-range support (already what bare flags do), window
+semantics depend on DESC ordering (operators reversing cursor
+order produce empty results correctly). 10 new CLI tests —
+parses --range and threads both cursors to adapter, exits 2 on
+missing separator + empty after half + empty before half + with
+--after-id + with --before-id (5 exit-2 cases), JSON envelope
+echoes range field + afterId + beforeId when set, JSON range=
+null when not set, composes with all other filters (--tenant +
+--table + --kind + --actor-id + --range + --limit), bare flags
+mutually-exclusive message now suggests --range as the window-
+cursor approach. cli.ts helpText extended for retention history
+usage line with [--range <after-id>..<before-id>] + 5-line
+description explaining the single-flag window-cursor semantic +
+mutual exclusivity rules. ADR-0201 documents the design + 7
+rejected alternatives + 6 future Qs (--range on diff-timeline
+all three paths pairing with ADR-0197 Q1, --range strict-
+inclusive >=/<= semantic same as ADR-0195 Q6, visualization of
+range bounds in human output, --range @file.txt batch, range
+envelope as parsed object {after, before}, partial range syntax
+collapse). The retention CLI now has 18 actions with window-
+cursor pagination on the audit-log surface — operators get
+one-flag operator-friendly access to the substrate's range-
+cursor support that ADR-0196 documented but deliberately gated
+behind explicit operator gesture; bidirectional pagination
+(--after-id/--before-id) + window cursor (--range) now compose
+across the retention history filter dimensions (tenant + table
++ kind + actor + since + until + limit).
+M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind
 closes ADR-0194 Q1 by making `--kind <event-kind>` repeatable on
 `retention diff-timeline` across all three dispatch paths via the
 multiFlags infrastructure — mirror of ADR-0199's multi-actor
@@ -8586,7 +8653,33 @@ CLI-native; existing kind-filter test block
 rewritten + expanded from 7→11 adapter tests
 and 9→12 CLI tests to cover single + multi-kind
 across all three dispatch paths + composition
-with multi-actor from ADR-0199).
+with multi-actor from ADR-0199),
+ADR-0201 covers M6.7.zz.tenant.opt-out.cli.history.range
+(`retention history --range <after-id>..<before-id>`
+single-flag window-cursor pagination — closes
+ADR-0196 Q2 — pure CLI delivery leveraging
+ListOptOutHistoryInput's existing both-cursors-
+set support (substrate-level range-cursor
+preserved from ADR-0196 while CLI deliberately
+gated it behind explicit operator gesture); git-
+like commit-range `..` separator + parse
+validation rejects missing/empty halves + multi-
+part values; mutually exclusive with bare
+--after-id/--before-id (combining is operator
+confusion since --range sets both → exit 2 with
+clear error); bare-flag mutual-exclusivity error
+updated to suggest --range; JSON envelope gains
+range: string | null field echoing operator
+input + afterId + beforeId fields also populate
+for jq scripts reading either path; no CLI-side
+UUID validation matches deferred decision; no
+adapter changes; investigation window between
+two known events + tier-migration audit window
++ two-pass forensic narrowing + CI gate for
+audit-log emptiness in a window workflows now
+CLI-native; single-surface delivery this
+milestone — diff-timeline --range deferred to
+future milestone via ADR-0197 Q1).
 
 ## Architecture in 90 seconds
 
