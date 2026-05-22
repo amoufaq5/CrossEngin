@@ -5473,6 +5473,165 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
   });
 });
 
+describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+  const ACTOR_A = "11111111-1111-4000-8000-111111111111";
+  const ACTOR_B = "22222222-2222-4000-8000-222222222222";
+  const ACTOR_C = "33333333-3333-4000-8000-333333333333";
+
+  it("pair-wise: single excluded actor adds (h.actor_id IS NULL OR h.actor_id NOT IN ($N)) WHERE clause", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIdsNot: [ACTOR_A],
+    });
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4))",
+    );
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      ACTOR_A,
+      100,
+    ]);
+  });
+
+  it("pair-wise: multi-excluded actors adds NOT IN with multiple placeholders", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIdsNot: [ACTOR_A, ACTOR_B],
+    });
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4, $5))",
+    );
+    expect(capture[0]?.params).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+      ACTOR_A,
+      ACTOR_B,
+      100,
+    ]);
+  });
+
+  it("pair-wise: omits actorIdsNot WHERE clause when not set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(capture[0]?.sql).not.toContain("NOT IN");
+  });
+
+  it("pair-wise: treats empty array as filter-not-set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIdsNot: [],
+    });
+    expect(capture[0]?.sql).not.toContain("NOT IN");
+  });
+
+  it("N-way: single excluded actor positioned after tenant IN list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      actorIdsNot: [ACTOR_A],
+    });
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
+    );
+  });
+
+  it("N-way: multi-excluded actors with multiple placeholders", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+      actorIdsNot: [ACTOR_A, ACTOR_B],
+    });
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4, $5))",
+    );
+  });
+
+  it("cross-table: single excluded actor positioned after table IN list", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
+      actorIdsNot: [ACTOR_A],
+    });
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
+    );
+  });
+
+  it("pair-wise: composes with actorIds (positive + negative both clauses present)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIds: [ACTOR_A],
+      actorIdsNot: [ACTOR_B],
+    });
+    expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
+    );
+  });
+
+  it("pair-wise: composes with joinActor + eventKinds + actorIdsNot", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      actorIdsNot: [ACTOR_C],
+      eventKinds: ["opt_out_set"],
+      joinActor: true,
+    });
+    expect(capture[0]?.sql).toContain(
+      "LEFT JOIN meta.users u ON u.id = h.actor_id",
+    );
+    expect(capture[0]?.sql).toContain(
+      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4))",
+    );
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($5)");
+  });
+});
+
 describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + .multi-kind)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";

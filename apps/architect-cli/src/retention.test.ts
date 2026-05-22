@@ -7161,6 +7161,255 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
   });
 });
 
+describe("runRetention diff-timeline --actor-id-not (M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not)", () => {
+  const TENANT_A_ANN = "00000000-0000-4000-8000-000000000a01";
+  const TENANT_B_ANN = "00000000-0000-4000-8000-000000000a02";
+  const TENANT_C_ANN = "00000000-0000-4000-8000-000000000a03";
+  const ACTOR_X = "11111111-1111-4000-8000-111111111111";
+  const ACTOR_Y = "22222222-2222-4000-8000-222222222222";
+
+  it("pair-wise: threads single actorIdsNot to adapter when --actor-id-not set", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--actor-id-not",
+        ACTOR_X,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_X]);
+  });
+
+  it("pair-wise: threads multi actorIdsNot when --actor-id-not repeated", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--actor-id-not",
+        ACTOR_X,
+        "--actor-id-not",
+        ACTOR_Y,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_X, ACTOR_Y]);
+  });
+
+  it("pair-wise: omits actorIdsNot when --actor-id-not NOT set (backward compat)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toBeUndefined();
+  });
+
+  it("N-way: threads actorIdsNot alongside --add-tenant", async () => {
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C_ANN,
+        "--actor-id-not",
+        ACTOR_X,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_X]);
+  });
+
+  it("cross-table: threads actorIdsNot alongside --cross-table", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--actor-id-not",
+        ACTOR_X,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_X]);
+  });
+
+  it("composes with --actor-id (positive + negative both threaded)", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_X,
+        "--actor-id-not",
+        ACTOR_Y,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_X]);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_Y]);
+  });
+
+  it("pair-wise: JSON envelope echoes actorIdsNot when set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--actor-id-not",
+        ACTOR_X,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_X]);
+  });
+
+  it("N-way: JSON envelope echoes actorIdsNot", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C_ANN,
+        "--actor-id-not",
+        ACTOR_X,
+        "--actor-id-not",
+        ACTOR_Y,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.nway).toBe(true);
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_X, ACTOR_Y]);
+  });
+
+  it("cross-table: JSON envelope echoes actorIdsNot", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--actor-id-not",
+        ACTOR_X,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.crossTable).toBe(true);
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_X]);
+  });
+
+  it("pair-wise: JSON envelope actorIdsNot=null when NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A_ANN,
+        TENANT_B_ANN,
+        "workflow_traces",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdsNot).toBeNull();
+  });
+});
+
 describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + .multi-kind)", () => {
   it("returns exit 2 when --kind is invalid value", async () => {
     const { ctx, err } = buffers();

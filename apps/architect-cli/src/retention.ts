@@ -1528,6 +1528,9 @@ async function runRetentionDiffTimeline(
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const actorIdFlags = getMultiFlag(command, "actor-id");
   const actorIds = actorIdFlags.length > 0 ? actorIdFlags : undefined;
+  const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
+  const actorIdsNot =
+    actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
 
   const kindFlags = getMultiFlag(command, "kind");
   const validatedKinds: OptOutHistoryEventKind[] = [];
@@ -1597,6 +1600,7 @@ async function runRetentionDiffTimeline(
         limit,
         joinActor: withActorNames || undefined,
         actorIds,
+        actorIdsNot,
         eventKinds,
         afterId,
         beforeId,
@@ -1627,6 +1631,7 @@ async function runRetentionDiffTimeline(
         limit,
         withActorNames,
         actorIds: actorIds ?? null,
+        actorIdsNot: actorIdsNot ?? null,
         kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
@@ -1663,6 +1668,7 @@ async function runRetentionDiffTimeline(
         limit,
         joinActor: withActorNames || undefined,
         actorIds,
+        actorIdsNot,
         eventKinds,
         afterId,
         beforeId,
@@ -1693,6 +1699,7 @@ async function runRetentionDiffTimeline(
         limit,
         withActorNames,
         actorIds: actorIds ?? null,
+        actorIdsNot: actorIdsNot ?? null,
         kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
@@ -1724,6 +1731,7 @@ async function runRetentionDiffTimeline(
       limit,
       joinActor: withActorNames || undefined,
       actorIds,
+      actorIdsNot,
       eventKinds,
       afterId,
       beforeId,
@@ -1753,6 +1761,7 @@ async function runRetentionDiffTimeline(
       limit,
       withActorNames,
       actorIds: actorIds ?? null,
+      actorIdsNot: actorIdsNot ?? null,
       kinds: eventKinds ?? null,
       afterId: afterId ?? null,
       beforeId: beforeId ?? null,

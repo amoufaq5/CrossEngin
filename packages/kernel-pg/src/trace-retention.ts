@@ -412,6 +412,7 @@ export interface DiffHistoryTimelineInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
+  readonly actorIdsNot?: ReadonlyArray<string>;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -447,6 +448,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
+  readonly actorIdsNot?: ReadonlyArray<string>;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -481,6 +483,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly limit?: number;
   readonly joinActor?: boolean;
   readonly actorIds?: ReadonlyArray<string>;
+  readonly actorIdsNot?: ReadonlyArray<string>;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly afterId?: string;
   readonly beforeId?: string;
@@ -1686,6 +1689,17 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.actor_id IN (${actorPlaceholders})`);
     }
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const actorNotPlaceholders = input.actorIdsNot
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(
+        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
+      );
+    }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const kindPlaceholders = input.eventKinds
         .map((kind) => {
@@ -1818,6 +1832,17 @@ export class PostgresTraceRetention {
         })
         .join(", ");
       conditions.push(`h.actor_id IN (${actorPlaceholders})`);
+    }
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const actorNotPlaceholders = input.actorIdsNot
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(
+        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
+      );
     }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const kindPlaceholders = input.eventKinds
@@ -1957,6 +1982,17 @@ export class PostgresTraceRetention {
         })
         .join(", ");
       conditions.push(`h.actor_id IN (${actorPlaceholders})`);
+    }
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const actorNotPlaceholders = input.actorIdsNot
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(
+        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
+      );
     }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const kindPlaceholders = input.eventKinds
