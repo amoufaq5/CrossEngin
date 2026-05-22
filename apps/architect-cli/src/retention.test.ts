@@ -5885,6 +5885,406 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
   });
 });
 
+describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-out.cli.diff-history.per-side)", () => {
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  it("--kind-a invalid value exits 2 with valid-values list", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-a",
+        "bogus_kind",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-a 'bogus_kind'");
+    expect(err()).toContain("opt_out_set");
+  });
+
+  it("--kind-b invalid value exits 2", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-b",
+        "not_a_kind",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-b 'not_a_kind'");
+  });
+
+  it("--kind-not-a invalid value exits 2 on FIRST invalid occurrence", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not-a",
+        "policy_deleted",
+        "--kind-not-a",
+        "bogus",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-not-a 'bogus'");
+  });
+
+  it("--kind-not-b invalid value exits 2", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not-b",
+        "bad_value",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-not-b 'bad_value'");
+  });
+
+  it("threads eventKindA when --kind-a set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-a",
+        "opt_out_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindA).toBe("opt_out_set");
+    expect(capture[0]?.eventKindB).toBeUndefined();
+  });
+
+  it("threads eventKindB when --kind-b set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-b",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindB).toBe("policy_deleted");
+  });
+
+  it("threads multi-element eventKindsNotA when --kind-not-a repeated", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not-a",
+        "policy_deleted",
+        "--kind-not-a",
+        "retention_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNotA).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
+  });
+
+  it("threads eventKindsNotB when --kind-not-b set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not-b",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNotB).toEqual(["policy_deleted"]);
+  });
+
+  it("threads actorIdA + actorIdB independently", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-a",
+        ACTOR_ALICE,
+        "--actor-id-b",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdA).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdB).toBe(ACTOR_BOB);
+  });
+
+  it("threads actorIdNotA + actorIdNotB independently", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not-a",
+        ACTOR_ALICE,
+        "--actor-id-not-b",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNotA).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdNotB).toBe(ACTOR_BOB);
+  });
+
+  it("omits all per-side fields when no per-side flag set (backward compat)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindA).toBeUndefined();
+    expect(capture[0]?.eventKindB).toBeUndefined();
+    expect(capture[0]?.eventKindsNotA).toBeUndefined();
+    expect(capture[0]?.eventKindsNotB).toBeUndefined();
+    expect(capture[0]?.actorIdA).toBeUndefined();
+    expect(capture[0]?.actorIdB).toBeUndefined();
+    expect(capture[0]?.actorIdNotA).toBeUndefined();
+    expect(capture[0]?.actorIdNotB).toBeUndefined();
+  });
+
+  it("composes with global --kind + per-side --kind-a (both threaded)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind",
+        "opt_out_set",
+        "--kind-a",
+        "opt_out_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.eventKindA).toBe("opt_out_set");
+  });
+
+  it("JSON envelope echoes per-side kindA + kindB fields when set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-a",
+        "opt_out_set",
+        "--kind-b",
+        "policy_deleted",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kindA).toBe("opt_out_set");
+    expect(parsed_.kindB).toBe("policy_deleted");
+  });
+
+  it("JSON envelope echoes per-side kindsNotA + kindsNotB arrays when set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-not-a",
+        "policy_deleted",
+        "--kind-not-a",
+        "retention_set",
+        "--kind-not-b",
+        "policy_deleted",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kindsNotA).toEqual(["policy_deleted", "retention_set"]);
+    expect(parsed_.kindsNotB).toEqual(["policy_deleted"]);
+  });
+
+  it("JSON envelope echoes per-side actorIdA + actorIdB + actorIdNotA + actorIdNotB", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-a",
+        ACTOR_ALICE,
+        "--actor-id-not-b",
+        ACTOR_BOB,
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdA).toBe(ACTOR_ALICE);
+    expect(parsed_.actorIdB).toBeNull();
+    expect(parsed_.actorIdNotA).toBeNull();
+    expect(parsed_.actorIdNotB).toBe(ACTOR_BOB);
+  });
+
+  it("JSON envelope all per-side fields null when none set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kindA).toBeNull();
+    expect(parsed_.kindB).toBeNull();
+    expect(parsed_.kindsNotA).toBeNull();
+    expect(parsed_.kindsNotB).toBeNull();
+    expect(parsed_.actorIdA).toBeNull();
+    expect(parsed_.actorIdB).toBeNull();
+    expect(parsed_.actorIdNotA).toBeNull();
+    expect(parsed_.actorIdNotB).toBeNull();
+  });
+
+  it("adapter per-side error propagates as exit 1 with per-side error format", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--kind-a",
+        "opt_out_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error(
+            "diffHistoryEntries: expected event A to have event_kind 'opt_out_set' but A is 'policy_deleted'",
+          ),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain(
+      "expected event A to have event_kind 'opt_out_set'",
+    );
+    expect(err()).toContain("A is 'policy_deleted'");
+  });
+});
+
 describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
   it("default (no flag) calls prune (not previewPrune)", async () => {
     const { ctx } = buffers();

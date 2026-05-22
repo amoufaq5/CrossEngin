@@ -1235,6 +1235,32 @@ async function runRetentionDiffHistory(
     eventKind = kindFlag;
   }
 
+  const kindAFlag = getStringFlag(command, "kind-a");
+  let eventKindA: OptOutHistoryEventKind | undefined;
+  if (kindAFlag !== null) {
+    if (!isOptOutHistoryEventKind(kindAFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-history: invalid --kind-a '${kindAFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    eventKindA = kindAFlag;
+  }
+
+  const kindBFlag = getStringFlag(command, "kind-b");
+  let eventKindB: OptOutHistoryEventKind | undefined;
+  if (kindBFlag !== null) {
+    if (!isOptOutHistoryEventKind(kindBFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-history: invalid --kind-b '${kindBFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    eventKindB = kindBFlag;
+  }
+
   const kindNotFlags = getMultiFlag(command, "kind-not");
   const validatedKindsNot: OptOutHistoryEventKind[] = [];
   for (const kindNotFlag of kindNotFlags) {
@@ -1250,10 +1276,50 @@ async function runRetentionDiffHistory(
   const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
 
+  const kindNotAFlags = getMultiFlag(command, "kind-not-a");
+  const validatedKindsNotA: OptOutHistoryEventKind[] = [];
+  for (const kindNotAFlag of kindNotAFlags) {
+    if (!isOptOutHistoryEventKind(kindNotAFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-history: invalid --kind-not-a '${kindNotAFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    validatedKindsNotA.push(kindNotAFlag);
+  }
+  const eventKindsNotA: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsNotA.length > 0 ? validatedKindsNotA : undefined;
+
+  const kindNotBFlags = getMultiFlag(command, "kind-not-b");
+  const validatedKindsNotB: OptOutHistoryEventKind[] = [];
+  for (const kindNotBFlag of kindNotBFlags) {
+    if (!isOptOutHistoryEventKind(kindNotBFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-history: invalid --kind-not-b '${kindNotBFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    validatedKindsNotB.push(kindNotBFlag);
+  }
+  const eventKindsNotB: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsNotB.length > 0 ? validatedKindsNotB : undefined;
+
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
+  const actorIdAFlag = getStringFlag(command, "actor-id-a");
+  const actorIdA = actorIdAFlag !== null ? actorIdAFlag : undefined;
+  const actorIdBFlag = getStringFlag(command, "actor-id-b");
+  const actorIdB = actorIdBFlag !== null ? actorIdBFlag : undefined;
   const actorIdNotFlag = getStringFlag(command, "actor-id-not");
   const actorIdNot = actorIdNotFlag !== null ? actorIdNotFlag : undefined;
+  const actorIdNotAFlag = getStringFlag(command, "actor-id-not-a");
+  const actorIdNotA =
+    actorIdNotAFlag !== null ? actorIdNotAFlag : undefined;
+  const actorIdNotBFlag = getStringFlag(command, "actor-id-not-b");
+  const actorIdNotB =
+    actorIdNotBFlag !== null ? actorIdNotBFlag : undefined;
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
@@ -1280,9 +1346,17 @@ async function runRetentionDiffHistory(
       idA,
       idB,
       eventKind,
+      eventKindA,
+      eventKindB,
       eventKindsNot,
+      eventKindsNotA,
+      eventKindsNotB,
       actorId,
+      actorIdA,
+      actorIdB,
       actorIdNot,
+      actorIdNotA,
+      actorIdNotB,
       actorPresence,
       joinActor: withActorNames ? true : undefined,
     });
@@ -1298,9 +1372,17 @@ async function runRetentionDiffHistory(
     printJson(ctx.io, {
       action: "diff-history",
       kind: eventKind ?? null,
+      kindA: eventKindA ?? null,
+      kindB: eventKindB ?? null,
       kindsNot: eventKindsNot ?? null,
+      kindsNotA: eventKindsNotA ?? null,
+      kindsNotB: eventKindsNotB ?? null,
       actorId: actorId ?? null,
+      actorIdA: actorIdA ?? null,
+      actorIdB: actorIdB ?? null,
       actorIdNot: actorIdNot ?? null,
+      actorIdNotA: actorIdNotA ?? null,
+      actorIdNotB: actorIdNotB ?? null,
       systemOnly: systemOnlyFlag,
       noSystem: noSystemFlag,
       withActorNames,
