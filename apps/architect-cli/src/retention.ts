@@ -1209,6 +1209,8 @@ async function runRetentionDiffHistory(
 
   const actorIdFlag = getStringFlag(command, "actor-id");
   const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
+  const actorIdNotFlag = getStringFlag(command, "actor-id-not");
+  const actorIdNot = actorIdNotFlag !== null ? actorIdNotFlag : undefined;
   const withActorNames = getBooleanFlag(command, "with-actor-names");
 
   let result: DiffHistoryEntriesResult;
@@ -1218,6 +1220,7 @@ async function runRetentionDiffHistory(
       idB,
       eventKind,
       actorId,
+      actorIdNot,
       joinActor: withActorNames ? true : undefined,
     });
   } catch (err) {
@@ -1233,6 +1236,7 @@ async function runRetentionDiffHistory(
       action: "diff-history",
       kind: eventKind ?? null,
       actorId: actorId ?? null,
+      actorIdNot: actorIdNot ?? null,
       withActorNames,
       result,
     });

@@ -5008,6 +5008,137 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   });
 });
 
+describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.diff-history.actor-not)", () => {
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  it("threads actorIdNot to adapter when --actor-id-not set", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not",
+        ACTOR_ALICE,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+  });
+
+  it("omits actorIdNot when --actor-id-not NOT set (backward compat)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdNot).toBeUndefined();
+  });
+
+  it("composes with --actor-id (both threaded independently)", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_BOB);
+  });
+
+  it("adapter exclusion error propagates as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error(
+            `diffHistoryEntries: expected neither event to have actor_id '${ACTOR_BOB}' but A matches`,
+          ),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain(
+      `expected neither event to have actor_id '${ACTOR_BOB}'`,
+    );
+    expect(err()).toContain("A matches");
+  });
+
+  it("JSON envelope echoes actorIdNot field when --actor-id-not set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not",
+        ACTOR_BOB,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.action).toBe("diff-history");
+    expect(parsed_.actorIdNot).toBe(ACTOR_BOB);
+  });
+
+  it("JSON envelope actorIdNot=null when --actor-id-not NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "diff-history", ID_A, ID_B, "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdNot).toBeNull();
+  });
+});
+
 describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
   it("default (no flag) calls prune (not previewPrune)", async () => {
     const { ctx } = buffers();

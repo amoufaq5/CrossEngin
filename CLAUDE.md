@@ -21,15 +21,94 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,876 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names
+**56 packages + 1 app, 129 meta-schema tables, 8,890 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.actor-not
+closes ADR-0204 Q5 + ADR-0203 Q1 in spirit by adding
+`--actor-id-not <uuid>` exclusion expectation check on
+`retention diff-history` — inverse of ADR-0203's positive
+`--actor-id` expectation. Operator declares "I expect neither
+event to have actor_id X" and adapter throws when reality
+differs. Use cases — tier-migration anti-actor verification
+(verify production migration events were NOT authored by test
+SA), suspended-user audit pre-check, CI gate excluding
+automation, "this isn't me" forensic discipline.
+DiffHistoryEntriesInput gains optional actorIdNot?: string;
+adapter exclusion check fires after the actorId check with
+error message naming offending side(s) compactly — single
+match: "but A matches", both match: "but both A and B match";
+asymmetric rendering vs --actor-id positive check (which shows
+"A is '<actual>'") because operator already knows the excluded
+value, naming the side suffices. Null actor_id (system event)
+correctly passes when --actor-id-not is a UUID (null !== UUID).
+CLI threads --actor-id-not via getStringFlag, passes actorIdNot
+to adapter, echoes actorIdNot: string | null in JSON envelope.
+NOT mutually exclusive with --actor-id at CLI boundary — operators
+can compose freely ("both must be Alice AND neither is Bob" is
+valid + redundant; contradictory --actor-id X --actor-id-not X
+surfaces actorId-check error first since order matters but
+both error messages are clear). Mismatch exits 1 (runtime path
+matching ADR-0203 + ADR-0198 + cross-tenant + cross-table
+mismatch propagation). No CLI-side UUID validation matches
+ADR-0175/0186/0193/0203 deferred decision. Rejected alternatives
+— --actor-id-not as filter limiting fieldDiffs (doesn't fit
+diff-history takes 2 fixed IDs not list query), make match warn
+not throw (silent gates lose safety), two flags --actor-id-not-a
++ --actor-id-not-b per-side (overkill defer), CLI-enforced
+mutual exclusivity with --actor-id (would block valid
+compositions adapter-level errors surface contradictions
+naturally), render match as fieldDiff (actor_id isn't a field
+in next_state JSONB throwing is loud), PG WHERE NOT silent zero
+rows (indistinguishable from no-match throw clearer), inverse
+flag named --exclude-actor-id (verbose --actor-id-not matches
+established naming). Drawbacks — single-value exclusion only
+(multi-value defer), no null-actor exclusion (operators jq-
+filter for system-only audits), composition with --actor-id
+can be contradictory (clear adapter error in either ordering),
+no CLI-side UUID validation, asymmetric error rendering vs
+--actor-id positive check (different rendering reflects
+different info needs documented), no per-side --actor-id-not-a
++ --actor-id-not-b (defer pairs with ADR-0203 Q1). 8 new
+adapter tests in a new "PostgresTraceRetention.diffHistoryEntries
+--actor-id-not exclusion check" describe block — accepts when
+neither event has excluded actor_id, accepts when both events
+have null actor_id and excluded is UUID, throws when A matches
+excluded with explicit error "A matches", throws when B matches
+"B matches", throws naming both when both match "both A and B
+match", omits check when actorIdNot not set backward compat,
+composes with --actor-id when distinct (both pass), contradictory
+--actor-id + --actor-id-not surfaces actorId check first. 6
+new CLI tests in a new "runRetention diff-history --actor-id-not"
+describe block — threads actorIdNot when set, omits when NOT
+set backward compat, composes with --actor-id (both threaded
+independently), adapter exclusion error propagates exit 1 with
+explicit error, JSON envelope echoes actorIdNot when set, JSON
+actorIdNot=null when NOT set. Test count: 8,876 → 8,890 (+14:
+adapter +8, CLI +6). cli.ts helpText extended for retention
+diff-history usage line with [--actor-id-not <uuid>] flag +
+2-line description explaining anti-actor verification semantic.
+ADR-0205 documents the design + 8 rejected alternatives + 6
+future Qs (--actor-id-not multi-value tuple exclusion, --actor-
+id-not-a + --actor-id-not-b per-side asymmetric exclusion,
+--system-only + --no-system explicit null actor_id matching,
+--kind-not exclusion companion symmetric flag, --actor-id-not
+filter on diff-timeline different semantic, --actor-id-not
+filter on retention history pairs with ADR-0186 existing
+filter). The retention diff-history surface now has both
+positive (--actor-id from ADR-0203) and negative (--actor-id-
+not from this milestone) expectation checks composing with
+event-kind expectation check (--kind from ADR-0198) + actor
+display surfacing (--with-actor-names from ADR-0204) — operators
+get full positive + negative expectation gates with named-actor
+audit readability uniformly on the cross-event policy diff
+surface.
+M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names
 closes ADR-0203 Q3 + ADR-0198 Q5 by adding `--with-actor-names`
 boolean flag to `retention diff-history`, composing ADR-0185's
 LEFT JOIN meta.users infrastructure with the diff-history surface.
@@ -9123,6 +9202,57 @@ retention diff-history (this milestone) — operators
 get human-readable actor attribution uniformly
 across single-tenant audit-log + cross-tenant
 timeline diff + cross-event policy diff workflows).
+ADR-0205 covers M6.7.zz.tenant.opt-out.cli.diff-history.actor-not
+(`retention diff-history --actor-id-not <uuid>` actor
+exclusion expectation check — closes ADR-0204 Q5 +
+ADR-0203 Q1 in spirit; inverse of ADR-0203's positive
+--actor-id expectation; operator declares "I expect
+neither event to have actor_id X" and adapter throws
+when reality differs; DiffHistoryEntriesInput gains
+optional actorIdNot?: string field; adapter exclusion
+check fires after the actorId expectation check with
+error message naming offending side(s) compactly —
+single match: "but A matches", both match: "but both
+A and B match"; asymmetric rendering vs --actor-id
+positive check (shows actual value) because operator
+already knows the excluded value naming the side
+suffices; null actor_id correctly passes when
+--actor-id-not is a UUID (null !== UUID); CLI threads
+via getStringFlag, echoes actorIdNot: string | null
+in JSON envelope; NOT mutually exclusive with
+--actor-id at CLI boundary operators compose freely;
+contradictory --actor-id X --actor-id-not X surfaces
+actorId-check error first; mismatch exits 1; no CLI-
+side UUID validation matches deferred decision; use
+cases — tier-migration anti-actor verification,
+suspended-user audit pre-check, CI gate excluding
+automation, "this isn't me" forensic discipline; 8
+new adapter tests (accepts when neither matches,
+accepts when both null and excluded is UUID, throws
+A matches, throws B matches, throws both A and B
+match, omits check backward compat, composes with
+--actor-id distinct passes, contradictory composition
+surfaces actorId-check first); 6 new CLI tests
+(threads actorIdNot, omits backward compat, composes
+with --actor-id independently threaded, adapter error
+propagates exit 1, JSON envelope echoes when set,
+JSON null when NOT set); cli.ts helpText extended
+with [--actor-id-not <uuid>] flag note + 2-line
+description; future Qs cover --actor-id-not multi-
+value tuple, per-side --actor-id-not-a + --actor-id-
+not-b, --system-only + --no-system explicit null
+matching, --kind-not exclusion companion, --actor-id-
+not filter on diff-timeline different semantic,
+--actor-id-not filter on retention history. The
+retention diff-history surface now has both positive
+(--actor-id from ADR-0203) and negative (--actor-id-
+not from this milestone) expectation checks composing
+with event-kind expectation check (--kind from ADR-
+0198) + actor display surfacing (--with-actor-names
+from ADR-0204) — operators get full positive +
+negative expectation gates with named-actor audit
+readability uniformly on the cross-event policy diff
+surface).
 
 ## Architecture in 90 seconds
 

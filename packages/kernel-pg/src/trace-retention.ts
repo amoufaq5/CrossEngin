@@ -331,6 +331,7 @@ export interface DiffHistoryEntriesInput {
   readonly idB: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly actorId?: string;
+  readonly actorIdNot?: string;
   readonly joinActor?: boolean;
 }
 
@@ -1615,6 +1616,20 @@ export class PostgresTraceRetention {
       if (mismatches.length > 0) {
         throw new Error(
           `diffHistoryEntries: expected both events to have actor_id '${input.actorId}' but ${mismatches.join(" and ")}`,
+        );
+      }
+    }
+    if (input.actorIdNot !== undefined) {
+      const matches: string[] = [];
+      if (entryA.actor_id === input.actorIdNot) matches.push("A");
+      if (entryB.actor_id === input.actorIdNot) matches.push("B");
+      if (matches.length > 0) {
+        const suffix =
+          matches.length === 1
+            ? `${matches[0]} matches`
+            : "both A and B match";
+        throw new Error(
+          `diffHistoryEntries: expected neither event to have actor_id '${input.actorIdNot}' but ${suffix}`,
         );
       }
     }

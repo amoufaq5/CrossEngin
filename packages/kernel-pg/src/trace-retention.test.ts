@@ -4320,6 +4320,182 @@ describe("PostgresTraceRetention.diffHistoryEntries --with-actor-names (M6.7.zz.
   });
 });
 
+describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion check (M6.7.zz.tenant.opt-out.cli.diff-history.actor-not)", () => {
+  const TENANT = "00000000-0000-4000-8000-00000000000A";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+  const ACTOR_CAROL = "33333333-0000-4000-8000-000000000003";
+
+  function rawEntry(
+    id: string,
+    overrides: Partial<{
+      actor_id: string | null;
+      event_kind: string;
+      next_state: Record<string, unknown> | null;
+    }> = {},
+  ): Record<string, unknown> {
+    return {
+      id,
+      tenant_id: TENANT,
+      table_name: "workflow_traces",
+      event_kind: "opt_out_set",
+      actor_id: ACTOR_ALICE,
+      occurred_at: "2026-05-22T12:00:00.000Z",
+      next_state: { opt_out: true, retention_days: 365 },
+      ...overrides,
+    };
+  }
+
+  it("accepts when neither event has the excluded actor_id", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      actorIdNot: ACTOR_CAROL,
+    });
+    expect(result.idA).toBe(ID_A);
+    expect(result.idB).toBe(ID_B);
+  });
+
+  it("accepts when both events have null actor_id (system) and excluded is a UUID", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: null }),
+        rawEntry(ID_B, { actor_id: null }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      actorIdNot: ACTOR_ALICE,
+    });
+    expect(result.idA).toBe(ID_A);
+  });
+
+  it("throws when event A matches the excluded actor", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorIdNot: ACTOR_CAROL,
+      }),
+    ).rejects.toThrow(
+      `expected neither event to have actor_id '${ACTOR_CAROL}' but A matches`,
+    );
+  });
+
+  it("throws when event B matches the excluded actor", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorIdNot: ACTOR_CAROL,
+      }),
+    ).rejects.toThrow(
+      `expected neither event to have actor_id '${ACTOR_CAROL}' but B matches`,
+    );
+  });
+
+  it("throws naming both when both events match the excluded actor", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
+        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorIdNot: ACTOR_CAROL,
+      }),
+    ).rejects.toThrow(
+      `expected neither event to have actor_id '${ACTOR_CAROL}' but both A and B match`,
+    );
+  });
+
+  it("omits the check when actorIdNot not set (backward compat)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
+    expect(result.idA).toBe(ID_A);
+  });
+
+  it("composes with --actor-id expectation check (both pass when distinct)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
+        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.diffHistoryEntries({
+      idA: ID_A,
+      idB: ID_B,
+      actorId: ACTOR_ALICE,
+      actorIdNot: ACTOR_BOB,
+    });
+    expect(result.idA).toBe(ID_A);
+  });
+
+  it("contradictory --actor-id + --actor-id-not surfaces actorId check first", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        rawEntry(ID_A, { actor_id: ACTOR_BOB }),
+        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    await expect(
+      r.diffHistoryEntries({
+        idA: ID_A,
+        idB: ID_B,
+        actorId: ACTOR_ALICE,
+        actorIdNot: ACTOR_BOB,
+      }),
+    ).rejects.toThrow(
+      `expected both events to have actor_id '${ACTOR_ALICE}'`,
+    );
+  });
+});
+
 describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";
