@@ -1508,15 +1508,42 @@ async function runRetentionDiffTimeline(
   const eventKinds = validatedKinds.length > 0 ? validatedKinds : undefined;
 
   const afterIdFlag = getStringFlag(command, "after-id");
-  const afterId = afterIdFlag !== null ? afterIdFlag : undefined;
-
   const beforeIdFlag = getStringFlag(command, "before-id");
-  const beforeId = beforeIdFlag !== null ? beforeIdFlag : undefined;
+  const rangeFlag = getStringFlag(command, "range");
 
-  if (afterIdFlag !== null && beforeIdFlag !== null) {
+  let afterId: string | undefined =
+    afterIdFlag !== null ? afterIdFlag : undefined;
+  let beforeId: string | undefined =
+    beforeIdFlag !== null ? beforeIdFlag : undefined;
+
+  if (rangeFlag !== null) {
+    if (afterIdFlag !== null || beforeIdFlag !== null) {
+      printError(
+        ctx.io,
+        "retention diff-timeline: --range cannot be combined with --after-id or --before-id",
+      );
+      return 2;
+    }
+    const parts = rangeFlag.split("..");
+    if (
+      parts.length !== 2 ||
+      parts[0] === undefined ||
+      parts[0].length === 0 ||
+      parts[1] === undefined ||
+      parts[1].length === 0
+    ) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: invalid --range '${rangeFlag}' (expected <after-id>..<before-id>)`,
+      );
+      return 2;
+    }
+    afterId = parts[0];
+    beforeId = parts[1];
+  } else if (afterIdFlag !== null && beforeIdFlag !== null) {
     printError(
       ctx.io,
-      "retention diff-timeline: --after-id and --before-id are mutually exclusive",
+      "retention diff-timeline: --after-id and --before-id are mutually exclusive (use --range <after-id>..<before-id> for window cursor)",
     );
     return 2;
   }
@@ -1567,6 +1594,7 @@ async function runRetentionDiffTimeline(
         kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
+        range: rangeFlag ?? null,
         nextAfterId: nextAfterIdCross,
         nextBeforeId: nextBeforeIdCross,
         result: crossResult,
@@ -1632,6 +1660,7 @@ async function runRetentionDiffTimeline(
         kinds: eventKinds ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
+        range: rangeFlag ?? null,
         nextAfterId: nextAfterIdNway,
         nextBeforeId: nextBeforeIdNway,
         result: nwayResult,
@@ -1691,6 +1720,7 @@ async function runRetentionDiffTimeline(
       kinds: eventKinds ?? null,
       afterId: afterId ?? null,
       beforeId: beforeId ?? null,
+      range: rangeFlag ?? null,
       nextAfterId: nextAfterIdPair,
       nextBeforeId: nextBeforeIdPair,
       result,

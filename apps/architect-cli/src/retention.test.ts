@@ -7549,6 +7549,363 @@ describe("runRetention diff-timeline --before-id (M6.7.zz.tenant.opt-out.cli.dif
   });
 });
 
+describe("runRetention diff-timeline --range (M6.7.zz.tenant.opt-out.cli.diff-timeline.range)", () => {
+  const AFTER_ID = "50000000-0000-4000-8000-000000000005";
+  const BEFORE_ID = "70000000-0000-4000-8000-000000000007";
+
+  it("pair-wise: parses --range and threads both cursors to adapter", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.afterId).toBe(AFTER_ID);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("N-way: parses --range and threads both cursors alongside --add-tenant", async () => {
+    const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.afterId).toBe(AFTER_ID);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("cross-table: parses --range and threads both cursors alongside --cross-table", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.afterId).toBe(AFTER_ID);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("returns exit 2 when --range is missing the separator", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        AFTER_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --range");
+    expect(err()).toContain("<after-id>..<before-id>");
+  });
+
+  it("returns exit 2 when --range has empty after-id half", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        `..${BEFORE_ID}`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --range");
+  });
+
+  it("returns exit 2 when --range has empty before-id half", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        `${AFTER_ID}..`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --range");
+  });
+
+  it("returns exit 2 when --range combined with --after-id", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--after-id",
+        AFTER_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain(
+      "--range cannot be combined with --after-id or --before-id",
+    );
+  });
+
+  it("returns exit 2 when --range combined with --before-id", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--before-id",
+        BEFORE_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--range cannot be combined with");
+  });
+
+  it("bare --after-id + --before-id without --range error message points at --range", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--after-id",
+        AFTER_ID,
+        "--before-id",
+        BEFORE_ID,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+    expect(err()).toContain("--range");
+  });
+
+  it("pair-wise: JSON envelope echoes range field + afterId + beforeId when --range set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.range).toBe(`${AFTER_ID}..${BEFORE_ID}`);
+    expect(parsed_.afterId).toBe(AFTER_ID);
+    expect(parsed_.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("pair-wise: JSON envelope range=null when --range NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.range).toBeNull();
+  });
+
+  it("N-way: JSON envelope echoes range field on N-way path", async () => {
+    const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.nway).toBe(true);
+    expect(parsed_.range).toBe(`${AFTER_ID}..${BEFORE_ID}`);
+    expect(parsed_.afterId).toBe(AFTER_ID);
+    expect(parsed_.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("cross-table: JSON envelope echoes range field on cross-table path", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "llm_call_traces",
+        "--cross-table",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.crossTable).toBe(true);
+    expect(parsed_.range).toBe(`${AFTER_ID}..${BEFORE_ID}`);
+    expect(parsed_.afterId).toBe(AFTER_ID);
+    expect(parsed_.beforeId).toBe(BEFORE_ID);
+  });
+
+  it("composes with --actor-id + --kind + --with-actor-names + --since", async () => {
+    const ACTOR_A = "11111111-1111-1111-1111-111111111111";
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--actor-id",
+        ACTOR_A,
+        "--kind",
+        "opt_out_set",
+        "--with-actor-names",
+        "--since",
+        "2026-01-01",
+        "--range",
+        `${AFTER_ID}..${BEFORE_ID}`,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
+    expect(capture[0]?.joinActor).toBe(true);
+    expect(capture[0]?.afterId).toBe(AFTER_ID);
+    expect(capture[0]?.beforeId).toBe(BEFORE_ID);
+    expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
+  });
+});
+
 describe("formatTimelineCrossTableDiff", () => {
   it("renders 'No history events for this tenant' when entries empty", () => {
     const out = formatTimelineCrossTableDiff({
