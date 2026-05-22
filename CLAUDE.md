@@ -21,15 +21,140 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 8,777 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.history.before-id
+**56 packages + 1 app, 129 meta-schema tables, 8,798 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id
+closes ADR-0195 Q1 + ADR-0196 Q1 by adding `--before-id <uuid>`
+reverse cursor pagination to all three `retention diff-timeline`
+dispatch paths uniformly — pair-wise cross-tenant + N-way cross-
+tenant via --add-tenant + cross-table via --cross-table. Brings
+diff-timeline to bidirectional-pagination parity with retention
+history (ADR-0196 just shipped --before-id there). Cursor SQL
+flips operator from ADR-0195's `>` to `<` since diff-timeline
+orders ASC (oldest first) and walking backward in time toward
+older entries means going UP the list — `(h.occurred_at, h.id) <
+(cursor)` returns earlier-timestamp entries. Mirror table: for
+retention history (DESC), --after-id uses `<` (walk-down = older)
+and --before-id uses `>` (walk-up = newer); for diff-timeline
+(ASC), --after-id uses `>` (walk-down = newer) and --before-id
+uses `<` (walk-up = older). Operator semantics consistent across
+surfaces: --after-id always means "next chronologically-forward
+page" and --before-id always means "previous chronologically-
+backward page" regardless of underlying SQL operator. All three
+diff-timeline input types gain optional beforeId?: string field;
+all three adapter methods add identical conditional WHERE clause
+when set positioned right after the afterId block before
+params.push(limit). Adapter accepts both afterId + beforeId
+simultaneously (substrate-level range-cursor semantic preserved
+across all three diff-timeline paths matching ADR-0196 history
+pattern) while CLI enforces mutual exclusivity at boundary —
+both flags set returns exit 2 with clear error. CLI dispatcher
+in runRetentionDiffTimeline reads both flags via getStringFlag,
+checks mutual exclusivity BEFORE reading positionals (matches
+ADR-0192's flag-validation-first pattern), threads beforeId
+through to whichever of the three adapter methods is selected.
+nextBeforeId computed at CLI layer for all three paths as the
+FIRST entry's id when entries.length === limit (boundary for
+going-older in ASC ordering — first entry is oldest); when
+length < limit no more older entries → null. JSON envelope
+gains beforeId: string | null + nextBeforeId: string | null
+fields across all three envelope shapes (pair-wise no-
+discriminator, nway:true, crossTable:true) alongside existing
+afterId + nextAfterId from ADR-0195. Human-format hint
+'Page full — previous page: crossengin retention diff-timeline
+--before-id <id> ...' appended when nextBeforeId !== null;
+both forward + backward hints can appear in same output when
+both cursors are populated mirroring ADR-0196. Use cases
+unblocked — page reversal on the timeline surface after
+overshooting with --after-id, anchor-based bidirectional audit
+on cohort timeline (--after-id <X> + --before-id <X> two
+queries one each direction with --add-tenant), cross-table
+backward audit walking back through multi-table timeline to
+find when policies were originally established, resume from
+saved cursor in either direction. Rejected alternatives —
+reverse ORDER BY on --before-id (would confuse operators
+expecting ASC matches ADR-0189/0195 consistent ordering),
+reject both flags at adapter boundary (overzealous substrate-
+level range-cursor is sound), single --cursor + --direction
+flag (verbose explicit named flags clearer matches ADR-0196/
+0195/0175 precedent), use LAST entry id for nextBeforeId
+(would point at newest entry useless for backward toward-
+older pagination), compute nextBeforeId only when --before-id
+explicitly set (would hide bidirectional cursors on first
+page; both cursors every full page matches ADR-0196 convention),
+auto-paginate via streaming generator (operators want explicit
+control), nextBeforeId named prevBeforeId in envelope
+(inconsistent with nextAfterId), two separate adapter methods
+per direction (3 methods × 2 directions = 6 structural
+explosion). Drawbacks — three adapter methods each gain
+identical cursor logic for the second time (after ADR-0195's
+--after-id) structural symmetry mirrors established pattern
+acceptable maintenance cost, adapter accepts both afterId +
+beforeId simultaneously but CLI rejects substrate-flexibility/
+CLI-restriction split documented, both nextAfterId +
+nextBeforeId populated on every full page matches ADR-0196
+convention (first-page nextBeforeId returns empty on follow-up
+correct end-of-pagination signal in backward direction), no
+CLI-side UUID validation matches deferred decision across
+the cursor work, cursor operators flipped vs retention history
+(`<` here vs `>` on history for --before-id) operators reading
+both surfaces may find inversion mildly confusing (mitigated
+by consistent semantic labeling regardless of underlying SQL
+operator). 9 new adapter tests in trace-retention.test.ts in
+a new "PostgresTraceRetention diff-timeline --before-id reverse
+cursor" describe block — pair-wise --before-id threads as $N
+param into compound cursor with < operator (ASC walk-backward
+toward older) verified via SQL substring + params, pair-wise
+same $N reused for both subquery lookup and tiebreaker via
+regex count appears twice, pair-wise omits when not set, N-way
+threads positioned after tenant IN list + table param, cross-
+table threads positioned after table IN list + tenant param,
+pair-wise composes beforeId with afterId in SAME query both
+cursor clauses present (range semantic — substrate-level
+flexibility preserved), N-way omits when not set, cross-table
+omits when not set, pair-wise ORDER BY remains h.occurred_at
+ASC + h.id ASC no direction reversal. 12 new CLI tests in
+retention.test.ts in a new "runRetention diff-timeline
+--before-id" describe block — pair-wise threads beforeId to
+adapter, pair-wise omits when not set backward compat verified,
+exit 2 when --after-id + --before-id both set mutually
+exclusive with explicit error message, N-way threads alongside
+--add-tenant, cross-table threads alongside --cross-table,
+JSON envelope echoes beforeId when set (pair-wise), JSON
+envelope beforeId=null when not set, JSON nextBeforeId is
+FIRST entry id when length === limit verifying ASC ordering
+oldest-first (with nextAfterId verifying both populated and
+pointing at correct boundaries), JSON nextBeforeId=null when
+length < limit, human-format prints previous-page hint with
+--before-id <id> when length === limit, JSON envelope echoes
+beforeId + nextBeforeId on N-way path, JSON envelope echoes
+beforeId + nextBeforeId on cross-table path. cli.ts helpText
+extended with [--before-id <uuid>] flag note on both diff-
+timeline usage lines + mutual-exclusivity note + nextAfterId
++ nextBeforeId bidirectional navigation. ADR-0197 documents
+the design + 8 rejected alternatives + 7 future Qs (--range
+range-cursor flag at CLI boundary leveraging adapter's both-
+cursors-set support same Q as ADR-0196 Q2, --before-id on
+retention diff-history, cross-process cursor stability,
+--watch flag for stream-tail mode, --include-cursor-row for
+>=/<= semantic, composite indexes for scale, unified
+pagination flag set across surfaces noted as no-action-needed
+since flag names already unify). The retention CLI now has
+18 actions with bidirectional cursor pagination uniform
+across BOTH audit-log surfaces — retention history
+--after-id + --before-id from ADR-0175 + ADR-0196 (DESC)
+and retention diff-timeline --after-id + --before-id from
+ADR-0195 + this milestone (ASC across all three dispatch
+paths) — operators have stable forward + backward cursor-
+paginated workflows on every audit-log query in the retention
+substrate without OFFSET drift under concurrent inserts.
+M6.7.zz.tenant.opt-out.history.before-id
 closes ADR-0175 Q1 by adding `--before-id <uuid>` reverse cursor
 pagination to `retention history` — walking BACKWARD through the
 DESC-ordered audit log toward newer entries. After ADR-0175
@@ -8104,7 +8229,38 @@ human-format adds 'Page full — previous page:
 --before-id <id>' hint; page reversal + stream-
 tail polling + sliding-window audit + resume from
 saved cursor either direction workflows now CLI-
-native).
+native),
+ADR-0197 covers M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id
+(`retention diff-timeline --before-id <uuid>`
+reverse cursor pagination across all three diff-
+timeline paths — closes ADR-0195 Q1 + ADR-0196
+Q1 — walks BACKWARD through ASC-ordered timeline
+toward OLDER entries (vs --after-id forward toward
+newer); cursor SQL flips operator from ADR-0195's
+`>` to `<` since diff-timeline orders ASC and
+walking up the list returns older entries — mirror
+of ADR-0196's `<`/`>` flip on the DESC retention
+history surface; operator semantics consistent
+across both surfaces — --after-id always means
+"next chronologically-forward page" and
+--before-id always "previous chronologically-
+backward page" regardless of underlying SQL
+operator; all three diff-timeline input types gain
+optional beforeId?: string field; adapter accepts
+both afterId + beforeId simultaneously substrate-
+level range-cursor semantic preserved across all
+three paths while CLI enforces mutual exclusivity;
+nextBeforeId computed at CLI layer for all three
+paths as FIRST entry id when length === limit
+(boundary for going-older in ASC ordering);
+JSON envelope echoes beforeId + nextBeforeId
+across all three envelope shapes; human-format
+hint appended when nextBeforeId non-null; page
+reversal + anchor-based bidirectional audit on
+cohort timeline + cross-table backward audit +
+resume from saved cursor either direction
+workflows now CLI-native across all three
+diff-timeline paths).
 
 ## Architecture in 90 seconds
 

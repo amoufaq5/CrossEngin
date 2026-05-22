@@ -1461,6 +1461,17 @@ async function runRetentionDiffTimeline(
   const afterIdFlag = getStringFlag(command, "after-id");
   const afterId = afterIdFlag !== null ? afterIdFlag : undefined;
 
+  const beforeIdFlag = getStringFlag(command, "before-id");
+  const beforeId = beforeIdFlag !== null ? beforeIdFlag : undefined;
+
+  if (afterIdFlag !== null && beforeIdFlag !== null) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: --after-id and --before-id are mutually exclusive",
+    );
+    return 2;
+  }
+
   if (crossTable) {
     const tenantId = positionalA;
     const tableNames = [positionalB, positionalC, ...addTables];
@@ -1476,6 +1487,7 @@ async function runRetentionDiffTimeline(
         actorId,
         eventKind,
         afterId,
+        beforeId,
       });
     } catch (err) {
       printError(
@@ -1489,6 +1501,10 @@ async function runRetentionDiffTimeline(
       crossResult.entries.length === limit
         ? (crossResult.entries[crossResult.entries.length - 1]?.id ?? null)
         : null;
+    const nextBeforeIdCross =
+      crossResult.entries.length === limit
+        ? (crossResult.entries[0]?.id ?? null)
+        : null;
 
     if (command.format === "json") {
       printJson(ctx.io, {
@@ -1501,7 +1517,9 @@ async function runRetentionDiffTimeline(
         actorId: actorId ?? null,
         kind: eventKind ?? null,
         afterId: afterId ?? null,
+        beforeId: beforeId ?? null,
         nextAfterId: nextAfterIdCross,
+        nextBeforeId: nextBeforeIdCross,
         result: crossResult,
       });
       return 0;
@@ -1510,6 +1528,7 @@ async function runRetentionDiffTimeline(
       formatTimelineCrossTableDiff(crossResult, {
         withActorNames,
         nextAfterId: nextAfterIdCross,
+        nextBeforeId: nextBeforeIdCross,
       }),
     );
     return 0;
@@ -1533,6 +1552,7 @@ async function runRetentionDiffTimeline(
         actorId,
         eventKind,
         afterId,
+        beforeId,
       });
     } catch (err) {
       printError(
@@ -1546,6 +1566,10 @@ async function runRetentionDiffTimeline(
       nwayResult.entries.length === limit
         ? (nwayResult.entries[nwayResult.entries.length - 1]?.id ?? null)
         : null;
+    const nextBeforeIdNway =
+      nwayResult.entries.length === limit
+        ? (nwayResult.entries[0]?.id ?? null)
+        : null;
 
     if (command.format === "json") {
       printJson(ctx.io, {
@@ -1558,7 +1582,9 @@ async function runRetentionDiffTimeline(
         actorId: actorId ?? null,
         kind: eventKind ?? null,
         afterId: afterId ?? null,
+        beforeId: beforeId ?? null,
         nextAfterId: nextAfterIdNway,
+        nextBeforeId: nextBeforeIdNway,
         result: nwayResult,
       });
       return 0;
@@ -1567,6 +1593,7 @@ async function runRetentionDiffTimeline(
       formatTimelineNwayDiff(nwayResult, {
         withActorNames,
         nextAfterId: nextAfterIdNway,
+        nextBeforeId: nextBeforeIdNway,
       }),
     );
     return 0;
@@ -1585,6 +1612,7 @@ async function runRetentionDiffTimeline(
       actorId,
       eventKind,
       afterId,
+      beforeId,
     });
   } catch (err) {
     printError(
@@ -1598,6 +1626,10 @@ async function runRetentionDiffTimeline(
     result.entries.length === limit
       ? (result.entries[result.entries.length - 1]?.id ?? null)
       : null;
+  const nextBeforeIdPair =
+    result.entries.length === limit
+      ? (result.entries[0]?.id ?? null)
+      : null;
 
   if (command.format === "json") {
     printJson(ctx.io, {
@@ -1609,7 +1641,9 @@ async function runRetentionDiffTimeline(
       actorId: actorId ?? null,
       kind: eventKind ?? null,
       afterId: afterId ?? null,
+      beforeId: beforeId ?? null,
       nextAfterId: nextAfterIdPair,
+      nextBeforeId: nextBeforeIdPair,
       result,
     });
     return 0;
@@ -1618,6 +1652,7 @@ async function runRetentionDiffTimeline(
     formatTimelineDiff(result, {
       withActorNames,
       nextAfterId: nextAfterIdPair,
+      nextBeforeId: nextBeforeIdPair,
     }),
   );
   return 0;
@@ -1628,6 +1663,7 @@ export function formatTimelineDiff(
   opts: {
     readonly withActorNames?: boolean;
     readonly nextAfterId?: string | null;
+    readonly nextBeforeId?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];
@@ -1655,6 +1691,12 @@ export function formatTimelineDiff(
       `Page full — next page: crossengin retention diff-timeline --after-id ${opts.nextAfterId} ...`,
     );
   }
+  if (opts.nextBeforeId !== undefined && opts.nextBeforeId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — previous page: crossengin retention diff-timeline --before-id ${opts.nextBeforeId} ...`,
+    );
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -1663,6 +1705,7 @@ export function formatTimelineNwayDiff(
   opts: {
     readonly withActorNames?: boolean;
     readonly nextAfterId?: string | null;
+    readonly nextBeforeId?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];
@@ -1693,6 +1736,12 @@ export function formatTimelineNwayDiff(
       `Page full — next page: crossengin retention diff-timeline --after-id ${opts.nextAfterId} ...`,
     );
   }
+  if (opts.nextBeforeId !== undefined && opts.nextBeforeId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — previous page: crossengin retention diff-timeline --before-id ${opts.nextBeforeId} ...`,
+    );
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -1701,6 +1750,7 @@ export function formatTimelineCrossTableDiff(
   opts: {
     readonly withActorNames?: boolean;
     readonly nextAfterId?: string | null;
+    readonly nextBeforeId?: string | null;
   } = {},
 ): string {
   const lines: string[] = [];
@@ -1729,6 +1779,12 @@ export function formatTimelineCrossTableDiff(
     lines.push("");
     lines.push(
       `Page full — next page: crossengin retention diff-timeline --after-id ${opts.nextAfterId} ...`,
+    );
+  }
+  if (opts.nextBeforeId !== undefined && opts.nextBeforeId !== null) {
+    lines.push("");
+    lines.push(
+      `Page full — previous page: crossengin retention diff-timeline --before-id ${opts.nextBeforeId} ...`,
     );
   }
   return lines.join("\n") + "\n";

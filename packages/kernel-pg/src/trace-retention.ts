@@ -403,6 +403,7 @@ export interface DiffHistoryTimelineInput {
   readonly actorId?: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly afterId?: string;
+  readonly beforeId?: string;
 }
 
 export interface TimelineEntry {
@@ -437,6 +438,7 @@ export interface DiffHistoryTimelineNwayInput {
   readonly actorId?: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly afterId?: string;
+  readonly beforeId?: string;
 }
 
 export interface NwayTimelineEntry {
@@ -470,6 +472,7 @@ export interface DiffHistoryTimelineCrossTableInput {
   readonly actorId?: string;
   readonly eventKind?: OptOutHistoryEventKind;
   readonly afterId?: string;
+  readonly beforeId?: string;
 }
 
 export interface CrossTableTimelineEntry {
@@ -1614,6 +1617,16 @@ export class PostgresTraceRetention {
          )`,
       );
     }
+    if (input.beforeId !== undefined) {
+      params.push(input.beforeId);
+      const beforeIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) < (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${beforeIdParam}),
+           $${beforeIdParam}
+         )`,
+      );
+    }
     params.push(limit);
     const joinActor = input.joinActor === true;
     const selectActorCols = joinActor
@@ -1724,6 +1737,16 @@ export class PostgresTraceRetention {
         `(h.occurred_at, h.id) > (
            (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
            $${afterIdParam}
+         )`,
+      );
+    }
+    if (input.beforeId !== undefined) {
+      params.push(input.beforeId);
+      const beforeIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) < (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${beforeIdParam}),
+           $${beforeIdParam}
          )`,
       );
     }
@@ -1843,6 +1866,16 @@ export class PostgresTraceRetention {
         `(h.occurred_at, h.id) > (
            (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${afterIdParam}),
            $${afterIdParam}
+         )`,
+      );
+    }
+    if (input.beforeId !== undefined) {
+      params.push(input.beforeId);
+      const beforeIdParam = params.length;
+      conditions.push(
+        `(h.occurred_at, h.id) < (
+           (SELECT occurred_at FROM ${SCHEMA}.${HISTORY_TABLE} WHERE id = $${beforeIdParam}),
+           $${beforeIdParam}
          )`,
       );
     }
