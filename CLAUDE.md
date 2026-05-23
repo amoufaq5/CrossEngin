@@ -21,15 +21,96 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,153 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.envelope-rename
+**56 packages + 1 app, 129 meta-schema tables, 9,170 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.contradiction-detection
+closes 15 multi-value milestones' recurring deferred cross-
+flag contradiction detection Q by adding CLI-side eager
+set-intersection contradiction detection across all 3
+retention surfaces. Operators using positive (`--kind`,
+`--actor-id`) + negative (`--kind-not`, `--actor-id-not`)
+flag pairs can express set-intersection contradictions like
+`--kind opt_out_set --kind-not opt_out_set` that silently
+produce empty PG results; this milestone surfaces them as
+exit 2 errors BEFORE the adapter call with explicit error
+naming conflicting values. Pure CLI-side ergonomic check;
+no adapter changes; adapter contract unchanged (if
+contradictions slip through, PG layer still handles
+correctly via SQL IN AND NOT IN returning empty). Real
+contradiction use cases caught now — copy-paste error
+(operator copies kind value from shell var to two flags),
+cohort iteration (operator scripts building flag lists from
+external sources may include duplicates across positive/
+negative), refactoring drift (operator updates one flag list
+but forgets to remove from the other), CI script regressions
+(flag list construction logic regresses to include
+conflicts; CI flags fail fast with explicit error). Generic
+findContradictoryValues<T> helper handles both kind
+dimension (OptOutHistoryEventKind) and actor-id dimension
+(string); returns array of conflicting values (not just
+boolean) so error message can name them; Set-based O(1)
+membership lookup. Per-surface checks — retention history
+2 checks (--kind/--kind-not + --actor-id/--actor-id-not),
+retention diff-timeline 2 checks (same as history; parsing
+happens once at top of function before path dispatch so
+applies across all 3 dispatch paths uniformly), retention
+diff-history 6 checks (global + per-side A + per-side B for
+both kind and actor dimensions — covers the full per-event-
+pair surface with all per-side variants). Implementation
+uses table of {label, positive, negative} records iterated
+in tight loop for clean code. Check ordering — contradiction
+checks fire AFTER multi-value flag parsing + validation but
+BEFORE adapter call; kind dimension before actor dimension
+(matching adapter check ordering pattern); within kind/
+actor: global before per-side A before per-side B. Error
+format `retention {surface}: {label} share value(s)
+[{values}] — empty result by construction` with quoted
+comma-separated value list; exit code 2 distinct from
+adapter error exit 1. Same-value cross-side patterns
+preserved — --kind-a X + --kind-b X is NOT a contradiction
+(operators may intentionally assert both sides same kind);
+only same-dimension positive/negative pairs checked. NEW
+"retention cross-flag contradiction detection" describe
+block with 3 nested describe blocks (history + diff-timeline
++ diff-history) covering — kind contradiction errors with
+single + multi-value list intersection, actor contradiction
+errors, disjoint sets allowed, check fires BEFORE adapter
+call verified by capture-length-0, multi-dispatch path
+coverage on diff-timeline (N-way + cross-table), per-side
+A + B contradiction errors, same-value cross-side allowed,
+global + per-side different-values allowed. Test count:
+9,153 → 9,170 (+17 net: 17 CLI tests covering all 3
+surfaces + per-side variants on diff-history). ADR-0226
+documents the design + 8 rejected alternatives + 6 future
+Qs (--system-only + --actor-id Y cross-dimensional semantic
+contradiction defer separate semantic-contradiction
+milestone, --no-system + redundant --actor-id not a
+contradiction no check needed, global + per-side
+contradiction --system-only + --no-system-a defer adapter
+ordering handles, partial contradiction warnings --kind X
+Y --kind-not X where Y survives defer operator-policy,
+--explain flag showing why query would return empty defer
+separate milestone, CLI-side UUID format validation on
+--actor-id defer duplicate PG validation). The retention
+CLI now has ergonomic guards against silent-empty-result
+surprises from set-intersection contradictions across all
+3 surfaces. Pattern documented for future surfaces — when
+new retention actions add multi-value positive/negative
+pairs, they inherit the contradiction check pattern via
+the shared findContradictoryValues helper. Natural follow-
+up milestones — cross-dimensional semantic contradiction
+detection --system-only + --actor-id (ADR-0226 future Q1),
+retention CLI --csv output format (closes ADR-0224 Q5),
+--explain flag (debug aid covering ADR-0226 Q5 + ADR-0224
+related), retention summary action (new adapter + CLI),
+or move beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.history.envelope-rename
 closes ADR-0224 future Qs 1-3 by applying 3 history-envelope
 renames to match canonical conventions from ADR-0224. Pure
 CLI-side rename milestone (no adapter changes); brings the
@@ -12746,6 +12827,43 @@ conventions without per-milestone re-decision. Follow-up
 milestones unblocked — cross-flag contradiction detection,
 --csv output format, --explain flag, or move beyond
 retention).
+ADR-0226 covers M6.7.zz.tenant.opt-out.cli.contradiction-detection
+(retention CLI cross-flag contradiction detection — closes
+15 multi-value milestones' recurring deferred future Q;
+CLI-side eager set-intersection contradiction detection
+across all 3 retention surfaces; pure CLI-side ergonomic
+check no adapter changes; operators using positive +
+negative multi-value flag pairs can express set-intersection
+contradictions like --kind opt_out_set --kind-not opt_out_set
+that silently produce empty PG results — surfaces as exit 2
+BEFORE adapter call with explicit error naming conflicting
+values; generic findContradictoryValues<T> helper handles
+both dimensions returns conflict array Set-based O(1)
+lookup; per-surface checks history 2 + diff-timeline 2 +
+diff-history 6 global + per-side A + per-side B for both
+kind + actor; check ordering kind before actor global
+before per-side; error format
+`retention {surface}: {label} share value(s) [{values}]
+— empty result by construction` exit 2 distinct from
+adapter exit 1; same-value cross-side patterns preserved
+--kind-a X + --kind-b X NOT a contradiction; 17 new CLI
+tests test count 9,153 → 9,170; rejected — adapter-side
+detection less ergonomic, warning won't prevent CI scripts,
+cross-dimensional semantic contradictions scope creep
+defer, auto-resolve ambiguous intent, single combined
+check loses specificity, --allow-contradiction adds
+complexity, partial contradictions already handled by PG,
+parsed-command level check cleaner per-surface; future Qs
+— --system-only + --actor-id Y cross-dimensional semantic
+defer separate milestone, --no-system + --actor-id not a
+contradiction, global + per-side contradiction defer
+adapter ordering handles, partial contradiction warnings
+defer operator-policy, --explain flag showing empty result
+defer, CLI-side UUID format validation defer duplicate PG.
+The retention CLI now has ergonomic guards against silent-
+empty-result surprises across all 3 surfaces; pattern
+documented for future surfaces inheriting contradiction
+check via shared findContradictoryValues helper).
 
 ## Architecture in 90 seconds
 

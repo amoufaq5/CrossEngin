@@ -14863,3 +14863,412 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
     });
   });
 });
+
+describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.cli.contradiction-detection)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+  const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+
+  describe("retention history", () => {
+    it("exits 2 when --kind X + --kind-not X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--kind and --kind-not share value(s)");
+      expect(err()).toContain("'opt_out_set'");
+      expect(err()).toContain("empty result by construction");
+    });
+
+    it("exits 2 when --actor-id X + --actor-id-not X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--actor-id",
+          ACTOR_ALICE,
+          "--actor-id-not",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--actor-id and --actor-id-not share value(s)");
+      expect(err()).toContain(`'${ACTOR_ALICE}'`);
+    });
+
+    it("exits 2 with multi-value intersection naming all conflicting kinds", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--kind",
+          "opt_out_cleared",
+          "--kind-not",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_cleared",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("'opt_out_set'");
+      expect(err()).toContain("'opt_out_cleared'");
+    });
+
+    it("does NOT error when --kind and --kind-not are disjoint", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "policy_deleted",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+
+    it("contradiction check fires BEFORE adapter call (no PG query attempted)", async () => {
+      const capture: ListOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(capture).toHaveLength(0);
+    });
+  });
+
+  describe("retention diff-timeline", () => {
+    it("exits 2 when --kind X + --kind-not X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-timeline: --kind and --kind-not share value(s)",
+      );
+      expect(err()).toContain("'opt_out_set'");
+    });
+
+    it("exits 2 when --actor-id X + --actor-id-not X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--actor-id",
+          ACTOR_BOB,
+          "--actor-id-not",
+          ACTOR_BOB,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-timeline: --actor-id and --actor-id-not share value(s)",
+      );
+      expect(err()).toContain(`'${ACTOR_BOB}'`);
+    });
+
+    it("contradiction check fires across all 3 dispatch paths (N-way via --add-tenant)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--add-tenant",
+          "00000000-0000-4000-8000-00000000000C",
+          "--kind",
+          "policy_deleted",
+          "--kind-not",
+          "policy_deleted",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("share value(s)");
+    });
+
+    it("contradiction check fires for cross-table dispatch", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          "workflow_traces",
+          "tenant_opt_outs",
+          "--cross-table",
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("share value(s)");
+    });
+  });
+
+  describe("retention diff-history", () => {
+    it("exits 2 when global --kind X + --kind-not X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --kind / --kind-not share value(s)",
+      );
+    });
+
+    it("exits 2 when global --actor-id X + --actor-id-not X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--actor-id",
+          ACTOR_ALICE,
+          "--actor-id-not",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --actor-id / --actor-id-not share value(s)",
+      );
+    });
+
+    it("exits 2 when per-side --kind-a X + --kind-not-a X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind-a",
+          "opt_out_set",
+          "--kind-not-a",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --kind-a / --kind-not-a share value(s)",
+      );
+    });
+
+    it("exits 2 when per-side --kind-b X + --kind-not-b X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind-b",
+          "policy_deleted",
+          "--kind-not-b",
+          "policy_deleted",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --kind-b / --kind-not-b share value(s)",
+      );
+    });
+
+    it("exits 2 when per-side --actor-id-a X + --actor-id-not-a X share value", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--actor-id-a",
+          ACTOR_ALICE,
+          "--actor-id-not-a",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --actor-id-a / --actor-id-not-a share value(s)",
+      );
+    });
+
+    it("does NOT error when per-side --kind-a X + --kind-b X (asymmetric same-value pattern allowed)", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind-a",
+          "opt_out_set",
+          "--kind-b",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+
+    it("does NOT error when global --kind X + per-side --kind-a Y (different values)", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind",
+          "opt_out_set",
+          "--kind-a",
+          "opt_out_cleared",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+
+    it("contradiction check fires BEFORE adapter call (no PG query attempted)", async () => {
+      const capture: DiffHistoryEntriesInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ diffCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(capture).toHaveLength(0);
+    });
+  });
+});

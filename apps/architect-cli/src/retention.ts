@@ -36,6 +36,22 @@ import { printError, printJson, printSuccess } from "./format.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
+function findContradictoryValues<T>(
+  positive: ReadonlyArray<T> | undefined,
+  negative: ReadonlyArray<T> | undefined,
+): T[] {
+  if (
+    positive === undefined ||
+    positive.length === 0 ||
+    negative === undefined ||
+    negative.length === 0
+  ) {
+    return [];
+  }
+  const negativeSet = new Set<T>(negative);
+  return positive.filter((value) => negativeSet.has(value));
+}
+
 export interface RetentionContext extends RunContext {
   readonly retentionOverride?: PostgresTraceRetention;
 }
@@ -878,6 +894,28 @@ async function runRetentionHistory(
   const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
 
+  const contradictoryKinds = findContradictoryValues(
+    eventKinds,
+    eventKindsNot,
+  );
+  if (contradictoryKinds.length > 0) {
+    const list = contradictoryKinds.map((k) => `'${k}'`).join(", ");
+    printError(
+      ctx.io,
+      `retention history: --kind and --kind-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
+  const contradictoryActors = findContradictoryValues(actorIds, actorIdsNot);
+  if (contradictoryActors.length > 0) {
+    const list = contradictoryActors.map((a) => `'${a}'`).join(", ");
+    printError(
+      ctx.io,
+      `retention history: --actor-id and --actor-id-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
+
   let effectiveAfterId: string | undefined =
     afterIdFlag !== null ? afterIdFlag : undefined;
   let effectiveBeforeId: string | undefined =
@@ -1351,6 +1389,48 @@ async function runRetentionDiffHistory(
   const actorIdNotBFlags = getMultiFlag(command, "actor-id-not-b");
   const actorIdsNotB: ReadonlyArray<string> | undefined =
     actorIdNotBFlags.length > 0 ? actorIdNotBFlags : undefined;
+
+  const kindContradictionChecks: ReadonlyArray<{
+    label: string;
+    positive: ReadonlyArray<OptOutHistoryEventKind> | undefined;
+    negative: ReadonlyArray<OptOutHistoryEventKind> | undefined;
+  }> = [
+    { label: "--kind / --kind-not", positive: eventKinds, negative: eventKindsNot },
+    { label: "--kind-a / --kind-not-a", positive: eventKindsA, negative: eventKindsNotA },
+    { label: "--kind-b / --kind-not-b", positive: eventKindsB, negative: eventKindsNotB },
+  ];
+  for (const check of kindContradictionChecks) {
+    const conflicts = findContradictoryValues(check.positive, check.negative);
+    if (conflicts.length > 0) {
+      const list = conflicts.map((k) => `'${k}'`).join(", ");
+      printError(
+        ctx.io,
+        `retention diff-history: ${check.label} share value(s) [${list}] — empty result by construction`,
+      );
+      return 2;
+    }
+  }
+  const actorContradictionChecks: ReadonlyArray<{
+    label: string;
+    positive: ReadonlyArray<string> | undefined;
+    negative: ReadonlyArray<string> | undefined;
+  }> = [
+    { label: "--actor-id / --actor-id-not", positive: actorIds, negative: actorIdsNot },
+    { label: "--actor-id-a / --actor-id-not-a", positive: actorIdsA, negative: actorIdsNotA },
+    { label: "--actor-id-b / --actor-id-not-b", positive: actorIdsB, negative: actorIdsNotB },
+  ];
+  for (const check of actorContradictionChecks) {
+    const conflicts = findContradictoryValues(check.positive, check.negative);
+    if (conflicts.length > 0) {
+      const list = conflicts.map((a) => `'${a}'`).join(", ");
+      printError(
+        ctx.io,
+        `retention diff-history: ${check.label} share value(s) [${list}] — empty result by construction`,
+      );
+      return 2;
+    }
+  }
+
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const systemOnlyAFlag = getBooleanFlag(command, "system-only-a");
@@ -1793,6 +1873,28 @@ async function runRetentionDiffTimeline(
   }
   const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
+
+  const contradictoryKinds = findContradictoryValues(
+    eventKinds,
+    eventKindsNot,
+  );
+  if (contradictoryKinds.length > 0) {
+    const list = contradictoryKinds.map((k) => `'${k}'`).join(", ");
+    printError(
+      ctx.io,
+      `retention diff-timeline: --kind and --kind-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
+  const contradictoryActors = findContradictoryValues(actorIds, actorIdsNot);
+  if (contradictoryActors.length > 0) {
+    const list = contradictoryActors.map((a) => `'${a}'`).join(", ");
+    printError(
+      ctx.io,
+      `retention diff-timeline: --actor-id and --actor-id-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
 
   const afterIdFlag = getStringFlag(command, "after-id");
   const beforeIdFlag = getStringFlag(command, "before-id");
