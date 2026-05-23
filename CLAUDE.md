@@ -21,15 +21,80 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,280 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary
+**56 packages + 1 app, 129 meta-schema tables, 9,284 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming
+closes ADR-0224 future Q6 by rigorously documenting the two-
+level JSON envelope field naming separation. Pure docs + 4
+documentary tests; no production code changes (current state
+correct just under-documented). The two levels — Level 1
+envelope (operator INPUT echo, CLI-flag-derived plural names
+like kinds/kindsA/actorIds answering "what did the operator
+ask for?") vs Level 2 result/entries (actual DATA, domain-
+model singular names like eventKindA/actorIdA/eventKind/actorId
+answering "what did the query return?"). The confusion this
+resolves — operator running diff-history --kind-a opt_out_set
+--format=json sees BOTH env.kindsA=["opt_out_set"] (what they
+asked for) AND env.result.eventKindA="opt_out_set" (what event
+A actually is); without docs operators wonder why same concept
+appears under two names at two nesting levels. Why naming
+differs intentionally — (1) different semantic kindsA is tuple
+expectation "event A should be one of these" vs eventKindA is
+scalar fact "event A IS this" plural-vs-singular reflects
+tuple-vs-scalar, (2) different provenance envelope tracks CLI
+flags operator-facing vocabulary vs result tracks domain-model/
+PG columns data-facing vocabulary, (3) path-disambiguation is
+a feature operators distinguish "what I asked for"
+env.kindsA from "what I got" env.result.eventKindA by JSON
+path, (4) stability envelope names evolve with CLI flag
+changes vs result names evolve with data model decoupling
+means CLI flag rename like ADR-0225 eventKinds → kinds doesn't
+force data-model field rename. Field catalog documented —
+diff-history result idA/idB/eventKindA/eventKindB/actorIdA/
+actorIdB/occurredAtA/occurredAtB/fieldDiffs; history entries
+id/eventKind/actorId/tenantId/tableName/occurredAt/prevState/
+nextState/attributes. NEW "two-level field naming separation
+(ADR-0233)" describe block inside cross-surface conventions
+test scope with 4 documentary tests — diff-history envelope
+kindsA vs result eventKindA at different levels, diff-history
+envelope actorIdsA vs result actorIdA, history envelope kinds
+vs entries[].eventKind, history entry uses domain-model names
+id/eventKind/actorId/tenantId. Tests document + enforce the
+separation so future refactors don't accidentally collapse the
+two levels. Test count: 9,280 → 9,284 (+4 net: documentary
+tests). ADR-0233 documents the design + 7 rejected
+alternatives + 6 future Qs (unify names rename result
+eventKindA → kindsA conflates scalar fact with tuple
+expectation, unify names rename envelope kindsA → eventKindA
+breaks flag-derived convention, prefix envelope requestedKindsA
+verbose nesting disambiguates, prefix result actualEventKindA
+verbose, flatten two levels loses asked-for-vs-got distinction,
+document only in code comments operators don't see, JSON Schema
+with descriptions heavier defer; future Qs — JSON Schema
+generation with field descriptions defer ADR-0224 Q4, summary
+action result naming key/count generic intentional defer,
+operator-facing documentation page docs/operator-guides defer,
+consistent occurredAt vs occurred_at casing JSON camelCase CSV
+snake_case intentional defer, diff-timeline result entries
+tenantSide/tenantLabel/tableLabel dispatch-specific defer,
+versioned envelope shape for two-level contract defer no
+external consumers). The retention CLI's JSON envelope two-
+level field naming separation is now the canonical reference
+for new surfaces — envelope echoes operator input (CLI-flag-
+derived names) + result/entries contain data (domain-model
+names). This closes the last documentation gap from the
+envelope-conventions codification (ADR-0224). Natural follow-
+up milestones — retention summary time-bucket grouping
+(ADR-0232 Q1 — --group-by day|hour|week), --explain-analyze
+actual EXPLAIN ANALYZE (ADR-0229 Q2), --format=yaml (ADR-0231
+Q1), or move beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.summary
 adds a NEW `retention summary` action (15th retention CLI
 action) — aggregate opt-out/policy mutation history counts
 grouped by one dimension (kind/tenant/actor/table) with the
@@ -13556,6 +13621,33 @@ actions; summary is first aggregate-reporting surface reusing
 filter family + contradiction detection + output formats +
 query builder pattern; time-bucket grouping natural follow-
 up).
+ADR-0233 covers M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming
+(retention JSON envelope two-level field naming separation —
+closes ADR-0224 future Q6; pure docs + 4 documentary tests no
+production code changes; documents the two levels Level 1
+envelope operator INPUT echo CLI-flag-derived plural names
+kinds/kindsA/actorIds answering "what did operator ask for?"
+vs Level 2 result/entries actual DATA domain-model singular
+names eventKindA/actorIdA/eventKind answering "what did query
+return?"; naming differs intentionally — different semantic
+tuple-expectation vs scalar-fact, different provenance CLI-
+flags vs domain-model/PG-columns, path-disambiguation is a
+feature, stability decoupled evolution; field catalog
+documented diff-history result + history entries; 4
+documentary tests verifying separation enforce future
+refactors don't collapse levels; test count 9,280 → 9,284;
+rejected — unify names either direction conflates semantic or
+breaks convention, prefix requested/actual verbose nesting
+disambiguates, flatten loses asked-for-vs-got, code comments
+operators don't see, JSON Schema heavier defer; future Qs —
+JSON Schema generation defer ADR-0224 Q4, summary key/count
+generic intentional defer, operator-facing docs page defer,
+occurredAt camelCase vs occurred_at snake_case format-specific
+intentional defer, diff-timeline dispatch-specific fields
+defer, versioned envelope defer. The two-level separation is
+now canonical reference for new surfaces; closes last
+documentation gap from envelope-conventions codification
+ADR-0224).
 
 ## Architecture in 90 seconds
 

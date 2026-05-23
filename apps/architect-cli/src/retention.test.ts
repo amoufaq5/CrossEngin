@@ -14907,6 +14907,165 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
       expect(env.withActorNames).toBe(false);
     });
   });
+
+  describe("two-level field naming separation (ADR-0233)", () => {
+    const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+    const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+    const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+    const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+    it("diff-history: envelope echoes kindsA (CLI-flag-derived) while result has eventKindA (domain-model)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind-a",
+          "opt_out_set",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffResult: {
+              idA: ID_A,
+              idB: ID_B,
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              occurredAtA: "2026-05-20T12:00:00.000Z",
+              occurredAtB: "2026-05-21T12:00:00.000Z",
+              eventKindA: "opt_out_set",
+              eventKindB: "retention_set",
+              actorIdA: ACTOR_ALICE,
+              actorIdB: null,
+              fieldDiffs: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      // Level 1 (envelope): operator INPUT echo, CLI-flag-derived plural
+      expect(env.kindsA).toEqual(["opt_out_set"]);
+      expect(env.eventKindA).toBeUndefined();
+      // Level 2 (result): actual DATA, domain-model singular
+      expect(env.result.eventKindA).toBe("opt_out_set");
+      expect(env.result.kindsA).toBeUndefined();
+    });
+
+    it("diff-history: envelope actorIdsA (input) vs result actorIdA (data) at different levels", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--actor-id-a",
+          ACTOR_ALICE,
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffResult: {
+              idA: ID_A,
+              idB: ID_B,
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              occurredAtA: "2026-05-20T12:00:00.000Z",
+              occurredAtB: "2026-05-21T12:00:00.000Z",
+              eventKindA: "opt_out_set",
+              eventKindB: "retention_set",
+              actorIdA: ACTOR_ALICE,
+              actorIdB: null,
+              fieldDiffs: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      // envelope: actorIdsA (plural, input echo)
+      expect(env.actorIdsA).toEqual([ACTOR_ALICE]);
+      // result: actorIdA (singular, actual data)
+      expect(env.result.actorIdA).toBe(ACTOR_ALICE);
+      expect(env.result.actorIdsA).toBeUndefined();
+    });
+
+    it("history: envelope kinds (input) vs entries[].eventKind (data) at different levels", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            historyEntries: [
+              {
+                id: "10000000-0000-4000-8000-000000000001",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: ACTOR_ALICE,
+                occurredAt: "2026-05-20T12:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true },
+                attributes: {},
+              },
+            ],
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      // Level 1 (envelope): kinds (plural, input echo)
+      expect(env.kinds).toEqual(["opt_out_set"]);
+      expect(env.eventKind).toBeUndefined();
+      // Level 2 (entries): eventKind (singular, actual data)
+      expect(env.entries[0].eventKind).toBe("opt_out_set");
+      expect(env.entries[0].kinds).toBeUndefined();
+    });
+
+    it("history: entry data fields use domain-model names (id/eventKind/actorId/tenantId)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            historyEntries: [
+              {
+                id: "10000000-0000-4000-8000-000000000001",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: ACTOR_ALICE,
+                occurredAt: "2026-05-20T12:00:00.000Z",
+                prevState: null,
+                nextState: null,
+                attributes: {},
+              },
+            ],
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      const entry = env.entries[0];
+      expect(entry.id).toBe("10000000-0000-4000-8000-000000000001");
+      expect(entry.eventKind).toBe("opt_out_set");
+      expect(entry.actorId).toBe(ACTOR_ALICE);
+      expect(entry.tenantId).toBe(TENANT_A);
+    });
+  });
 });
 
 describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.cli.contradiction-detection)", () => {
