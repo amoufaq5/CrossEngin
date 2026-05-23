@@ -306,15 +306,18 @@ export interface SummarizeOptOutHistoryInput {
   readonly since?: string;
   readonly until?: string;
   readonly groupBy: OptOutHistorySummaryGroupBy;
+  readonly thenBy?: OptOutHistorySummaryGroupBy;
 }
 
 export interface OptOutHistorySummaryBucket {
   readonly key: string | null;
+  readonly subKey?: string | null;
   readonly count: number;
 }
 
 export interface OptOutHistorySummaryResult {
   readonly groupBy: OptOutHistorySummaryGroupBy;
+  readonly thenBy?: OptOutHistorySummaryGroupBy;
   readonly totalCount: number;
   readonly buckets: ReadonlyArray<OptOutHistorySummaryBucket>;
 }
@@ -1502,28 +1505,39 @@ export class PostgresTraceRetention {
     sql: string;
     params: unknown[];
   } {
-    const categoricalColumn: Partial<
-      Record<OptOutHistorySummaryGroupBy, string>
-    > = {
-      kind: "h.event_kind",
-      tenant: "h.tenant_id",
-      actor: "h.actor_id",
-      table: "h.table_name",
+    const resolveDimension = (
+      dim: OptOutHistorySummaryGroupBy,
+    ): { col: string; keyExpr: string; isTemporal: boolean } => {
+      const categoricalColumn: Partial<
+        Record<OptOutHistorySummaryGroupBy, string>
+      > = {
+        kind: "h.event_kind",
+        tenant: "h.tenant_id",
+        actor: "h.actor_id",
+        table: "h.table_name",
+      };
+      const temporalUnit: Partial<
+        Record<OptOutHistorySummaryGroupBy, string>
+      > = {
+        day: "day",
+        hour: "hour",
+        week: "week",
+        month: "month",
+      };
+      const unit = temporalUnit[dim];
+      if (unit !== undefined) {
+        const col = `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC')`;
+        return { col, keyExpr: `${col}::text`, isTemporal: true };
+      }
+      const col = categoricalColumn[dim]!;
+      return { col, keyExpr: col, isTemporal: false };
     };
-    const temporalUnit: Partial<
-      Record<OptOutHistorySummaryGroupBy, string>
-    > = {
-      day: "day",
-      hour: "hour",
-      week: "week",
-      month: "month",
-    };
-    const unit = temporalUnit[input.groupBy];
-    const isTemporal = unit !== undefined;
-    const col = isTemporal
-      ? `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC')`
-      : categoricalColumn[input.groupBy]!;
-    const keyExpr = isTemporal ? `${col}::text` : col;
+    const primary = resolveDimension(input.groupBy);
+    const col = primary.col;
+    const keyExpr = primary.keyExpr;
+    const isTemporal = primary.isTemporal;
+    const secondary =
+      input.thenBy !== undefined ? resolveDimension(input.thenBy) : undefined;
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (input.tenantId !== undefined) {
@@ -1590,14 +1604,25 @@ export class PostgresTraceRetention {
     }
     const where =
       conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
-    const orderBy = isTemporal
-      ? `${col} ASC`
-      : `COUNT(*) DESC, ${col} ASC`;
-    const sql = `SELECT ${keyExpr} AS key, COUNT(*)::bigint AS count
+    if (secondary === undefined) {
+      const orderBy = isTemporal
+        ? `${col} ASC`
+        : `COUNT(*) DESC, ${col} ASC`;
+      const sql = `SELECT ${keyExpr} AS key, COUNT(*)::bigint AS count
        FROM ${SCHEMA}.${HISTORY_TABLE} h
        ${where}
        GROUP BY ${col}
        ORDER BY ${orderBy}`;
+      return { sql, params };
+    }
+    // Cross-tab: two-dimensional grid ordered (primary ASC, secondary ASC)
+    // for a deterministic, readable grid (temporal chronological;
+    // categorical alphabetical).
+    const sql = `SELECT ${keyExpr} AS key, ${secondary.keyExpr} AS sub_key, COUNT(*)::bigint AS count
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${where}
+       GROUP BY ${col}, ${secondary.col}
+       ORDER BY ${col} ASC, ${secondary.col} ASC`;
     return { sql, params };
   }
 
@@ -1605,8 +1630,10 @@ export class PostgresTraceRetention {
     input: SummarizeOptOutHistoryInput,
   ): Promise<OptOutHistorySummaryResult> {
     const { sql, params } = this.buildSummarizeOptOutHistoryQuery(input);
+    const hasThenBy = input.thenBy !== undefined;
     const result = await this.conn.query<{
       key: string | null;
+      sub_key?: string | null;
       count: string | number;
     }>(sql, params);
     let totalCount = 0;
@@ -1614,10 +1641,13 @@ export class PostgresTraceRetention {
       const count =
         typeof r.count === "string" ? Number.parseInt(r.count, 10) : r.count;
       totalCount += count;
-      return { key: r.key, count };
+      return hasThenBy
+        ? { key: r.key, subKey: r.sub_key ?? null, count }
+        : { key: r.key, count };
     });
     return {
       groupBy: input.groupBy,
+      ...(hasThenBy ? { thenBy: input.thenBy } : {}),
       totalCount,
       buckets,
     };

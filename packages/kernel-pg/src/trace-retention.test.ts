@@ -11078,4 +11078,91 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(result.buckets[0]?.key).toBe("2026-05-20 00:00:00");
     expect(result.buckets[1]?.key).toBe("2026-05-21 00:00:00");
   });
+
+  it("cross-tab: buildSummarizeOptOutHistoryQuery groups by two dimensions with sub_key", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "kind",
+    });
+    expect(sql).toContain(
+      "date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')::text AS key",
+    );
+    expect(sql).toContain("h.event_kind AS sub_key");
+    expect(sql).toContain(
+      "GROUP BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC'), h.event_kind",
+    );
+    // cross-tab orders grid (primary ASC, secondary ASC), not count DESC
+    expect(sql).toContain(
+      "ORDER BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC') ASC, h.event_kind ASC",
+    );
+    expect(sql).not.toContain("ORDER BY COUNT(*) DESC");
+  });
+
+  it("cross-tab: categorical × categorical (kind × tenant)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      thenBy: "tenant",
+    });
+    expect(sql).toContain("h.event_kind AS key, h.tenant_id AS sub_key");
+    expect(sql).toContain("GROUP BY h.event_kind, h.tenant_id");
+    expect(sql).toContain("ORDER BY h.event_kind ASC, h.tenant_id ASC");
+  });
+
+  it("cross-tab: composes with filters", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "tenant",
+      thenBy: "day",
+      eventKinds: ["opt_out_set"],
+    });
+    expect(sql).toContain("h.event_kind IN ($1)");
+    expect(sql).toContain("h.tenant_id AS key");
+    expect(sql).toContain("AS sub_key");
+    expect(params).toEqual(["opt_out_set"]);
+  });
+
+  it("cross-tab: summarizeOptOutHistory returns buckets with key + subKey + thenBy in result", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        { key: "2026-05-20 00:00:00", sub_key: "opt_out_set", count: "5" },
+        { key: "2026-05-20 00:00:00", sub_key: "policy_deleted", count: "2" },
+        { key: "2026-05-21 00:00:00", sub_key: "opt_out_set", count: "3" },
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({
+      groupBy: "day",
+      thenBy: "kind",
+    });
+    expect(result.groupBy).toBe("day");
+    expect(result.thenBy).toBe("kind");
+    expect(result.totalCount).toBe(10);
+    expect(result.buckets[0]).toEqual({
+      key: "2026-05-20 00:00:00",
+      subKey: "opt_out_set",
+      count: 5,
+    });
+    expect(result.buckets[1]?.subKey).toBe("policy_deleted");
+  });
+
+  it("single-dimension result omits thenBy + subKey (backward compat)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [{ key: "opt_out_set", count: "12" }],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({ groupBy: "kind" });
+    expect(result.thenBy).toBeUndefined();
+    expect(result.buckets[0]).toEqual({ key: "opt_out_set", count: 12 });
+    expect("subKey" in result.buckets[0]!).toBe(false);
+  });
 });

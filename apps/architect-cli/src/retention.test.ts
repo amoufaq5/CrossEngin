@@ -16980,4 +16980,170 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     expect(err()).toContain("retention summary:");
     expect(err()).toContain("connection lost");
   });
+
+  describe("cross-tab (--then-by)", () => {
+    function crossTabResult(): OptOutHistorySummaryResult {
+      return {
+        groupBy: "day",
+        thenBy: "kind",
+        totalCount: 10,
+        buckets: [
+          { key: "2026-05-20 00:00:00", subKey: "opt_out_set", count: 5 },
+          { key: "2026-05-20 00:00:00", subKey: "policy_deleted", count: 2 },
+          { key: "2026-05-21 00:00:00", subKey: "opt_out_set", count: 3 },
+        ],
+      };
+    }
+
+    it("threads thenBy to adapter", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "kind",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: crossTabResult(),
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.groupBy).toBe("day");
+      expect(capture[0]?.thenBy).toBe("kind");
+    });
+
+    it("exits 2 on invalid --then-by", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--then-by", "bogus"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("invalid --then-by 'bogus'");
+    });
+
+    it("exits 2 when --then-by equals --group-by", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "kind",
+          "--then-by",
+          "kind",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("must differ from --group-by");
+    });
+
+    it("human format renders 2-key grid + cross-tab title", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "kind",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ summaryResult: crossTabResult() }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("Summary by day × kind (total: 10 events)");
+      expect(out()).toContain("2026-05-20 00:00:00");
+      expect(out()).toContain("opt_out_set");
+    });
+
+    it("JSON format includes thenBy + buckets with subKey", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "kind",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ summaryResult: crossTabResult() }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const parsed_ = JSON.parse(out());
+      expect(parsed_.groupBy).toBe("day");
+      expect(parsed_.thenBy).toBe("kind");
+      expect(parsed_.buckets[0].subKey).toBe("opt_out_set");
+    });
+
+    it("CSV format emits 3-column header (primary, secondary, count)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "kind",
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ summaryResult: crossTabResult() }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toBe("day,kind,count");
+      expect(lines[1]).toBe("2026-05-20 00:00:00,opt_out_set,5");
+    });
+
+    it("--explain plan includes thenBy + cross-tab SQL", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "tenant",
+          "--then-by",
+          "day",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.groupBy).toBe("tenant");
+      expect(plan.thenBy).toBe("day");
+    });
+  });
 });

@@ -1317,6 +1317,24 @@ async function runRetentionSummary(
   }
   const groupBy: OptOutHistorySummaryGroupBy = groupByFlag ?? "kind";
 
+  const thenByFlag = getStringFlag(command, "then-by");
+  if (thenByFlag !== null && !isSummaryGroupBy(thenByFlag)) {
+    printError(
+      ctx.io,
+      `retention summary: invalid --then-by '${thenByFlag}' (expected one of: kind, tenant, actor, table, day, hour, week, month)`,
+    );
+    return 2;
+  }
+  const thenBy: OptOutHistorySummaryGroupBy | undefined =
+    thenByFlag ?? undefined;
+  if (thenBy !== undefined && thenBy === groupBy) {
+    printError(
+      ctx.io,
+      `retention summary: --then-by '${thenBy}' must differ from --group-by '${groupBy}' (cross-tab requires two distinct dimensions)`,
+    );
+    return 2;
+  }
+
   if (systemOnlyFlag && noSystemFlag) {
     printError(
       ctx.io,
@@ -1420,6 +1438,7 @@ async function runRetentionSummary(
     since,
     until,
     groupBy,
+    thenBy,
   };
 
   if (explainFlag) {
@@ -1429,6 +1448,7 @@ async function runRetentionSummary(
       explain: true,
       executed: false,
       groupBy,
+      thenBy: thenBy ?? null,
       filters: {
         tenantId: tenantFilter ?? null,
         tableName: tableFilter ?? null,
@@ -1466,6 +1486,7 @@ async function runRetentionSummary(
     printJson(ctx.io, {
       action: "summary",
       groupBy: result.groupBy,
+      ...(result.thenBy !== undefined ? { thenBy: result.thenBy } : {}),
       totalCount: result.totalCount,
       buckets: result.buckets,
     });
@@ -1480,8 +1501,11 @@ async function runRetentionSummary(
       printNdjson(ctx.io, result.buckets);
       return 0;
     }
-    const headers = [groupBy, "count"];
-    const rows = result.buckets.map((b) => [b.key, b.count]);
+    const headers =
+      thenBy !== undefined ? [groupBy, thenBy, "count"] : [groupBy, "count"];
+    const rows = result.buckets.map((b) =>
+      thenBy !== undefined ? [b.key, b.subKey ?? null, b.count] : [b.key, b.count],
+    );
     if (command.format === "tsv") {
       printTsv(ctx.io, headers, rows);
     } else {
@@ -1495,9 +1519,11 @@ async function runRetentionSummary(
 }
 
 function formatSummary(result: OptOutHistorySummaryResult): string {
-  const lines: string[] = [
-    `Summary by ${result.groupBy} (total: ${result.totalCount.toString()} events)`,
-  ];
+  const title =
+    result.thenBy !== undefined
+      ? `Summary by ${result.groupBy} × ${result.thenBy} (total: ${result.totalCount.toString()} events)`
+      : `Summary by ${result.groupBy} (total: ${result.totalCount.toString()} events)`;
+  const lines: string[] = [title];
   if (result.buckets.length === 0) {
     lines.push("  (no events match the given filters)");
     return lines.join("\n") + "\n";
@@ -1506,6 +1532,18 @@ function formatSummary(result: OptOutHistorySummaryResult): string {
     ...result.buckets.map((b) => (b.key ?? "<system>").length),
     10,
   );
+  if (result.thenBy !== undefined) {
+    const subKeyWidth = Math.max(
+      ...result.buckets.map((b) => (b.subKey ?? "<system>").length),
+      10,
+    );
+    for (const b of result.buckets) {
+      const key = (b.key ?? "<system>").padEnd(keyWidth);
+      const subKey = (b.subKey ?? "<system>").padEnd(subKeyWidth);
+      lines.push(`  ${key}  ${subKey}  ${b.count.toString().padStart(8)}`);
+    }
+    return lines.join("\n") + "\n";
+  }
   for (const b of result.buckets) {
     const key = (b.key ?? "<system>").padEnd(keyWidth);
     lines.push(`  ${key}  ${b.count.toString().padStart(8)}`);
