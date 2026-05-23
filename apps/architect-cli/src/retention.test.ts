@@ -5055,13 +5055,14 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
   });
 });
 
-describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter)", () => {
+describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + .multi)", () => {
   const ID_A = "aa000000-0000-4000-8000-0000000000aa";
   const ID_B = "bb000000-0000-4000-8000-0000000000bb";
   const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
   const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+  const ACTOR_CAROL = "33333333-0000-4000-8000-000000000003";
 
-  it("threads actorId to adapter when --actor-id set", async () => {
+  it("threads single-element actorIds array when --actor-id set once", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5079,10 +5080,33 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
   });
 
-  it("omits actorId when --actor-id NOT set (backward compat)", async () => {
+  it("threads multi-element actorIds array when --actor-id repeated", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+  });
+
+  it("omits actorIds when --actor-id NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5093,10 +5117,10 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBeUndefined();
+    expect(capture[0]?.actorIds).toBeUndefined();
   });
 
-  it("composes with --kind threading both eventKind and actorId", async () => {
+  it("composes with --kind threading both eventKinds and actorIds", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5117,10 +5141,34 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
     );
     expect(code).toBe(0);
     expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
-    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
   });
 
-  it("adapter mismatch error propagates as exit 1 with explicit error", async () => {
+  it("composes with --actor-id-not threading both as independent dimensions", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_CAROL,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
+    expect(capture[0]?.actorIdNot).toBe(ACTOR_CAROL);
+  });
+
+  it("adapter mismatch error propagates as exit 1 with multi-value error format", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
       parsed(
@@ -5130,24 +5178,26 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
         ID_B,
         "--actor-id",
         ACTOR_ALICE,
+        "--actor-id",
+        ACTOR_BOB,
       ),
       {
         ...ctx,
         retentionOverride: fakeRetention({
           throws: new Error(
-            `diffHistoryEntries: expected both events to have actor_id '${ACTOR_ALICE}' but A is '${ACTOR_BOB}'`,
+            `diffHistoryEntries: expected both events to have actor_id in ['${ACTOR_ALICE}', '${ACTOR_BOB}'] but A is '${ACTOR_CAROL}'`,
           ),
         }),
       } as RetentionContext,
     );
     expect(code).toBe(1);
     expect(err()).toContain(
-      `expected both events to have actor_id '${ACTOR_ALICE}'`,
+      `expected both events to have actor_id in ['${ACTOR_ALICE}', '${ACTOR_BOB}']`,
     );
-    expect(err()).toContain(`A is '${ACTOR_BOB}'`);
+    expect(err()).toContain(`A is '${ACTOR_CAROL}'`);
   });
 
-  it("JSON envelope echoes actorId field when --actor-id set", async () => {
+  it("JSON envelope echoes single-element actorIds array when --actor-id set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -5168,10 +5218,35 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.action).toBe("diff-history");
-    expect(parsed_.actorId).toBe(ACTOR_ALICE);
+    expect(parsed_.actorIds).toEqual([ACTOR_ALICE]);
   });
 
-  it("JSON envelope actorId=null when --actor-id NOT set", async () => {
+  it("JSON envelope echoes multi-element actorIds array when --actor-id repeated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id",
+        ACTOR_BOB,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIds).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+  });
+
+  it("JSON envelope actorIds=null when --actor-id NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed("retention", "diff-history", ID_A, ID_B, "--format", "json"),
@@ -5182,7 +5257,33 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.actorId).toBeNull();
+    expect(parsed_.actorIds).toBeNull();
+  });
+
+  it("composes with per-side --actor-id-a threading both global and per-side independently", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id",
+        ACTOR_BOB,
+        "--actor-id-a",
+        ACTOR_ALICE,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+    expect(capture[0]?.actorIdA).toBe(ACTOR_ALICE);
   });
 });
 
@@ -5447,7 +5548,7 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
     );
     expect(code).toBe(0);
     expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
-    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
     expect(capture[0]?.joinActor).toBe(true);
   });
 });
@@ -5513,7 +5614,7 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorId).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
     expect(capture[0]?.actorIdNot).toBe(ACTOR_BOB);
   });
 

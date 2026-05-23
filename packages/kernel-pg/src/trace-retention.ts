@@ -339,7 +339,7 @@ export interface DiffHistoryEntriesInput {
   readonly eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly eventKindsNotA?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly eventKindsNotB?: ReadonlyArray<OptOutHistoryEventKind>;
-  readonly actorId?: string;
+  readonly actorIds?: ReadonlyArray<string>;
   readonly actorIdA?: string;
   readonly actorIdB?: string;
   readonly actorIdNot?: string;
@@ -1713,21 +1713,23 @@ export class PostgresTraceRetention {
         );
       }
     }
-    if (input.actorId !== undefined) {
+    if (input.actorIds !== undefined && input.actorIds.length > 0) {
+      const expectedSet = new Set<string>(input.actorIds);
       const mismatches: string[] = [];
-      if (entryA.actor_id !== input.actorId) {
+      if (entryA.actor_id === null || !expectedSet.has(entryA.actor_id)) {
         mismatches.push(
           `A is ${entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`}`,
         );
       }
-      if (entryB.actor_id !== input.actorId) {
+      if (entryB.actor_id === null || !expectedSet.has(entryB.actor_id)) {
         mismatches.push(
           `B is ${entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`}`,
         );
       }
       if (mismatches.length > 0) {
+        const actorList = input.actorIds.map((a) => `'${a}'`).join(", ");
         throw new Error(
-          `diffHistoryEntries: expected both events to have actor_id '${input.actorId}' but ${mismatches.join(" and ")}`,
+          `diffHistoryEntries: expected both events to have actor_id in [${actorList}] but ${mismatches.join(" and ")}`,
         );
       }
     }

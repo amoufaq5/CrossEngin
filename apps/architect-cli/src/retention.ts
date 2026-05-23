@@ -1308,8 +1308,9 @@ async function runRetentionDiffHistory(
   const eventKindsNotB: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKindsNotB.length > 0 ? validatedKindsNotB : undefined;
 
-  const actorIdFlag = getStringFlag(command, "actor-id");
-  const actorId = actorIdFlag !== null ? actorIdFlag : undefined;
+  const actorIdFlags = getMultiFlag(command, "actor-id");
+  const actorIds: ReadonlyArray<string> | undefined =
+    actorIdFlags.length > 0 ? actorIdFlags : undefined;
   const actorIdAFlag = getStringFlag(command, "actor-id-a");
   const actorIdA = actorIdAFlag !== null ? actorIdAFlag : undefined;
   const actorIdBFlag = getStringFlag(command, "actor-id-b");
@@ -1387,7 +1388,7 @@ async function runRetentionDiffHistory(
       eventKindsNot,
       eventKindsNotA,
       eventKindsNotB,
-      actorId,
+      actorIds,
       actorIdA,
       actorIdB,
       actorIdNot,
@@ -1415,7 +1416,7 @@ async function runRetentionDiffHistory(
       kindsNot: eventKindsNot ?? null,
       kindsNotA: eventKindsNotA ?? null,
       kindsNotB: eventKindsNotB ?? null,
-      actorId: actorId ?? null,
+      actorIds: actorIds ?? null,
       actorIdA: actorIdA ?? null,
       actorIdB: actorIdB ?? null,
       actorIdNot: actorIdNot ?? null,
