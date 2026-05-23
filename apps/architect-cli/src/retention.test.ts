@@ -14511,3 +14511,342 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     });
   });
 });
+
+describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-out.cli.json-envelope.conventions)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+
+  describe("multi-value flag envelope shape (array-or-null)", () => {
+    it("history --kind multi: actorIds + eventKinds render as arrays", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--kind",
+          "opt_out_cleared",
+          "--actor-id",
+          "11111111-0000-4000-8000-000000000001",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      expect(Array.isArray(env.eventKinds)).toBe(true);
+      expect(Array.isArray(env.actorIds)).toBe(true);
+      expect(env.eventKinds).toHaveLength(2);
+      expect(env.actorIds).toHaveLength(1);
+    });
+
+    it("diff-timeline --kind multi: kinds + actorIds render as arrays", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--kind",
+          "opt_out_set",
+          "--actor-id",
+          "11111111-0000-4000-8000-000000000001",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      expect(Array.isArray(env.kinds)).toBe(true);
+      expect(Array.isArray(env.actorIds)).toBe(true);
+    });
+
+    it("diff-history --kind multi: kinds + actorIds + per-side render as arrays", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind",
+          "opt_out_set",
+          "--kind-a",
+          "opt_out_set",
+          "--actor-id",
+          "11111111-0000-4000-8000-000000000001",
+          "--actor-id-a",
+          "11111111-0000-4000-8000-000000000001",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      expect(Array.isArray(env.kinds)).toBe(true);
+      expect(Array.isArray(env.kindsA)).toBe(true);
+      expect(Array.isArray(env.actorIds)).toBe(true);
+      expect(Array.isArray(env.actorIdsA)).toBe(true);
+    });
+
+    it("all multi-value envelope fields are null when not set (across all 3 surfaces)", async () => {
+      const { ctx: ctx1, out: outHistory } = buffers();
+      await runRetention(
+        parsed("retention", "history", "--format=json"),
+        {
+          ...ctx1,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      const histEnv = JSON.parse(outHistory());
+      expect(histEnv.eventKinds).toBeNull();
+      expect(histEnv.actorIds).toBeNull();
+      expect(histEnv.actorIdsNot).toBeNull();
+
+      const { ctx: ctx2, out: outTimeline } = buffers();
+      await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--format=json",
+        ),
+        {
+          ...ctx2,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      const tlEnv = JSON.parse(outTimeline());
+      expect(tlEnv.kinds).toBeNull();
+      expect(tlEnv.kindsNot).toBeNull();
+      expect(tlEnv.actorIds).toBeNull();
+      expect(tlEnv.actorIdsNot).toBeNull();
+
+      const { ctx: ctx3, out: outDiff } = buffers();
+      await runRetention(
+        parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
+        {
+          ...ctx3,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      const diffEnv = JSON.parse(outDiff());
+      expect(diffEnv.kinds).toBeNull();
+      expect(diffEnv.actorIds).toBeNull();
+      expect(diffEnv.actorIdsNot).toBeNull();
+    });
+  });
+
+  describe("boolean flag envelope shape (always boolean, never null)", () => {
+    it("history systemOnly + noSystem are booleans when flags not set", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      expect(typeof env.systemOnly).toBe("boolean");
+      expect(typeof env.noSystem).toBe("boolean");
+      expect(env.systemOnly).toBe(false);
+      expect(env.noSystem).toBe(false);
+    });
+
+    it("diff-history all 6 boolean fields (global + per-side) are booleans", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      expect(typeof env.systemOnly).toBe("boolean");
+      expect(typeof env.noSystem).toBe("boolean");
+      expect(typeof env.systemOnlyA).toBe("boolean");
+      expect(typeof env.noSystemA).toBe("boolean");
+      expect(typeof env.systemOnlyB).toBe("boolean");
+      expect(typeof env.noSystemB).toBe("boolean");
+      expect(typeof env.withActorNames).toBe("boolean");
+    });
+
+    it("diff-timeline systemOnly + noSystem + withActorNames are booleans", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out());
+      expect(typeof env.systemOnly).toBe("boolean");
+      expect(typeof env.noSystem).toBe("boolean");
+      expect(typeof env.withActorNames).toBe("boolean");
+    });
+  });
+
+  describe("action discriminator field (where present)", () => {
+    it("diff-history emits action=\"diff-history\"", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.action).toBe("diff-history");
+    });
+
+    it("diff-timeline pair-wise emits action=\"diff-timeline\" without nway/crossTable", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.action).toBe("diff-timeline");
+      expect(env.nway).toBeUndefined();
+      expect(env.crossTable).toBeUndefined();
+    });
+
+    it("diff-timeline N-way emits action=\"diff-timeline\" + nway:true discriminator", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--add-tenant",
+          "00000000-0000-4000-8000-00000000000C",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.action).toBe("diff-timeline");
+      expect(env.nway).toBe(true);
+    });
+
+    it("diff-timeline cross-table emits action=\"diff-timeline\" + crossTable:true discriminator", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          "workflow_traces",
+          "tenant_opt_outs",
+          "--cross-table",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.action).toBe("diff-timeline");
+      expect(env.crossTable).toBe(true);
+    });
+  });
+
+  describe("known inconsistencies (documented as future Qs in ADR-0224)", () => {
+    it("history envelope CURRENTLY uses eventKinds/eventKindsNot (deviates from kinds/kindsNot convention; future Q rename)", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.eventKinds).toBeDefined();
+      expect(env.kinds).toBeUndefined();
+    });
+
+    it("history envelope CURRENTLY omits action discriminator (future Q add)", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed("retention", "history", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.action).toBeUndefined();
+    });
+
+    it("history envelope CURRENTLY omits withActorNames echo (future Q add)", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--with-actor-names",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.withActorNames).toBeUndefined();
+    });
+  });
+});
