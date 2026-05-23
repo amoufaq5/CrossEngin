@@ -342,7 +342,7 @@ export interface DiffHistoryEntriesInput {
   readonly actorIds?: ReadonlyArray<string>;
   readonly actorIdA?: string;
   readonly actorIdB?: string;
-  readonly actorIdNot?: string;
+  readonly actorIdsNot?: ReadonlyArray<string>;
   readonly actorIdNotA?: string;
   readonly actorIdNotB?: string;
   readonly actorPresence?: ActorPresenceFilter;
@@ -1753,17 +1753,23 @@ export class PostgresTraceRetention {
         `diffHistoryEntries: expected event B to have actor_id '${input.actorIdB}' but B is ${actual}`,
       );
     }
-    if (input.actorIdNot !== undefined) {
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const excludedSet = new Set<string>(input.actorIdsNot);
       const matches: string[] = [];
-      if (entryA.actor_id === input.actorIdNot) matches.push("A");
-      if (entryB.actor_id === input.actorIdNot) matches.push("B");
+      if (entryA.actor_id !== null && excludedSet.has(entryA.actor_id)) {
+        matches.push("A");
+      }
+      if (entryB.actor_id !== null && excludedSet.has(entryB.actor_id)) {
+        matches.push("B");
+      }
       if (matches.length > 0) {
         const suffix =
           matches.length === 1
             ? `${matches[0]} matches`
             : "both A and B match";
+        const actorList = input.actorIdsNot.map((a) => `'${a}'`).join(", ");
         throw new Error(
-          `diffHistoryEntries: expected neither event to have actor_id '${input.actorIdNot}' but ${suffix}`,
+          `diffHistoryEntries: expected neither event to have actor_id in [${actorList}] but ${suffix}`,
         );
       }
     }

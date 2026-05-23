@@ -5165,7 +5165,7 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
     );
     expect(code).toBe(0);
     expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_CAROL);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_CAROL]);
   });
 
   it("adapter mismatch error propagates as exit 1 with multi-value error format", async () => {
@@ -5553,13 +5553,14 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   });
 });
 
-describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.diff-history.actor-not)", () => {
+describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + .multi)", () => {
   const ID_A = "aa000000-0000-4000-8000-0000000000aa";
   const ID_B = "bb000000-0000-4000-8000-0000000000bb";
   const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
   const ACTOR_BOB = "22222222-0000-4000-8000-000000000002";
+  const ACTOR_CAROL = "33333333-0000-4000-8000-000000000003";
 
-  it("threads actorIdNot to adapter when --actor-id-not set", async () => {
+  it("threads single-element actorIdsNot array when --actor-id-not set once", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5577,10 +5578,33 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE]);
   });
 
-  it("omits actorIdNot when --actor-id-not NOT set (backward compat)", async () => {
+  it("threads multi-element actorIdsNot array when --actor-id-not repeated", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not",
+        ACTOR_ALICE,
+        "--actor-id-not",
+        ACTOR_BOB,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+  });
+
+  it("omits actorIdsNot when --actor-id-not NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
@@ -5591,7 +5615,7 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorIdNot).toBeUndefined();
+    expect(capture[0]?.actorIdsNot).toBeUndefined();
   });
 
   it("composes with --actor-id (both threaded independently)", async () => {
@@ -5615,10 +5639,41 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
     );
     expect(code).toBe(0);
     expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_BOB);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_BOB]);
   });
 
-  it("adapter exclusion error propagates as exit 1", async () => {
+  it("composes with multi-value --actor-id and multi-value --actor-id-not", async () => {
+    const capture: DiffHistoryEntriesInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id",
+        ACTOR_ALICE,
+        "--actor-id",
+        ACTOR_BOB,
+        "--actor-id-not",
+        ACTOR_CAROL,
+        "--actor-id-not",
+        "44444444-0000-4000-8000-000000000004",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE, ACTOR_BOB]);
+    expect(capture[0]?.actorIdsNot).toEqual([
+      ACTOR_CAROL,
+      "44444444-0000-4000-8000-000000000004",
+    ]);
+  });
+
+  it("adapter exclusion error propagates as exit 1 with multi-value error format", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
       parsed(
@@ -5628,24 +5683,26 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
         ID_B,
         "--actor-id-not",
         ACTOR_BOB,
+        "--actor-id-not",
+        ACTOR_CAROL,
       ),
       {
         ...ctx,
         retentionOverride: fakeRetention({
           throws: new Error(
-            `diffHistoryEntries: expected neither event to have actor_id '${ACTOR_BOB}' but A matches`,
+            `diffHistoryEntries: expected neither event to have actor_id in ['${ACTOR_BOB}', '${ACTOR_CAROL}'] but A matches`,
           ),
         }),
       } as RetentionContext,
     );
     expect(code).toBe(1);
     expect(err()).toContain(
-      `expected neither event to have actor_id '${ACTOR_BOB}'`,
+      `expected neither event to have actor_id in ['${ACTOR_BOB}', '${ACTOR_CAROL}']`,
     );
     expect(err()).toContain("A matches");
   });
 
-  it("JSON envelope echoes actorIdNot field when --actor-id-not set", async () => {
+  it("JSON envelope echoes single-element actorIdsNot array when --actor-id-not set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed(
@@ -5666,10 +5723,35 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.action).toBe("diff-history");
-    expect(parsed_.actorIdNot).toBe(ACTOR_BOB);
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_BOB]);
   });
 
-  it("JSON envelope actorIdNot=null when --actor-id-not NOT set", async () => {
+  it("JSON envelope echoes multi-element actorIdsNot array when --actor-id-not repeated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-history",
+        ID_A,
+        ID_B,
+        "--actor-id-not",
+        ACTOR_BOB,
+        "--actor-id-not",
+        ACTOR_CAROL,
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.actorIdsNot).toEqual([ACTOR_BOB, ACTOR_CAROL]);
+  });
+
+  it("JSON envelope actorIdsNot=null when --actor-id-not NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
       parsed("retention", "diff-history", ID_A, ID_B, "--format", "json"),
@@ -5680,7 +5762,7 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
     );
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
-    expect(parsed_.actorIdNot).toBeNull();
+    expect(parsed_.actorIdsNot).toBeNull();
   });
 });
 
@@ -6002,7 +6084,7 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.actorIdNot).toBe(ACTOR_ALICE);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE]);
     expect(capture[0]?.actorPresence).toBe("no_system");
   });
 

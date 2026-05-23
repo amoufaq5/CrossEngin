@@ -21,15 +21,119 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,083 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi
+**56 packages + 1 app, 129 meta-schema tables, 9,091 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi
+closes ADR-0205 Q1 by widening `--actor-id-not <uuid>` from
+single-value to repeated flag (OR-semantic tuple exclusion
+check) on `retention diff-history` using the multiFlags
+infrastructure from ADR-0183. Operator declares "I expect
+NEITHER event to have actor_id in {set of N excluded UUIDs}"
+and adapter throws on match with side(s) named. Completes the
+within-action symmetry on the actor dimension on diff-history —
+both positive --actor-id (ADR-0218 just-shipped) and negative
+--actor-id-not are now multi-value tuple expressions; the kind
+dimension already has this symmetry (--kind from ADR-0217 +
+--kind-not from ADR-0214). 9th consecutive single→multi rename
+across the actor + kind family (ADR-0199/0200/0207/0210/0211/
+0214/0217/0218/0219). The diff-history global multi-value
+matrix is now COMPLETE — only --system-only/--no-system remain
+single-value (boolean by nature). Real cohort-negative-
+exclusion use cases on actor dimension — multi-actor exclusion
+forensic (NEITHER event in suspect actor cohort of 3
+compromised SA candidates during incident investigation),
+workflow audit excluding migration cohort (NEITHER event from
+migration SA 1 OR migration SA 2 OR backfill SA), CI gate with
+actor-tuple exclusion (fail build if either event authored by
+any of 3 excluded automation accounts), anti-automation pair
+verification (NEITHER event from automation accounts pre-list),
+compose with multi-value --actor-id positive (canonical "events
+by Alice OR Bob but NOT Carol OR Dave" cohort positive + tuple
+exclusion), compose with --kind multi-value exclusion (NEITHER
+event is policy_deleted OR retention_set AND NEITHER event
+authored by excluded SA list). Breaking adapter rename
+DiffHistoryEntriesInput.actorIdNot?: string → actorIdsNot?:
+ReadonlyArray<string>; session-recent code from ADR-0205 with
+no external consumers contained scope matches established one-
+shot break precedent. Adapter rewritten with Set-based O(1)
+membership lookup; null actor_id never matches any UUID in
+exclusion tuple by construction (system events pass exclusion —
+operators wanting "exclude system" use --no-system instead);
+always-list error format `actor_id in ['X']` for single-value +
+`actor_id in ['X', 'Y']` for multi-value (single-value error
+breaks from ADR-0205's `actor_id 'X'` shape — acceptable since
+field rename is itself breaking; consistent rendering across
+single + multi mirrors ADR-0218 positive-side format restoring
+symmetry across positive + negative). CLI
+runRetentionDiffHistory reads via getMultiFlag("actor-id-not")
+instead of getStringFlag; no per-occurrence validation needed
+(UUIDs are free-form strings at CLI boundary matching ADR-0207/
+0210/0211/0218 pattern). JSON envelope renamed actorIdNot:
+string | null → actorIdsNot: string[] | null matching ADR-0207/
+0210/0211/0214/0217/0218 array-or-null canonical multi-value
+envelope shape across the family. Per-side --actor-id-not-a /
+--actor-id-not-b stay single-value (deferred future Q for
+ADR-0215 family). cli.ts helpText updated from [--actor-id-not
+<uuid>] to [--actor-id-not <uuid> ...] indicating repeatable +
+description extended explaining "repeatable + NEITHER event
+authored by any of the listed actors (OR-semantic exclusion) +
+match by either side on any listed actor exits 1 (anti-actor
+verification, mirror of --actor-id)". Adapter test block
+rewritten + expanded from 8 to 12 tests under renamed
+"diffHistoryEntries --actor-id-not exclusion check (M6.7.zz
+.tenant.opt-out.cli.diff-history.actor-not + .multi)" describe
+block — single-value accepts neither matches, single-value
+accepts both system, single-value throws A matches with new
+actor_id in ['X'] format, single-value throws B matches,
+single-value throws naming both, multi-value accepts neither
+has any of N excluded actors (NEW), multi-value throws A
+matches one of N with multi-value error format (NEW), multi-
+value throws naming both when both events match different
+actors in exclusion list (NEW), omits check when actorIdsNot
+not set backward compat, treats empty actorIdsNot array as
+filter-not-set (NEW), composes with --actor-id positive
+expectation check, contradictory --actor-id + --actor-id-not
+surfaces actorId check first. CLI test block rewritten +
+expanded from 6 to 10 tests under renamed "runRetention diff-
+history --actor-id-not (M6.7.zz.tenant.opt-out.cli.diff-history
+.actor-not + .multi)" describe block — threads single-element
+array when --actor-id-not set once, threads multi-element
+array when --actor-id-not repeated (NEW), omits when not set
+backward compat, composes with --actor-id, composes with
+multi-value --actor-id and multi-value --actor-id-not (NEW),
+adapter exclusion error propagates exit 1 with multi-value
+error format, JSON envelope echoes single-element array, JSON
+envelope echoes multi-element array (NEW), JSON envelope
+actorIdsNot=null when not set. Test count: 9,083 → 9,091 (+8
+net: adapter +4, CLI +4). ADR-0219 documents the design + 10
+rejected alternatives + 6 future Qs (per-side multi-value
+--actor-id-not-a / --actor-id-not-b defer, --actor-id-not
+@file.txt defer UUID lists scripted via xargs, combined
+positive/negative tuple ordering disambiguation defer current
+ordering canonical, multi-value --actor-id-not on retention
+history N/A already from ADR-0211, CLI-side dedup defer Set
+handles fine, semantic-shape exclusion grouping --exclude-
+automation-actors shorthand defer operator-policy). The
+retention CLI's diff-history global multi-value matrix is now
+COMPLETE — all 4 expectation-check dimensions on global diff-
+history are multi-value tuple expressions: --kind (ADR-0217) +
+--kind-not (ADR-0214) + --actor-id (ADR-0218) + --actor-id-not
+(this milestone). The actor + kind family has 9 consecutive
+single→multi widenings across all 3 retention surfaces. Per-
+side single-value variants remain (ADR-0215 + ADR-0216
+family); per-side multi-value tuples are the next natural batch
+of milestones. Natural follow-up milestones — per-side multi-
+value variants on diff-history (ADR-0215 + ADR-0217/0218/0219
+family — 4 deferred Qs per side dimension), multi-value --kind
+on retention history (ADR-0206 Q1), JSON envelope shape
+documentation as a family-wide ADR.
+M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi
 closes ADR-0203 Q2 by widening `--actor-id <uuid>` from
 single-value to repeated flag (OR-semantic tuple expectation
 check) on `retention diff-history` using the multiFlags
@@ -11806,6 +11910,63 @@ Natural follow-up milestones — multi-value --actor-id-not on
 global diff-history (ADR-0205 Q1 restoring within-action
 symmetry on actor dimension), per-side multi-value variants
 (ADR-0215 + ADR-0217/0218 family Qs)).
+ADR-0219 covers M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi
+(widen global --actor-id-not from single-value to repeated
+flag on retention diff-history — closes ADR-0205 Q1; ships
+multi-value tuple exclusion check "NEITHER event has any of
+these N excluded actors" using multiFlags infrastructure from
+ADR-0183; completes within-action symmetry on actor dimension
+on diff-history — both positive --actor-id (ADR-0218) and
+negative --actor-id-not are now multi-value tuple expressions
+mirroring kind dimension (--kind ADR-0217 + --kind-not
+ADR-0214); 9th consecutive single→multi rename across actor +
+kind family (ADR-0199/0200/0207/0210/0211/0214/0217/0218/0219);
+diff-history global multi-value matrix now COMPLETE — all 4
+expectation-check dimensions on global diff-history are multi-
+value (only --system-only/--no-system remain single-value
+boolean by nature); breaking adapter rename
+DiffHistoryEntriesInput.actorIdNot?: string → actorIdsNot?:
+ReadonlyArray<string> matching established one-shot break
+precedent; adapter rewritten with Set-based O(1) membership
+lookup; null actor_id never matches any UUID in exclusion
+tuple by construction (system events pass exclusion —
+operators wanting "exclude system" use --no-system); always-
+list error format `actor_id in ['X']` for single-value +
+`actor_id in ['X', 'Y']` for multi-value (single-value error
+breaks from ADR-0205's `actor_id 'X'` shape acceptable since
+field rename is itself breaking; mirrors ADR-0218 positive-
+side format restoring symmetry across positive + negative);
+CLI runRetentionDiffHistory reads via
+getMultiFlag("actor-id-not") with no per-occurrence
+validation; JSON envelope renamed actorIdNot: string | null →
+actorIdsNot: string[] | null matching array-or-null canonical
+multi-value envelope shape; per-side --actor-id-not-a /
+--actor-id-not-b stay single-value (deferred future Q); 4 new
+adapter tests + 4 new CLI tests = 8 total; test count 9,083 →
+9,091; rejected — additive actorIdsNot alongside actorIdNot
+duplication, comma-separated string breaks shell quoting,
+--actor-id-not-list canonical name inconsistent with --actor-
+id-not repeatable pattern, AND semantic on multi-value
+exclusion semantically equivalent to OR, array literal JSON
+worse UX, retain single-value `actor_id 'X'` error format
+inconsistent, per-side multi-value in same milestone scope
+creep, add IS NOT NULL handling for system events changes
+semantics, normalize expression DSL scope creep, CLI-side
+eager contradiction error duplicates adapter ordering; future
+Qs — per-side multi-value --actor-id-not-a / --actor-id-not-b
+defer, --actor-id-not @file.txt defer UUID lists scripted via
+xargs, combined positive/negative tuple ordering
+disambiguation defer current ordering canonical, multi-value
+--actor-id-not on retention history N/A already from
+ADR-0211, CLI-side dedup defer Set handles fine, semantic-
+shape exclusion grouping --exclude-automation-actors shorthand
+defer operator-policy. The retention CLI's diff-history
+global multi-value matrix is now COMPLETE. The actor + kind
+family has 9 consecutive single→multi widenings across all 3
+retention surfaces. Per-side variants are the next natural
+batch of milestones — per-side multi-value variants combining
+ADR-0215 per-side pattern with future multi-value tuples
+across 4 deferred Qs per side dimension).
 
 ## Architecture in 90 seconds
 

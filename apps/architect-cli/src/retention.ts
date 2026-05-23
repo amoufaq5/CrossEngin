@@ -1315,8 +1315,9 @@ async function runRetentionDiffHistory(
   const actorIdA = actorIdAFlag !== null ? actorIdAFlag : undefined;
   const actorIdBFlag = getStringFlag(command, "actor-id-b");
   const actorIdB = actorIdBFlag !== null ? actorIdBFlag : undefined;
-  const actorIdNotFlag = getStringFlag(command, "actor-id-not");
-  const actorIdNot = actorIdNotFlag !== null ? actorIdNotFlag : undefined;
+  const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
+  const actorIdsNot: ReadonlyArray<string> | undefined =
+    actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
   const actorIdNotAFlag = getStringFlag(command, "actor-id-not-a");
   const actorIdNotA =
     actorIdNotAFlag !== null ? actorIdNotAFlag : undefined;
@@ -1391,7 +1392,7 @@ async function runRetentionDiffHistory(
       actorIds,
       actorIdA,
       actorIdB,
-      actorIdNot,
+      actorIdsNot,
       actorIdNotA,
       actorIdNotB,
       actorPresence,
@@ -1419,7 +1420,7 @@ async function runRetentionDiffHistory(
       actorIds: actorIds ?? null,
       actorIdA: actorIdA ?? null,
       actorIdB: actorIdB ?? null,
-      actorIdNot: actorIdNot ?? null,
+      actorIdsNot: actorIdsNot ?? null,
       actorIdNotA: actorIdNotA ?? null,
       actorIdNotB: actorIdNotB ?? null,
       systemOnly: systemOnlyFlag,
