@@ -24,6 +24,7 @@ import type {
   ExpiringOptOutsInput,
   ListOptOutHistoryInput,
   OptOutHistoryEntry,
+  OptOutHistorySummaryResult,
   PostgresTraceRetention,
   PreviewRestoreTenantPolicyInput,
   RestoreTenantPolicyInput,
@@ -34,6 +35,7 @@ import type {
   RetentionRunResult,
   SetTenantOptOutInput,
   SetTenantRetentionInput,
+  SummarizeOptOutHistoryInput,
   TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -110,6 +112,8 @@ function fakeRetention(opts: {
   deleteCapture?: DeleteTenantPolicyInput[];
   historyEntries?: readonly OptOutHistoryEntry[];
   historyCapture?: ListOptOutHistoryInput[];
+  summaryResult?: OptOutHistorySummaryResult;
+  summaryCapture?: SummarizeOptOutHistoryInput[];
   restoreResult?: RestoreTenantPolicyResult;
   restoreCapture?: RestoreTenantPolicyInput[];
   diffResult?: DiffHistoryEntriesResult;
@@ -262,6 +266,23 @@ function fakeRetention(opts: {
       sql: "SELECT * FROM meta.opt_out_history (fake cross-table)",
       params: [] as unknown[],
     }),
+    buildSummarizeOptOutHistoryQuery: (
+      _input: SummarizeOptOutHistoryInput,
+    ) => ({
+      sql: "SELECT key, count FROM meta.opt_out_history (fake summary)",
+      params: [] as unknown[],
+    }),
+    summarizeOptOutHistory: async (input: SummarizeOptOutHistoryInput) => {
+      opts.summaryCapture?.push(input);
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.summaryResult ?? {
+          groupBy: input.groupBy,
+          totalCount: 0,
+          buckets: [],
+        }
+      );
+    },
     restoreTenantPolicy: async (input: RestoreTenantPolicyInput) => {
       opts.restoreCapture?.push(input);
       if (opts.throws !== undefined) throw opts.throws;
@@ -16480,4 +16501,257 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
     });
   });
 
+});
+
+describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+  function summaryResult(
+    overrides: Partial<OptOutHistorySummaryResult> = {},
+  ): OptOutHistorySummaryResult {
+    return {
+      groupBy: "kind",
+      totalCount: 16,
+      buckets: [
+        { key: "opt_out_set", count: 12 },
+        { key: "opt_out_cleared", count: 3 },
+        { key: "policy_deleted", count: 1 },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("threads default groupBy=kind to adapter", async () => {
+    const capture: SummarizeOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryCapture: capture,
+          summaryResult: summaryResult(),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.groupBy).toBe("kind");
+  });
+
+  it("threads --group-by tenant to adapter", async () => {
+    const capture: SummarizeOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--group-by", "tenant"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryCapture: capture,
+          summaryResult: summaryResult({ groupBy: "tenant", buckets: [] }),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.groupBy).toBe("tenant");
+  });
+
+  it("exits 2 on invalid --group-by", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--group-by", "bogus"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --group-by 'bogus'");
+  });
+
+  it("threads filters (tenant + kind + actor + since) to adapter", async () => {
+    const capture: SummarizeOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "summary",
+        "--tenant",
+        TENANT_A,
+        "--kind",
+        "opt_out_set",
+        "--actor-id",
+        ACTOR_ALICE,
+        "--since",
+        "2026-05-01",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryCapture: capture,
+          summaryResult: summaryResult(),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.tenantId).toBe(TENANT_A);
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
+    expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE]);
+    expect(capture[0]?.since).toBe("2026-05-01T00:00:00.000Z");
+  });
+
+  it("human format renders bucket table + total", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Summary by kind (total: 16 events)");
+    expect(out()).toContain("opt_out_set");
+    expect(out()).toContain("12");
+  });
+
+  it("human format renders <system> for null key + (no events) when empty", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--group-by", "actor"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryResult: {
+            groupBy: "actor",
+            totalCount: 0,
+            buckets: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("(no events match the given filters)");
+  });
+
+  it("JSON format emits action + groupBy + totalCount + buckets", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.action).toBe("summary");
+    expect(parsed_.groupBy).toBe("kind");
+    expect(parsed_.totalCount).toBe(16);
+    expect(parsed_.buckets).toHaveLength(3);
+  });
+
+  it("CSV format emits group-by column header + count rows", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--format=csv"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const lines = out().split("\n");
+    expect(lines[0]).toBe("kind,count");
+    expect(lines[1]).toBe("opt_out_set,12");
+  });
+
+  it("NDJSON format emits one bucket per line", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--format=ndjson"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const lines = out().split("\n").filter((l) => l.length > 0);
+    expect(lines).toHaveLength(3);
+    expect(JSON.parse(lines[0]!)).toEqual({ key: "opt_out_set", count: 12 });
+  });
+
+  it("--explain emits query plan without calling adapter", async () => {
+    const capture: SummarizeOptOutHistoryInput[] = [];
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--group-by", "tenant", "--explain", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ summaryCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture).toHaveLength(0);
+    const plan = JSON.parse(out());
+    expect(plan.action).toBe("summary");
+    expect(plan.explain).toBe(true);
+    expect(plan.groupBy).toBe("tenant");
+    expect(typeof plan.sql).toBe("string");
+  });
+
+  it("exits 2 on contradictory --kind + --kind-not", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "summary",
+        "--kind",
+        "opt_out_set",
+        "--kind-not",
+        "opt_out_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("share value(s)");
+  });
+
+  it("exits 2 on --system-only + --actor-id semantic contradiction", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "summary",
+        "--system-only",
+        "--actor-id",
+        ACTOR_ALICE,
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--system-only requires actor_id IS NULL");
+  });
+
+  it("adapter error propagates as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("summarizeOptOutHistory: connection lost"),
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(1);
+    expect(err()).toContain("retention summary:");
+    expect(err()).toContain("connection lost");
+  });
 });

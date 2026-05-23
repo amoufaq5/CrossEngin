@@ -20,6 +20,8 @@ import {
   type ExpiringOptOut,
   type OptOutHistoryEntry,
   type OptOutHistoryEventKind,
+  type OptOutHistorySummaryGroupBy,
+  type OptOutHistorySummaryResult,
   type PgConnection,
   type RestoreTenantPolicyPreview,
   type RestoreTenantPolicyResult,
@@ -116,7 +118,7 @@ export async function runRetention(
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|restore|diff-history|diff-timeline|diff|prune> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|summary|restore|diff-history|diff-timeline|diff|prune> [args]",
     );
     return 2;
   }
@@ -146,6 +148,8 @@ export async function runRetention(
         return await runRetentionListPolicies(command, ctx, handle.retention);
       case "history":
         return await runRetentionHistory(command, ctx, handle.retention);
+      case "summary":
+        return await runRetentionSummary(command, ctx, handle.retention);
       case "restore":
         return await runRetentionRestore(command, ctx, handle.retention);
       case "diff-history":
@@ -159,7 +163,7 @@ export async function runRetention(
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, restore, diff-history, diff-timeline, diff, prune`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, summary, restore, diff-history, diff-timeline, diff, prune`,
         );
         return 2;
     }
@@ -1261,6 +1265,243 @@ function formatActor(e: {
   const name = e.actorDisplayName ?? e.actorEmail;
   if (name === undefined || name === null) return e.actorId;
   return `${name} (${e.actorId})`;
+}
+
+function isSummaryGroupBy(v: string): v is OptOutHistorySummaryGroupBy {
+  return v === "kind" || v === "tenant" || v === "actor" || v === "table";
+}
+
+async function runRetentionSummary(
+  command: ParsedCommand,
+  ctx: RunContext,
+  retention: PostgresTraceRetention,
+): Promise<number> {
+  const tenantFilter = getStringFlag(command, "tenant");
+  const tableFilter = getStringFlag(command, "table");
+  const kindFlags = getMultiFlag(command, "kind");
+  const kindNotFlags = getMultiFlag(command, "kind-not");
+  const actorIdFlags = getMultiFlag(command, "actor-id");
+  const actorIds: ReadonlyArray<string> | undefined =
+    actorIdFlags.length > 0 ? actorIdFlags : undefined;
+  const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
+  const actorIdsNot: ReadonlyArray<string> | undefined =
+    actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
+  const sinceFlag = getStringFlag(command, "since");
+  const untilFlag = getStringFlag(command, "until");
+  const systemOnlyFlag = getBooleanFlag(command, "system-only");
+  const noSystemFlag = getBooleanFlag(command, "no-system");
+  const explainFlag = getBooleanFlag(command, "explain");
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(ctx.io, "retention summary: --csv-separator cannot be '\"' or newline");
+    return 2;
+  }
+  const csvSeparator = csvSeparatorFlag ?? ",";
+
+  const groupByFlag = getStringFlag(command, "group-by");
+  if (groupByFlag !== null && !isSummaryGroupBy(groupByFlag)) {
+    printError(
+      ctx.io,
+      `retention summary: invalid --group-by '${groupByFlag}' (expected one of: kind, tenant, actor, table)`,
+    );
+    return 2;
+  }
+  const groupBy: OptOutHistorySummaryGroupBy = groupByFlag ?? "kind";
+
+  if (systemOnlyFlag && noSystemFlag) {
+    printError(
+      ctx.io,
+      "retention summary: --system-only and --no-system are mutually exclusive",
+    );
+    return 2;
+  }
+  const actorPresence: "system_only" | "no_system" | undefined = systemOnlyFlag
+    ? "system_only"
+    : noSystemFlag
+      ? "no_system"
+      : undefined;
+
+  const validatedKinds: OptOutHistoryEventKind[] = [];
+  for (const kindFlag of kindFlags) {
+    if (!isOptOutHistoryEventKind(kindFlag)) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --kind '${kindFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    validatedKinds.push(kindFlag);
+  }
+  const eventKinds: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKinds.length > 0 ? validatedKinds : undefined;
+
+  const validatedKindsNot: OptOutHistoryEventKind[] = [];
+  for (const kindNotFlag of kindNotFlags) {
+    if (!isOptOutHistoryEventKind(kindNotFlag)) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --kind-not '${kindNotFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    validatedKindsNot.push(kindNotFlag);
+  }
+  const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
+
+  const contradictoryKinds = findContradictoryValues(eventKinds, eventKindsNot);
+  if (contradictoryKinds.length > 0) {
+    const list = contradictoryKinds.map((k) => `'${k}'`).join(", ");
+    printError(
+      ctx.io,
+      `retention summary: --kind and --kind-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
+  const contradictoryActors = findContradictoryValues(actorIds, actorIdsNot);
+  if (contradictoryActors.length > 0) {
+    const list = contradictoryActors.map((a) => `'${a}'`).join(", ");
+    printError(
+      ctx.io,
+      `retention summary: --actor-id and --actor-id-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
+  if (actorPresence === "system_only" && actorIds !== undefined) {
+    printError(
+      ctx.io,
+      "retention summary: --system-only requires actor_id IS NULL but --actor-id requires a non-null UUID — empty result by construction",
+    );
+    return 2;
+  }
+
+  let since: string | undefined;
+  if (sinceFlag !== null) {
+    const ms = Date.parse(sinceFlag);
+    if (!Number.isFinite(ms)) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --since '${sinceFlag}' (must be an ISO 8601 timestamp)`,
+      );
+      return 2;
+    }
+    since = new Date(ms).toISOString();
+  }
+  let until: string | undefined;
+  if (untilFlag !== null) {
+    const ms = Date.parse(untilFlag);
+    if (!Number.isFinite(ms)) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --until '${untilFlag}' (must be an ISO 8601 timestamp)`,
+      );
+      return 2;
+    }
+    until = new Date(ms).toISOString();
+  }
+
+  const summaryInput = {
+    tenantId: tenantFilter ?? undefined,
+    tableName: tableFilter ?? undefined,
+    eventKinds,
+    eventKindsNot,
+    actorIds,
+    actorIdsNot,
+    actorPresence,
+    since,
+    until,
+    groupBy,
+  };
+
+  if (explainFlag) {
+    const { sql, params } = retention.buildSummarizeOptOutHistoryQuery(summaryInput);
+    const plan = {
+      action: "summary",
+      explain: true,
+      executed: false,
+      groupBy,
+      filters: {
+        tenantId: tenantFilter ?? null,
+        tableName: tableFilter ?? null,
+        kinds: eventKinds ?? null,
+        kindsNot: eventKindsNot ?? null,
+        actorIds: actorIds ?? null,
+        actorIdsNot: actorIdsNot ?? null,
+        actorPresence: actorPresence ?? null,
+        since: since ?? null,
+        until: until ?? null,
+      },
+      sql,
+      params,
+    };
+    if (command.format !== "human") {
+      printJson(ctx.io, plan);
+    } else {
+      ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
+    }
+    return 0;
+  }
+
+  let result: OptOutHistorySummaryResult;
+  try {
+    result = await retention.summarizeOptOutHistory(summaryInput);
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention summary: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "summary",
+      groupBy: result.groupBy,
+      totalCount: result.totalCount,
+      buckets: result.buckets,
+    });
+    return 0;
+  }
+  if (
+    command.format === "csv" ||
+    command.format === "tsv" ||
+    command.format === "ndjson"
+  ) {
+    if (command.format === "ndjson") {
+      printNdjson(ctx.io, result.buckets);
+      return 0;
+    }
+    const headers = [groupBy, "count"];
+    const rows = result.buckets.map((b) => [b.key, b.count]);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, rows);
+    } else {
+      printCsv(ctx.io, headers, rows, csvSeparator);
+    }
+    return 0;
+  }
+
+  ctx.io.stdout.write(formatSummary(result));
+  return 0;
+}
+
+function formatSummary(result: OptOutHistorySummaryResult): string {
+  const lines: string[] = [
+    `Summary by ${result.groupBy} (total: ${result.totalCount.toString()} events)`,
+  ];
+  if (result.buckets.length === 0) {
+    lines.push("  (no events match the given filters)");
+    return lines.join("\n") + "\n";
+  }
+  const keyWidth = Math.max(
+    ...result.buckets.map((b) => (b.key ?? "<system>").length),
+    10,
+  );
+  for (const b of result.buckets) {
+    const key = (b.key ?? "<system>").padEnd(keyWidth);
+    lines.push(`  ${key}  ${b.count.toString().padStart(8)}`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 async function runRetentionDelete(

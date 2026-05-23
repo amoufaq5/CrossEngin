@@ -285,6 +285,36 @@ export interface ListOptOutHistoryInput {
   readonly joinActor?: boolean;
 }
 
+export type OptOutHistorySummaryGroupBy =
+  | "kind"
+  | "tenant"
+  | "actor"
+  | "table";
+
+export interface SummarizeOptOutHistoryInput {
+  readonly tenantId?: string;
+  readonly tableName?: string;
+  readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
+  readonly eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
+  readonly actorIds?: ReadonlyArray<string>;
+  readonly actorIdsNot?: ReadonlyArray<string>;
+  readonly actorPresence?: ActorPresenceFilter;
+  readonly since?: string;
+  readonly until?: string;
+  readonly groupBy: OptOutHistorySummaryGroupBy;
+}
+
+export interface OptOutHistorySummaryBucket {
+  readonly key: string | null;
+  readonly count: number;
+}
+
+export interface OptOutHistorySummaryResult {
+  readonly groupBy: OptOutHistorySummaryGroupBy;
+  readonly totalCount: number;
+  readonly buckets: ReadonlyArray<OptOutHistorySummaryBucket>;
+}
+
 export interface RestoreTenantPolicyInput {
   readonly historyId: string;
   readonly actorId?: string | null;
@@ -1462,6 +1492,113 @@ export class PostgresTraceRetention {
       }
       return entry;
     });
+  }
+
+  buildSummarizeOptOutHistoryQuery(input: SummarizeOptOutHistoryInput): {
+    sql: string;
+    params: unknown[];
+  } {
+    const groupColumn: Record<OptOutHistorySummaryGroupBy, string> = {
+      kind: "h.event_kind",
+      tenant: "h.tenant_id",
+      actor: "h.actor_id",
+      table: "h.table_name",
+    };
+    const col = groupColumn[input.groupBy];
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (input.tenantId !== undefined) {
+      params.push(input.tenantId);
+      conditions.push(`h.tenant_id = $${params.length}`);
+    }
+    if (input.tableName !== undefined) {
+      params.push(input.tableName);
+      conditions.push(`h.table_name = $${params.length}`);
+    }
+    if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
+      const placeholders = input.eventKinds
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.event_kind IN (${placeholders})`);
+    }
+    if (
+      input.eventKindsNot !== undefined &&
+      input.eventKindsNot.length > 0
+    ) {
+      const placeholders = input.eventKindsNot
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.event_kind NOT IN (${placeholders})`);
+    }
+    if (input.actorIds !== undefined && input.actorIds.length > 0) {
+      const placeholders = input.actorIds
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.actor_id IN (${placeholders})`);
+    }
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const placeholders = input.actorIdsNot
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(
+        `(h.actor_id IS NULL OR h.actor_id NOT IN (${placeholders}))`,
+      );
+    }
+    if (input.actorPresence === "system_only") {
+      conditions.push(`h.actor_id IS NULL`);
+    } else if (input.actorPresence === "no_system") {
+      conditions.push(`h.actor_id IS NOT NULL`);
+    }
+    if (input.since !== undefined) {
+      params.push(input.since);
+      conditions.push(`h.occurred_at >= $${params.length}`);
+    }
+    if (input.until !== undefined) {
+      params.push(input.until);
+      conditions.push(`h.occurred_at <= $${params.length}`);
+    }
+    const where =
+      conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const sql = `SELECT ${col} AS key, COUNT(*)::bigint AS count
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${where}
+       GROUP BY ${col}
+       ORDER BY COUNT(*) DESC, ${col} ASC`;
+    return { sql, params };
+  }
+
+  async summarizeOptOutHistory(
+    input: SummarizeOptOutHistoryInput,
+  ): Promise<OptOutHistorySummaryResult> {
+    const { sql, params } = this.buildSummarizeOptOutHistoryQuery(input);
+    const result = await this.conn.query<{
+      key: string | null;
+      count: string | number;
+    }>(sql, params);
+    let totalCount = 0;
+    const buckets = result.rows.map((r) => {
+      const count =
+        typeof r.count === "string" ? Number.parseInt(r.count, 10) : r.count;
+      totalCount += count;
+      return { key: r.key, count };
+    });
+    return {
+      groupBy: input.groupBy,
+      totalCount,
+      buckets,
+    };
   }
 
   async restoreTenantPolicy(

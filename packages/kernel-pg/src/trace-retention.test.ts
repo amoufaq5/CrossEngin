@@ -10882,3 +10882,130 @@ describe("PostgresTraceRetention query builders (M6.7.zz.tenant.opt-out.cli.expl
     ).toThrow(/at least 2 tableNames required/);
   });
 });
+
+describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.cli.summary)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+  it("buildSummarizeOptOutHistoryQuery groups by event_kind (default dimension)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "kind" });
+    expect(sql).toContain("SELECT h.event_kind AS key, COUNT(*)::bigint AS count");
+    expect(sql).toContain("GROUP BY h.event_kind");
+    expect(sql).toContain("ORDER BY COUNT(*) DESC, h.event_kind ASC");
+  });
+
+  it("buildSummarizeOptOutHistoryQuery groups by tenant", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "tenant" });
+    expect(sql).toContain("h.tenant_id AS key");
+    expect(sql).toContain("GROUP BY h.tenant_id");
+  });
+
+  it("buildSummarizeOptOutHistoryQuery groups by actor", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "actor" });
+    expect(sql).toContain("h.actor_id AS key");
+    expect(sql).toContain("GROUP BY h.actor_id");
+  });
+
+  it("buildSummarizeOptOutHistoryQuery groups by table", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "table" });
+    expect(sql).toContain("h.table_name AS key");
+    expect(sql).toContain("GROUP BY h.table_name");
+  });
+
+  it("buildSummarizeOptOutHistoryQuery applies filters in WHERE clause", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      tenantId: TENANT_A,
+      eventKinds: ["opt_out_set", "opt_out_cleared"],
+      since: "2026-05-01T00:00:00.000Z",
+    });
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("h.event_kind IN ($2, $3)");
+    expect(sql).toContain("h.occurred_at >= $4");
+    expect(params).toEqual([
+      TENANT_A,
+      "opt_out_set",
+      "opt_out_cleared",
+      "2026-05-01T00:00:00.000Z",
+    ]);
+  });
+
+  it("buildSummarizeOptOutHistoryQuery applies actorPresence system_only", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      actorPresence: "system_only",
+    });
+    expect(sql).toContain("h.actor_id IS NULL");
+  });
+
+  it("summarizeOptOutHistory parses bigint count + computes totalCount", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        { key: "opt_out_set", count: "12" },
+        { key: "opt_out_cleared", count: "3" },
+        { key: "policy_deleted", count: "1" },
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({ groupBy: "kind" });
+    expect(result.groupBy).toBe("kind");
+    expect(result.totalCount).toBe(16);
+    expect(result.buckets).toEqual([
+      { key: "opt_out_set", count: 12 },
+      { key: "opt_out_cleared", count: 3 },
+      { key: "policy_deleted", count: 1 },
+    ]);
+  });
+
+  it("summarizeOptOutHistory handles numeric count (non-string driver)", async () => {
+    const conn = mockConnection(() => ({
+      rows: [{ key: ACTOR_ALICE, count: 5 }],
+      rowCount: 1,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({ groupBy: "actor" });
+    expect(result.totalCount).toBe(5);
+    expect(result.buckets[0]).toEqual({ key: ACTOR_ALICE, count: 5 });
+  });
+
+  it("summarizeOptOutHistory preserves null key (system actor) in buckets", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        { key: null, count: "4" },
+        { key: ACTOR_ALICE, count: "2" },
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({ groupBy: "actor" });
+    expect(result.buckets[0]?.key).toBeNull();
+    expect(result.totalCount).toBe(6);
+  });
+
+  it("summarizeOptOutHistory returns empty buckets + zero total when no rows", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({ groupBy: "kind" });
+    expect(result.totalCount).toBe(0);
+    expect(result.buckets).toEqual([]);
+  });
+});

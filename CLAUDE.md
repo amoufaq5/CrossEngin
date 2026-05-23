@@ -21,15 +21,90 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,257 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator
+**56 packages + 1 app, 129 meta-schema tables, 9,280 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary
+adds a NEW `retention summary` action (15th retention CLI
+action) — aggregate opt-out/policy mutation history counts
+grouped by one dimension (kind/tenant/actor/table) with the
+existing filter family. Operator-dashboard backing without
+custom SQL; server-side GROUP BY efficient for large audit
+logs. Operator use cases — kind breakdown (12 opt_out_set, 3
+opt_out_cleared, 1 policy_deleted), tenant cohort report
+(--group-by tenant --since 2026-05-01), actor leaderboard
+(which actors drive most mutations null → <system>), table
+distribution (mutations per prunable table), filtered
+aggregation (compose with --kind/--actor-id-not/--system-only/
+--since/--until). Adapter — new OptOutHistorySummaryGroupBy
+type (kind|tenant|actor|table) + SummarizeOptOutHistoryInput
+(reuses filter family tenantId/tableName/eventKinds/
+eventKindsNot/actorIds/actorIdsNot/actorPresence/since/until +
+groupBy) + OptOutHistorySummaryBucket {key, count} +
+OptOutHistorySummaryResult {groupBy, totalCount, buckets};
+buildSummarizeOptOutHistoryQuery following ADR-0229 builder
+pattern for --explain + summarizeOptOutHistory method. SQL
+shape SELECT <group-col> AS key, COUNT(*)::bigint AS count
+FROM history WHERE <filters> GROUP BY <group-col> ORDER BY
+COUNT(*) DESC, <group-col> ASC; group-col maps kind →
+h.event_kind, tenant → h.tenant_id, actor → h.actor_id (null
+preserved → <system> in human format), table → h.table_name;
+COUNT(*)::bigint cast + adapter parses string bigint into JS
+number accumulating totalCount. CLI runRetentionSummary
+parses --group-by (default kind invalid → exit 2) + full
+filter family + --format/--explain/--csv-separator; reuses
+contradiction detection ADR-0226 same-dimension + ADR-0230
+cross-dimensional (--kind X --kind-not X, --actor-id Y
+--actor-id-not Y, --system-only --actor-id Z all exit 2).
+Output formats — human "Summary by {dim} (total: N events)"
++ aligned key/count table null → <system> empty → "(no events
+match the given filters)", json {action, groupBy, totalCount,
+buckets}, csv/tsv header {dim},count + bucket rows, ndjson one
+bucket per line, --explain query plan + raw SQL via builder.
+Dispatch + help — added summary to retention action dispatch
++ usage strings + dedicated help block documenting group-by
+dimensions + filter reuse + format support. Adapter test
+block NEW "PostgresTraceRetention.summarizeOptOutHistory"
+describe with 10 tests — builder groups by kind/tenant/actor/
+table (4 tests), builder applies filters in WHERE, builder
+applies actorPresence system_only, method parses bigint count
++ computes totalCount, method handles numeric count non-string
+driver, method preserves null key system actor, method returns
+empty buckets + zero total. CLI test block NEW "runRetention
+summary" describe with 13 tests — threads default groupBy=kind,
+threads --group-by tenant, exits 2 on invalid --group-by,
+threads filters tenant+kind+actor+since, human format renders
+bucket table + total, human format <system> + (no events)
+empty, JSON format action+groupBy+totalCount+buckets, CSV
+format group-by column header + count rows, NDJSON one bucket
+per line, --explain query plan without adapter call, exits 2
+contradictory --kind+--kind-not, exits 2 --system-only+
+--actor-id semantic, adapter error propagates exit 1. Test
+count: 9,257 → 9,280 (+23 net: 10 adapter + 13 CLI). ADR-0232
+documents the design + 10 rejected alternatives + 6 future Qs
+(multi-dimensional group-by composite buckets defer, time-
+bucket grouping --group-by day|hour|week date_trunc +
+timezone defer high-value follow-up, --top N limit defer
+operators head, HAVING-style --min-count defer post-filter,
+percentage/cumulative columns defer compute from count/total,
+summary across diff-timeline/diff-history N/A comparison
+surfaces not aggregatable). The retention CLI now has 15
+actions; summary is the first aggregate-reporting surface
+reusing the established filter family + contradiction
+detection + output formats + query builder pattern. Time-
+bucket grouping (--group-by day) is the natural follow-up for
+histogram-style retention activity reports. Natural follow-up
+milestones — retention summary time-bucket grouping (ADR-0232
+Q1 — --group-by day|hour|week), --explain-analyze actual
+EXPLAIN ANALYZE execution (ADR-0229 Q2), --format=yaml
+(ADR-0231 Q1), or move beyond retention to other Phase 2
+deferred Qs.
+M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator
 closes ADR-0227 future Qs 1 + 3 + 4 in a single bulk milestone
 adding 3 new output format options to the retention CLI:
 --format=tsv (tab-separated values for shell pipelines using
@@ -13451,6 +13526,36 @@ defer. The retention CLI now has 5 output format options
 across all 3 surfaces; operator workflows covered spreadsheets
 + shell pipelines + log aggregators + data analysis; pattern
 documented for future format variants).
+ADR-0232 covers M6.7.zz.tenant.opt-out.cli.summary (retention
+CLI summary action — NEW aggregate-reporting surface; 15th
+retention CLI action; aggregates opt-out/policy mutation
+history counts grouped by one dimension kind/tenant/actor/
+table with existing filter family; operator-dashboard backing
+without custom SQL server-side GROUP BY efficient for large
+audit logs; adapter OptOutHistorySummaryGroupBy +
+SummarizeOptOutHistoryInput reuses filter family +
+OptOutHistorySummaryResult {groupBy, totalCount, buckets};
+buildSummarizeOptOutHistoryQuery ADR-0229 builder pattern +
+summarizeOptOutHistory method; SQL SELECT group-col AS key
+COUNT(*)::bigint GROUP BY group-col ORDER BY count DESC key
+ASC; CLI runRetentionSummary --group-by default kind invalid
+exit 2 + full filter family + reuses contradiction detection
+ADR-0226/0230; output formats human aligned table null →
+<system> + json + csv/tsv + ndjson + --explain raw SQL; 10
+adapter tests + 13 CLI tests = 23 new tests test count 9,257
+→ 9,280; rejected — multi-dimensional group-by composite
+buckets defer, time-bucket grouping defer high-value follow-
+up, --top N defer operators head, HAVING --min-count defer,
+percentage/cumulative columns defer, summary across diff-
+timeline/diff-history N/A comparison surfaces; future Qs —
+time-bucket grouping --group-by day|hour|week date_trunc
+defer high-value, multi-dimensional group-by defer, --top N
+defer, --min-count defer, percentage columns defer, summary
+across other surfaces N/A. The retention CLI now has 15
+actions; summary is first aggregate-reporting surface reusing
+filter family + contradiction detection + output formats +
+query builder pattern; time-bucket grouping natural follow-
+up).
 
 ## Architecture in 90 seconds
 
