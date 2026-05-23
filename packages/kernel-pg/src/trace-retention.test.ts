@@ -11165,4 +11165,121 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(result.buckets[0]).toEqual({ key: "opt_out_set", count: 12 });
     expect("subKey" in result.buckets[0]!).toBe(false);
   });
+
+  it("fillGaps: generates zero-count buckets via generate_series + LEFT JOIN", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      fillGaps: true,
+      since: "2026-05-01T00:00:00.000Z",
+      until: "2026-05-07T00:00:00.000Z",
+    });
+    expect(sql).toContain("generate_series(");
+    expect(sql).toContain(
+      "date_trunc('day', $1::timestamptz AT TIME ZONE 'UTC')",
+    );
+    expect(sql).toContain(
+      "date_trunc('day', $2::timestamptz AT TIME ZONE 'UTC')",
+    );
+    expect(sql).toContain("interval '1 day'");
+    expect(sql).toContain("LEFT JOIN meta.tenant_retention_opt_out_history h");
+    expect(sql).toContain("COUNT(h.id)::bigint AS count");
+    expect(sql).toContain("h.occurred_at >= $1");
+    expect(sql).toContain("h.occurred_at <= $2");
+    expect(params).toEqual([
+      "2026-05-01T00:00:00.000Z",
+      "2026-05-07T00:00:00.000Z",
+    ]);
+  });
+
+  it("fillGaps: filters live in the LEFT JOIN ON clause (zero buckets survive)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      fillGaps: true,
+      since: "2026-05-01T00:00:00.000Z",
+      until: "2026-05-07T00:00:00.000Z",
+      eventKinds: ["opt_out_set"],
+      tenantId: "00000000-0000-4000-8000-00000000000A",
+    });
+    // filters in ON clause, not WHERE, so empty buckets still appear
+    expect(sql).not.toContain("WHERE");
+    expect(sql).toContain("h.event_kind IN ($4)");
+    expect(sql).toContain("h.tenant_id = $3");
+    expect(params).toEqual([
+      "2026-05-01T00:00:00.000Z",
+      "2026-05-07T00:00:00.000Z",
+      "00000000-0000-4000-8000-00000000000A",
+      "opt_out_set",
+    ]);
+  });
+
+  it("fillGaps: throws when groupBy is not temporal", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    expect(() =>
+      r.buildSummarizeOptOutHistoryQuery({
+        groupBy: "kind",
+        fillGaps: true,
+        since: "2026-05-01T00:00:00.000Z",
+        until: "2026-05-07T00:00:00.000Z",
+      }),
+    ).toThrow(/fillGaps requires a temporal groupBy/);
+  });
+
+  it("fillGaps: throws when since or until is missing", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    expect(() =>
+      r.buildSummarizeOptOutHistoryQuery({
+        groupBy: "day",
+        fillGaps: true,
+        since: "2026-05-01T00:00:00.000Z",
+      }),
+    ).toThrow(/fillGaps requires both since and until/);
+  });
+
+  it("fillGaps: throws when thenBy (cross-tab) is set", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    expect(() =>
+      r.buildSummarizeOptOutHistoryQuery({
+        groupBy: "day",
+        thenBy: "kind",
+        fillGaps: true,
+        since: "2026-05-01T00:00:00.000Z",
+        until: "2026-05-07T00:00:00.000Z",
+      }),
+    ).toThrow(/fillGaps is not supported with thenBy/);
+  });
+
+  it("fillGaps: summarizeOptOutHistory returns zero-count buckets for empty days", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        { key: "2026-05-01 00:00:00", count: "5" },
+        { key: "2026-05-02 00:00:00", count: "0" },
+        { key: "2026-05-03 00:00:00", count: "2" },
+      ],
+      rowCount: 3,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({
+      groupBy: "day",
+      fillGaps: true,
+      since: "2026-05-01T00:00:00.000Z",
+      until: "2026-05-03T00:00:00.000Z",
+    });
+    expect(result.totalCount).toBe(7);
+    expect(result.buckets[1]).toEqual({
+      key: "2026-05-02 00:00:00",
+      count: 0,
+    });
+  });
 });

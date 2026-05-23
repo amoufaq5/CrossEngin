@@ -17146,4 +17146,167 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       expect(plan.thenBy).toBe("day");
     });
   });
+
+  describe("gap-filling (--fill-gaps)", () => {
+    it("threads fillGaps to adapter when --group-by temporal + --since + --until", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-07",
+          "--fill-gaps",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: "day", totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.fillGaps).toBe(true);
+    });
+
+    it("exits 2 when --fill-gaps used with categorical --group-by", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "kind",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-07",
+          "--fill-gaps",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--fill-gaps requires a temporal --group-by",
+      );
+    });
+
+    it("exits 2 when --fill-gaps used without --since/--until", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--fill-gaps",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--fill-gaps requires both --since and --until",
+      );
+    });
+
+    it("exits 2 when --fill-gaps combined with --then-by", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "kind",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-07",
+          "--fill-gaps",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--fill-gaps is not supported with --then-by");
+    });
+
+    it("human format renders zero-count buckets for empty days", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-03",
+          "--fill-gaps",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryResult: {
+              groupBy: "day",
+              totalCount: 7,
+              buckets: [
+                { key: "2026-05-01 00:00:00", count: 5 },
+                { key: "2026-05-02 00:00:00", count: 0 },
+                { key: "2026-05-03 00:00:00", count: 2 },
+              ],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("2026-05-02 00:00:00");
+      // the zero-count day appears in output
+      const lines = out().split("\n");
+      const zeroLine = lines.find((l) => l.includes("2026-05-02"));
+      expect(zeroLine).toContain("0");
+    });
+
+    it("--explain plan includes fillGaps=true + generate_series in SQL note", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-07",
+          "--fill-gaps",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.fillGaps).toBe(true);
+    });
+  });
 });

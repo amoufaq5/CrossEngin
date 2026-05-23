@@ -21,15 +21,82 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,304 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.cross-tab
+**56 packages + 1 app, 129 meta-schema tables, 9,316 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.gap-fill
+closes ADR-0234 Q4 + ADR-0235 Q3 by adding --fill-gaps flag
+emitting zero-count buckets for empty time periods via
+generate_series + LEFT JOIN. GROUP BY only emits buckets for
+periods with events so empty days vanish leaving histogram
+gaps; --fill-gaps makes empty periods show count=0 for
+continuous charting-ready series. Operator use cases —
+continuous daily histogram (--group-by day --since --until
+--fill-gaps one row per day including zero-activity days),
+incident hourly timeline (every hour shown even quiet ones),
+charting-ready output (gap-filled CSV/ndjson feeds plotting
+tools without client-side gap interpolation). Preconditions
+(validated CLI-side + adapter-side defense-in-depth) — (1)
+temporal --group-by day/hour/week/month categorical dimensions
+have unbounded/non-enumerable domains gap-filling meaningless
+exit 2, (2) both --since AND --until bucket range must be
+bounded unbounded gap-filling impossible exit 2, (3) NOT
+--then-by cross-tab gap-filling needs cartesian product
+deferred exit 2. SQL generate_series + LEFT JOIN — SELECT
+b.bucket::text AS key COUNT(h.id)::bigint FROM generate_series(
+date_trunc('<unit>', $1 AT TIME ZONE 'UTC'), date_trunc(...,
+$2...), interval '1 <unit>') AS b(bucket) LEFT JOIN history h
+ON date_trunc(occurred_at) = b.bucket AND occurred_at >= $1
+AND occurred_at <= $2 [AND filters] GROUP BY b.bucket ORDER BY
+b.bucket ASC. Key design — (1) generate_series spans range
+every period appears even with no events, (2) COUNT(h.id) not
+COUNT(*) COUNT(*) counts bucket row 1 even empty COUNT(h.id)
+counts non-null joined event IDs 0 for empty, (3) filters in
+LEFT JOIN ON clause NOT WHERE if in WHERE LEFT JOIN
+degenerates to INNER zero-count buckets vanish ON preserves
+them canonical LEFT-JOIN-filtered-right-side pattern, (4)
+since/until reused $1/$2 bound both generate_series range AND
+event occurred_at range, (5) $1/$2 first filters $3+ gap-
+filling builds own param order. Adapter — SummarizeOptOut
+HistoryInput gains fillGaps?: boolean; builder branches to
+private buildGapFilledSummaryQuery when fillGaps true;
+summarizeOptOutHistory unchanged parses bigint including
+explicit zeros. CLI --fill-gaps boolean flag with 3
+precondition validations + threads fillGaps + --explain echoes
+fillGaps. All output formats render zero-count buckets
+identically (count: 0). Adapter test block extended — 6 gap-
+filling tests: generates zero-count buckets via generate_series
++ LEFT JOIN, filters in ON clause not WHERE zero buckets
+survive, throws non-temporal groupBy, throws missing since/
+until, throws thenBy cross-tab, summarize returns zero-count
+buckets for empty days. CLI test block NEW "gap-filling
+(--fill-gaps)" describe with 6 tests: threads fillGaps temporal
++ since + until, exits 2 categorical group-by, exits 2 without
+since/until, exits 2 combined with --then-by, human format
+renders zero-count buckets, --explain plan includes fillGaps.
+Test count: 9,304 → 9,316 (+12 net: 6 adapter + 6 CLI).
+ADR-0236 documents the design + 8 rejected alternatives + 6
+future Qs (cross-tab gap-filling cartesian product defer
+ADR-0235 Q3 family, categorical gap-filling bounded kind defer
+inconsistent, --fill-gaps default range from data min/max
+defer explicit clearer, custom timezone gap-fill defer
+ADR-0234 Q1, sparse-to-dense threshold defer operators control
+via range, generate_series performance large ranges document
+cardinality defer). The retention summary action now supports
+single-dimension (8 dimensions) + cross-tab (any × any) +
+gap-filled temporal histograms; the generate_series + LEFT
+JOIN ON-clause-filter pattern is the foundation for future
+cross-tab + categorical gap-filling. Natural follow-up
+milestones — cross-tab gap-filling (ADR-0236 Q1), --explain-
+analyze actual EXPLAIN ANALYZE (ADR-0229 Q2), --format=yaml
+(ADR-0231 Q1), or move beyond retention to other Phase 2
+deferred Qs.
+M6.7.zz.tenant.opt-out.cli.summary.cross-tab
 closes ADR-0232 Q2 + ADR-0234 Q3 by adding optional --then-by
 <dimension> second grouping dimension to retention summary
 producing cross-tab composite {key, subKey, count} buckets.
@@ -13822,6 +13889,33 @@ filling cells defer, cross-tab totals GROUPING SETS defer,
 group defer. The summary action now supports single-dimension
 8 dimensions + cross-tab any × any distinct pair; long-format
 cross-tab is foundation for future pivot + gap-filling + n-way).
+ADR-0236 covers M6.7.zz.tenant.opt-out.cli.summary.gap-fill
+(retention summary gap-filling --fill-gaps zero-count buckets
+— closes ADR-0234 Q4 + ADR-0235 Q3; emits zero-count buckets
+for empty time periods via generate_series + LEFT JOIN so
+histograms have no gaps; 3 preconditions temporal group-by +
+since/until bounded + no then-by validated CLI-side + adapter
+defense-in-depth; SQL generate_series spans range + COUNT(h.id)
+not COUNT(*) for zero-count + filters in LEFT JOIN ON clause
+not WHERE preserve zero buckets canonical pattern + since/until
+reused $1/$2; adapter fillGaps?: boolean + private
+buildGapFilledSummaryQuery branch; CLI --fill-gaps flag + 3
+validations + threads + --explain echoes; all formats render
+zero-count identically; 6 adapter tests + 6 CLI tests; test
+count 9,304 → 9,316; rejected — gap-fill categorical unbounded
+domains defer, default range from data min/max two round-trips,
+filters in WHERE degenerates LEFT JOIN, COUNT(*) counts bucket
+row, client-side gap-filling SQL canonical, cross-tab gap-fill
+same milestone complex defer, --fill-gaps to now() non-
+deterministic, separate histogram action duplicates filters;
+future Qs — cross-tab gap-filling cartesian defer, categorical
+gap-fill bounded kind defer, default range defer, custom
+timezone defer, sparse-to-dense threshold defer, generate_
+series performance large ranges defer. The summary action now
+supports single-dimension + cross-tab + gap-filled temporal
+histograms; generate_series + LEFT JOIN ON-clause-filter
+pattern is foundation for future cross-tab + categorical gap-
+filling).
 
 ## Architecture in 90 seconds
 

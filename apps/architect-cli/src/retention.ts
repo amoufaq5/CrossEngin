@@ -1427,6 +1427,32 @@ async function runRetentionSummary(
     until = new Date(ms).toISOString();
   }
 
+  const fillGaps = getBooleanFlag(command, "fill-gaps");
+  if (fillGaps) {
+    const TEMPORAL = new Set(["day", "hour", "week", "month"]);
+    if (!TEMPORAL.has(groupBy)) {
+      printError(
+        ctx.io,
+        `retention summary: --fill-gaps requires a temporal --group-by (day, hour, week, month), got '${groupBy}'`,
+      );
+      return 2;
+    }
+    if (since === undefined || until === undefined) {
+      printError(
+        ctx.io,
+        "retention summary: --fill-gaps requires both --since and --until to bound the time range",
+      );
+      return 2;
+    }
+    if (thenBy !== undefined) {
+      printError(
+        ctx.io,
+        "retention summary: --fill-gaps is not supported with --then-by (cross-tab gap-filling not implemented)",
+      );
+      return 2;
+    }
+  }
+
   const summaryInput = {
     tenantId: tenantFilter ?? undefined,
     tableName: tableFilter ?? undefined,
@@ -1439,6 +1465,7 @@ async function runRetentionSummary(
     until,
     groupBy,
     thenBy,
+    fillGaps,
   };
 
   if (explainFlag) {
@@ -1449,6 +1476,7 @@ async function runRetentionSummary(
       executed: false,
       groupBy,
       thenBy: thenBy ?? null,
+      fillGaps,
       filters: {
         tenantId: tenantFilter ?? null,
         tableName: tableFilter ?? null,

@@ -307,6 +307,7 @@ export interface SummarizeOptOutHistoryInput {
   readonly until?: string;
   readonly groupBy: OptOutHistorySummaryGroupBy;
   readonly thenBy?: OptOutHistorySummaryGroupBy;
+  readonly fillGaps?: boolean;
 }
 
 export interface OptOutHistorySummaryBucket {
@@ -1501,10 +1502,112 @@ export class PostgresTraceRetention {
     });
   }
 
+  private buildGapFilledSummaryQuery(
+    input: SummarizeOptOutHistoryInput,
+    temporalUnit: Partial<Record<OptOutHistorySummaryGroupBy, string>>,
+  ): { sql: string; params: unknown[] } {
+    const unit = temporalUnit[input.groupBy];
+    if (unit === undefined) {
+      throw new Error(
+        "summarizeOptOutHistory: fillGaps requires a temporal groupBy (day, hour, week, month)",
+      );
+    }
+    if (input.since === undefined || input.until === undefined) {
+      throw new Error(
+        "summarizeOptOutHistory: fillGaps requires both since and until to bound the time range",
+      );
+    }
+    if (input.thenBy !== undefined) {
+      throw new Error(
+        "summarizeOptOutHistory: fillGaps is not supported with thenBy (cross-tab)",
+      );
+    }
+    // since=$1, until=$2 (used for both generate_series bounds AND
+    // the LEFT JOIN occurred_at range); other filters follow as $3+.
+    const params: unknown[] = [input.since, input.until];
+    const joinConditions: string[] = [
+      `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC') = b.bucket`,
+      `h.occurred_at >= $1`,
+      `h.occurred_at <= $2`,
+    ];
+    if (input.tenantId !== undefined) {
+      params.push(input.tenantId);
+      joinConditions.push(`h.tenant_id = $${params.length}`);
+    }
+    if (input.tableName !== undefined) {
+      params.push(input.tableName);
+      joinConditions.push(`h.table_name = $${params.length}`);
+    }
+    if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
+      const placeholders = input.eventKinds
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      joinConditions.push(`h.event_kind IN (${placeholders})`);
+    }
+    if (
+      input.eventKindsNot !== undefined &&
+      input.eventKindsNot.length > 0
+    ) {
+      const placeholders = input.eventKindsNot
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      joinConditions.push(`h.event_kind NOT IN (${placeholders})`);
+    }
+    if (input.actorIds !== undefined && input.actorIds.length > 0) {
+      const placeholders = input.actorIds
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      joinConditions.push(`h.actor_id IN (${placeholders})`);
+    }
+    if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
+      const placeholders = input.actorIdsNot
+        .map((actorId) => {
+          params.push(actorId);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      joinConditions.push(
+        `(h.actor_id IS NULL OR h.actor_id NOT IN (${placeholders}))`,
+      );
+    }
+    if (input.actorPresence === "system_only") {
+      joinConditions.push(`h.actor_id IS NULL`);
+    } else if (input.actorPresence === "no_system") {
+      joinConditions.push(`h.actor_id IS NOT NULL`);
+    }
+    const sql = `SELECT b.bucket::text AS key, COUNT(h.id)::bigint AS count
+       FROM generate_series(
+         date_trunc('${unit}', $1::timestamptz AT TIME ZONE 'UTC'),
+         date_trunc('${unit}', $2::timestamptz AT TIME ZONE 'UTC'),
+         interval '1 ${unit}'
+       ) AS b(bucket)
+       LEFT JOIN ${SCHEMA}.${HISTORY_TABLE} h ON ${joinConditions.join(" AND ")}
+       GROUP BY b.bucket
+       ORDER BY b.bucket ASC`;
+    return { sql, params };
+  }
+
   buildSummarizeOptOutHistoryQuery(input: SummarizeOptOutHistoryInput): {
     sql: string;
     params: unknown[];
   } {
+    const temporalUnit: Partial<
+      Record<OptOutHistorySummaryGroupBy, string>
+    > = {
+      day: "day",
+      hour: "hour",
+      week: "week",
+      month: "month",
+    };
     const resolveDimension = (
       dim: OptOutHistorySummaryGroupBy,
     ): { col: string; keyExpr: string; isTemporal: boolean } => {
@@ -1516,14 +1619,6 @@ export class PostgresTraceRetention {
         actor: "h.actor_id",
         table: "h.table_name",
       };
-      const temporalUnit: Partial<
-        Record<OptOutHistorySummaryGroupBy, string>
-      > = {
-        day: "day",
-        hour: "hour",
-        week: "week",
-        month: "month",
-      };
       const unit = temporalUnit[dim];
       if (unit !== undefined) {
         const col = `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC')`;
@@ -1532,6 +1627,11 @@ export class PostgresTraceRetention {
       const col = categoricalColumn[dim]!;
       return { col, keyExpr: col, isTemporal: false };
     };
+
+    if (input.fillGaps === true) {
+      return this.buildGapFilledSummaryQuery(input, temporalUnit);
+    }
+
     const primary = resolveDimension(input.groupBy);
     const col = primary.col;
     const keyExpr = primary.keyExpr;
