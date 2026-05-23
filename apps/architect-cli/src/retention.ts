@@ -1777,6 +1777,21 @@ async function runRetentionDiffTimeline(
   }
   const eventKinds = validatedKinds.length > 0 ? validatedKinds : undefined;
 
+  const kindNotFlags = getMultiFlag(command, "kind-not");
+  const validatedKindsNot: OptOutHistoryEventKind[] = [];
+  for (const kindNotFlag of kindNotFlags) {
+    if (!isOptOutHistoryEventKind(kindNotFlag)) {
+      printError(
+        ctx.io,
+        `retention diff-timeline: invalid --kind-not '${kindNotFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    validatedKindsNot.push(kindNotFlag);
+  }
+  const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
+
   const afterIdFlag = getStringFlag(command, "after-id");
   const beforeIdFlag = getStringFlag(command, "before-id");
   const rangeFlag = getStringFlag(command, "range");
@@ -1834,6 +1849,7 @@ async function runRetentionDiffTimeline(
         actorIdsNot,
         actorPresence,
         eventKinds,
+        eventKindsNot,
         afterId,
         beforeId,
       });
@@ -1867,6 +1883,7 @@ async function runRetentionDiffTimeline(
         systemOnly: systemOnlyFlag,
         noSystem: noSystemFlag,
         kinds: eventKinds ?? null,
+        kindsNot: eventKindsNot ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
         range: rangeFlag ?? null,
@@ -1905,6 +1922,7 @@ async function runRetentionDiffTimeline(
         actorIdsNot,
         actorPresence,
         eventKinds,
+        eventKindsNot,
         afterId,
         beforeId,
       });
@@ -1938,6 +1956,7 @@ async function runRetentionDiffTimeline(
         systemOnly: systemOnlyFlag,
         noSystem: noSystemFlag,
         kinds: eventKinds ?? null,
+        kindsNot: eventKindsNot ?? null,
         afterId: afterId ?? null,
         beforeId: beforeId ?? null,
         range: rangeFlag ?? null,
@@ -1971,6 +1990,7 @@ async function runRetentionDiffTimeline(
       actorIdsNot,
       actorPresence,
       eventKinds,
+      eventKindsNot,
       afterId,
       beforeId,
     });
@@ -2003,6 +2023,7 @@ async function runRetentionDiffTimeline(
       systemOnly: systemOnlyFlag,
       noSystem: noSystemFlag,
       kinds: eventKinds ?? null,
+      kindsNot: eventKindsNot ?? null,
       afterId: afterId ?? null,
       beforeId: beforeId ?? null,
       range: rangeFlag ?? null,

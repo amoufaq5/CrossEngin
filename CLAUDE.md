@@ -21,15 +21,118 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,123 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.kind-not.multi
+**56 packages + 1 app, 129 meta-schema tables, 9,138 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi
+closes ADR-0200 deferred future Q + ADR-0207 deferred Q4 by
+adding NEW `--kind-not <event-kind>` repeatable flag on
+`retention diff-timeline` across all 3 dispatch paths
+(pair-wise + N-way via --add-tenant + cross-table via
+--add-table). Multi-value OR-semantic substrate-side NOT IN
+exclusion filter; operator excludes timeline entries with
+`event_kind IN {N excluded event_kinds}`. 13th milestone in
+the multi-value family; ADDITIVE not breaking — new field
+multi-value from inception matching ADR-0211/0222 precedent.
+COMPLETES the kind dimension symmetry across ALL 3 retention
+surfaces — history (ADR-0221/0222) + diff-timeline (ADR-0200/
+this ADR) + diff-history (ADR-0217/0214); positive + negative
+both multi-value on every surface. Real cohort-negative-
+exclusion use cases on diff-timeline — cross-tenant cohort-vs-
+deletion timeline (5-tenant cohort show ALL mutation events
+EXCLUDING policy_deleted + retention_set surfacing only opt-
+out workflow events), cross-table forensic timeline excluding
+maintenance (across 4 prunable tables show events EXCLUDING
+policy_deleted during incident window), pair-wise migration
+verification with deletion exclusion (assert migration
+timeline on both tenants EXCLUDING retention_set post-
+migration cleanup), CI gate aggregation with kind-list
+exclusion (fail build if any timeline event matches any of
+N excluded kinds), compose with --actor-id-not from ADR-0207
+("events NOT by automation actors AND NOT of maintenance
+kinds" cohort exclusion across timeline). ADDITIVE adapter
+fields — all 3 diff-timeline input types
+(DiffHistoryTimelineInput + DiffHistoryTimelineNwayInput +
+DiffHistoryTimelineCrossTableInput) gain eventKindsNot?:
+ReadonlyArray<OptOutHistoryEventKind> multi-value from
+inception; no breaking rename; existing consumers unaffected.
+Adapter WHERE clause 3-path symmetry — each of 3 adapter
+methods gains the same conditional WHERE block positioned
+immediately after the existing eventKinds IN block;
+parameterized NOT IN clause; matches established ADR-0193/
+0194/0199/0200/0202/0207/0213 3-dispatch-path symmetry
+pattern (every diff-timeline filter exists in 3 identical
+conditional WHERE clauses). event_kind never null by
+constraint so no IS NULL handling needed. CLI dispatcher
+runRetentionDiffTimeline parses kindNotFlags via getMultiFlag
+ONCE at top of function before path dispatch with per-
+occurrence validation via isOptOutHistoryEventKind loop
+matching ADR-0200/0214/0217/0220/0221/0222 pattern (exits 2
+on FIRST invalid value with that value named); then threaded
+to whichever of 3 adapter methods is selected. JSON envelope
+3 shapes (pair-wise no-discriminator + nway:true +
+crossTable:true) all gain kindsNot: string[] | null field
+positioned after kinds matching array-or-null canonical
+multi-value envelope shape. cli.ts helpText updated — both
+diff-timeline usage lines (pair-wise + cross-table) gain
+[--kind-not <event-kind> ...] indicating repeatable; pair-
+wise description extended with "--kind-not is repeatable and
+EXCLUDES entries with any of the listed event_kinds (OR-
+semantic NOT IN; mirror of --kind)"; cross-table description
+extended to enumerate --kind-not alongside other repeatable
+flags. Composition with --kind — both clauses fire
+independently at PG layer across all 3 paths; --kind X --kind
+Y --kind-not Z produces h.event_kind IN ($X, $Y) AND
+h.event_kind NOT IN ($Z); matches ADR-0222 composition
+behavior on history surface. Check ordering preserved — NOT
+IN fires AFTER IN within WHERE conditions (positive before
+negative). Adapter test block NEW "PostgresTraceRetention
+diff-timeline --kind-not exclusion filter (M6.7.zz.tenant
+.opt-out.cli.diff-timeline.kind-not.multi)" describe block —
+pair-wise single-value NOT IN ($N) (NEW), pair-wise multi-
+value NOT IN ($N1, $N2) (NEW), pair-wise composes with IN +
+NOT IN independently (NEW), pair-wise omits NOT IN when
+empty array (NEW), N-way threads via --add-tenant dispatch
+(NEW), cross-table threads via --cross-table dispatch (NEW).
+CLI test block NEW "runRetention diff-timeline --kind-not
+(M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi)"
+describe block — exit 2 on invalid --kind-not, exit 2 on
+FIRST invalid occurrence multi (NEW), pair-wise threads
+single-element array, pair-wise threads multi-element array
+(NEW), pair-wise composes with --kind, N-way threads via
+--add-tenant (NEW), cross-table threads via --cross-table
+(NEW), JSON envelope echoes kindsNot array pair-wise (NEW),
+JSON envelope kindsNot=null when not set (NEW). Test count:
+9,123 → 9,138 (+15 net: adapter +6, CLI +9). ADR-0223
+documents the design + 10 rejected alternatives + 6 future
+Qs (per-side --kind-not-a/b on diff-history N/A already
+exists from ADR-0215, --kind-not @file.txt defer 4-value
+enum bounded, CLI-side dedup defer PG handles fine,
+semantic-shape exclusion grouping shorthand defer operator-
+policy, cross-flag contradiction detection defer current
+behavior observably correct, JSON envelope shape unification
+family-wide ADR defer for separate documentation milestone).
+The retention CLI's multi-value `--kind-not` coverage now
+spans ALL 3 retention surfaces — history (ADR-0222) + diff-
+timeline (this milestone across 3 dispatch paths) + diff-
+history (ADR-0214). The kind dimension symmetry on diff-
+timeline is the 3rd surface to receive complete positive +
+negative multi-value symmetry — together with history (ADR-
+0221+0222) and diff-history (ADR-0217+0214) this completes
+the kind dimension symmetry across the entire retention
+surface area. Natural follow-up milestones — JSON envelope
+shape documentation as family-wide ADR (consistency across
+13 multi-value milestones), cross-flag contradiction
+detection across 3 retention surfaces (ergonomic
+improvement), retention CLI ergonomics --explain flag
+(debug aid), retention CLI --csv output format, or move
+beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.history.kind-not.multi
 closes ADR-0206 Q4 by adding NEW `--kind-not <event-kind>`
 repeatable flag on `retention history` for multi-value OR-
 semantic substrate-side NOT IN exclusion filter. Operator
@@ -12385,6 +12488,52 @@ history + diff-history; diff-timeline --kind-not is the
 natural follow-up. The kind dimension on retention history
 is the 2nd dimension to receive complete positive + negative
 multi-value symmetry on its surface).
+ADR-0223 covers M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi
+(add NEW --kind-not on retention diff-timeline across all 3
+dispatch paths — closes ADR-0200 deferred future Q +
+ADR-0207 deferred Q4; ships multi-value OR-semantic
+substrate-side NOT IN exclusion filter "events EXCLUDING N
+event_kinds" using multiFlags infrastructure from ADR-0183;
+13th milestone in multi-value family ADDITIVE not breaking
+matching ADR-0211/0222 precedent; COMPLETES kind dimension
+symmetry across ALL 3 retention surfaces — history + diff-
+timeline + diff-history each have positive + negative multi-
+value; ADDITIVE adapter fields on all 3 diff-timeline input
+types (pair-wise + N-way + cross-table) gain
+eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
+adapter WHERE clause 3-path symmetry matching established
+ADR-0193/0194/0199/0200/0202/0207/0213 pattern; CLI
+dispatcher runRetentionDiffTimeline parses kindNotFlags via
+getMultiFlag ONCE at top before path dispatch with per-
+occurrence validation; JSON envelope 3 shapes gain kindsNot:
+string[] | null field; composition with --kind both clauses
+fire independently across all 3 paths; check ordering NOT IN
+fires AFTER IN; 6 new adapter tests + 9 new CLI tests = 15
+total; test count 9,123 → 9,138; rejected — single-value
+flag breaking rename later, apply only to pair-wise path
+breaks 3-path symmetry, comma-separated breaks shell
+quoting, --exclude-kind naming inconsistent, ANY array PG
+syntax equivalent NOT IN more readable, AND semantic on
+exclusion equivalent to OR, array literal JSON worse UX,
+IS NULL OR NOT IN unnecessary non-null event_kind column,
+CLI-side eager contradiction error operators may
+intentionally include redundant, CLI per-path flag parsing
+duplication cleaner to parse once and thread; future Qs —
+per-side --kind-not-a/b on diff-history N/A already from
+ADR-0215, --kind-not @file.txt defer bounded enum, CLI-side
+dedup defer PG handles, semantic-shape grouping defer
+operator-policy, cross-flag contradiction detection defer
+current behavior observably correct, JSON envelope shape
+unification family-wide ADR defer separate documentation
+milestone. The retention CLI's multi-value --kind-not
+coverage now spans ALL 3 retention surfaces; kind dimension
+symmetry is complete across the entire retention surface
+area. Natural follow-up milestones — JSON envelope shape
+documentation as family-wide ADR consistency across 13
+multi-value milestones, cross-flag contradiction detection
+ergonomic improvement, retention CLI ergonomics --explain
+flag debug aid, retention CLI --csv output format, or move
+beyond retention to other Phase 2 deferred Qs).
 
 ## Architecture in 90 seconds
 

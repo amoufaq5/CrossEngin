@@ -7531,6 +7531,90 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
   });
 });
 
+describe("PostgresTraceRetention diff-timeline --kind-not exclusion filter (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+
+  it("pair-wise: adds h.event_kind NOT IN ($N) when single eventKindsNot is set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      eventKindsNot: ["policy_deleted"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind NOT IN ($4)");
+  });
+
+  it("pair-wise: builds h.event_kind NOT IN ($N1, $N2) for multi-kind exclusion", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      eventKindsNot: ["policy_deleted", "retention_set"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind NOT IN ($4, $5)");
+  });
+
+  it("pair-wise: composes with eventKinds IN + eventKindsNot NOT IN independently", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      eventKinds: ["opt_out_set"],
+      eventKindsNot: ["policy_deleted"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($4)");
+    expect(capture[0]?.sql).toContain("h.event_kind NOT IN ($5)");
+  });
+
+  it("pair-wise: omits NOT IN clause when eventKindsNot empty array", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimeline({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      eventKindsNot: [],
+    });
+    expect(capture[0]?.sql).not.toContain("NOT IN");
+  });
+
+  it("N-way: adds h.event_kind NOT IN when eventKindsNot set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineNway({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      eventKindsNot: ["policy_deleted", "retention_set"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind NOT IN");
+  });
+
+  it("cross-table: adds h.event_kind NOT IN when eventKindsNot set", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.diffHistoryTimelineCrossTable({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "tenant_opt_outs"],
+      eventKindsNot: ["policy_deleted"],
+    });
+    expect(capture[0]?.sql).toContain("h.event_kind NOT IN");
+  });
+});
+
 describe("PostgresTraceRetention diff-timeline --after-id cursor pagination (M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";

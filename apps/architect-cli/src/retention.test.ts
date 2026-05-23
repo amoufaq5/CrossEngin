@@ -9859,6 +9859,229 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
   });
 });
 
+describe("runRetention diff-timeline --kind-not (M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+
+  it("returns exit 2 on invalid --kind-not value", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind-not",
+        "bogus",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-not 'bogus'");
+  });
+
+  it("returns exit 2 on FIRST invalid --kind-not occurrence", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind-not",
+        "opt_out_set",
+        "--kind-not",
+        "bad",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-not 'bad'");
+  });
+
+  it("pair-wise: threads single-element eventKindsNot array", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind-not",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
+  });
+
+  it("pair-wise: threads multi-element eventKindsNot array when --kind-not repeated", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNot).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
+  });
+
+  it("pair-wise: composes --kind + --kind-not threading both independently", async () => {
+    const capture: DiffHistoryTimelineInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind",
+        "opt_out_set",
+        "--kind-not",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
+  });
+
+  it("N-way: threads eventKindsNot via --add-tenant dispatch", async () => {
+    const capture: DiffHistoryTimelineNwayInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        "00000000-0000-4000-8000-00000000000C",
+        "--kind-not",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ diffTimelineNwayCapture: capture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
+  });
+
+  it("cross-table: threads eventKindsNot via --cross-table dispatch", async () => {
+    const capture: DiffHistoryTimelineCrossTableInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        "workflow_traces",
+        "tenant_opt_outs",
+        "--cross-table",
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTimelineCrossTableCapture: capture,
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.eventKindsNot).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
+  });
+
+  it("JSON envelope echoes kindsNot array (pair-wise)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kindsNot).toEqual(["policy_deleted", "retention_set"]);
+  });
+
+  it("JSON envelope kindsNot=null when --kind-not not set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff-timeline",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsed_ = JSON.parse(out());
+    expect(parsed_.kindsNot).toBeNull();
+  });
+});
+
 describe("runRetention diff-timeline --after-id (M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor)", () => {
   const AFTER_ID = "50000000-0000-4000-8000-000000000005";
 
