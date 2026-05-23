@@ -2756,6 +2756,128 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     expect(parsedJson.eventKinds).toBeNull();
   });
 
+  it("returns exit 2 on invalid --kind-not", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--kind-not", "bogus"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind-not 'bogus'");
+  });
+
+  it("threads eventKindsNot single-element array when --kind-not set once", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind-not",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
+  });
+
+  it("threads multi-element eventKindsNot array when --kind-not repeated", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]?.eventKindsNot).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
+  });
+
+  it("composes --kind + --kind-not threading both independently", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "opt_out_cleared",
+        "--kind-not",
+        "policy_deleted",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]?.eventKinds).toEqual([
+      "opt_out_set",
+      "opt_out_cleared",
+    ]);
+    expect(historyCapture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
+  });
+
+  it("JSON envelope echoes eventKindsNot array when --kind-not set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind-not",
+        "policy_deleted",
+        "--kind-not",
+        "retention_set",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.eventKindsNot).toEqual([
+      "policy_deleted",
+      "retention_set",
+    ]);
+  });
+
+  it("JSON envelope eventKindsNot=null when --kind-not NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.eventKindsNot).toBeNull();
+  });
+
   it("returns exit 2 on invalid --since", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(

@@ -3117,6 +3117,59 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
     expect(capture[0]?.sql).not.toContain("event_kind IN");
   });
 
+  it("excludes by single eventKindsNot when provided", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ eventKindsNot: ["policy_deleted"] });
+    expect(capture[0]?.sql).toContain("event_kind NOT IN ($1)");
+    expect(capture[0]?.params?.[0]).toBe("policy_deleted");
+  });
+
+  it("excludes by multiple eventKindsNot with NOT IN clause (OR-semantic)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      eventKindsNot: ["policy_deleted", "retention_set"],
+    });
+    expect(capture[0]?.sql).toContain("event_kind NOT IN ($1, $2)");
+    expect(capture[0]?.params?.[0]).toBe("policy_deleted");
+    expect(capture[0]?.params?.[1]).toBe("retention_set");
+  });
+
+  it("omits NOT IN clause when eventKindsNot empty array", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ eventKindsNot: [] });
+    expect(capture[0]?.sql).not.toContain("NOT IN");
+  });
+
+  it("composes eventKinds + eventKindsNot independently (both clauses fire)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      eventKinds: ["opt_out_set", "opt_out_cleared"],
+      eventKindsNot: ["policy_deleted"],
+    });
+    expect(capture[0]?.sql).toContain("event_kind IN ($1, $2)");
+    expect(capture[0]?.sql).toContain("event_kind NOT IN ($3)");
+  });
+
   it("filters by since + until time range when provided", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(

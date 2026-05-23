@@ -273,6 +273,7 @@ export interface ListOptOutHistoryInput {
   readonly tenantId?: string;
   readonly tableName?: string;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
+  readonly eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly actorIds?: ReadonlyArray<string>;
   readonly actorIdsNot?: ReadonlyArray<string>;
   readonly actorPresence?: ActorPresenceFilter;
@@ -1323,6 +1324,18 @@ export class PostgresTraceRetention {
         })
         .join(", ");
       conditions.push(`h.event_kind IN (${kindPlaceholders})`);
+    }
+    if (
+      input.eventKindsNot !== undefined &&
+      input.eventKindsNot.length > 0
+    ) {
+      const kindNotPlaceholders = input.eventKindsNot
+        .map((kind) => {
+          params.push(kind);
+          return `$${params.length}`;
+        })
+        .join(", ");
+      conditions.push(`h.event_kind NOT IN (${kindNotPlaceholders})`);
     }
     if (input.actorIds !== undefined && input.actorIds.length > 0) {
       const actorPlaceholders = input.actorIds

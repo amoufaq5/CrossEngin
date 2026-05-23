@@ -817,6 +817,7 @@ async function runRetentionHistory(
   const tenantFilter = getStringFlag(command, "tenant");
   const tableFilter = getStringFlag(command, "table");
   const kindFlags = getMultiFlag(command, "kind");
+  const kindNotFlags = getMultiFlag(command, "kind-not");
   const sinceFlag = getStringFlag(command, "since");
   const untilFlag = getStringFlag(command, "until");
   const limitFlag = getStringFlag(command, "limit");
@@ -862,6 +863,20 @@ async function runRetentionHistory(
   }
   const eventKinds: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKinds.length > 0 ? validatedKinds : undefined;
+
+  const validatedKindsNot: OptOutHistoryEventKind[] = [];
+  for (const kindNotFlag of kindNotFlags) {
+    if (!isOptOutHistoryEventKind(kindNotFlag)) {
+      printError(
+        ctx.io,
+        `retention history: invalid --kind-not '${kindNotFlag}' (expected one of: opt_out_set, opt_out_cleared, retention_set, policy_deleted)`,
+      );
+      return 2;
+    }
+    validatedKindsNot.push(kindNotFlag);
+  }
+  const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
 
   let effectiveAfterId: string | undefined =
     afterIdFlag !== null ? afterIdFlag : undefined;
@@ -945,6 +960,7 @@ async function runRetentionHistory(
       tenantId: tenantFilter ?? undefined,
       tableName: tableFilter ?? undefined,
       eventKinds,
+      eventKindsNot,
       actorIds,
       actorIdsNot,
       actorPresence,
@@ -973,6 +989,7 @@ async function runRetentionHistory(
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
       eventKinds: eventKinds ?? null,
+      eventKindsNot: eventKindsNot ?? null,
       actorIds: actorIds ?? null,
       actorIdsNot: actorIdsNot ?? null,
       systemOnly: systemOnlyFlag,
