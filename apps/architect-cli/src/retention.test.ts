@@ -15295,6 +15295,195 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
       expect(capture).toHaveLength(0);
     });
   });
+
+  describe("cross-dimensional semantic contradictions (M6.7.zz.tenant.opt-out.cli.semantic-contradiction)", () => {
+    it("history: exits 2 when --system-only + --actor-id together", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--system-only",
+          "--actor-id",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--system-only requires actor_id IS NULL");
+      expect(err()).toContain("--actor-id requires a non-null UUID");
+      expect(err()).toContain("empty result by construction");
+    });
+
+    it("history: --no-system + --actor-id is NOT a contradiction (valid composition)", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--no-system",
+          "--actor-id",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+
+    it("history: --system-only alone (without --actor-id) is valid", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--system-only"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+
+    it("diff-timeline: exits 2 when --system-only + --actor-id together", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--system-only",
+          "--actor-id",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-timeline: --system-only requires actor_id IS NULL",
+      );
+    });
+
+    it("diff-history: exits 2 when global --system-only + --actor-id together", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--system-only",
+          "--actor-id",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --system-only + --actor-id",
+      );
+    });
+
+    it("diff-history: exits 2 when per-side --system-only-a + --actor-id-a together", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--system-only-a",
+          "--actor-id-a",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --system-only-a + --actor-id-a",
+      );
+    });
+
+    it("diff-history: exits 2 when per-side --system-only-b + --actor-id-b together", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--system-only-b",
+          "--actor-id-b",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "retention diff-history: --system-only-b + --actor-id-b",
+      );
+    });
+
+    it("diff-history: --system-only-a + --actor-id-b is NOT a contradiction (cross-side allowed)", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--system-only-a",
+          "--actor-id-b",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+
+    it("diff-timeline: check fires BEFORE adapter call (capture-length-0)", async () => {
+      const capture: DiffHistoryTimelineInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--system-only",
+          "--actor-id",
+          ACTOR_ALICE,
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(capture).toHaveLength(0);
+    });
+  });
 });
 
 describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", () => {
@@ -15383,7 +15572,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
           "policy_deleted",
           "--actor-id",
           ACTOR_ALICE,
-          "--system-only",
+          "--no-system",
           "--limit",
           "50",
           "--explain",
@@ -15401,7 +15590,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
       expect(plan.filters.kinds).toEqual(["opt_out_set", "opt_out_cleared"]);
       expect(plan.filters.kindsNot).toEqual(["policy_deleted"]);
       expect(plan.filters.actorIds).toEqual([ACTOR_ALICE]);
-      expect(plan.filters.actorPresence).toBe("system_only");
+      expect(plan.filters.actorPresence).toBe("no_system");
       expect(plan.pagination.limit).toBe(50);
     });
   });

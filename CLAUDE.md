@@ -21,15 +21,99 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,220 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql
+**56 packages + 1 app, 129 meta-schema tables, 9,229 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.semantic-contradiction
+closes ADR-0226 future Q1 by adding CLI-side eager detection
+for the cross-dimensional `--system-only` + `--actor-id`
+contradiction across all 3 retention surfaces. --system-only
+requires actor_id IS NULL (SQL WHERE) + --actor-id Y requires
+actor_id IN (Y) where Y is non-null UUID; mutually exclusive
+at SQL layer; PG returns empty by construction. This milestone
+surfaces the contradiction as exit-2 BEFORE adapter call with
+explicit error naming both flags + brief SQL semantic
+explanation. Use cases caught now — copy-paste error (operator
+copies --system-only and --actor-id from different shell vars
+unaware they conflict), refactoring drift (operator updates
+--actor-id list but leaves --system-only in place), CI script
+regressions, operator learning the semantics (--system-only =
+"no actor" vs --actor-id = "specific actor" different
+dimensions). Use cases NOT caught (intentional) — --no-system
++ --actor-id Y compatible no contradiction (both satisfiable
+by any UUID redundant but valid), --system-only + --actor-id-
+not Y compatible the IS NULL branch from ADR-0211 design
+satisfies both clauses returns system events, --system-only-a
++ --actor-id-b cross-side flags operate on different events
+no per-side conflict, --system-only + --no-system already
+detected by ADR-0212 mutual exclusion same dimension. Per-
+surface checks — retention history 1 check, retention diff-
+timeline 1 check (parsing happens once at top of dispatcher),
+retention diff-history 3 checks (global + per-side A + per-
+side B). Table-driven structure matching ADR-0226 pattern —
+presenceActorChecks: ReadonlyArray<{label, presence, actors}>
+iterated in tight loop; if presence === "system_only" &&
+actors !== undefined → exit 2 with explicit error. Check
+ordering — cross-dimensional check fires AFTER same-dimension
+contradiction detection (ADR-0226) but BEFORE adapter call;
+within cross-dimensional: global before per-side; A before B.
+Error format `retention {surface}: --system-only{+side} +
+--actor-id{+side} — system-only requires actor_id IS NULL but
+--actor-id requires a non-null UUID — empty result by
+construction` includes surface name + both contradicting flags
++ brief SQL semantic explanation + "empty result by
+construction" suffix matching ADR-0226's error format; exit
+code 2 distinct from adapter exit 1. Asymmetric treatment
+documented — --no-system + --actor-id valid (redundant non-
+null UUID constraint) vs --system-only + --actor-id
+contradiction (definite-empty IS NULL vs IN UUID); only
+definite-empty-by-construction patterns flagged. Existing test
+"plan echoes all filters from operator flags" updated — was
+using --system-only + --actor-id together which is now
+contradictory exits 2; updated to use --no-system + --actor-
+id valid composition still verifies plan echo coverage with
+actorPresence: "no_system". NEW "cross-dimensional semantic
+contradictions" describe block inside contradiction detection
+test scope with 9 tests — history exits 2 on --system-only +
+--actor-id with proper error format, history --no-system +
+--actor-id NOT a contradiction valid composition exits 0,
+history --system-only alone without --actor-id valid exits 0,
+diff-timeline exits 2 on --system-only + --actor-id with
+proper surface prefix, diff-history exits 2 on global
+--system-only + --actor-id with proper label, diff-history
+exits 2 on per-side --system-only-a + --actor-id-a, diff-
+history exits 2 on per-side --system-only-b + --actor-id-b,
+diff-history --system-only-a + --actor-id-b cross-side NOT a
+contradiction valid composition, diff-timeline check fires
+BEFORE adapter call verified by capture-length-0. Test count:
+9,220 → 9,229 (+9 net: 9 CLI tests). ADR-0230 documents the
+design + 9 rejected alternatives + 6 future Qs (--system-only
++ --actor-id-not Y NOT a contradiction adapter-level
+documentary test defer, multi-dimensional contradictions in
+future flag families inherit pattern via table-driven
+structure, contradiction detection between global + per-side
+flags adapter ordering handles defer, detection across 3
+surfaces uniformly for new flag dimensions inherits pattern,
+CLI hint about valid alternatives defer operator-UX polish,
+JSON output for contradiction errors defer operator-UX
+polish). The retention CLI now has TWO contradiction detection
+layers — same-dimension set-intersection (ADR-0226) + cross-
+dimensional semantic (this milestone); together they catch
+the most common contradictory-flag patterns operators
+encounter. Pattern documented for future cross-dimensional
+contradictions via table-driven structure. Natural follow-up
+milestones — --explain-analyze actual EXPLAIN ANALYZE execution
+with timing/row-count statistics (ADR-0229 Q2), --format=tsv
+mechanical CSV variant (ADR-0227 Q1), --format=ndjson
+streaming JSON per-row (ADR-0227 Q3), retention summary action
+new adapter + CLI, or move beyond retention to other Phase 2
+deferred Qs.
+M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql
 closes ADR-0228 future Q1 (Option B) by refactoring 5 retention
 adapter methods to extract SQL-building into public query-builder
 methods. CLI --explain now includes raw PG SQL + bound parameters
@@ -13204,6 +13288,47 @@ in --explain output across all 3 surfaces with surface-
 appropriate base SELECT shapes; adapter contract enriched
 with 5 public builder methods; pattern documented for future
 adapter methods to contribute builders for raw-SQL output).
+ADR-0230 covers M6.7.zz.tenant.opt-out.cli.semantic-contradiction
+(retention CLI cross-dimensional semantic contradiction
+detection — closes ADR-0226 future Q1; CLI-side eager
+detection for --system-only + --actor-id contradiction across
+all 3 retention surfaces; pure CLI-side ergonomic check no
+adapter changes; --system-only requires actor_id IS NULL +
+--actor-id Y requires actor_id IN (Y) non-null UUID mutually
+exclusive at SQL layer PG returns empty by construction
+surfaces as exit 2 BEFORE adapter call; per-surface checks
+history 1 + diff-timeline 1 + diff-history 3 global + per-
+side A + per-side B; table-driven structure matching ADR-0226
+pattern; check ordering AFTER same-dimension contradiction
+BEFORE adapter call; error format `--system-only{+side} +
+--actor-id{+side} — system-only requires actor_id IS NULL but
+--actor-id requires a non-null UUID — empty result by
+construction`; asymmetric treatment --no-system + --actor-id
+valid redundant non-null vs --system-only + --actor-id
+contradiction definite-empty; cross-side --system-only-a +
+--actor-id-b NOT a contradiction different events; existing
+"plan echoes all filters" test updated from --system-only to
+--no-system; 9 new CLI tests test count 9,220 → 9,229;
+rejected — detect --no-system + --actor-id redundancy as
+warning adds noise on valid composition, auto-resolve by
+dropping flag operator intent ambiguous, --allow-contradictory-
+semantics adds complexity, adapter-side detection wrong layer,
+bundle with ADR-0226 same-dimension different scopes clearer
+separated, detect --system-only + --no-system already detected
+by ADR-0212, detect cross-side per-side contradictions
+intentional asymmetric per ADR-0215, generic constraint solver
+framework premature abstraction, defer to future semantic
+linter friction; future Qs — --system-only + --actor-id-not Y
+NOT a contradiction documentary test defer, multi-dimensional
+contradictions in future flag families inherit pattern, global
++ per-side cross-flag contradictions adapter ordering handles
+defer, detection across surfaces uniformly inherits pattern,
+CLI hint about valid alternatives defer operator-UX polish,
+JSON output for contradiction errors defer operator-UX polish.
+The retention CLI now has TWO contradiction detection layers
+— same-dimension set-intersection (ADR-0226) + cross-
+dimensional semantic (ADR-0230); together they catch the most
+common contradictory-flag patterns operators encounter).
 
 ## Architecture in 90 seconds
 

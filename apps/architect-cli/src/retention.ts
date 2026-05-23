@@ -956,6 +956,13 @@ async function runRetentionHistory(
     );
     return 2;
   }
+  if (actorPresence === "system_only" && actorIds !== undefined) {
+    printError(
+      ctx.io,
+      "retention history: --system-only requires actor_id IS NULL but --actor-id requires a non-null UUID — empty result by construction",
+    );
+    return 2;
+  }
 
   let effectiveAfterId: string | undefined =
     afterIdFlag !== null ? afterIdFlag : undefined;
@@ -1614,6 +1621,25 @@ async function runRetentionDiffHistory(
       ? "no_system"
       : undefined;
 
+  const presenceActorChecks: ReadonlyArray<{
+    label: string;
+    presence: "system_only" | "no_system" | undefined;
+    actors: ReadonlyArray<string> | undefined;
+  }> = [
+    { label: "--system-only + --actor-id", presence: actorPresence, actors: actorIds },
+    { label: "--system-only-a + --actor-id-a", presence: actorPresenceA, actors: actorIdsA },
+    { label: "--system-only-b + --actor-id-b", presence: actorPresenceB, actors: actorIdsB },
+  ];
+  for (const check of presenceActorChecks) {
+    if (check.presence === "system_only" && check.actors !== undefined) {
+      printError(
+        ctx.io,
+        `retention diff-history: ${check.label} — system-only requires actor_id IS NULL but --actor-id requires a non-null UUID — empty result by construction`,
+      );
+      return 2;
+    }
+  }
+
   if (explainFlag) {
     const { sql, params } = retention.buildDiffHistoryEntriesQuery({
       idA,
@@ -2073,6 +2099,13 @@ async function runRetentionDiffTimeline(
     printError(
       ctx.io,
       `retention diff-timeline: --actor-id and --actor-id-not share value(s) [${list}] — empty result by construction`,
+    );
+    return 2;
+  }
+  if (actorPresence === "system_only" && actorIds !== undefined) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: --system-only requires actor_id IS NULL but --actor-id requires a non-null UUID — empty result by construction",
     );
     return 2;
   }
