@@ -333,7 +333,7 @@ export interface PreviewRestoreTenantPolicyInput {
 export interface DiffHistoryEntriesInput {
   readonly idA: string;
   readonly idB: string;
-  readonly eventKind?: OptOutHistoryEventKind;
+  readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly eventKindA?: OptOutHistoryEventKind;
   readonly eventKindB?: OptOutHistoryEventKind;
   readonly eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
@@ -1630,17 +1630,21 @@ export class PostgresTraceRetention {
         `diffHistoryEntries: event B has unknown event_kind '${entryB.event_kind}'`,
       );
     }
-    if (input.eventKind !== undefined) {
+    if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
+      const expectedSet = new Set<string>(input.eventKinds);
       const mismatches: string[] = [];
-      if (entryA.event_kind !== input.eventKind) {
+      if (!expectedSet.has(entryA.event_kind)) {
         mismatches.push(`A is '${entryA.event_kind}'`);
       }
-      if (entryB.event_kind !== input.eventKind) {
+      if (!expectedSet.has(entryB.event_kind)) {
         mismatches.push(`B is '${entryB.event_kind}'`);
       }
       if (mismatches.length > 0) {
+        const kindList = input.eventKinds
+          .map((k) => `'${k}'`)
+          .join(", ");
         throw new Error(
-          `diffHistoryEntries: expected both events to have event_kind '${input.eventKind}' but ${mismatches.join(" and ")}`,
+          `diffHistoryEntries: expected both events to have event_kind in [${kindList}] but ${mismatches.join(" and ")}`,
         );
       }
     }
