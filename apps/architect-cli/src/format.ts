@@ -33,13 +33,39 @@ export function escapeCsvCell(value: unknown): string {
   return str;
 }
 
+export function escapeCsvCellWithSep(
+  value: unknown,
+  separator: string,
+): string {
+  if (value === null || value === undefined) return "";
+  let str: string;
+  if (typeof value === "string") {
+    str = value;
+  } else if (typeof value === "object") {
+    str = JSON.stringify(value);
+  } else {
+    str = String(value);
+  }
+  const sepEscape =
+    separator === "\\" ? "\\\\" : separator.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`["\\n\\r${sepEscape}]`);
+  if (pattern.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
 export function formatCsv(
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  separator: string = ",",
 ): string {
-  const lines: string[] = [headers.map(escapeCsvCell).join(",")];
+  const escape = separator === ","
+    ? escapeCsvCell
+    : (value: unknown) => escapeCsvCellWithSep(value, separator);
+  const lines: string[] = [headers.map(escape).join(separator)];
   for (const row of rows) {
-    lines.push(row.map(escapeCsvCell).join(","));
+    lines.push(row.map(escape).join(separator));
   }
   return lines.join("\n") + "\n";
 }
@@ -48,8 +74,32 @@ export function printCsv(
   io: IoStreams,
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  separator: string = ",",
 ): void {
-  io.stdout.write(formatCsv(headers, rows));
+  io.stdout.write(formatCsv(headers, rows, separator));
+}
+
+export function formatTsv(
+  headers: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): string {
+  return formatCsv(headers, rows, "\t");
+}
+
+export function printTsv(
+  io: IoStreams,
+  headers: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): void {
+  io.stdout.write(formatTsv(headers, rows));
+}
+
+export function formatNdjson(rows: ReadonlyArray<unknown>): string {
+  return rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
+}
+
+export function printNdjson(io: IoStreams, rows: ReadonlyArray<unknown>): void {
+  io.stdout.write(formatNdjson(rows));
 }
 
 export function formatValidationErrors(errors: readonly ValidationError[]): string {

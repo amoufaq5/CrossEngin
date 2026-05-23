@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import {
   escapeCsvCell,
+  escapeCsvCellWithSep,
   formatCsv,
   formatDiff,
   formatManifestSummary,
+  formatNdjson,
+  formatTsv,
   formatValidationErrors,
   printCsv,
   printError,
   printJson,
+  printNdjson,
   printSuccess,
+  printTsv,
   type IoStreams,
 } from "./format.js";
 
@@ -219,5 +224,118 @@ describe("printCsv", () => {
     };
     printCsv(io, ["a", "b"], [["1", "2"]]);
     expect(stdoutBuf).toBe("a,b\n1,2\n");
+  });
+
+  it("respects custom separator", () => {
+    let stdoutBuf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { stdoutBuf += s; } },
+      stderr: { write: () => {} },
+    };
+    printCsv(io, ["a", "b"], [["1", "2"]], ";");
+    expect(stdoutBuf).toBe("a;b\n1;2\n");
+  });
+});
+
+describe("escapeCsvCellWithSep (custom separator)", () => {
+  it("quotes when string contains custom separator", () => {
+    expect(escapeCsvCellWithSep("a;b", ";")).toBe('"a;b"');
+  });
+
+  it("does NOT quote when string contains default comma but separator is semicolon", () => {
+    expect(escapeCsvCellWithSep("a,b", ";")).toBe("a,b");
+  });
+
+  it("still quotes when string contains double quote regardless of separator", () => {
+    expect(escapeCsvCellWithSep('a"b', ";")).toBe('"a""b"');
+  });
+
+  it("still quotes when string contains newline regardless of separator", () => {
+    expect(escapeCsvCellWithSep("a\nb", ";")).toBe('"a\nb"');
+  });
+});
+
+describe("formatCsv with custom separator", () => {
+  it("uses semicolon separator when specified", () => {
+    const csv = formatCsv(["a", "b"], [["1", "2"]], ";");
+    expect(csv).toBe("a;b\n1;2\n");
+  });
+
+  it("escapes cells with custom separator", () => {
+    const csv = formatCsv(["field"], [["a;b"]], ";");
+    expect(csv).toBe('field\n"a;b"\n');
+  });
+
+  it("does NOT escape comma when separator is semicolon", () => {
+    const csv = formatCsv(["field"], [["a,b"]], ";");
+    expect(csv).toBe("field\na,b\n");
+  });
+});
+
+describe("formatTsv", () => {
+  it("renders header + rows with tab separator + trailing newline", () => {
+    const tsv = formatTsv(["a", "b"], [["1", "2"]]);
+    expect(tsv).toBe("a\tb\n1\t2\n");
+  });
+
+  it("escapes cells containing tabs", () => {
+    const tsv = formatTsv(["field"], [["a\tb"]]);
+    expect(tsv).toBe('field\n"a\tb"\n');
+  });
+
+  it("escapes cells with quotes / newlines (same as CSV)", () => {
+    const tsv = formatTsv(["field"], [['c"d'], ["e\nf"]]);
+    expect(tsv).toBe('field\n"c""d"\n"e\nf"\n');
+  });
+
+  it("does NOT escape commas (commas allowed in TSV)", () => {
+    const tsv = formatTsv(["field"], [["a,b"]]);
+    expect(tsv).toBe("field\na,b\n");
+  });
+});
+
+describe("printTsv", () => {
+  it("writes formatted TSV to stdout", () => {
+    let stdoutBuf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { stdoutBuf += s; } },
+      stderr: { write: () => {} },
+    };
+    printTsv(io, ["a", "b"], [["1", "2"]]);
+    expect(stdoutBuf).toBe("a\tb\n1\t2\n");
+  });
+});
+
+describe("formatNdjson", () => {
+  it("renders one JSON object per line with trailing newline", () => {
+    const ndjson = formatNdjson([{ a: 1 }, { a: 2 }]);
+    expect(ndjson).toBe('{"a":1}\n{"a":2}\n');
+  });
+
+  it("renders empty rows as just trailing newline", () => {
+    const ndjson = formatNdjson([]);
+    expect(ndjson).toBe("\n");
+  });
+
+  it("preserves null values", () => {
+    const ndjson = formatNdjson([{ a: null, b: "x" }]);
+    expect(ndjson).toBe('{"a":null,"b":"x"}\n');
+  });
+
+  it("nested objects/arrays inline (no pretty-print)", () => {
+    const ndjson = formatNdjson([{ nested: { x: 1, y: [2, 3] } }]);
+    expect(ndjson).toBe('{"nested":{"x":1,"y":[2,3]}}\n');
+  });
+});
+
+describe("printNdjson", () => {
+  it("writes formatted NDJSON to stdout", () => {
+    let stdoutBuf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { stdoutBuf += s; } },
+      stderr: { write: () => {} },
+    };
+    printNdjson(io, [{ a: 1 }, { b: 2 }]);
+    expect(stdoutBuf).toBe('{"a":1}\n{"b":2}\n');
   });
 });

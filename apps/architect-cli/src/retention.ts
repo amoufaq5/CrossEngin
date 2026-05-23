@@ -32,7 +32,14 @@ import {
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getMultiFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printCsv, printError, printJson, printSuccess } from "./format.js";
+import {
+  printCsv,
+  printError,
+  printJson,
+  printNdjson,
+  printSuccess,
+  printTsv,
+} from "./format.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
@@ -890,6 +897,15 @@ async function runRetentionHistory(
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const explainFlag = getBooleanFlag(command, "explain");
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(
+      ctx.io,
+      "retention history: --csv-separator cannot be '\"' or newline",
+    );
+    return 2;
+  }
+  const csvSeparator = csvSeparatorFlag ?? ",";
 
   if (systemOnlyFlag && noSystemFlag) {
     printError(
@@ -1084,7 +1100,7 @@ async function runRetentionHistory(
       sql,
       params,
     };
-    if (command.format === "json" || command.format === "csv") {
+    if (command.format !== "human") {
       printJson(ctx.io, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
@@ -1148,7 +1164,11 @@ async function runRetentionHistory(
     return 0;
   }
 
-  if (command.format === "csv") {
+  if (
+    command.format === "csv" ||
+    command.format === "tsv" ||
+    command.format === "ndjson"
+  ) {
     const baseHeaders = [
       "id",
       "tenant_id",
@@ -1163,6 +1183,10 @@ async function runRetentionHistory(
     const headers = withActorNames
       ? [...baseHeaders, "actor_display_name", "actor_email"]
       : baseHeaders;
+    if (command.format === "ndjson") {
+      printNdjson(ctx.io, entries);
+      return 0;
+    }
     const rows = entries.map((e) => {
       const baseRow: ReadonlyArray<unknown> = [
         e.id,
@@ -1179,7 +1203,11 @@ async function runRetentionHistory(
         ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
         : baseRow;
     });
-    printCsv(ctx.io, headers, rows);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, rows);
+    } else {
+      printCsv(ctx.io, headers, rows, csvSeparator);
+    }
     return 0;
   }
 
@@ -1574,6 +1602,15 @@ async function runRetentionDiffHistory(
   const noSystemBFlag = getBooleanFlag(command, "no-system-b");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const explainFlag = getBooleanFlag(command, "explain");
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(
+      ctx.io,
+      "retention diff-history: --csv-separator cannot be '\"' or newline",
+    );
+    return 2;
+  }
+  const csvSeparator = csvSeparatorFlag ?? ",";
 
   if (systemOnlyFlag && noSystemFlag) {
     printError(
@@ -1677,7 +1714,7 @@ async function runRetentionDiffHistory(
       sqlNote:
         "expectation checks (kind/actor/per-side/presence) are applied in adapter post-fetch; only base SELECT shown",
     };
-    if (command.format === "json" || command.format === "csv") {
+    if (command.format !== "human") {
       printJson(ctx.io, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
@@ -1741,10 +1778,22 @@ async function runRetentionDiffHistory(
     });
     return 0;
   }
-  if (command.format === "csv") {
+  if (
+    command.format === "csv" ||
+    command.format === "tsv" ||
+    command.format === "ndjson"
+  ) {
+    if (command.format === "ndjson") {
+      printNdjson(ctx.io, result.fieldDiffs);
+      return 0;
+    }
     const headers = ["field", "value_a", "value_b"];
     const rows = result.fieldDiffs.map((d) => [d.field, d.valueA, d.valueB]);
-    printCsv(ctx.io, headers, rows);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, rows);
+    } else {
+      printCsv(ctx.io, headers, rows, csvSeparator);
+    }
     return 0;
   }
   ctx.io.stdout.write(formatHistoryDiff(result, { withActorNames }));
@@ -2029,6 +2078,15 @@ async function runRetentionDiffTimeline(
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const explainFlag = getBooleanFlag(command, "explain");
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: --csv-separator cannot be '\"' or newline",
+    );
+    return 2;
+  }
+  const csvSeparator = csvSeparatorFlag ?? ",";
   const actorIdFlags = getMultiFlag(command, "actor-id");
   const actorIds = actorIdFlags.length > 0 ? actorIdFlags : undefined;
   const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
@@ -2248,7 +2306,7 @@ async function runRetentionDiffTimeline(
       sql,
       params,
     };
-    if (command.format === "json" || command.format === "csv") {
+    if (command.format !== "human") {
       printJson(ctx.io, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
@@ -2316,7 +2374,11 @@ async function runRetentionDiffTimeline(
       });
       return 0;
     }
-    if (command.format === "csv") {
+    if (
+      command.format === "csv" ||
+      command.format === "tsv" ||
+      command.format === "ndjson"
+    ) {
       const baseHeaders = [
         "id",
         "tenant_id",
@@ -2332,6 +2394,10 @@ async function runRetentionDiffTimeline(
       const headers = withActorNames
         ? [...baseHeaders, "actor_display_name", "actor_email"]
         : baseHeaders;
+      if (command.format === "ndjson") {
+        printNdjson(ctx.io, crossResult.entries);
+        return 0;
+      }
       const rows = crossResult.entries.map((e) => {
         const baseRow: ReadonlyArray<unknown> = [
           e.id,
@@ -2349,7 +2415,11 @@ async function runRetentionDiffTimeline(
           ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
           : baseRow;
       });
-      printCsv(ctx.io, headers, rows);
+      if (command.format === "tsv") {
+        printTsv(ctx.io, headers, rows);
+      } else {
+        printCsv(ctx.io, headers, rows, csvSeparator);
+      }
       return 0;
     }
     ctx.io.stdout.write(
@@ -2425,7 +2495,11 @@ async function runRetentionDiffTimeline(
       });
       return 0;
     }
-    if (command.format === "csv") {
+    if (
+      command.format === "csv" ||
+      command.format === "tsv" ||
+      command.format === "ndjson"
+    ) {
       const baseHeaders = [
         "id",
         "tenant_id",
@@ -2441,6 +2515,10 @@ async function runRetentionDiffTimeline(
       const headers = withActorNames
         ? [...baseHeaders, "actor_display_name", "actor_email"]
         : baseHeaders;
+      if (command.format === "ndjson") {
+        printNdjson(ctx.io, nwayResult.entries);
+        return 0;
+      }
       const rows = nwayResult.entries.map((e) => {
         const baseRow: ReadonlyArray<unknown> = [
           e.id,
@@ -2458,7 +2536,11 @@ async function runRetentionDiffTimeline(
           ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
           : baseRow;
       });
-      printCsv(ctx.io, headers, rows);
+      if (command.format === "tsv") {
+        printTsv(ctx.io, headers, rows);
+      } else {
+        printCsv(ctx.io, headers, rows, csvSeparator);
+      }
       return 0;
     }
     ctx.io.stdout.write(
@@ -2528,7 +2610,11 @@ async function runRetentionDiffTimeline(
     });
     return 0;
   }
-  if (command.format === "csv") {
+  if (
+    command.format === "csv" ||
+    command.format === "tsv" ||
+    command.format === "ndjson"
+  ) {
     const baseHeaders = [
       "id",
       "tenant_id",
@@ -2544,6 +2630,10 @@ async function runRetentionDiffTimeline(
     const headers = withActorNames
       ? [...baseHeaders, "actor_display_name", "actor_email"]
       : baseHeaders;
+    if (command.format === "ndjson") {
+      printNdjson(ctx.io, result.entries);
+      return 0;
+    }
     const rows = result.entries.map((e) => {
       const baseRow: ReadonlyArray<unknown> = [
         e.id,
@@ -2561,7 +2651,11 @@ async function runRetentionDiffTimeline(
         ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
         : baseRow;
     });
-    printCsv(ctx.io, headers, rows);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, rows);
+    } else {
+      printCsv(ctx.io, headers, rows, csvSeparator);
+    }
     return 0;
   }
   ctx.io.stdout.write(

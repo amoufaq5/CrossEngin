@@ -14,7 +14,7 @@ export const SUBCOMMANDS = [
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
-export const OUTPUT_FORMATS = ["human", "json", "csv"] as const;
+export const OUTPUT_FORMATS = ["human", "json", "csv", "tsv", "ndjson"] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 export interface ParsedCommand {
@@ -102,7 +102,9 @@ export function parseArgs(argv: readonly string[]): ParseResult {
     if (
       formatRaw !== "human" &&
       formatRaw !== "json" &&
-      formatRaw !== "csv"
+      formatRaw !== "csv" &&
+      formatRaw !== "tsv" &&
+      formatRaw !== "ndjson"
     ) {
       return {
         ok: false,
@@ -412,9 +414,13 @@ export function helpText(): string {
     "  help                    Show this help text",
     "",
     "Flags:",
-    "  --format human|json|csv Output format (default: human). csv is supported on",
-    "                          list-style retention actions (history + diff-timeline);",
-    "                          diff-history csv emits field-diff rows.",
+    "  --format human|json|csv|tsv|ndjson",
+    "                          Output format (default: human). csv/tsv/ndjson are",
+    "                          supported on list-style retention actions (history +",
+    "                          diff-timeline); diff-history csv/tsv emits field-diff",
+    "                          rows. ndjson emits one entry per line (no envelope).",
+    "  --csv-separator CHAR    Custom CSV separator (default: ','). Only applies to",
+    "                          --format=csv. Cannot be '\"' or newline.",
     "  --force                 With init / patch, overwrite an existing file",
     "  --output <path>         With patch, write the result to a different path",
     "  --dry-run               With apply, emit SQL without executing",
