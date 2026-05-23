@@ -21,15 +21,76 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,152 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.json-envelope.conventions
+**56 packages + 1 app, 129 meta-schema tables, 9,153 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.history.envelope-rename
+closes ADR-0224 future Qs 1-3 by applying 3 history-envelope
+renames to match canonical conventions from ADR-0224. Pure
+CLI-side rename milestone (no adapter changes); brings the
+history surface envelope into compliance with the family-wide
+JSON envelope conventions codified in ADR-0224. Breaking
+change to operator JSON parsing scripts but session-recent
+code with no external consumers contained scope. 3 envelope
+changes: (1) eventKinds → kinds + eventKindsNot → kindsNot
+(history was using adapter input field name; canonical
+convention says envelope field names derive from CLI flag
+names like --kind → kinds matching diff-history/diff-timeline
+pattern), (2) ADD action: "history" discriminator (matches
+diff-history's action: "diff-history" and diff-timeline's
+action: "diff-timeline" patterns; operators reading JSON
+across surfaces can now reliably discriminate by action field),
+(3) ADD withActorNames boolean echo (history was parsing
+--with-actor-names flag but not echoing it in envelope;
+canonical convention says all operator-input flags echo).
+Field positioning matches canonical pattern — action
+discriminator first, filter args (tenantFilter/tableFilter
+history-specific), multi-value tuple filters, actor presence
+booleans, boolean flags (withActorNames), range filters,
+pagination, result-level fields. Test updates — 5 existing
+tests reading parsedJson.eventKinds/parsedJson.eventKindsNot
+on history updated to parsedJson.kinds/parsedJson.kindsNot
+via sed bulk replace; 3 "intentional-current-state" tests
+from ADR-0224's known-inconsistencies describe block replaced
+with 4 canonical-convention tests (kinds rename verified,
+action discriminator verified, withActorNames=true when flag
+set, withActorNames=false when flag not set); 1 cross-surface
+consistency test updated histEnv.eventKinds → histEnv.kinds.
+Test count: 9,152 → 9,153 (+1 net: -3 inconsistency tests
++ 4 canonical tests). ADR-0225 documents the 3 rename changes
++ 6 rejected alternatives + 6 future Qs (JSON Schema
+generation from envelope shapes defer scope creep, CLI output
+format variants --format=csv/tsv/yaml defer operator-
+ergonomics, result-level field naming unification document
+2-level separation defer current state correct, migration
+guide for operators defer no external consumers PR
+description suffices, tenantFilter/tableFilter Filter suffix
+consistency defer surface-specific accurate, versioned
+envelope shape envelopeVersion:2 defer no external consumers
+adds complexity without immediate benefit). The retention
+CLI's JSON envelope shape conventions are now fully realized
+across all 3 surfaces — ADR-0224 codified the conventions +
+ADR-0225 brings history into compliance. Cross-surface
+scripts simplified — operators can write env.kinds once and
+use it across all 3 surfaces. Future multi-value milestones
+inherit the conventions; new surfaces or new actions follow
+the documented canonical patterns without per-milestone re-
+decision. Follow-up milestones unblocked — cross-flag
+contradiction detection, --csv output format, --explain
+flag, and other ergonomic improvements can be designed
+against a stable canonical envelope shape. Natural follow-up
+milestones — cross-flag contradiction detection across 3
+retention surfaces (ergonomic improvement), retention CLI
+--explain flag (debug aid), retention CLI --csv output
+format (closes ADR-0224 Q5), retention summary action (new
+adapter + CLI), or move beyond retention to other Phase 2
+deferred Qs.
+M6.7.zz.tenant.opt-out.cli.json-envelope.conventions
 closes 13 milestones' recurring "JSON envelope shape
 unification" deferred Q by codifying the canonical JSON
 envelope shape conventions for retention CLI actions in a
@@ -12646,6 +12707,45 @@ state correct. The retention CLI's JSON envelope shape
 conventions are now codified in a single family-wide
 reference ADR; future multi-value milestones inherit
 canonical conventions without re-deciding).
+ADR-0225 covers M6.7.zz.tenant.opt-out.cli.history.envelope-rename
+(history JSON envelope rename to canonical conventions —
+closes ADR-0224 future Qs 1-3 by applying 3 history-envelope
+renames; pure CLI-side rename milestone no adapter changes
+breaking change to operator JSON parsing scripts session-
+recent code with no external consumers contained scope; 3
+envelope changes — eventKinds → kinds + eventKindsNot →
+kindsNot canonical CLI-flag-derived naming convention, ADD
+action: "history" discriminator matches diff-history/diff-
+timeline patterns, ADD withActorNames boolean echo canonical
+all-operator-input-flags-echo convention; field positioning
+matches canonical pattern; test updates 5 existing tests
+sed-renamed eventKinds → kinds, 3 inconsistency tests
+replaced with 4 canonical tests, 1 cross-surface test
+updated; 1 net new test test count 9,152 → 9,153; rejected
+— keep history's current shape with separate "history-
+specific naming" convention defeats single canonical
+reference, additive add new fields alongside deprecated
+doubles envelope size ambiguous future removal still
+breaking, CLI flag --canonical-envelope adds CLI complexity
+without enduring benefit, defer rename indefinitely leaves
+documented future Qs open recurring friction source, rename
+diff-history/diff-timeline to history's pattern wrong
+direction history is outlier, eventKindsAlias backward
+compat field conflict; future Qs — JSON Schema generation
+defer scope creep, --format=csv/tsv/yaml defer operator-
+ergonomics, result-level field naming unification document
+2-level separation defer current state correct, migration
+guide for operators defer no external consumers PR
+description suffices, tenantFilter/tableFilter Filter suffix
+defer surface-specific accurate, versioned envelope shape
+defer no external consumers. The retention CLI's JSON
+envelope shape conventions are now fully realized across all
+3 surfaces — ADR-0224 codified + ADR-0225 brings history into
+compliance. Future multi-value milestones inherit canonical
+conventions without per-milestone re-decision. Follow-up
+milestones unblocked — cross-flag contradiction detection,
+--csv output format, --explain flag, or move beyond
+retention).
 
 ## Architecture in 90 seconds
 

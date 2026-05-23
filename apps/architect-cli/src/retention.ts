@@ -986,14 +986,16 @@ async function runRetentionHistory(
 
   if (command.format === "json") {
     printJson(ctx.io, {
+      action: "history",
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
-      eventKinds: eventKinds ?? null,
-      eventKindsNot: eventKindsNot ?? null,
+      kinds: eventKinds ?? null,
+      kindsNot: eventKindsNot ?? null,
       actorIds: actorIds ?? null,
       actorIdsNot: actorIdsNot ?? null,
       systemOnly: systemOnlyFlag,
       noSystem: noSystemFlag,
+      withActorNames,
       since: since ?? null,
       until: until ?? null,
       afterId: effectiveAfterId ?? null,

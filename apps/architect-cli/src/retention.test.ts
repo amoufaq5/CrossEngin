@@ -2739,7 +2739,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     );
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
-    expect(parsedJson.eventKinds).toEqual(["opt_out_set", "policy_deleted"]);
+    expect(parsedJson.kinds).toEqual(["opt_out_set", "policy_deleted"]);
   });
 
   it("JSON envelope eventKinds=null when --kind NOT set", async () => {
@@ -2753,7 +2753,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     );
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
-    expect(parsedJson.eventKinds).toBeNull();
+    expect(parsedJson.kinds).toBeNull();
   });
 
   it("returns exit 2 on invalid --kind-not", async () => {
@@ -2858,7 +2858,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     );
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
-    expect(parsedJson.eventKindsNot).toEqual([
+    expect(parsedJson.kindsNot).toEqual([
       "policy_deleted",
       "retention_set",
     ]);
@@ -2875,7 +2875,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     );
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
-    expect(parsedJson.eventKindsNot).toBeNull();
+    expect(parsedJson.kindsNot).toBeNull();
   });
 
   it("returns exit 2 on invalid --since", async () => {
@@ -2996,7 +2996,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.tenantFilter).toBe(TENANT_A);
-    expect(parsedJson.eventKinds).toEqual(["opt_out_set"]);
+    expect(parsedJson.kinds).toEqual(["opt_out_set"]);
     expect(parsedJson.limit).toBe(10);
     expect(parsedJson.count).toBe(2);
     expect(parsedJson.entries).toHaveLength(2);
@@ -14519,7 +14519,7 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
   const ID_B = "bb000000-0000-4000-8000-0000000000bb";
 
   describe("multi-value flag envelope shape (array-or-null)", () => {
-    it("history --kind multi: actorIds + eventKinds render as arrays", async () => {
+    it("history --kind multi: actorIds + kinds render as arrays", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
         parsed(
@@ -14540,9 +14540,9 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
       );
       expect(code).toBe(0);
       const env = JSON.parse(out());
-      expect(Array.isArray(env.eventKinds)).toBe(true);
+      expect(Array.isArray(env.kinds)).toBe(true);
       expect(Array.isArray(env.actorIds)).toBe(true);
-      expect(env.eventKinds).toHaveLength(2);
+      expect(env.kinds).toHaveLength(2);
       expect(env.actorIds).toHaveLength(1);
     });
 
@@ -14613,7 +14613,7 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
         } as RetentionContext,
       );
       const histEnv = JSON.parse(outHistory());
-      expect(histEnv.eventKinds).toBeNull();
+      expect(histEnv.kinds).toBeNull();
       expect(histEnv.actorIds).toBeNull();
       expect(histEnv.actorIdsNot).toBeNull();
 
@@ -14797,8 +14797,8 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
     });
   });
 
-  describe("known inconsistencies (documented as future Qs in ADR-0224)", () => {
-    it("history envelope CURRENTLY uses eventKinds/eventKindsNot (deviates from kinds/kindsNot convention; future Q rename)", async () => {
+  describe("canonical conventions on history surface (closes ADR-0224 Q1-3 — ADR-0225 rename milestone)", () => {
+    it("history envelope uses kinds/kindsNot (canonical CLI-flag-derived naming)", async () => {
       const { ctx, out } = buffers();
       await runRetention(
         parsed(
@@ -14814,11 +14814,11 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
         } as RetentionContext,
       );
       const env = JSON.parse(out());
-      expect(env.eventKinds).toBeDefined();
-      expect(env.kinds).toBeUndefined();
+      expect(env.kinds).toEqual(["opt_out_set"]);
+      expect(env.eventKinds).toBeUndefined();
     });
 
-    it("history envelope CURRENTLY omits action discriminator (future Q add)", async () => {
+    it("history envelope emits action=\"history\" discriminator", async () => {
       const { ctx, out } = buffers();
       await runRetention(
         parsed("retention", "history", "--format=json"),
@@ -14828,10 +14828,10 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
         } as RetentionContext,
       );
       const env = JSON.parse(out());
-      expect(env.action).toBeUndefined();
+      expect(env.action).toBe("history");
     });
 
-    it("history envelope CURRENTLY omits withActorNames echo (future Q add)", async () => {
+    it("history envelope echoes withActorNames boolean", async () => {
       const { ctx, out } = buffers();
       await runRetention(
         parsed(
@@ -14846,7 +14846,20 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
         } as RetentionContext,
       );
       const env = JSON.parse(out());
-      expect(env.withActorNames).toBeUndefined();
+      expect(env.withActorNames).toBe(true);
+    });
+
+    it("history envelope withActorNames=false when --with-actor-names not set", async () => {
+      const { ctx, out } = buffers();
+      await runRetention(
+        parsed("retention", "history", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      const env = JSON.parse(out());
+      expect(env.withActorNames).toBe(false);
     });
   });
 });
