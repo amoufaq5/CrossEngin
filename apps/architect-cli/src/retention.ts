@@ -1453,6 +1453,30 @@ async function runRetentionSummary(
     }
   }
 
+  const timezoneFlag = getStringFlag(command, "timezone");
+  const timezone = timezoneFlag ?? undefined;
+  if (timezone !== undefined) {
+    // Parameterized at the adapter (injection-safe); light CLI-side
+    // charset check for friendlier errors (PG validates the actual name).
+    if (!/^[A-Za-z][A-Za-z0-9_+/:-]*$/.test(timezone)) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --timezone '${timezone}' (expected an IANA name like 'America/New_York' or 'UTC')`,
+      );
+      return 2;
+    }
+    const TEMPORAL = new Set(["day", "hour", "week", "month"]);
+    const anyTemporal =
+      TEMPORAL.has(groupBy) || (thenBy !== undefined && TEMPORAL.has(thenBy));
+    if (!anyTemporal) {
+      printError(
+        ctx.io,
+        "retention summary: --timezone only applies to temporal --group-by / --then-by (day, hour, week, month)",
+      );
+      return 2;
+    }
+  }
+
   const summaryInput = {
     tenantId: tenantFilter ?? undefined,
     tableName: tableFilter ?? undefined,
@@ -1466,6 +1490,7 @@ async function runRetentionSummary(
     groupBy,
     thenBy,
     fillGaps,
+    timezone,
   };
 
   if (explainFlag) {
@@ -1477,6 +1502,7 @@ async function runRetentionSummary(
       groupBy,
       thenBy: thenBy ?? null,
       fillGaps,
+      timezone: timezone ?? null,
       filters: {
         tenantId: tenantFilter ?? null,
         tableName: tableFilter ?? null,

@@ -17309,4 +17309,150 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       expect(plan.fillGaps).toBe(true);
     });
   });
+
+  describe("custom timezone (--timezone)", () => {
+    it("threads timezone to adapter with temporal --group-by", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--timezone",
+          "America/New_York",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: "day", totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.timezone).toBe("America/New_York");
+    });
+
+    it("exits 2 on invalid timezone format (injection-ish chars)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--timezone",
+          "'; DROP TABLE--",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("invalid --timezone");
+    });
+
+    it("exits 2 when --timezone used with categorical --group-by", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "kind",
+          "--timezone",
+          "America/New_York",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--timezone only applies to temporal",
+      );
+    });
+
+    it("accepts UTC explicitly", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "hour",
+          "--timezone",
+          "UTC",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: "hour", totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.timezone).toBe("UTC");
+    });
+
+    it("--timezone valid with temporal --then-by (cross-tab)", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "tenant",
+          "--then-by",
+          "day",
+          "--timezone",
+          "Europe/London",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: {
+              groupBy: "tenant",
+              thenBy: "day",
+              totalCount: 0,
+              buckets: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.timezone).toBe("Europe/London");
+    });
+
+    it("--explain plan echoes timezone", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--timezone",
+          "Asia/Tokyo",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.timezone).toBe("Asia/Tokyo");
+    });
+  });
 });

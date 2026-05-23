@@ -21,15 +21,78 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,316 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.gap-fill
+**56 packages + 1 app, 129 meta-schema tables, 9,328 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.timezone
+closes ADR-0234 Q1 + ADR-0235 Q5 + ADR-0236 Q4 by adding
+--timezone <iana-tz> to bucket temporal dimensions in a custom
+timezone (default UTC). Operators reporting on single-region
+tenants want local-time day boundaries (America/New_York
+midnight-to-midnight) not UTC. Operator use cases — local-
+business-day histogram (--group-by day --timezone America/
+New_York), regional incident timeline (--group-by hour
+--timezone Europe/London --fill-gaps), cross-tab in local time
+(--group-by tenant --then-by day --timezone Asia/Tokyo).
+Parameterized timezone injection defense — timezone string
+bound as query parameter NOT interpolated; PG's AT TIME ZONE
+operator accepts text-typed value so date_trunc('<unit>',
+h.occurred_at AT TIME ZONE $N) works; eliminates SQL-injection
+surface entirely even malicious '; DROP TABLE-- is treated as
+param value rejected by PG as invalid timezone at runtime.
+Conditional parameterization backward compat — no --timezone
+keeps literal AT TIME ZONE 'UTC' identical to pre-ADR-0237 SQL
+existing tests unchanged; --timezone X + temporal pushes X as
+FIRST param $1 filters follow $2+; --timezone X + categorical-
+only ignored no date_trunc not pushed. Param ordering —
+standard path tz $1 if set + temporal filters $2+; gap-filling
+path since $1 until $2 timezone $3 if set filters $4+;
+generate_series bounds + LEFT JOIN ON-clause date_trunc both
+reference $3; single timezone param shared across all
+date_trunc references primary + secondary cross-tab +
+generate_series gap-fill. CLI validation defense-in-depth even
+though parameterized — (1) charset check ^[A-Za-z][A-Za-z0-9_
++/:-]*$ IANA names + offset forms friendly exit-2 for garbage
+PG validates actual name invalid IANA → exit 1 runtime, (2)
+temporal requirement --timezone only applies to temporal
+--group-by OR --then-by categorical-only would be silent no-op
+exit 2 with explanation. Adapter — SummarizeOptOutHistoryInput
+gains timezone?: string; builder computes tzExpr ('UTC' literal
+or $N param) threads through resolveDimension standard path +
+gap-filling builder. Output bucket keys reflect chosen timezone
+wall-clock time e.g. --timezone America/New_York yields
+2026-05-20 00:00:00 Eastern midnight. Adapter test block
+extended — 6 timezone tests: defaults literal 'UTC' backward
+compat, parameterizes custom as $1 not interpolated injection-
+safe, custom tz $1 filters $2+, ignored no param categorical,
+applies gap-filling tz $3, cross-tab uses param once both
+temporal dims. CLI test block NEW "custom timezone (--timezone)"
+describe with 6 tests: threads timezone temporal, exits 2
+invalid format injection-ish chars, exits 2 categorical
+group-by, accepts UTC explicitly, valid with temporal --then-by
+cross-tab, --explain echoes timezone. Test count: 9,316 →
+9,328 (+12 net: 6 adapter + 6 CLI). ADR-0237 documents the
+design + 8 rejected alternatives + 6 future Qs (--timezone
+affecting --since/--until interpretation defer operators pass
+explicit TZ, timezone abbreviation EST/PST ambiguous defer,
+--timezone list helper pg_timezone_names defer, per-tenant
+default timezone defer config-layer, timezone in non-summary
+surfaces history/diff-timeline display localization defer,
+DST-transition bucket handling PG handles correctly defer
+under-documented). The retention summary action now honors
+--timezone across all temporal modes (single-dimension + cross-
+tab + gap-filling); injection-safe parameterized timezone with
+UTC default + backward-compat literal SQL. Natural follow-up
+milestones — cross-tab gap-filling (ADR-0236 Q1), --explain-
+analyze actual EXPLAIN ANALYZE (ADR-0229 Q2), --format=yaml
+(ADR-0231 Q1), --top N + --min-count (ADR-0232 Q3+Q4), or move
+beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.summary.gap-fill
 closes ADR-0234 Q4 + ADR-0235 Q3 by adding --fill-gaps flag
 emitting zero-count buckets for empty time periods via
 generate_series + LEFT JOIN. GROUP BY only emits buckets for
@@ -13916,6 +13979,31 @@ supports single-dimension + cross-tab + gap-filled temporal
 histograms; generate_series + LEFT JOIN ON-clause-filter
 pattern is foundation for future cross-tab + categorical gap-
 filling).
+ADR-0237 covers M6.7.zz.tenant.opt-out.cli.summary.timezone
+(retention summary custom timezone bucketing --timezone —
+closes ADR-0234 Q1 + ADR-0235 Q5 + ADR-0236 Q4; bucket
+temporal dimensions in custom IANA timezone default UTC;
+parameterized timezone injection-safe NOT interpolated PG
+AT TIME ZONE accepts text param eliminates injection surface;
+conditional parameterization backward compat no --timezone
+keeps literal 'UTC'; tz param first $1 standard path / $3
+gap-fill after since/until; single shared tz param across all
+date_trunc references; CLI validation charset check + temporal
+requirement; works across single-dimension + cross-tab + gap-
+filling; bucket keys reflect chosen tz wall-clock; 6 adapter
+tests + 6 CLI tests; test count 9,316 → 9,328; rejected —
+interpolate with validation only parameterize gold standard,
+always parameterize breaks existing UTC tests, session SET
+timezone stateful, store offset number IANA handles DST, default
+server local non-deterministic, silently ignore categorical
+confusing, --timezone affecting since/until parsing keep
+separate, --utc shorthand redundant; future Qs — --timezone
+affecting since/until defer, abbreviation EST/PST ambiguous
+defer, --timezone list helper defer, per-tenant default defer,
+timezone in non-summary surfaces defer, DST-transition handling
+PG correct defer under-documented. The summary action honors
+--timezone across all temporal modes; injection-safe
+parameterized with UTC default + backward-compat literal SQL).
 
 ## Architecture in 90 seconds
 

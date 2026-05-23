@@ -308,6 +308,7 @@ export interface SummarizeOptOutHistoryInput {
   readonly groupBy: OptOutHistorySummaryGroupBy;
   readonly thenBy?: OptOutHistorySummaryGroupBy;
   readonly fillGaps?: boolean;
+  readonly timezone?: string;
 }
 
 export interface OptOutHistorySummaryBucket {
@@ -1523,10 +1524,16 @@ export class PostgresTraceRetention {
       );
     }
     // since=$1, until=$2 (used for both generate_series bounds AND
-    // the LEFT JOIN occurred_at range); other filters follow as $3+.
+    // the LEFT JOIN occurred_at range); timezone (if custom) is $3;
+    // other filters follow.
     const params: unknown[] = [input.since, input.until];
+    let tzExpr = "'UTC'";
+    if (input.timezone !== undefined) {
+      params.push(input.timezone);
+      tzExpr = `$${params.length}`;
+    }
     const joinConditions: string[] = [
-      `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC') = b.bucket`,
+      `date_trunc('${unit}', h.occurred_at AT TIME ZONE ${tzExpr}) = b.bucket`,
       `h.occurred_at >= $1`,
       `h.occurred_at <= $2`,
     ];
@@ -1586,8 +1593,8 @@ export class PostgresTraceRetention {
     }
     const sql = `SELECT b.bucket::text AS key, COUNT(h.id)::bigint AS count
        FROM generate_series(
-         date_trunc('${unit}', $1::timestamptz AT TIME ZONE 'UTC'),
-         date_trunc('${unit}', $2::timestamptz AT TIME ZONE 'UTC'),
+         date_trunc('${unit}', $1::timestamptz AT TIME ZONE ${tzExpr}),
+         date_trunc('${unit}', $2::timestamptz AT TIME ZONE ${tzExpr}),
          interval '1 ${unit}'
        ) AS b(bucket)
        LEFT JOIN ${SCHEMA}.${HISTORY_TABLE} h ON ${joinConditions.join(" AND ")}
@@ -1608,6 +1615,23 @@ export class PostgresTraceRetention {
       week: "week",
       month: "month",
     };
+
+    if (input.fillGaps === true) {
+      return this.buildGapFilledSummaryQuery(input, temporalUnit);
+    }
+
+    const params: unknown[] = [];
+    // Custom timezone is parameterized (defense-in-depth vs injection);
+    // defaults to literal 'UTC' when not provided (preserves prior SQL).
+    const anyTemporal =
+      temporalUnit[input.groupBy] !== undefined ||
+      (input.thenBy !== undefined &&
+        temporalUnit[input.thenBy] !== undefined);
+    let tzExpr = "'UTC'";
+    if (input.timezone !== undefined && anyTemporal) {
+      params.push(input.timezone);
+      tzExpr = `$${params.length}`;
+    }
     const resolveDimension = (
       dim: OptOutHistorySummaryGroupBy,
     ): { col: string; keyExpr: string; isTemporal: boolean } => {
@@ -1621,16 +1645,12 @@ export class PostgresTraceRetention {
       };
       const unit = temporalUnit[dim];
       if (unit !== undefined) {
-        const col = `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC')`;
+        const col = `date_trunc('${unit}', h.occurred_at AT TIME ZONE ${tzExpr})`;
         return { col, keyExpr: `${col}::text`, isTemporal: true };
       }
       const col = categoricalColumn[dim]!;
       return { col, keyExpr: col, isTemporal: false };
     };
-
-    if (input.fillGaps === true) {
-      return this.buildGapFilledSummaryQuery(input, temporalUnit);
-    }
 
     const primary = resolveDimension(input.groupBy);
     const col = primary.col;
@@ -1639,7 +1659,6 @@ export class PostgresTraceRetention {
     const secondary =
       input.thenBy !== undefined ? resolveDimension(input.thenBy) : undefined;
     const conditions: string[] = [];
-    const params: unknown[] = [];
     if (input.tenantId !== undefined) {
       params.push(input.tenantId);
       conditions.push(`h.tenant_id = $${params.length}`);

@@ -11282,4 +11282,87 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
       count: 0,
     });
   });
+
+  it("timezone: defaults to literal 'UTC' when not provided (backward compat)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+    });
+    expect(sql).toContain("AT TIME ZONE 'UTC'");
+    expect(params).toEqual([]);
+  });
+
+  it("timezone: parameterizes custom timezone as $1 (defense-in-depth vs injection)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      timezone: "America/New_York",
+    });
+    expect(sql).toContain("AT TIME ZONE $1");
+    expect(sql).not.toContain("AT TIME ZONE 'America");
+    expect(params[0]).toBe("America/New_York");
+  });
+
+  it("timezone: custom tz is $1, filters follow as $2+", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      timezone: "Europe/London",
+      tenantId: "00000000-0000-4000-8000-00000000000A",
+    });
+    expect(sql).toContain("AT TIME ZONE $1");
+    expect(sql).toContain("h.tenant_id = $2");
+    expect(params).toEqual([
+      "Europe/London",
+      "00000000-0000-4000-8000-00000000000A",
+    ]);
+  });
+
+  it("timezone: ignored (no param) for categorical groupBy", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      timezone: "America/New_York",
+    });
+    // categorical grouping has no date_trunc; timezone not used
+    expect(sql).not.toContain("AT TIME ZONE");
+    expect(params).toEqual([]);
+  });
+
+  it("timezone: applies in gap-filling (tz is $3 after since/until)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      fillGaps: true,
+      since: "2026-05-01T00:00:00.000Z",
+      until: "2026-05-07T00:00:00.000Z",
+      timezone: "America/New_York",
+    });
+    expect(sql).toContain("AT TIME ZONE $3");
+    expect(sql).not.toContain("AT TIME ZONE 'UTC'");
+    expect(params[2]).toBe("America/New_York");
+  });
+
+  it("timezone: cross-tab uses parameterized tz once for both temporal dims", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "hour",
+      timezone: "Asia/Tokyo",
+    });
+    expect(sql).toContain("AT TIME ZONE $1");
+    expect(params[0]).toBe("Asia/Tokyo");
+  });
 });
