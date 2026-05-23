@@ -36,6 +36,46 @@ import { printCsv, printError, printJson, printSuccess } from "./format.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
+interface ExplainPlan {
+  readonly action: string;
+  readonly explain: boolean;
+  readonly executed: boolean;
+  readonly [key: string]: unknown;
+}
+
+function formatExplainPlan(plan: ExplainPlan): string {
+  const lines: string[] = [
+    `Query plan: retention ${plan.action} (NOT executed; remove --explain to run)`,
+  ];
+  for (const [key, value] of Object.entries(plan)) {
+    if (key === "action" || key === "explain" || key === "executed") continue;
+    if (value === null || value === undefined) continue;
+    if (typeof value === "object" && !Array.isArray(value)) {
+      lines.push(`  ${key}:`);
+      for (const [subKey, subValue] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        const rendered =
+          subValue === null || subValue === undefined
+            ? "(any)"
+            : Array.isArray(subValue)
+              ? `[${subValue.map((v) => JSON.stringify(v)).join(", ")}]`
+              : typeof subValue === "string"
+                ? `'${subValue}'`
+                : String(subValue);
+        lines.push(`    ${subKey}: ${rendered}`);
+      }
+    } else if (Array.isArray(value)) {
+      lines.push(
+        `  ${key}: [${value.map((v) => JSON.stringify(v)).join(", ")}]`,
+      );
+    } else {
+      lines.push(`  ${key}: ${String(value)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 function findContradictoryValues<T>(
   positive: ReadonlyArray<T> | undefined,
   negative: ReadonlyArray<T> | undefined,
@@ -849,6 +889,7 @@ async function runRetentionHistory(
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+  const explainFlag = getBooleanFlag(command, "explain");
 
   if (systemOnlyFlag && noSystemFlag) {
     printError(
@@ -990,6 +1031,41 @@ async function runRetentionHistory(
       return 2;
     }
     limit = parsed;
+  }
+
+  if (explainFlag) {
+    const plan = {
+      action: "history",
+      explain: true,
+      executed: false,
+      filters: {
+        tenantId: tenantFilter ?? null,
+        tableName: tableFilter ?? null,
+        kinds: eventKinds ?? null,
+        kindsNot: eventKindsNot ?? null,
+        actorIds: actorIds ?? null,
+        actorIdsNot: actorIdsNot ?? null,
+        actorPresence: actorPresence ?? null,
+        since: since ?? null,
+        until: until ?? null,
+      },
+      pagination: {
+        limit,
+        afterId: effectiveAfterId ?? null,
+        beforeId: effectiveBeforeId ?? null,
+        range: rangeFlag ?? null,
+      },
+      output: {
+        ordering: "occurred_at DESC, id DESC",
+        withActorNames,
+      },
+    };
+    if (command.format === "json" || command.format === "csv") {
+      printJson(ctx.io, plan);
+    } else {
+      ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
+    }
+    return 0;
   }
 
   let entries: ReadonlyArray<OptOutHistoryEntry>;
@@ -1473,6 +1549,7 @@ async function runRetentionDiffHistory(
   const systemOnlyBFlag = getBooleanFlag(command, "system-only-b");
   const noSystemBFlag = getBooleanFlag(command, "no-system-b");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+  const explainFlag = getBooleanFlag(command, "explain");
 
   if (systemOnlyFlag && noSystemFlag) {
     printError(
@@ -1519,6 +1596,42 @@ async function runRetentionDiffHistory(
     : noSystemBFlag
       ? "no_system"
       : undefined;
+
+  if (explainFlag) {
+    const plan = {
+      action: "diff-history",
+      explain: true,
+      executed: false,
+      idA,
+      idB,
+      filters: {
+        kinds: eventKinds ?? null,
+        kindsA: eventKindsA ?? null,
+        kindsB: eventKindsB ?? null,
+        kindsNot: eventKindsNot ?? null,
+        kindsNotA: eventKindsNotA ?? null,
+        kindsNotB: eventKindsNotB ?? null,
+        actorIds: actorIds ?? null,
+        actorIdsA: actorIdsA ?? null,
+        actorIdsB: actorIdsB ?? null,
+        actorIdsNot: actorIdsNot ?? null,
+        actorIdsNotA: actorIdsNotA ?? null,
+        actorIdsNotB: actorIdsNotB ?? null,
+        actorPresence: actorPresence ?? null,
+        actorPresenceA: actorPresenceA ?? null,
+        actorPresenceB: actorPresenceB ?? null,
+      },
+      output: {
+        withActorNames,
+      },
+    };
+    if (command.format === "json" || command.format === "csv") {
+      printJson(ctx.io, plan);
+    } else {
+      ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
+    }
+    return 0;
+  }
 
   let result: DiffHistoryEntriesResult;
   try {
@@ -1863,6 +1976,7 @@ async function runRetentionDiffTimeline(
   }
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
+  const explainFlag = getBooleanFlag(command, "explain");
   const actorIdFlags = getMultiFlag(command, "actor-id");
   const actorIds = actorIdFlags.length > 0 ? actorIdFlags : undefined;
   const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
@@ -1976,6 +2090,51 @@ async function runRetentionDiffTimeline(
       "retention diff-timeline: --after-id and --before-id are mutually exclusive (use --range <after-id>..<before-id> for window cursor)",
     );
     return 2;
+  }
+
+  if (explainFlag) {
+    const dispatchPath = crossTable
+      ? "cross-table"
+      : hasAddTenant
+        ? "nway"
+        : "pair-wise";
+    const plan = {
+      action: "diff-timeline",
+      explain: true,
+      executed: false,
+      dispatchPath,
+      tenants: crossTable
+        ? [positionalA]
+        : [positionalA, positionalB, ...addTenants],
+      tables: crossTable
+        ? [positionalB, positionalC, ...addTables]
+        : [positionalC],
+      filters: {
+        kinds: eventKinds ?? null,
+        kindsNot: eventKindsNot ?? null,
+        actorIds: actorIds ?? null,
+        actorIdsNot: actorIdsNot ?? null,
+        actorPresence: actorPresence ?? null,
+        since: since ?? null,
+        until: until ?? null,
+      },
+      pagination: {
+        limit,
+        afterId: afterId ?? null,
+        beforeId: beforeId ?? null,
+        range: rangeFlag ?? null,
+      },
+      output: {
+        ordering: "occurred_at ASC, id ASC",
+        withActorNames,
+      },
+    };
+    if (command.format === "json" || command.format === "csv") {
+      printJson(ctx.io, plan);
+    } else {
+      ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
+    }
+    return 0;
   }
 
   if (crossTable) {

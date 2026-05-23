@@ -15273,6 +15273,286 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
   });
 });
 
+describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+  describe("retention history --explain", () => {
+    it("does NOT call the adapter when --explain is set", async () => {
+      const capture: ListOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--tenant",
+          TENANT_A,
+          "--kind",
+          "opt_out_set",
+          "--explain",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture).toHaveLength(0);
+    });
+
+    it("emits query plan (human format) with action + NOT executed indicator", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--explain"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("Query plan: retention history");
+      expect(out()).toContain("NOT executed");
+    });
+
+    it("emits query plan (JSON format) with explain=true + executed=false", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.action).toBe("history");
+      expect(plan.explain).toBe(true);
+      expect(plan.executed).toBe(false);
+      expect(plan.filters.kinds).toEqual(["opt_out_set"]);
+    });
+
+    it("plan echoes all filters from operator flags", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--tenant",
+          TENANT_A,
+          "--table",
+          "workflow_traces",
+          "--kind",
+          "opt_out_set",
+          "--kind",
+          "opt_out_cleared",
+          "--kind-not",
+          "policy_deleted",
+          "--actor-id",
+          ACTOR_ALICE,
+          "--system-only",
+          "--limit",
+          "50",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.filters.tenantId).toBe(TENANT_A);
+      expect(plan.filters.tableName).toBe("workflow_traces");
+      expect(plan.filters.kinds).toEqual(["opt_out_set", "opt_out_cleared"]);
+      expect(plan.filters.kindsNot).toEqual(["policy_deleted"]);
+      expect(plan.filters.actorIds).toEqual([ACTOR_ALICE]);
+      expect(plan.filters.actorPresence).toBe("system_only");
+      expect(plan.pagination.limit).toBe(50);
+    });
+  });
+
+  describe("retention diff-history --explain", () => {
+    it("does NOT call adapter when --explain set", async () => {
+      const capture: DiffHistoryEntriesInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind",
+          "opt_out_set",
+          "--explain",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ diffCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture).toHaveLength(0);
+    });
+
+    it("emits plan with idA + idB + per-side filters echoed", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--kind-a",
+          "opt_out_set",
+          "--kind-b",
+          "opt_out_cleared",
+          "--actor-id-a",
+          ACTOR_ALICE,
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.action).toBe("diff-history");
+      expect(plan.idA).toBe(ID_A);
+      expect(plan.idB).toBe(ID_B);
+      expect(plan.filters.kindsA).toEqual(["opt_out_set"]);
+      expect(plan.filters.kindsB).toEqual(["opt_out_cleared"]);
+      expect(plan.filters.actorIdsA).toEqual([ACTOR_ALICE]);
+    });
+  });
+
+  describe("retention diff-timeline --explain", () => {
+    it("emits plan with dispatchPath=pair-wise for default dispatch", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.action).toBe("diff-timeline");
+      expect(plan.dispatchPath).toBe("pair-wise");
+      expect(plan.tenants).toEqual([TENANT_A, TENANT_B]);
+      expect(plan.tables).toEqual(["workflow_traces"]);
+    });
+
+    it("emits plan with dispatchPath=nway via --add-tenant", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--add-tenant",
+          "00000000-0000-4000-8000-00000000000C",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.dispatchPath).toBe("nway");
+      expect(plan.tenants).toHaveLength(3);
+    });
+
+    it("emits plan with dispatchPath=cross-table via --cross-table", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          "workflow_traces",
+          "tenant_opt_outs",
+          "--cross-table",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.dispatchPath).toBe("cross-table");
+      expect(plan.tenants).toEqual([TENANT_A]);
+      expect(plan.tables).toEqual(["workflow_traces", "tenant_opt_outs"]);
+    });
+  });
+
+  describe("--explain composes with other flags", () => {
+    it("--explain + --format=csv still emits JSON plan (not CSV plan)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--explain", "--format=csv"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.explain).toBe(true);
+    });
+
+    it("--explain fires AFTER contradiction detection (still exit 2)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--kind-not",
+          "opt_out_set",
+          "--explain",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("share value(s)");
+    });
+  });
+});
+
 describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", () => {
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";

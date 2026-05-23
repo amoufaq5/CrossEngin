@@ -21,15 +21,96 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,194 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.csv-format
+**56 packages + 1 app, 129 meta-schema tables, 9,205 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.explain-flag
+closes ADR-0226 future Q5 by adding --explain boolean flag to
+all 3 retention surfaces. When set, skips the adapter call
+entirely and emits a structured "query plan" object describing
+the operator's effective filters + pagination + output spec,
+then exit 0. Pure CLI-side feature; no adapter changes; ADDITIVE
+no breaking changes. Operator ergonomic improvement — operators
+can preview retention query intent without database round-trip;
+complements ADR-0226's eager contradiction detection by handling
+the legitimate-empty cases. Scope tradeoff — CLI-side plan
+(Option A chosen) vs adapter-level raw SQL (Option B deferred
+as future Q since requires refactoring 5 adapter methods to
+extract SQL-building helpers); Option A is sufficient for the
+most common operator use case "what filters are effective here?"
+and ships in a single focused milestone. New ExplainPlan
+interface — action (string), explain (boolean always true),
+executed (boolean always false), surface-specific fields via
+[key: string]: unknown. Per-surface plan shapes — retention
+history (filters tenantId/tableName/kinds/kindsNot/actorIds/
+actorIdsNot/actorPresence/since/until, pagination limit/
+afterId/beforeId/range, output ordering/withActorNames);
+retention diff-history (idA/idB + 12 per-side filters covering
+global + per-side A + per-side B for kind+actor+actorPresence
+dimensions, output withActorNames); retention diff-timeline (3
+dispatch paths discriminated via dispatchPath field —
+pair-wise/nway/cross-table — with tenants/tables arrays
+reflecting the dispatch). Human-readable rendering for
+--format=human — formatExplainPlan helper formats null/undefined
+as (any), arrays as JSON-stringified [v1, v2, v3], strings as
+'value' quoted, primitives via String(); top-level message
+"Query plan: retention {action} (NOT executed; remove --explain
+to run)". JSON format emits pretty-printed plan. CSV format
+falls back to JSON since single-row plan doesn't fit CSV's
+tabular shape. Execution order — --explain fires AFTER flag
+parsing + validation + ADR-0226 contradiction detection but
+BEFORE any adapter call; operators using --explain with
+contradictory flag combination still see the contradiction
+error (exit 2) rather than misleading plan. Composition with
+other flags — --explain + --format=csv → JSON plan (CSV
+fallback), --explain + --with-actor-names → plan echoes
+withActorNames:true, --explain + contradictory flag pair →
+contradiction error fires first exit 2 no plan emitted. Help
+text updated — retention history/diff-history/diff-timeline
+usage lines gain [--explain] flag; global flag documentation
+added "--explain  With retention history / diff-history /
+diff-timeline, print the query plan (filters + pagination +
+output spec) without executing. Debug aid for legitimate
+empty results and for understanding effective WHERE
+conditions." NEW "retention --explain flag" describe block
+with 4 nested describe blocks — retention history --explain
+(no adapter call verified by capture-length-0, human format
+emits plan + NOT executed indicator, JSON format with
+explain=true/executed=false, all filters echoed from operator
+flags); retention diff-history --explain (no adapter call,
+plan with idA + idB + per-side filters echoed); retention
+diff-timeline --explain (dispatchPath=pair-wise default,
+dispatchPath=nway via --add-tenant, dispatchPath=cross-table
+via --cross-table); --explain composes with other flags
+(--explain + --format=csv emits JSON not CSV plan, --explain
+fires AFTER contradiction detection still exit 2). 11 new
+CLI tests test count 9,194 → 9,205. ADR-0228 documents the
+design + 8 rejected alternatives + 6 future Qs (adapter-level
+explainXxxQuery methods returning raw SQL + bound parameters
+defer follow-up milestone Option B, --explain analyze for
+executed query plan with timing/row-count statistics defer,
+plan rendering options --explain-format=tree/compact defer
+current format works, --explain output to separate file defer
+operators can redirect stdout, plan stability across versions
+document as part of envelope conventions defer, CLI hash/cache
+for repeated --explain invocations premature optimization
+defer). The retention CLI now has --explain across all 3
+surfaces with surface-appropriate plan shapes. Pattern
+documented for future surfaces — new retention actions
+inherit the --explain pattern via shared formatExplainPlan
+helper and ExplainPlan interface. Natural follow-up milestones
+— adapter-level explainXxxQuery returning raw SQL (ADR-0228
+Q1, Option B), cross-dimensional semantic contradiction
+detection (ADR-0226 Q1 — --system-only + --actor-id Y),
+--format=tsv mechanical CSV variant (ADR-0227 Q1), retention
+summary action, or move beyond retention to other Phase 2
+deferred Qs.
+M6.7.zz.tenant.opt-out.cli.csv-format
 closes ADR-0224 future Q5 by adding --format=csv as the 3rd
 output format option across all retention CLI surfaces. Emits
 RFC 4180-compliant CSV with surface-appropriate column
@@ -12977,6 +13058,46 @@ CSV for non-list retention actions defer JSON more natural
 for single-row. The retention CLI now supports CSV across
 all 3 surfaces; operators have ergonomic path from queries
 to spreadsheets/data pipelines without JSON intermediaries).
+ADR-0228 covers M6.7.zz.tenant.opt-out.cli.explain-flag
+(retention CLI --explain flag query plan output — closes
+ADR-0226 future Q5; CLI-side query plan preview without
+database round-trip; ADDITIVE no breaking no adapter changes;
+scope tradeoff Option A CLI-side plan chosen vs Option B
+adapter-level raw SQL deferred future Q since requires 5
+adapter method refactors; ExplainPlan interface with action +
+explain + executed + surface-specific fields; per-surface plan
+shapes — history (filters/pagination/output), diff-history
+(idA/idB + 12 per-side filters covering global + per-side A +
+per-side B + actorPresence dimensions), diff-timeline (3
+dispatch paths discriminated via dispatchPath field —
+pair-wise/nway/cross-table with tenants/tables arrays);
+formatExplainPlan helper renders human format with null →
+(any) + arrays → JSON-stringified + strings → 'quoted'; CSV
+falls back to JSON single-row doesn't fit tabular; execution
+order --explain fires AFTER validation + contradiction
+detection BEFORE adapter call; composes with --format=csv
+emits JSON, --with-actor-names echoed, contradictory pairs
+still exit 2 contradiction error first; 11 new CLI tests
+test count 9,194 → 9,205; rejected — Option B adapter raw
+SQL scope creep defer future Q, reconstruct SQL at CLI
+duplicates adapter logic, --dry-run vs --explain semantic
+distinct write vs read, --plan less recognizable than
+--explain matches PG EXPLAIN mental model, auto-execute empty
+filter set skips documentation step, skip --explain when
+contradiction detected silently swallows errors, --explain
+on non-list actions adds little value defer, CSV for
+single-row plan doesn't fit tabular JSON cleaner fallback;
+future Qs — adapter-level explainXxxQuery raw SQL Option B
+defer follow-up milestone, --explain analyze with execution
+timing/row-count defer, plan rendering options --explain-
+format=tree/compact defer current format works, --explain-to
+<path> output file defer redirect stdout, plan stability
+across versions document as envelope conventions defer, CLI
+hash/cache for repeated --explain premature optimization).
+The retention CLI now has --explain across all 3 surfaces
+with surface-appropriate plan shapes; pattern documented for
+future surfaces inheriting --explain via shared
+formatExplainPlan helper and ExplainPlan interface).
 
 ## Architecture in 90 seconds
 
