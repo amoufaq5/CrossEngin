@@ -1268,7 +1268,16 @@ function formatActor(e: {
 }
 
 function isSummaryGroupBy(v: string): v is OptOutHistorySummaryGroupBy {
-  return v === "kind" || v === "tenant" || v === "actor" || v === "table";
+  return (
+    v === "kind" ||
+    v === "tenant" ||
+    v === "actor" ||
+    v === "table" ||
+    v === "day" ||
+    v === "hour" ||
+    v === "week" ||
+    v === "month"
+  );
 }
 
 async function runRetentionSummary(
@@ -1302,7 +1311,7 @@ async function runRetentionSummary(
   if (groupByFlag !== null && !isSummaryGroupBy(groupByFlag)) {
     printError(
       ctx.io,
-      `retention summary: invalid --group-by '${groupByFlag}' (expected one of: kind, tenant, actor, table)`,
+      `retention summary: invalid --group-by '${groupByFlag}' (expected one of: kind, tenant, actor, table, day, hour, week, month)`,
     );
     return 2;
   }

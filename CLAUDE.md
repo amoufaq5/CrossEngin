@@ -21,15 +21,78 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,284 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming
+**56 packages + 1 app, 129 meta-schema tables, 9,292 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.time-bucket
+closes ADR-0232 Q1 by extending retention summary --group-by
+with 4 temporal dimensions (day/hour/week/month) using
+date_trunc(occurred_at) for histogram-style time-series
+activity reports. Highest-value follow-up to ADR-0232 summary;
+transforms static dimension breakdowns into time-series.
+Operator use cases — daily activity histogram (--group-by day
+--since 2026-05-01), incident-window hourly volume (--group-by
+hour --since/--until window), monthly trend (--group-by
+month), filtered time-series (--kind opt_out_set --group-by
+day). OptOutHistorySummaryGroupBy extended with day|hour|week|
+month alongside categorical kind|tenant|actor|table. SQL
+builder temporal grouping — SELECT date_trunc('<unit>',
+h.occurred_at AT TIME ZONE 'UTC')::text AS key COUNT(*)::bigint
+GROUP BY date_trunc(...) ORDER BY date_trunc(...) ASC. Key
+design — (1) UTC normalization h.occurred_at AT TIME ZONE 'UTC'
+ensures deterministic bucketing regardless of PG session
+timezone day boundaries are UTC midnight, (2) ::text cast so
+bucket key is string format "2026-05-20 00:00:00", (3)
+chronological ordering temporal dimensions sort key ASC NOT
+COUNT(*) DESC histogram reads left-to-right in time order
+builder branches categorical → COUNT(*) DESC col ASC temporal
+→ col ASC, (4) literal unit mapping from fixed map {day:
+"day", ...} NOT free-form interpolation CLI validates
+--group-by against enum before builder runs no SQL injection
+surface. Adapter summarizeOptOutHistory unchanged parses
+bigint count + accumulates totalCount key for temporal buckets
+is timestamp text never null. CLI isSummaryGroupBy extended to
+accept 4 temporal values + error message lists all 8 valid
+values + help text documents categorical-vs-temporal ordering
+distinction + UTC bucketing. All output formats work unchanged
+human "Summary by day (total: N events)" + chronological key/
+count table, json {action, groupBy: "day", totalCount,
+buckets}, csv/tsv day,count + chronological rows, ndjson one
+bucket per line, --explain raw SQL showing date_trunc. Adapter
+test block extended — 5 new tests: builder groups by day with
+date_trunc + UTC + chronological order (verifies NOT COUNT
+DESC), supports hour/week/month units, temporal composes with
+filters, categorical retains count DESC ordering, method
+returns time-bucket keys as timestamp strings. CLI test block
+extended — 3 new tests: threads --group-by day temporal,
+accepts all 4 temporal values day/hour/week/month, human
+format renders time-bucket summary by day. Test count: 9,284 →
+9,292 (+8 net: 5 adapter + 3 CLI). ADR-0234 documents the
+design + 8 rejected alternatives + 6 future Qs (--timezone
+<tz> for non-UTC bucketing defer UTC covers audit cases,
+quarter/year/minute units defer current 4 cover common needs,
+cross-tab categorical × temporal ADR-0232 Q2 multi-dimensional
+defer, gap-filling zero-count buckets via generate_series
+defer operators detect client-side, ISO-8601 T-separated +
+TZ-suffixed key format defer current readable + sorts, time-
+bucket on diff-timeline/diff-history N/A comparison surfaces).
+The retention summary action now supports 8 grouping
+dimensions — 4 categorical + 4 temporal; histograms read
+chronologically while categorical dimensions read as count-
+DESC leaderboards. UTC bucketing is deterministic; the
+date_trunc foundation enables future analytics (gap-filling,
+cross-tab, custom timezones). Natural follow-up milestones —
+retention summary cross-tab categorical × temporal (ADR-0232
+Q2 + ADR-0234 Q3 multi-dimensional group-by), --explain-
+analyze actual EXPLAIN ANALYZE (ADR-0229 Q2), --format=yaml
+(ADR-0231 Q1), or move beyond retention to other Phase 2
+deferred Qs.
+M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming
 closes ADR-0224 future Q6 by rigorously documenting the two-
 level JSON envelope field naming separation. Pure docs + 4
 documentary tests; no production code changes (current state
@@ -13648,6 +13711,30 @@ defer, versioned envelope defer. The two-level separation is
 now canonical reference for new surfaces; closes last
 documentation gap from envelope-conventions codification
 ADR-0224).
+ADR-0234 covers M6.7.zz.tenant.opt-out.cli.summary.time-bucket
+(retention summary time-bucket grouping — closes ADR-0232 Q1;
+extends --group-by with 4 temporal dimensions day/hour/week/
+month via date_trunc(occurred_at AT TIME ZONE 'UTC') for
+histogram-style time-series; UTC normalization deterministic
+bucketing + ::text cast string key + chronological ordering
+key ASC NOT count DESC for temporal builder branches +
+literal unit map no SQL injection; adapter unchanged parses
+bigint; CLI isSummaryGroupBy extended 8 values + help text
+categorical-vs-temporal ordering; all output formats work
+unchanged; 5 adapter tests + 3 CLI tests; test count 9,284 →
+9,292; rejected — separate --bucket flag orthogonal multi-
+dimensional defer, session-timezone non-deterministic, --
+timezone flag defer UTC default, epoch millis text more
+readable, count DESC for temporal scrambles timeline,
+quarter/year/minute defer, ISO-8601 T-separated reformatting
+defer current sorts, interpolate group-by literal map clearer;
+future Qs — --timezone non-UTC defer, quarter/year/minute
+defer, cross-tab categorical × temporal ADR-0232 Q2 defer,
+gap-filling zero-count buckets defer, ISO-8601 key format
+defer, time-bucket on diff-timeline/diff-history N/A. The
+summary action now supports 8 grouping dimensions; the
+date_trunc foundation enables future analytics gap-filling +
+cross-tab + custom timezones).
 
 ## Architecture in 90 seconds
 

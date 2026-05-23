@@ -16715,6 +16715,73 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     expect(capture[0]?.groupBy).toBe("tenant");
   });
 
+  it("threads --group-by day (temporal) to adapter", async () => {
+    const capture: SummarizeOptOutHistoryInput[] = [];
+    const { ctx } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--group-by", "day"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryCapture: capture,
+          summaryResult: {
+            groupBy: "day",
+            totalCount: 13,
+            buckets: [
+              { key: "2026-05-20 00:00:00", count: 8 },
+              { key: "2026-05-21 00:00:00", count: 5 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(capture[0]?.groupBy).toBe("day");
+  });
+
+  it("accepts all temporal --group-by values (day/hour/week/month)", async () => {
+    for (const unit of ["day", "hour", "week", "month"] as const) {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--group-by", unit),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: unit, totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.groupBy).toBe(unit);
+    }
+  });
+
+  it("human format renders time-bucket summary by day", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "summary", "--group-by", "day"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryResult: {
+            groupBy: "day",
+            totalCount: 13,
+            buckets: [
+              { key: "2026-05-20 00:00:00", count: 8 },
+              { key: "2026-05-21 00:00:00", count: 5 },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Summary by day (total: 13 events)");
+    expect(out()).toContain("2026-05-20 00:00:00");
+    expect(out()).toContain("8");
+  });
+
   it("exits 2 on invalid --group-by", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(

@@ -11008,4 +11008,74 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(result.totalCount).toBe(0);
     expect(result.buckets).toEqual([]);
   });
+
+  it("buildSummarizeOptOutHistoryQuery groups by day with date_trunc + UTC + chronological order", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "day" });
+    expect(sql).toContain(
+      "date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')::text AS key",
+    );
+    expect(sql).toContain(
+      "GROUP BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')",
+    );
+    // temporal dimensions order chronologically (key ASC), NOT count DESC
+    expect(sql).toContain(
+      "ORDER BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC') ASC",
+    );
+    expect(sql).not.toContain("ORDER BY COUNT(*) DESC");
+  });
+
+  it("buildSummarizeOptOutHistoryQuery supports hour / week / month temporal units", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    for (const unit of ["hour", "week", "month"] as const) {
+      const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: unit });
+      expect(sql).toContain(`date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC')`);
+    }
+  });
+
+  it("buildSummarizeOptOutHistoryQuery temporal grouping composes with filters", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      tenantId: "00000000-0000-4000-8000-00000000000A",
+      eventKinds: ["opt_out_set"],
+    });
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("h.event_kind IN ($2)");
+    expect(sql).toContain("date_trunc('day'");
+    expect(params).toEqual([
+      "00000000-0000-4000-8000-00000000000A",
+      "opt_out_set",
+    ]);
+  });
+
+  it("categorical grouping retains count DESC ordering (not chronological)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "kind" });
+    expect(sql).toContain("ORDER BY COUNT(*) DESC, h.event_kind ASC");
+  });
+
+  it("summarizeOptOutHistory returns time-bucket keys as ISO-ish timestamp strings", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        { key: "2026-05-20 00:00:00", count: "8" },
+        { key: "2026-05-21 00:00:00", count: "5" },
+      ],
+      rowCount: 2,
+    }));
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.summarizeOptOutHistory({ groupBy: "day" });
+    expect(result.groupBy).toBe("day");
+    expect(result.totalCount).toBe(13);
+    expect(result.buckets[0]?.key).toBe("2026-05-20 00:00:00");
+    expect(result.buckets[1]?.key).toBe("2026-05-21 00:00:00");
+  });
 });

@@ -289,7 +289,11 @@ export type OptOutHistorySummaryGroupBy =
   | "kind"
   | "tenant"
   | "actor"
-  | "table";
+  | "table"
+  | "day"
+  | "hour"
+  | "week"
+  | "month";
 
 export interface SummarizeOptOutHistoryInput {
   readonly tenantId?: string;
@@ -1498,13 +1502,28 @@ export class PostgresTraceRetention {
     sql: string;
     params: unknown[];
   } {
-    const groupColumn: Record<OptOutHistorySummaryGroupBy, string> = {
+    const categoricalColumn: Partial<
+      Record<OptOutHistorySummaryGroupBy, string>
+    > = {
       kind: "h.event_kind",
       tenant: "h.tenant_id",
       actor: "h.actor_id",
       table: "h.table_name",
     };
-    const col = groupColumn[input.groupBy];
+    const temporalUnit: Partial<
+      Record<OptOutHistorySummaryGroupBy, string>
+    > = {
+      day: "day",
+      hour: "hour",
+      week: "week",
+      month: "month",
+    };
+    const unit = temporalUnit[input.groupBy];
+    const isTemporal = unit !== undefined;
+    const col = isTemporal
+      ? `date_trunc('${unit}', h.occurred_at AT TIME ZONE 'UTC')`
+      : categoricalColumn[input.groupBy]!;
+    const keyExpr = isTemporal ? `${col}::text` : col;
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (input.tenantId !== undefined) {
@@ -1571,11 +1590,14 @@ export class PostgresTraceRetention {
     }
     const where =
       conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
-    const sql = `SELECT ${col} AS key, COUNT(*)::bigint AS count
+    const orderBy = isTemporal
+      ? `${col} ASC`
+      : `COUNT(*) DESC, ${col} ASC`;
+    const sql = `SELECT ${keyExpr} AS key, COUNT(*)::bigint AS count
        FROM ${SCHEMA}.${HISTORY_TABLE} h
        ${where}
        GROUP BY ${col}
-       ORDER BY COUNT(*) DESC, ${col} ASC`;
+       ORDER BY ${orderBy}`;
     return { sql, params };
   }
 
