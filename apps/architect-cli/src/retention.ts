@@ -1237,9 +1237,9 @@ async function runRetentionDiffHistory(
   const eventKinds: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKinds.length > 0 ? validatedKinds : undefined;
 
-  const kindAFlag = getStringFlag(command, "kind-a");
-  let eventKindA: OptOutHistoryEventKind | undefined;
-  if (kindAFlag !== null) {
+  const kindAFlags = getMultiFlag(command, "kind-a");
+  const validatedKindsA: OptOutHistoryEventKind[] = [];
+  for (const kindAFlag of kindAFlags) {
     if (!isOptOutHistoryEventKind(kindAFlag)) {
       printError(
         ctx.io,
@@ -1247,12 +1247,14 @@ async function runRetentionDiffHistory(
       );
       return 2;
     }
-    eventKindA = kindAFlag;
+    validatedKindsA.push(kindAFlag);
   }
+  const eventKindsA: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsA.length > 0 ? validatedKindsA : undefined;
 
-  const kindBFlag = getStringFlag(command, "kind-b");
-  let eventKindB: OptOutHistoryEventKind | undefined;
-  if (kindBFlag !== null) {
+  const kindBFlags = getMultiFlag(command, "kind-b");
+  const validatedKindsB: OptOutHistoryEventKind[] = [];
+  for (const kindBFlag of kindBFlags) {
     if (!isOptOutHistoryEventKind(kindBFlag)) {
       printError(
         ctx.io,
@@ -1260,8 +1262,10 @@ async function runRetentionDiffHistory(
       );
       return 2;
     }
-    eventKindB = kindBFlag;
+    validatedKindsB.push(kindBFlag);
   }
+  const eventKindsB: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKindsB.length > 0 ? validatedKindsB : undefined;
 
   const kindNotFlags = getMultiFlag(command, "kind-not");
   const validatedKindsNot: OptOutHistoryEventKind[] = [];
@@ -1311,19 +1315,21 @@ async function runRetentionDiffHistory(
   const actorIdFlags = getMultiFlag(command, "actor-id");
   const actorIds: ReadonlyArray<string> | undefined =
     actorIdFlags.length > 0 ? actorIdFlags : undefined;
-  const actorIdAFlag = getStringFlag(command, "actor-id-a");
-  const actorIdA = actorIdAFlag !== null ? actorIdAFlag : undefined;
-  const actorIdBFlag = getStringFlag(command, "actor-id-b");
-  const actorIdB = actorIdBFlag !== null ? actorIdBFlag : undefined;
+  const actorIdAFlags = getMultiFlag(command, "actor-id-a");
+  const actorIdsA: ReadonlyArray<string> | undefined =
+    actorIdAFlags.length > 0 ? actorIdAFlags : undefined;
+  const actorIdBFlags = getMultiFlag(command, "actor-id-b");
+  const actorIdsB: ReadonlyArray<string> | undefined =
+    actorIdBFlags.length > 0 ? actorIdBFlags : undefined;
   const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
   const actorIdsNot: ReadonlyArray<string> | undefined =
     actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
-  const actorIdNotAFlag = getStringFlag(command, "actor-id-not-a");
-  const actorIdNotA =
-    actorIdNotAFlag !== null ? actorIdNotAFlag : undefined;
-  const actorIdNotBFlag = getStringFlag(command, "actor-id-not-b");
-  const actorIdNotB =
-    actorIdNotBFlag !== null ? actorIdNotBFlag : undefined;
+  const actorIdNotAFlags = getMultiFlag(command, "actor-id-not-a");
+  const actorIdsNotA: ReadonlyArray<string> | undefined =
+    actorIdNotAFlags.length > 0 ? actorIdNotAFlags : undefined;
+  const actorIdNotBFlags = getMultiFlag(command, "actor-id-not-b");
+  const actorIdsNotB: ReadonlyArray<string> | undefined =
+    actorIdNotBFlags.length > 0 ? actorIdNotBFlags : undefined;
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const systemOnlyAFlag = getBooleanFlag(command, "system-only-a");
@@ -1384,17 +1390,17 @@ async function runRetentionDiffHistory(
       idA,
       idB,
       eventKinds,
-      eventKindA,
-      eventKindB,
+      eventKindsA,
+      eventKindsB,
       eventKindsNot,
       eventKindsNotA,
       eventKindsNotB,
       actorIds,
-      actorIdA,
-      actorIdB,
+      actorIdsA,
+      actorIdsB,
       actorIdsNot,
-      actorIdNotA,
-      actorIdNotB,
+      actorIdsNotA,
+      actorIdsNotB,
       actorPresence,
       actorPresenceA,
       actorPresenceB,
@@ -1412,17 +1418,17 @@ async function runRetentionDiffHistory(
     printJson(ctx.io, {
       action: "diff-history",
       kinds: eventKinds ?? null,
-      kindA: eventKindA ?? null,
-      kindB: eventKindB ?? null,
+      kindsA: eventKindsA ?? null,
+      kindsB: eventKindsB ?? null,
       kindsNot: eventKindsNot ?? null,
       kindsNotA: eventKindsNotA ?? null,
       kindsNotB: eventKindsNotB ?? null,
       actorIds: actorIds ?? null,
-      actorIdA: actorIdA ?? null,
-      actorIdB: actorIdB ?? null,
+      actorIdsA: actorIdsA ?? null,
+      actorIdsB: actorIdsB ?? null,
       actorIdsNot: actorIdsNot ?? null,
-      actorIdNotA: actorIdNotA ?? null,
-      actorIdNotB: actorIdNotB ?? null,
+      actorIdsNotA: actorIdsNotA ?? null,
+      actorIdsNotB: actorIdsNotB ?? null,
       systemOnly: systemOnlyFlag,
       noSystem: noSystemFlag,
       systemOnlyA: systemOnlyAFlag,

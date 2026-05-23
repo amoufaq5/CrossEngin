@@ -334,17 +334,17 @@ export interface DiffHistoryEntriesInput {
   readonly idA: string;
   readonly idB: string;
   readonly eventKinds?: ReadonlyArray<OptOutHistoryEventKind>;
-  readonly eventKindA?: OptOutHistoryEventKind;
-  readonly eventKindB?: OptOutHistoryEventKind;
+  readonly eventKindsA?: ReadonlyArray<OptOutHistoryEventKind>;
+  readonly eventKindsB?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly eventKindsNot?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly eventKindsNotA?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly eventKindsNotB?: ReadonlyArray<OptOutHistoryEventKind>;
   readonly actorIds?: ReadonlyArray<string>;
-  readonly actorIdA?: string;
-  readonly actorIdB?: string;
+  readonly actorIdsA?: ReadonlyArray<string>;
+  readonly actorIdsB?: ReadonlyArray<string>;
   readonly actorIdsNot?: ReadonlyArray<string>;
-  readonly actorIdNotA?: string;
-  readonly actorIdNotB?: string;
+  readonly actorIdsNotA?: ReadonlyArray<string>;
+  readonly actorIdsNotB?: ReadonlyArray<string>;
   readonly actorPresence?: ActorPresenceFilter;
   readonly actorPresenceA?: ActorPresenceFilter;
   readonly actorPresenceB?: ActorPresenceFilter;
@@ -1649,20 +1649,32 @@ export class PostgresTraceRetention {
       }
     }
     if (
-      input.eventKindA !== undefined &&
-      entryA.event_kind !== input.eventKindA
+      input.eventKindsA !== undefined &&
+      input.eventKindsA.length > 0
     ) {
-      throw new Error(
-        `diffHistoryEntries: expected event A to have event_kind '${input.eventKindA}' but A is '${entryA.event_kind}'`,
-      );
+      const expectedSet = new Set<string>(input.eventKindsA);
+      if (!expectedSet.has(entryA.event_kind)) {
+        const kindList = input.eventKindsA
+          .map((k) => `'${k}'`)
+          .join(", ");
+        throw new Error(
+          `diffHistoryEntries: expected event A to have event_kind in [${kindList}] but A is '${entryA.event_kind}'`,
+        );
+      }
     }
     if (
-      input.eventKindB !== undefined &&
-      entryB.event_kind !== input.eventKindB
+      input.eventKindsB !== undefined &&
+      input.eventKindsB.length > 0
     ) {
-      throw new Error(
-        `diffHistoryEntries: expected event B to have event_kind '${input.eventKindB}' but B is '${entryB.event_kind}'`,
-      );
+      const expectedSet = new Set<string>(input.eventKindsB);
+      if (!expectedSet.has(entryB.event_kind)) {
+        const kindList = input.eventKindsB
+          .map((k) => `'${k}'`)
+          .join(", ");
+        throw new Error(
+          `diffHistoryEntries: expected event B to have event_kind in [${kindList}] but B is '${entryB.event_kind}'`,
+        );
+      }
     }
     if (
       input.eventKindsNot !== undefined &&
@@ -1734,24 +1746,32 @@ export class PostgresTraceRetention {
       }
     }
     if (
-      input.actorIdA !== undefined &&
-      entryA.actor_id !== input.actorIdA
+      input.actorIdsA !== undefined &&
+      input.actorIdsA.length > 0
     ) {
-      const actual =
-        entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`;
-      throw new Error(
-        `diffHistoryEntries: expected event A to have actor_id '${input.actorIdA}' but A is ${actual}`,
-      );
+      const expectedSet = new Set<string>(input.actorIdsA);
+      if (entryA.actor_id === null || !expectedSet.has(entryA.actor_id)) {
+        const actual =
+          entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`;
+        const actorList = input.actorIdsA.map((a) => `'${a}'`).join(", ");
+        throw new Error(
+          `diffHistoryEntries: expected event A to have actor_id in [${actorList}] but A is ${actual}`,
+        );
+      }
     }
     if (
-      input.actorIdB !== undefined &&
-      entryB.actor_id !== input.actorIdB
+      input.actorIdsB !== undefined &&
+      input.actorIdsB.length > 0
     ) {
-      const actual =
-        entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`;
-      throw new Error(
-        `diffHistoryEntries: expected event B to have actor_id '${input.actorIdB}' but B is ${actual}`,
-      );
+      const expectedSet = new Set<string>(input.actorIdsB);
+      if (entryB.actor_id === null || !expectedSet.has(entryB.actor_id)) {
+        const actual =
+          entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`;
+        const actorList = input.actorIdsB.map((a) => `'${a}'`).join(", ");
+        throw new Error(
+          `diffHistoryEntries: expected event B to have actor_id in [${actorList}] but B is ${actual}`,
+        );
+      }
     }
     if (input.actorIdsNot !== undefined && input.actorIdsNot.length > 0) {
       const excludedSet = new Set<string>(input.actorIdsNot);
@@ -1774,20 +1794,32 @@ export class PostgresTraceRetention {
       }
     }
     if (
-      input.actorIdNotA !== undefined &&
-      entryA.actor_id === input.actorIdNotA
+      input.actorIdsNotA !== undefined &&
+      input.actorIdsNotA.length > 0
     ) {
-      throw new Error(
-        `diffHistoryEntries: expected event A to have actor_id NOT '${input.actorIdNotA}' but A matches`,
-      );
+      const excludedSet = new Set<string>(input.actorIdsNotA);
+      if (entryA.actor_id !== null && excludedSet.has(entryA.actor_id)) {
+        const actorList = input.actorIdsNotA
+          .map((a) => `'${a}'`)
+          .join(", ");
+        throw new Error(
+          `diffHistoryEntries: expected event A to have actor_id NOT in [${actorList}] but A matches`,
+        );
+      }
     }
     if (
-      input.actorIdNotB !== undefined &&
-      entryB.actor_id === input.actorIdNotB
+      input.actorIdsNotB !== undefined &&
+      input.actorIdsNotB.length > 0
     ) {
-      throw new Error(
-        `diffHistoryEntries: expected event B to have actor_id NOT '${input.actorIdNotB}' but B matches`,
-      );
+      const excludedSet = new Set<string>(input.actorIdsNotB);
+      if (entryB.actor_id !== null && excludedSet.has(entryB.actor_id)) {
+        const actorList = input.actorIdsNotB
+          .map((a) => `'${a}'`)
+          .join(", ");
+        throw new Error(
+          `diffHistoryEntries: expected event B to have actor_id NOT in [${actorList}] but B matches`,
+        );
+      }
     }
     if (input.actorPresence === "system_only") {
       const mismatches: string[] = [];
