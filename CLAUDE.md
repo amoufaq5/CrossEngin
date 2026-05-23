@@ -21,15 +21,136 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,045 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.per-side
+**56 packages + 1 app, 129 meta-schema tables, 9,068 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only
+closes ADR-0212 Q2 + ADR-0215 deferred per-side actor-presence
+boolean-pair by adding 4 per-side actor-presence flags
+(--system-only-a, --no-system-a, --system-only-b, --no-system-b)
+to retention diff-history. This is the 5th and final per-side
+future Q completing the per-side expectation-check matrix on the
+diff-history surface. The 4-flag intra-side mutual-exclusivity
+design space resolves cleanly by reusing the ActorPresenceFilter
+discriminated string union from ADR-0209/0212 per side — same
+type at adapter level, CLI handles 4 booleans + intra-side
+mutual exclusivity check + translates to 2 union values one per
+side. Real asymmetric use cases — migration-to-human handoff
+verification (A is system migration, B is human adjustment),
+human-to-automation handoff (A is manual opt-out, B is system
+sweep), system sweep audit pair (both sides system), operator
+forensic discipline (both sides human), compose with kind
+expectations (A is human opt_out_set + B is system
+policy_deleted), compose with actor expectations (A is Alice's
+human + B is system NOT Bob), symmetric assertion via per-side
+flags equivalent to global but explicit when composing.
+DiffHistoryEntriesInput gains 2 new optional fields
+actorPresenceA?: ActorPresenceFilter + actorPresenceB?:
+ActorPresenceFilter (ADDITIVE matching ADR-0215 precedent —
+per-side semantically distinct from global not just renames;
+global symmetric assertion stays for operators wanting "both
+events" semantic). Adapter gains 2 new conditional blocks
+positioned immediately after the existing global actorPresence
+block (end of actor dimension chain) — single-side check (not
+"both events" loop) throws with explicit "event A" / "event B"
+prefix using established asymmetric rendering (positive shows
+actual UUID since operator needs to see WHO authored event;
+negative renders <system> placeholder since operator knows
+excluded value). Check ordering — global actorPresence fires
+first then per-side A then per-side B matching ADR-0215
+ordering pattern. CLI parses 4 new boolean flags via
+getBooleanFlag + 2 intra-side mutual-exclusivity checks (both
+A flags set exit 2; both B flags set exit 2; A's and B's flags
+don't interact — operators can set --system-only-a +
+--no-system-b for asymmetric "A is system, B is human"
+assertion canonical use case) + translates to 2 actorPresenceA/
+actorPresenceB union values + threads to adapter. JSON envelope
+gains 4 new boolean fields (systemOnlyA, noSystemA, systemOnlyB,
+noSystemB) matching CLI flag names verbatim using established
+boolean-echo convention from ADR-0209/0212 — operators read
+literal flag state; intra-side mutual exclusivity at CLI
+guarantees both never true simultaneously. Composition with
+global — per-side composes freely; when both set BOTH check
+fire global first (matches ADR-0205/0215 contradictory-
+combination ordering). --system-only + --system-only-a is
+redundant but harmless; --system-only + --no-system-a is
+contradictory at data layer (global fires first surfacing
+"expected both events to be system-authored" error);
+--system-only-a + --no-system-b is the canonical asymmetric
+pattern; --system-only-a + --system-only-b is equivalent to
+global but explicit. cli.ts helpText extended for retention
+diff-history usage line with [--system-only-a | --no-system-a]
+[--system-only-b | --no-system-b] notation + 4-line description
+explaining per-side actor-presence + intra-side mutual
+exclusivity + A's-and-B's-flags-don't-interact + per-side-
+fires-after-global semantic. 10 new adapter tests in a new
+"PostgresTraceRetention.diffHistoryEntries per-side
+actorPresence expectation checks" describe block — --system-
+only-a accepts/throws-with-actual-UUID, --no-system-a accepts/
+throws-with-<system>-rendering, --system-only-b throws (B
+independent of A), --no-system-b throws with <system>, canonical
+asymmetric pattern --system-only-a + --no-system-b accepts when
+A=null + B=UUID, composition global --system-only fires BEFORE
+per-side --no-system-a surfacing global error first, omits per-
+side actor-presence checks when fields not set backward compat,
+per-side A fires BEFORE per-side B in check order. 13 new CLI
+tests in a new "runRetention diff-history per-side --system-
+only / --no-system" describe block — exit 2 when --system-only-a
++ --no-system-a both set with explicit error, exit 2 when
+--system-only-b + --no-system-b both set, --system-only-a +
+--no-system-b allowed (different sides asymmetric assertion),
+threads actorPresenceA/B='system_only'/'no_system' for each
+flag, omits per-side actorPresence fields when neither set
+backward compat, composes with global --system-only + per-side
+--no-system-a both threaded global fires first at adapter, JSON
+envelope echoes systemOnlyA + noSystemA + systemOnlyB +
+noSystemB booleans, JSON envelope all per-side actor-presence
+booleans false when none set, adapter per-side error propagates
+exit 1 with per-side error format, intra-side mutual exclusivity
+check fires BEFORE PG adapter call (capture length 0). Test
+count: 9,045 → 9,068 (+23: adapter +10, CLI +13). ADR-0216
+documents the design + 8 rejected alternatives + 6 future Qs
+(per-side --system-only-X + per-side --actor-id-X contradiction
+detection defer, JSON envelope unification to discriminated
+string per side defer would be breaking, apply per-side actor-
+presence to retention diff-timeline N/A list-style not per-
+event-pair, apply per-side to retention history N/A list-style,
+short-circuit LEFT JOIN when actorPresenceA='system_only'
+optimization pairs with ADR-0212 Q3 + ADR-0213 Q5 family defer,
+combined per-side actor-presence + actor-id consistency check
+operators can express via not setting --actor-id-a defer). The
+retention diff-history surface now has the COMPLETE per-side
+expectation-check matrix — 5 dimensions × 3 modes (global
+symmetric + per-side A + per-side B) = 15 expectation-check
+flag families plus --with-actor-names: event_kind positive
+(--kind ADR-0198 + --kind-a ADR-0215 + --kind-b ADR-0215),
+event_kind negative multi (--kind-not ADR-0214 + --kind-not-a
+ADR-0215 + --kind-not-b ADR-0215), actor_id positive (--actor-
+id ADR-0203 + --actor-id-a ADR-0215 + --actor-id-b ADR-0215),
+actor_id negative (--actor-id-not ADR-0205 + --actor-id-not-a
+ADR-0215 + --actor-id-not-b ADR-0215), system presence
+(--system-only/--no-system ADR-0212 + --system-only-a/
+--no-system-a ADR-0216 + --system-only-b/--no-system-b
+ADR-0216). Operators have unprecedented control over per-event-
+pair forensic assertions — symmetric AND asymmetric
+expectations across kind + actor + system-presence dimensions
+in a single command; the matrix is now fully symmetric every
+dimension has both global symmetric and per-side asymmetric
+variants. Natural follow-up milestones — multi-value tuple
+expectations on actor-id positive/negative (ADR-0203 Q2 +
+ADR-0205 Q1), multi-value tuple expectation on global --kind
+positive (ADR-0198 Q2), per-side multi-value variants combining
+ADR-0215 per-side pattern with future multi-value tuples. The
+retention CLI now has 18 actions with the most comprehensive
+multi-flag coverage in the codebase; the per-side asymmetric
+expectation-check matrix on diff-history is COMPLETE for the 5
+actor + kind dimensions.
+M6.7.zz.tenant.opt-out.cli.diff-history.per-side
 closes ADR-0198 Q1 + ADR-0203 Q1 + ADR-0205 Q2 + ADR-0208 Q2 by
 adding 8 per-side asymmetric expectation-check flags to
 `retention diff-history` covering 4 of the 5 per-side future Qs
@@ -11280,6 +11401,63 @@ command. The natural follow-up milestones — --system-
 only-a/-b + --no-system-a/-b per-side boolean-pair
 (ADR-0212 Q2), multi-value tuple expectations on per-
 side variants (ADR-0198 Q2 / ADR-0203 Q2 family)).
+ADR-0216 covers M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only
+(per-side --system-only/--no-system actor-presence
+expectation check on retention diff-history — closes
+ADR-0212 Q2 + ADR-0215 deferred 5th per-side future
+Q; ships 4 new boolean flags (--system-only-a,
+--no-system-a, --system-only-b, --no-system-b)
+completing the per-side expectation-check matrix on
+diff-history; the 4-flag intra-side mutual-exclusivity
+design space resolves cleanly by reusing the
+ActorPresenceFilter discriminated string union from
+ADR-0209/0212 per side — same type at adapter level,
+CLI handles 4 booleans + intra-side mutual exclusivity
+check + translates to 2 union values; ADDITIVE
+DiffHistoryEntriesInput gains actorPresenceA/B?:
+ActorPresenceFilter preserving global actorPresence;
+adapter check blocks positioned at end of actor
+dimension chain (after global actorPresence); per-
+side error format mirrors ADR-0215 asymmetric
+rendering (positive shows actual UUID, negative
+renders <system> placeholder); CLI intra-side mutual
+exclusivity checks fire BEFORE adapter call;
+composition with global — global fires first natural
+ordering; canonical asymmetric --system-only-a +
+--no-system-b for "A is system, B is human"; 10 new
+adapter tests + 13 new CLI tests = 23 total; test
+count 9,045 → 9,068; rejected — two boolean field
+pairs on adapter (allows invalid both-true per side
+discriminated union cleaner), single combined
+actorPresence 4-value union (combinatorial
+explosion), --side-A-presence parameterized flag
+unusual form, CLI-side global + per-side contradiction
+error (operator intent ambiguous), positional A B
+arguments unusual form, adapter-side mutual exclusivity
+(operator intent ambiguous); future Qs — per-side
+--system-only-X + per-side --actor-id-X contradiction
+detection defer, JSON envelope unification defer
+breaking, apply per-side to retention diff-timeline
++ retention history N/A list-style, short-circuit
+LEFT JOIN when actorPresenceA='system_only' defer
+optimization, combined actor-presence + actor-id
+consistency defer. The retention diff-history surface
+now has the COMPLETE per-side expectation-check
+matrix — 5 dimensions × 3 modes (global symmetric +
+per-side A + per-side B) = 15 expectation-check flag
+families plus --with-actor-names; the matrix is now
+fully symmetric every dimension has both global and
+per-side variants. Natural follow-up milestones —
+multi-value tuple expectations on actor-id positive/
+negative (ADR-0203 Q2 + ADR-0205 Q1), multi-value
+tuple expectation on global --kind positive (ADR-0198
+Q2), per-side multi-value variants combining ADR-0215
+per-side pattern with future multi-value tuples. The
+retention CLI now has 18 actions with the most
+comprehensive multi-flag coverage in the codebase;
+the per-side asymmetric expectation-check matrix on
+diff-history is COMPLETE for all 5 actor + kind +
+system-presence dimensions).
 
 ## Architecture in 90 seconds
 

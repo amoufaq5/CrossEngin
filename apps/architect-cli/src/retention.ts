@@ -1322,6 +1322,10 @@ async function runRetentionDiffHistory(
     actorIdNotBFlag !== null ? actorIdNotBFlag : undefined;
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
+  const systemOnlyAFlag = getBooleanFlag(command, "system-only-a");
+  const noSystemAFlag = getBooleanFlag(command, "no-system-a");
+  const systemOnlyBFlag = getBooleanFlag(command, "system-only-b");
+  const noSystemBFlag = getBooleanFlag(command, "no-system-b");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
 
   if (systemOnlyFlag && noSystemFlag) {
@@ -1331,12 +1335,42 @@ async function runRetentionDiffHistory(
     );
     return 2;
   }
+  if (systemOnlyAFlag && noSystemAFlag) {
+    printError(
+      ctx.io,
+      "retention diff-history: --system-only-a and --no-system-a are mutually exclusive",
+    );
+    return 2;
+  }
+  if (systemOnlyBFlag && noSystemBFlag) {
+    printError(
+      ctx.io,
+      "retention diff-history: --system-only-b and --no-system-b are mutually exclusive",
+    );
+    return 2;
+  }
   const actorPresence:
     | "system_only"
     | "no_system"
     | undefined = systemOnlyFlag
     ? "system_only"
     : noSystemFlag
+      ? "no_system"
+      : undefined;
+  const actorPresenceA:
+    | "system_only"
+    | "no_system"
+    | undefined = systemOnlyAFlag
+    ? "system_only"
+    : noSystemAFlag
+      ? "no_system"
+      : undefined;
+  const actorPresenceB:
+    | "system_only"
+    | "no_system"
+    | undefined = systemOnlyBFlag
+    ? "system_only"
+    : noSystemBFlag
       ? "no_system"
       : undefined;
 
@@ -1358,6 +1392,8 @@ async function runRetentionDiffHistory(
       actorIdNotA,
       actorIdNotB,
       actorPresence,
+      actorPresenceA,
+      actorPresenceB,
       joinActor: withActorNames ? true : undefined,
     });
   } catch (err) {
@@ -1385,6 +1421,10 @@ async function runRetentionDiffHistory(
       actorIdNotB: actorIdNotB ?? null,
       systemOnly: systemOnlyFlag,
       noSystem: noSystemFlag,
+      systemOnlyA: systemOnlyAFlag,
+      noSystemA: noSystemAFlag,
+      systemOnlyB: systemOnlyBFlag,
+      noSystemB: noSystemBFlag,
       withActorNames,
       result,
     });

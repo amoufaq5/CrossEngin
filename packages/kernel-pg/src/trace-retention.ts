@@ -346,6 +346,8 @@ export interface DiffHistoryEntriesInput {
   readonly actorIdNotA?: string;
   readonly actorIdNotB?: string;
   readonly actorPresence?: ActorPresenceFilter;
+  readonly actorPresenceA?: ActorPresenceFilter;
+  readonly actorPresenceB?: ActorPresenceFilter;
   readonly joinActor?: boolean;
 }
 
@@ -1799,6 +1801,32 @@ export class PostgresTraceRetention {
             : "both A and B are <system>";
         throw new Error(
           `diffHistoryEntries: expected neither event to be system-authored (actor_id IS NULL) but ${suffix}`,
+        );
+      }
+    }
+    if (input.actorPresenceA === "system_only") {
+      if (entryA.actor_id !== null) {
+        throw new Error(
+          `diffHistoryEntries: expected event A to be system-authored (actor_id IS NULL) but A is '${entryA.actor_id}'`,
+        );
+      }
+    } else if (input.actorPresenceA === "no_system") {
+      if (entryA.actor_id === null) {
+        throw new Error(
+          `diffHistoryEntries: expected event A to NOT be system-authored (actor_id IS NULL) but A is <system>`,
+        );
+      }
+    }
+    if (input.actorPresenceB === "system_only") {
+      if (entryB.actor_id !== null) {
+        throw new Error(
+          `diffHistoryEntries: expected event B to be system-authored (actor_id IS NULL) but B is '${entryB.actor_id}'`,
+        );
+      }
+    } else if (input.actorPresenceB === "no_system") {
+      if (entryB.actor_id === null) {
+        throw new Error(
+          `diffHistoryEntries: expected event B to NOT be system-authored (actor_id IS NULL) but B is <system>`,
         );
       }
     }
