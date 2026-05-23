@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  escapeCsvCell,
+  formatCsv,
   formatDiff,
   formatManifestSummary,
   formatValidationErrors,
+  printCsv,
   printError,
   printJson,
   printSuccess,
@@ -143,5 +146,78 @@ describe("formatDiff", () => {
     });
     expect(text).toContain("entities: +2 -1 ~3");
     expect(text).not.toContain("workflows:");
+  });
+});
+
+describe("escapeCsvCell (RFC 4180)", () => {
+  it("returns empty string for null", () => {
+    expect(escapeCsvCell(null)).toBe("");
+  });
+
+  it("returns empty string for undefined", () => {
+    expect(escapeCsvCell(undefined)).toBe("");
+  });
+
+  it("returns plain string for simple values (no quoting needed)", () => {
+    expect(escapeCsvCell("hello")).toBe("hello");
+    expect(escapeCsvCell(42)).toBe("42");
+    expect(escapeCsvCell(true)).toBe("true");
+    expect(escapeCsvCell(false)).toBe("false");
+  });
+
+  it("quotes + escapes when string contains comma", () => {
+    expect(escapeCsvCell("a,b")).toBe('"a,b"');
+  });
+
+  it("quotes + escapes when string contains double quote", () => {
+    expect(escapeCsvCell('say "hi"')).toBe('"say ""hi"""');
+  });
+
+  it("quotes + escapes when string contains newline", () => {
+    expect(escapeCsvCell("line1\nline2")).toBe('"line1\nline2"');
+  });
+
+  it("quotes + escapes when string contains carriage return", () => {
+    expect(escapeCsvCell("line1\rline2")).toBe('"line1\rline2"');
+  });
+
+  it("JSON-stringifies object values", () => {
+    expect(escapeCsvCell({ a: 1, b: 2 })).toBe('"{""a"":1,""b"":2}"');
+  });
+
+  it("JSON-stringifies array values", () => {
+    expect(escapeCsvCell([1, 2, 3])).toBe('"[1,2,3]"');
+  });
+});
+
+describe("formatCsv", () => {
+  it("renders header + rows separated by newlines + trailing newline", () => {
+    const csv = formatCsv(["a", "b"], [
+      ["1", "2"],
+      ["3", "4"],
+    ]);
+    expect(csv).toBe("a,b\n1,2\n3,4\n");
+  });
+
+  it("renders just header when rows empty", () => {
+    const csv = formatCsv(["a", "b"], []);
+    expect(csv).toBe("a,b\n");
+  });
+
+  it("escapes cells with commas / quotes", () => {
+    const csv = formatCsv(["field"], [["a,b"], ['c"d']]);
+    expect(csv).toBe('field\n"a,b"\n"c""d"\n');
+  });
+});
+
+describe("printCsv", () => {
+  it("writes formatted CSV to stdout", () => {
+    let stdoutBuf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { stdoutBuf += s; } },
+      stderr: { write: () => {} },
+    };
+    printCsv(io, ["a", "b"], [["1", "2"]]);
+    expect(stdoutBuf).toBe("a,b\n1,2\n");
   });
 });

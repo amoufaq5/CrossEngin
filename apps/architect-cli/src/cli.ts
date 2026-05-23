@@ -14,7 +14,7 @@ export const SUBCOMMANDS = [
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
-export const OUTPUT_FORMATS = ["human", "json"] as const;
+export const OUTPUT_FORMATS = ["human", "json", "csv"] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 export interface ParsedCommand {
@@ -99,7 +99,11 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   const formatRaw = flags.get("format");
   let format: OutputFormat = "human";
   if (typeof formatRaw === "string") {
-    if (formatRaw !== "human" && formatRaw !== "json") {
+    if (
+      formatRaw !== "human" &&
+      formatRaw !== "json" &&
+      formatRaw !== "csv"
+    ) {
       return {
         ok: false,
         error: { kind: "parse_error", message: `unknown output format: ${formatRaw}` },
@@ -407,7 +411,9 @@ export function helpText(): string {
     "  help                    Show this help text",
     "",
     "Flags:",
-    "  --format human|json     Output format (default: human)",
+    "  --format human|json|csv Output format (default: human). csv is supported on",
+    "                          list-style retention actions (history + diff-timeline);",
+    "                          diff-history csv emits field-diff rows.",
     "  --force                 With init / patch, overwrite an existing file",
     "  --output <path>         With patch, write the result to a different path",
     "  --dry-run               With apply, emit SQL without executing",

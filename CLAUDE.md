@@ -21,15 +21,96 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,170 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.contradiction-detection
+**56 packages + 1 app, 129 meta-schema tables, 9,194 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.csv-format
+closes ADR-0224 future Q5 by adding --format=csv as the 3rd
+output format option across all retention CLI surfaces. Emits
+RFC 4180-compliant CSV with surface-appropriate column
+schemas. Pure CLI-side output rendering; no adapter changes;
+no breaking changes; ADDITIVE alongside existing --format=
+human and --format=json. Operator ergonomic improvement —
+operators can pipe retention CLI output directly into
+spreadsheets (Excel/Numbers/Google Sheets), ETL pipelines
+(Airflow/dbt/custom scripts), awk/cut shell pipelines, and BI
+tools without intermediate JSON parsing. OutputFormat union
+extended ["human", "json", "csv"]; parser at cli.ts accepts
+--format=csv; unknown format values still produce exit-2
+errors per existing behavior. New format.ts helpers —
+escapeCsvCell(value: unknown) implements RFC 4180 (null/
+undefined → empty string, strings with comma/quote/newline/CR
+wrapped in "..." with embedded " doubled, object/array values
+JSON-stringified first then escaped, primitives via String()),
+formatCsv(headers, rows) joins cells with commas + newlines +
+trailing newline, printCsv(io, headers, rows) writes to
+stdout. Per-surface column schemas — retention history 9
+columns (id, tenant_id, table_name, event_kind, actor_id,
+occurred_at, prev_state, next_state, attributes) + 2 with
+--with-actor-names (actor_display_name, actor_email);
+retention diff-timeline pair-wise 10 columns with tenant_side
+discriminator; diff-timeline N-way 10 columns with
+tenant_label discriminator (different from pair-wise);
+diff-timeline cross-table 10 columns with table_label
+discriminator; retention diff-history different semantic
+field-diff rows (field, value_a, value_b) since surface is
+per-event-pair comparison. Column naming snake_case matching
+PG column names and adapter field names; surface-discriminator
+columns identify the surface by presence. JSON columns
+prev_state/next_state/attributes JSON-stringified within CSV
+cells then RFC 4180-escaped (typically wrapped in "..." with
+doubled embedded quotes). Empty-result CSV emits header row
+only (no separator line, just headers + trailing newline)
+RFC 4180-compliant and parseable by standard CSV readers.
+Pagination cursors NOT emitted in CSV format (CSV is flat
+row-oriented; cursor pagination is JSON-envelope feature;
+operators needing cursors should use --format=json).
+Adapter test block extended — NEW "retention CSV output
+format" describe block with 4 nested describe blocks — retention
+history --format=csv (CSV header + rows, null actor_id as
+empty cell, JSON state column escaping, --with-actor-names
+extends headers, header-only when empty), diff-timeline
+--format=csv 3 dispatch paths (pair-wise emits tenant_side
+column, N-way emits tenant_label not tenant_side, cross-table
+emits table_label column), diff-history --format=csv (field-
+diff rows, header-only when no diffs), --format=csv
+validation (CLI accepts no parse error). Format unit tests —
+NEW escapeCsvCell tests covering null/undefined → empty,
+plain values no quoting, comma/quote/newline/CR escaping,
+JSON-stringify object/array values; formatCsv tests covering
+header + rows separated by newlines + trailing newline,
+empty rows just header, escape cells with commas/quotes;
+printCsv writes formatted output to stdout. Test count:
+9,170 → 9,194 (+24 net: 11 retention CSV tests + 13 format
+CSV unit tests). ADR-0227 documents the design + 10 rejected
+alternatives + 6 future Qs (--format=tsv mechanical
+addition defer, --format=yaml less common for tabular data
+defer, --format=ndjson streaming JSON per-row defer log
+pipeline integration, --csv-separator custom separator
+locale-specific defer operator-policy, pagination cursor
+emission as separate file or stderr-line defer operators can
+parse cursor from JSON envelope, CSV output for non-list
+retention actions like retention set/restore defer JSON
+envelope more natural for single-row structured data). The
+retention CLI now supports CSV output across all 3 surfaces
+with surface-appropriate column schemas; operators have an
+ergonomic path from retention queries to spreadsheets and
+data pipelines without JSON parsing intermediaries. Pattern
+documented for future surfaces — new retention actions
+adding list-style output inherit the CSV pattern via the
+shared printCsv helper. Natural follow-up milestones —
+cross-dimensional semantic contradiction detection
+(ADR-0226 Q1 — --system-only + --actor-id Y), retention
+CLI --explain flag (ADR-0226 Q5 — debug aid showing SQL +
+bound parameters), --format=tsv mechanical CSV variant
+(ADR-0227 Q1), retention summary action (new adapter + CLI),
+or move beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.contradiction-detection
 closes 15 multi-value milestones' recurring deferred cross-
 flag contradiction detection Q by adding CLI-side eager
 set-intersection contradiction detection across all 3
@@ -12864,6 +12945,38 @@ The retention CLI now has ergonomic guards against silent-
 empty-result surprises across all 3 surfaces; pattern
 documented for future surfaces inheriting contradiction
 check via shared findContradictoryValues helper).
+ADR-0227 covers M6.7.zz.tenant.opt-out.cli.csv-format
+(retention CLI --format=csv output format — closes ADR-0224
+future Q5; ADDITIVE third output format across all retention
+surfaces; pure CLI-side rendering no adapter changes;
+operator ergonomic improvement piping output to spreadsheets/
+ETL/awk/BI without JSON parsing; OutputFormat union extended
+["human", "json", "csv"]; new format.ts helpers escapeCsvCell
+RFC 4180-compliant + formatCsv + printCsv; per-surface column
+schemas history 9 columns, diff-timeline 3 dispatch paths
+with surface-specific discriminator columns tenant_side/
+tenant_label/table_label, diff-history field-diff rows
+field/value_a/value_b; JSON columns stringified within CSV
+cells; empty-result emits header-only RFC 4180-compliant;
+pagination cursors NOT in CSV use --format=json; 11 retention
+CSV tests + 13 format CSV unit tests = 24 new tests test
+count 9,170 → 9,194; rejected — TSV/YAML same milestone
+scope creep, CSV library dependency unnecessary for 30 lines,
+pagination cursors as trailing comment non-standard, semicolon
+separator locale-specific, BOM for Excel awk pipelines don't
+want, pretty-printed JSON inside cells less spreadsheet
+friendly, type-aware per-cell rendering surprise, generic
+discriminator column less readable, --csv-headers=false
+operators can tail -n +2, diff-history field-diff rows
+with metadata duplicated; future Qs — --format=tsv
+mechanical defer, --format=yaml less common defer,
+--format=ndjson streaming defer log pipelines, --csv-
+separator custom defer operator-policy, pagination cursor
+emission separate file defer operators parse from JSON,
+CSV for non-list retention actions defer JSON more natural
+for single-row. The retention CLI now supports CSV across
+all 3 surfaces; operators have ergonomic path from queries
+to spreadsheets/data pipelines without JSON intermediaries).
 
 ## Architecture in 90 seconds
 

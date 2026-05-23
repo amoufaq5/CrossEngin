@@ -15272,3 +15272,335 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
     });
   });
 });
+
+describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+  const ACTOR_ALICE = "11111111-0000-4000-8000-000000000001";
+
+  describe("retention history --format=csv", () => {
+    it("emits CSV header + rows for history entries", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=csv"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            historyEntries: [
+              {
+                id: "10000000-0000-4000-8000-000000000001",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: ACTOR_ALICE,
+                occurredAt: "2026-05-20T12:00:00.000Z",
+                prevState: null,
+                nextState: { opt_out: true },
+                attributes: {},
+              },
+            ],
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toBe(
+        "id,tenant_id,table_name,event_kind,actor_id,occurred_at,prev_state,next_state,attributes",
+      );
+      expect(lines[1]).toContain("10000000-0000-4000-8000-000000000001");
+      expect(lines[1]).toContain(TENANT_A);
+      expect(lines[1]).toContain("opt_out_set");
+      expect(lines[1]).toContain(ACTOR_ALICE);
+    });
+
+    it("renders null actor_id as empty CSV cell", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=csv"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            historyEntries: [
+              {
+                id: "10000000-0000-4000-8000-000000000001",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: null,
+                occurredAt: "2026-05-20T12:00:00.000Z",
+                prevState: null,
+                nextState: null,
+                attributes: {},
+              },
+            ],
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      // null actor_id renders as empty cell; check the actor_id column
+      const rowParts = lines[1]?.split(",");
+      expect(rowParts?.[4]).toBe("");
+    });
+
+    it("escapes commas + quotes in JSON state columns", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=csv"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            historyEntries: [
+              {
+                id: "10000000-0000-4000-8000-000000000001",
+                tenantId: TENANT_A,
+                tableName: "workflow_traces",
+                eventKind: "opt_out_set",
+                actorId: ACTOR_ALICE,
+                occurredAt: "2026-05-20T12:00:00.000Z",
+                prevState: null,
+                nextState: { reason: 'oops, "test"' },
+                attributes: {},
+              },
+            ],
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lineOut = out();
+      // JSON-encoded nextState gets quoted + double-escaped quotes
+      expect(lineOut).toContain('""');
+    });
+
+    it("--format=csv with --with-actor-names extends headers", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--with-actor-names",
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toContain("actor_display_name");
+      expect(lines[0]).toContain("actor_email");
+    });
+
+    it("emits header row only when no entries match", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=csv"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n").filter((l) => l.length > 0);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe(
+        "id,tenant_id,table_name,event_kind,actor_id,occurred_at,prev_state,next_state,attributes",
+      );
+    });
+  });
+
+  describe("retention diff-timeline --format=csv (3 dispatch paths)", () => {
+    it("pair-wise: emits tenant_side column", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffTimelineResult: {
+              tenantIdA: TENANT_A,
+              tenantIdB: TENANT_B,
+              tableName: "workflow_traces",
+              entries: [
+                {
+                  id: "10000000-0000-4000-8000-000000000001",
+                  tenantId: TENANT_A,
+                  tenantSide: "A",
+                  tableName: "workflow_traces",
+                  eventKind: "opt_out_set",
+                  actorId: ACTOR_ALICE,
+                  occurredAt: "2026-05-20T12:00:00.000Z",
+                  prevState: null,
+                  nextState: { opt_out: true },
+                  attributes: {},
+                },
+              ],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toContain("tenant_side");
+      expect(lines[1]).toContain(",A,");
+    });
+
+    it("N-way: emits tenant_label column instead of tenant_side", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--add-tenant",
+          "00000000-0000-4000-8000-00000000000C",
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffTimelineNwayResult: {
+              tenantIds: [TENANT_A, TENANT_B, "00000000-0000-4000-8000-00000000000C"],
+              tableName: "workflow_traces",
+              entries: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toContain("tenant_label");
+      expect(lines[0]).not.toContain("tenant_side");
+    });
+
+    it("cross-table: emits table_label column", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          "workflow_traces",
+          "tenant_opt_outs",
+          "--cross-table",
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffTimelineCrossTableResult: {
+              tenantId: TENANT_A,
+              tableNames: ["workflow_traces", "tenant_opt_outs"],
+              entries: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toContain("table_label");
+    });
+  });
+
+  describe("retention diff-history --format=csv", () => {
+    it("emits field-diff rows (field, value_a, value_b)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffResult: {
+              idA: ID_A,
+              idB: ID_B,
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              occurredAtA: "2026-05-20T12:00:00.000Z",
+              occurredAtB: "2026-05-21T12:00:00.000Z",
+              eventKindA: "opt_out_set",
+              eventKindB: "opt_out_cleared",
+              actorIdA: ACTOR_ALICE,
+              actorIdB: ACTOR_ALICE,
+              fieldDiffs: [
+                { field: "opt_out", valueA: true, valueB: false },
+                { field: "retention_days", valueA: 365, valueB: null },
+              ],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n");
+      expect(lines[0]).toBe("field,value_a,value_b");
+      expect(lines[1]).toBe("opt_out,true,false");
+      expect(lines[2]).toBe("retention_days,365,");
+    });
+
+    it("emits header only when no field diffs", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--format=csv",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            diffResult: {
+              idA: ID_A,
+              idB: ID_B,
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              occurredAtA: "2026-05-20T12:00:00.000Z",
+              occurredAtB: "2026-05-21T12:00:00.000Z",
+              eventKindA: "opt_out_set",
+              eventKindB: "opt_out_set",
+              actorIdA: ACTOR_ALICE,
+              actorIdB: ACTOR_ALICE,
+              fieldDiffs: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const lines = out().split("\n").filter((l) => l.length > 0);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe("field,value_a,value_b");
+    });
+  });
+
+  describe("--format=csv validation", () => {
+    it("CLI accepts --format=csv (no parse error)", async () => {
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--format=csv"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+    });
+  });
+});

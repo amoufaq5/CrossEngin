@@ -17,6 +17,41 @@ export function printError(io: IoStreams, message: string): void {
   io.stderr.write(message + "\n");
 }
 
+export function escapeCsvCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  let str: string;
+  if (typeof value === "string") {
+    str = value;
+  } else if (typeof value === "object") {
+    str = JSON.stringify(value);
+  } else {
+    str = String(value);
+  }
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export function formatCsv(
+  headers: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): string {
+  const lines: string[] = [headers.map(escapeCsvCell).join(",")];
+  for (const row of rows) {
+    lines.push(row.map(escapeCsvCell).join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function printCsv(
+  io: IoStreams,
+  headers: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): void {
+  io.stdout.write(formatCsv(headers, rows));
+}
+
 export function formatValidationErrors(errors: readonly ValidationError[]): string {
   if (errors.length === 0) return "no validation errors";
   const lines: string[] = [`${errors.length.toString()} validation error(s):`];

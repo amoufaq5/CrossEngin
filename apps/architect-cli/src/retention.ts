@@ -32,7 +32,7 @@ import {
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getMultiFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printError, printJson, printSuccess } from "./format.js";
+import { printCsv, printError, printJson, printSuccess } from "./format.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
@@ -1048,6 +1048,41 @@ async function runRetentionHistory(
     return 0;
   }
 
+  if (command.format === "csv") {
+    const baseHeaders = [
+      "id",
+      "tenant_id",
+      "table_name",
+      "event_kind",
+      "actor_id",
+      "occurred_at",
+      "prev_state",
+      "next_state",
+      "attributes",
+    ];
+    const headers = withActorNames
+      ? [...baseHeaders, "actor_display_name", "actor_email"]
+      : baseHeaders;
+    const rows = entries.map((e) => {
+      const baseRow: ReadonlyArray<unknown> = [
+        e.id,
+        e.tenantId,
+        e.tableName,
+        e.eventKind,
+        e.actorId,
+        e.occurredAt,
+        e.prevState,
+        e.nextState,
+        e.attributes,
+      ];
+      return withActorNames
+        ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
+        : baseRow;
+    });
+    printCsv(ctx.io, headers, rows);
+    return 0;
+  }
+
   if (entries.length === 0) {
     printSuccess(ctx.io, "no history entries match the given filters");
     return 0;
@@ -1541,6 +1576,12 @@ async function runRetentionDiffHistory(
     });
     return 0;
   }
+  if (command.format === "csv") {
+    const headers = ["field", "value_a", "value_b"];
+    const rows = result.fieldDiffs.map((d) => [d.field, d.valueA, d.valueB]);
+    printCsv(ctx.io, headers, rows);
+    return 0;
+  }
   ctx.io.stdout.write(formatHistoryDiff(result, { withActorNames }));
   return 0;
 }
@@ -1997,6 +2038,42 @@ async function runRetentionDiffTimeline(
       });
       return 0;
     }
+    if (command.format === "csv") {
+      const baseHeaders = [
+        "id",
+        "tenant_id",
+        "table_name",
+        "table_label",
+        "event_kind",
+        "actor_id",
+        "occurred_at",
+        "prev_state",
+        "next_state",
+        "attributes",
+      ];
+      const headers = withActorNames
+        ? [...baseHeaders, "actor_display_name", "actor_email"]
+        : baseHeaders;
+      const rows = crossResult.entries.map((e) => {
+        const baseRow: ReadonlyArray<unknown> = [
+          e.id,
+          e.tenantId,
+          e.tableName,
+          e.tableLabel,
+          e.eventKind,
+          e.actorId,
+          e.occurredAt,
+          e.prevState,
+          e.nextState,
+          e.attributes,
+        ];
+        return withActorNames
+          ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
+          : baseRow;
+      });
+      printCsv(ctx.io, headers, rows);
+      return 0;
+    }
     ctx.io.stdout.write(
       formatTimelineCrossTableDiff(crossResult, {
         withActorNames,
@@ -2070,6 +2147,42 @@ async function runRetentionDiffTimeline(
       });
       return 0;
     }
+    if (command.format === "csv") {
+      const baseHeaders = [
+        "id",
+        "tenant_id",
+        "tenant_label",
+        "table_name",
+        "event_kind",
+        "actor_id",
+        "occurred_at",
+        "prev_state",
+        "next_state",
+        "attributes",
+      ];
+      const headers = withActorNames
+        ? [...baseHeaders, "actor_display_name", "actor_email"]
+        : baseHeaders;
+      const rows = nwayResult.entries.map((e) => {
+        const baseRow: ReadonlyArray<unknown> = [
+          e.id,
+          e.tenantId,
+          e.tenantLabel,
+          e.tableName,
+          e.eventKind,
+          e.actorId,
+          e.occurredAt,
+          e.prevState,
+          e.nextState,
+          e.attributes,
+        ];
+        return withActorNames
+          ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
+          : baseRow;
+      });
+      printCsv(ctx.io, headers, rows);
+      return 0;
+    }
     ctx.io.stdout.write(
       formatTimelineNwayDiff(nwayResult, {
         withActorNames,
@@ -2135,6 +2248,42 @@ async function runRetentionDiffTimeline(
       nextBeforeId: nextBeforeIdPair,
       result,
     });
+    return 0;
+  }
+  if (command.format === "csv") {
+    const baseHeaders = [
+      "id",
+      "tenant_id",
+      "tenant_side",
+      "table_name",
+      "event_kind",
+      "actor_id",
+      "occurred_at",
+      "prev_state",
+      "next_state",
+      "attributes",
+    ];
+    const headers = withActorNames
+      ? [...baseHeaders, "actor_display_name", "actor_email"]
+      : baseHeaders;
+    const rows = result.entries.map((e) => {
+      const baseRow: ReadonlyArray<unknown> = [
+        e.id,
+        e.tenantId,
+        e.tenantSide,
+        e.tableName,
+        e.eventKind,
+        e.actorId,
+        e.occurredAt,
+        e.prevState,
+        e.nextState,
+        e.attributes,
+      ];
+      return withActorNames
+        ? [...baseRow, e.actorDisplayName ?? null, e.actorEmail ?? null]
+        : baseRow;
+    });
+    printCsv(ctx.io, headers, rows);
     return 0;
   }
   ctx.io.stdout.write(
