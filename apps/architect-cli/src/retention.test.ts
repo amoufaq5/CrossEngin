@@ -2596,7 +2596,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     expect(historyCapture[0]).toEqual({
       tenantId: undefined,
       tableName: undefined,
-      eventKind: undefined,
+      eventKinds: undefined,
       since: undefined,
       until: undefined,
       limit: 100,
@@ -2629,7 +2629,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     expect(historyCapture[0]).toEqual({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       since: undefined,
       until: undefined,
       afterId: undefined,
@@ -2674,6 +2674,86 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     );
     expect(code).toBe(2);
     expect(err()).toContain("invalid --kind");
+  });
+
+  it("returns exit 2 on FIRST invalid --kind occurrence (multi)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "bogus",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --kind 'bogus'");
+  });
+
+  it("threads multi-element eventKinds array when --kind repeated", async () => {
+    const { ctx } = buffers();
+    const historyCapture: ListOptOutHistoryInput[] = [];
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "opt_out_cleared",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyCapture }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(historyCapture[0]?.eventKinds).toEqual([
+      "opt_out_set",
+      "opt_out_cleared",
+    ]);
+  });
+
+  it("JSON envelope echoes multi-element eventKinds array when --kind repeated", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "history",
+        "--kind",
+        "opt_out_set",
+        "--kind",
+        "policy_deleted",
+        "--format=json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.eventKinds).toEqual(["opt_out_set", "policy_deleted"]);
+  });
+
+  it("JSON envelope eventKinds=null when --kind NOT set", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "history", "--format=json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const parsedJson = JSON.parse(out());
+    expect(parsedJson.eventKinds).toBeNull();
   });
 
   it("returns exit 2 on invalid --since", async () => {
@@ -2794,7 +2874,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.tenantFilter).toBe(TENANT_A);
-    expect(parsedJson.eventKind).toBe("opt_out_set");
+    expect(parsedJson.eventKinds).toEqual(["opt_out_set"]);
     expect(parsedJson.limit).toBe(10);
     expect(parsedJson.count).toBe(2);
     expect(parsedJson.entries).toHaveLength(2);
@@ -3121,7 +3201,7 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
     expect(capture[0]).toEqual({
       tenantId: TENANT_A,
       tableName: undefined,
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       since: undefined,
       until: undefined,
       limit: 100,
@@ -3205,7 +3285,7 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
     );
     expect(code).toBe(0);
     expect(capture[0]?.tenantId).toBe(TENANT_A);
-    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
     expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
   });
 
@@ -3841,7 +3921,7 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
     expect(code).toBe(0);
     expect(capture[0]?.tenantId).toBe(TENANT);
     expect(capture[0]?.tableName).toBe("workflow_traces");
-    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
     expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
     expect(capture[0]?.beforeId).toBe(BEFORE_ID);
     expect(capture[0]?.limit).toBe(50);
@@ -4019,7 +4099,7 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
     expect(code).toBe(0);
     expect(capture[0]?.tenantId).toBe(TENANT);
     expect(capture[0]?.tableName).toBe("workflow_traces");
-    expect(capture[0]?.eventKind).toBe("opt_out_set");
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
     expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
     expect(capture[0]?.afterId).toBe(AFTER_ID);
     expect(capture[0]?.beforeId).toBe(BEFORE_ID);

@@ -3068,16 +3068,53 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
     expect(capture[0]?.params?.[0]).toBe("workflow_traces");
   });
 
-  it("filters by eventKind when provided", async () => {
+  it("filters by single eventKind when provided (multi-value array)", async () => {
     const capture: Capture[] = [];
     const conn = mockConnection(
       () => ({ rows: [], rowCount: 0 }),
       capture,
     );
     const r = new PostgresTraceRetention({ conn });
-    await r.listOptOutHistory({ eventKind: "opt_out_set" });
-    expect(capture[0]?.sql).toContain("event_kind = $1");
+    await r.listOptOutHistory({ eventKinds: ["opt_out_set"] });
+    expect(capture[0]?.sql).toContain("event_kind IN ($1)");
     expect(capture[0]?.params?.[0]).toBe("opt_out_set");
+  });
+
+  it("filters by multiple eventKinds with IN clause when provided (OR-semantic)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({
+      eventKinds: ["opt_out_set", "opt_out_cleared"],
+    });
+    expect(capture[0]?.sql).toContain("event_kind IN ($1, $2)");
+    expect(capture[0]?.params?.[0]).toBe("opt_out_set");
+    expect(capture[0]?.params?.[1]).toBe("opt_out_cleared");
+  });
+
+  it("omits the event_kind WHERE clause when eventKinds is empty array", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({ eventKinds: [] });
+    expect(capture[0]?.sql).not.toContain("event_kind IN");
+  });
+
+  it("omits the event_kind WHERE clause when eventKinds not set (backward compat)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [], rowCount: 0 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    await r.listOptOutHistory({});
+    expect(capture[0]?.sql).not.toContain("event_kind IN");
   });
 
   it("filters by since + until time range when provided", async () => {
@@ -7829,7 +7866,7 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
     await r.listOptOutHistory({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       since: "2026-05-01T00:00:00.000Z",
       until: "2026-05-31T23:59:59.000Z",
       afterId: AFTER_ID,
@@ -7915,7 +7952,7 @@ describe("PostgresTraceRetention.listOptOutHistory --before-id reverse cursor (M
     await r.listOptOutHistory({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       actorIds: [ACTOR_A],
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
@@ -7924,7 +7961,7 @@ describe("PostgresTraceRetention.listOptOutHistory --before-id reverse cursor (M
     });
     expect(capture[0]?.sql).toContain("h.tenant_id = $1");
     expect(capture[0]?.sql).toContain("h.table_name = $2");
-    expect(capture[0]?.sql).toContain("h.event_kind = $3");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($3)");
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $5");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $6");
@@ -8038,7 +8075,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIds filter (M6.7.zz.tena
     await r.listOptOutHistory({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       actorIds: [ACTOR_A, ACTOR_B],
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-06-01T00:00:00.000Z",
@@ -8047,7 +8084,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIds filter (M6.7.zz.tena
     });
     expect(capture[0]?.sql).toContain("h.tenant_id = $1");
     expect(capture[0]?.sql).toContain("h.table_name = $2");
-    expect(capture[0]?.sql).toContain("h.event_kind = $3");
+    expect(capture[0]?.sql).toContain("h.event_kind IN ($3)");
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4, $5)");
     expect(capture[0]?.sql).toContain("h.occurred_at >= $6");
     expect(capture[0]?.sql).toContain("h.occurred_at <= $7");
@@ -8213,7 +8250,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
     await r.listOptOutHistory({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
-      eventKind: "opt_out_set",
+      eventKinds: ["opt_out_set"],
       actorIdsNot: [ACTOR_B, ACTOR_C],
       since: "2026-05-01T00:00:00.000Z",
       until: "2026-05-31T00:00:00.000Z",

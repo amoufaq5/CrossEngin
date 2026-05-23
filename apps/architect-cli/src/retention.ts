@@ -816,7 +816,7 @@ async function runRetentionHistory(
 ): Promise<number> {
   const tenantFilter = getStringFlag(command, "tenant");
   const tableFilter = getStringFlag(command, "table");
-  const kindFlag = getStringFlag(command, "kind");
+  const kindFlags = getMultiFlag(command, "kind");
   const sinceFlag = getStringFlag(command, "since");
   const untilFlag = getStringFlag(command, "until");
   const limitFlag = getStringFlag(command, "limit");
@@ -849,8 +849,8 @@ async function runRetentionHistory(
       ? "no_system"
       : undefined;
 
-  let kind: OptOutHistoryEventKind | undefined;
-  if (kindFlag !== null) {
+  const validatedKinds: OptOutHistoryEventKind[] = [];
+  for (const kindFlag of kindFlags) {
     if (!isOptOutHistoryEventKind(kindFlag)) {
       printError(
         ctx.io,
@@ -858,8 +858,10 @@ async function runRetentionHistory(
       );
       return 2;
     }
-    kind = kindFlag;
+    validatedKinds.push(kindFlag);
   }
+  const eventKinds: ReadonlyArray<OptOutHistoryEventKind> | undefined =
+    validatedKinds.length > 0 ? validatedKinds : undefined;
 
   let effectiveAfterId: string | undefined =
     afterIdFlag !== null ? afterIdFlag : undefined;
@@ -942,7 +944,7 @@ async function runRetentionHistory(
     entries = await retention.listOptOutHistory({
       tenantId: tenantFilter ?? undefined,
       tableName: tableFilter ?? undefined,
-      eventKind: kind,
+      eventKinds,
       actorIds,
       actorIdsNot,
       actorPresence,
@@ -970,7 +972,7 @@ async function runRetentionHistory(
     printJson(ctx.io, {
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
-      eventKind: kind ?? null,
+      eventKinds: eventKinds ?? null,
       actorIds: actorIds ?? null,
       actorIdsNot: actorIdsNot ?? null,
       systemOnly: systemOnlyFlag,
