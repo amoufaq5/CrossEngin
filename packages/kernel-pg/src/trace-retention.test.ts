@@ -10734,3 +10734,151 @@ describe("normalizeResolutionForDiff", () => {
     });
   });
 });
+
+describe("PostgresTraceRetention query builders (M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+  const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+  const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+  const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+
+  function makeAdapter() {
+    return new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+  }
+
+  it("buildListOptOutHistoryQuery returns SQL with WHERE clauses for filters", () => {
+    const r = makeAdapter();
+    const { sql, params } = r.buildListOptOutHistoryQuery({
+      tenantId: TENANT_A,
+      eventKinds: ["opt_out_set", "opt_out_cleared"],
+      limit: 50,
+    });
+    expect(sql).toContain("SELECT");
+    expect(sql).toContain("FROM meta.tenant_retention_opt_out_history h");
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("h.event_kind IN ($2, $3)");
+    expect(sql).toContain("ORDER BY h.occurred_at DESC, h.id DESC");
+    expect(params).toEqual([TENANT_A, "opt_out_set", "opt_out_cleared", 50]);
+  });
+
+  it("buildListOptOutHistoryQuery same SQL as the executed query (consistency)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
+    const r = new PostgresTraceRetention({ conn });
+    const input = {
+      tenantId: TENANT_A,
+      eventKinds: ["opt_out_set" as const],
+      actorIds: ["11111111-0000-4000-8000-000000000001"],
+    };
+    await r.listOptOutHistory(input);
+    const built = r.buildListOptOutHistoryQuery(input);
+    expect(capture[0]?.sql).toBe(built.sql);
+    expect(capture[0]?.params).toEqual(built.params);
+  });
+
+  it("buildDiffHistoryEntriesQuery returns SQL with h.id IN ($1, $2)", () => {
+    const r = makeAdapter();
+    const { sql, params } = r.buildDiffHistoryEntriesQuery({
+      idA: ID_A,
+      idB: ID_B,
+    });
+    expect(sql).toContain("WHERE h.id IN ($1, $2)");
+    expect(params).toEqual([ID_A, ID_B]);
+  });
+
+  it("buildDiffHistoryEntriesQuery includes LEFT JOIN when joinActor=true", () => {
+    const r = makeAdapter();
+    const { sql } = r.buildDiffHistoryEntriesQuery({
+      idA: ID_A,
+      idB: ID_B,
+      joinActor: true,
+    });
+    expect(sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
+    expect(sql).toContain("actor_display_name");
+  });
+
+  it("buildDiffHistoryTimelineQuery returns SQL with pair-wise WHERE shape", () => {
+    const r = makeAdapter();
+    const { sql, params } = r.buildDiffHistoryTimelineQuery({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+    });
+    expect(sql).toContain("(h.tenant_id = $1 OR h.tenant_id = $2)");
+    expect(sql).toContain("h.table_name = $3");
+    expect(sql).toContain("ORDER BY h.occurred_at ASC, h.id ASC");
+    expect(params.slice(0, 3)).toEqual([
+      TENANT_A,
+      TENANT_B,
+      "workflow_traces",
+    ]);
+  });
+
+  it("buildDiffHistoryTimelineNwayQuery returns SQL with h.tenant_id IN (...)", () => {
+    const r = makeAdapter();
+    const { sql, params } = r.buildDiffHistoryTimelineNwayQuery({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+    });
+    expect(sql).toContain("h.tenant_id IN ($1, $2, $3)");
+    expect(sql).toContain("h.table_name = $4");
+    expect(params.slice(0, 4)).toEqual([
+      TENANT_A,
+      TENANT_B,
+      TENANT_C,
+      "workflow_traces",
+    ]);
+  });
+
+  it("buildDiffHistoryTimelineCrossTableQuery returns SQL with table_name IN (...)", () => {
+    const r = makeAdapter();
+    const { sql, params } = r.buildDiffHistoryTimelineCrossTableQuery({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "tenant_opt_outs"],
+    });
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("h.table_name IN ($2, $3)");
+    expect(params.slice(0, 3)).toEqual([
+      TENANT_A,
+      "workflow_traces",
+      "tenant_opt_outs",
+    ]);
+  });
+
+  it("builders throw on invalid limit (validation lives in builder)", () => {
+    const r = makeAdapter();
+    expect(() =>
+      r.buildListOptOutHistoryQuery({ limit: 0 }),
+    ).toThrow(/limit must be an integer >= 1/);
+    expect(() =>
+      r.buildDiffHistoryTimelineQuery({
+        tenantIdA: TENANT_A,
+        tenantIdB: TENANT_B,
+        tableName: "workflow_traces",
+        limit: -1,
+      }),
+    ).toThrow(/limit must be an integer >= 1/);
+  });
+
+  it("buildDiffHistoryTimelineNwayQuery throws on tenantIds.length < 2", () => {
+    const r = makeAdapter();
+    expect(() =>
+      r.buildDiffHistoryTimelineNwayQuery({
+        tenantIds: [TENANT_A],
+        tableName: "workflow_traces",
+      }),
+    ).toThrow(/at least 2 tenantIds required/);
+  });
+
+  it("buildDiffHistoryTimelineCrossTableQuery throws on tableNames.length < 2", () => {
+    const r = makeAdapter();
+    expect(() =>
+      r.buildDiffHistoryTimelineCrossTableQuery({
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces"],
+      }),
+    ).toThrow(/at least 2 tableNames required/);
+  });
+});

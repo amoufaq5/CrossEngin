@@ -21,15 +21,80 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,205 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.explain-flag
+**56 packages + 1 app, 129 meta-schema tables, 9,220 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql
+closes ADR-0228 future Q1 (Option B) by refactoring 5 retention
+adapter methods to extract SQL-building into public query-builder
+methods. CLI --explain now includes raw PG SQL + bound parameters
+in the plan output across all 3 retention surfaces. Operators can
+copy SQL + params into psql, EXPLAIN ANALYZE, or SQL debugging
+tools. 5 new public adapter methods — buildListOptOutHistoryQuery
++ buildDiffHistoryEntriesQuery + buildDiffHistoryTimelineQuery +
+buildDiffHistoryTimelineNwayQuery +
+buildDiffHistoryTimelineCrossTableQuery; each returns {sql, params}
+synchronously without executing. Refactor pattern — existing async
+methods become "call builder, execute via this.conn.query, post-
+process rows"; SQL string + params are character-identical to
+pre-refactor (verified by builder/adapter consistency test).
+Validation moves into builders — limit (>=1, integer) +
+tenantIds.length >= 2 for nway + tableNames.length >= 2 for cross-
+table all validated synchronously in builder; --explain sees
+validation errors before plan construction. diff-history special
+case — base SELECT shown (h.id IN ($1, $2)) plus sqlNote field
+explaining "expectation checks (kind/actor/per-side/presence) are
+applied in adapter post-fetch; only base SELECT shown" since diff-
+history's expectation checks are JS-layer validations on fetched
+rows, not SQL WHERE clauses. CLI --explain branches updated — each
+of 3 retention surfaces (history single-path + diff-history per-
+event-pair + diff-timeline with 3 dispatch paths) calls the
+corresponding builder and includes sql + params in the plan.
+fakeRetention in CLI tests extended with stub builder methods
+returning canned values for tests not exercising real SQL output.
+NEW "PostgresTraceRetention query builders" describe block with 10
+tests covering — buildListOptOutHistoryQuery returns SQL with
+WHERE clauses for filters (verifies $1/$2/$3 placeholders +
+ORDER BY DESC), builder/adapter consistency (sql identical when
+listOptOutHistory called vs builder called directly),
+buildDiffHistoryEntriesQuery returns h.id IN ($1, $2) base SELECT,
+buildDiffHistoryEntriesQuery with joinActor=true includes LEFT
+JOIN, buildDiffHistoryTimelineQuery pair-wise WHERE shape, build-
+DiffHistoryTimelineNwayQuery with IN (...) tenant placeholder,
+buildDiffHistoryTimelineCrossTableQuery with table_name IN (...)
+placeholders, builders throw on invalid limit (validation in
+builder), Nway throws on tenantIds.length < 2, cross-table throws
+on tableNames.length < 2. NEW "--explain raw SQL output" describe
+block with 5 CLI tests covering — history --explain plan includes
+sql + params, diff-history --explain plan includes sql + params +
+sqlNote about post-fetch expectations, diff-timeline pair-wise
+--explain plan, diff-timeline N-way --explain uses different
+builder (different SQL), diff-timeline cross-table --explain uses
+different builder. Test count: 9,205 → 9,220 (+15 net: 10
+adapter builder tests + 5 CLI raw-SQL tests). ADR-0229 documents
+the refactor pattern + 8 rejected alternatives + 6 future Qs
+(per-condition annotations defer rendering complexity, EXPLAIN
+ANALYZE integration defer requires actual execution, SQL
+formatting via prettier-sql defer operators don't need pretty,
+type-narrow params as ReadonlyArray defer minimal benefit, builder
+cache for identical inputs defer microsecond cost, expose builders
+in package public API surface defer no actionable change). The
+retention adapter contract is enriched with 5 public builder
+methods; operators using --explain get raw PG SQL + bound
+parameters; pattern documented for future adapter methods to
+contribute builders for --explain raw-SQL output. Natural follow-
+up milestones — EXPLAIN ANALYZE integration with actual execution
++ timing/row-count statistics (ADR-0229 Q2), cross-dimensional
+semantic contradiction detection (ADR-0226 Q1 — --system-only +
+--actor-id Y), --format=tsv mechanical CSV variant (ADR-0227 Q1),
+retention summary action, or move beyond retention to other
+Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.explain-flag
 closes ADR-0226 future Q5 by adding --explain boolean flag to
 all 3 retention surfaces. When set, skips the adapter call
 entirely and emits a structured "query plan" object describing
@@ -13098,6 +13163,47 @@ The retention CLI now has --explain across all 3 surfaces
 with surface-appropriate plan shapes; pattern documented for
 future surfaces inheriting --explain via shared
 formatExplainPlan helper and ExplainPlan interface).
+ADR-0229 covers M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql
+(retention adapter query-builder methods enabling raw SQL in
+--explain — closes ADR-0228 future Q1 Option B; refactor 5
+retention adapter methods to extract SQL-building into public
+buildXxxQuery methods returning {sql, params} synchronously
+without executing; existing async methods now call builders +
+execute + post-process preserving SQL output character-
+identical pre-refactor; 5 new builder methods —
+buildListOptOutHistoryQuery + buildDiffHistoryEntriesQuery +
+buildDiffHistoryTimelineQuery + buildDiffHistoryTimelineNway-
+Query + buildDiffHistoryTimelineCrossTableQuery; validation
+moves into builders limit + tenantIds.length >= 2 + tableNames
+.length >= 2 throw synchronously; CLI --explain branches
+include raw sql + params in plan output across all 3 retention
+surfaces; diff-history includes base SELECT + sqlNote
+explaining post-fetch expectation checks; fakeRetention in CLI
+tests extended with stub builders for tests not exercising
+real SQL output; builder/adapter consistency test verifies sql
+identical when listOptOutHistory called vs builder called
+directly guarding against future drift; 10 adapter builder
+tests + 5 CLI raw-SQL tests = 15 new tests test count
+9,205 → 9,220; rejected — duplicate SQL-building maintenance
+burden, explain parameter on Input messy return type, partial
+refactor in 2 milestones inconsistent --explain output, private
+builders + separate explainXxx methods public simpler API,
+keep validation in async methods builder validation gives
+faster feedback for --explain, SQL templating library external
+dependency unnecessary, static SQL const dynamic input
+requires construction, skip diff-history SQL too simple
+operators may want to verify base SELECT; future Qs — per-
+condition annotations defer rendering complexity, EXPLAIN
+ANALYZE integration with actual execution defer separate
+--explain-analyze flag, SQL formatting via prettier-sql defer
+not needed, type-narrow params as ReadonlyArray defer minimal
+benefit, builder cache defer microsecond cost not bottleneck,
+expose builders in package public API surface defer no
+actionable change. Operators get raw PG SQL + bound parameters
+in --explain output across all 3 surfaces with surface-
+appropriate base SELECT shapes; adapter contract enriched
+with 5 public builder methods; pattern documented for future
+adapter methods to contribute builders for raw-SQL output).
 
 ## Architecture in 90 seconds
 

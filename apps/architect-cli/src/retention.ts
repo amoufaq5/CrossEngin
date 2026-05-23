@@ -1034,6 +1034,21 @@ async function runRetentionHistory(
   }
 
   if (explainFlag) {
+    const { sql, params } = retention.buildListOptOutHistoryQuery({
+      tenantId: tenantFilter ?? undefined,
+      tableName: tableFilter ?? undefined,
+      eventKinds,
+      eventKindsNot,
+      actorIds,
+      actorIdsNot,
+      actorPresence,
+      since,
+      until,
+      limit,
+      afterId: effectiveAfterId,
+      beforeId: effectiveBeforeId,
+      joinActor: withActorNames || undefined,
+    });
     const plan = {
       action: "history",
       explain: true,
@@ -1059,6 +1074,8 @@ async function runRetentionHistory(
         ordering: "occurred_at DESC, id DESC",
         withActorNames,
       },
+      sql,
+      params,
     };
     if (command.format === "json" || command.format === "csv") {
       printJson(ctx.io, plan);
@@ -1598,6 +1615,11 @@ async function runRetentionDiffHistory(
       : undefined;
 
   if (explainFlag) {
+    const { sql, params } = retention.buildDiffHistoryEntriesQuery({
+      idA,
+      idB,
+      joinActor: withActorNames ? true : undefined,
+    });
     const plan = {
       action: "diff-history",
       explain: true,
@@ -1624,6 +1646,10 @@ async function runRetentionDiffHistory(
       output: {
         withActorNames,
       },
+      sql,
+      params,
+      sqlNote:
+        "expectation checks (kind/actor/per-side/presence) are applied in adapter post-fetch; only base SELECT shown",
     };
     if (command.format === "json" || command.format === "csv") {
       printJson(ctx.io, plan);
@@ -2098,6 +2124,64 @@ async function runRetentionDiffTimeline(
       : hasAddTenant
         ? "nway"
         : "pair-wise";
+    let sql: string;
+    let params: unknown[];
+    if (crossTable) {
+      const built = retention.buildDiffHistoryTimelineCrossTableQuery({
+        tenantId: positionalA,
+        tableNames: [positionalB, positionalC, ...addTables],
+        actorIds,
+        actorIdsNot,
+        actorPresence,
+        eventKinds,
+        eventKindsNot,
+        since,
+        until,
+        limit,
+        afterId,
+        beforeId,
+        joinActor: withActorNames || undefined,
+      });
+      sql = built.sql;
+      params = built.params;
+    } else if (hasAddTenant) {
+      const built = retention.buildDiffHistoryTimelineNwayQuery({
+        tenantIds: [positionalA, positionalB, ...addTenants],
+        tableName: positionalC,
+        actorIds,
+        actorIdsNot,
+        actorPresence,
+        eventKinds,
+        eventKindsNot,
+        since,
+        until,
+        limit,
+        afterId,
+        beforeId,
+        joinActor: withActorNames || undefined,
+      });
+      sql = built.sql;
+      params = built.params;
+    } else {
+      const built = retention.buildDiffHistoryTimelineQuery({
+        tenantIdA: positionalA,
+        tenantIdB: positionalB,
+        tableName: positionalC,
+        actorIds,
+        actorIdsNot,
+        actorPresence,
+        eventKinds,
+        eventKindsNot,
+        since,
+        until,
+        limit,
+        afterId,
+        beforeId,
+        joinActor: withActorNames || undefined,
+      });
+      sql = built.sql;
+      params = built.params;
+    }
     const plan = {
       action: "diff-timeline",
       explain: true,
@@ -2128,6 +2212,8 @@ async function runRetentionDiffTimeline(
         ordering: "occurred_at ASC, id ASC",
         withActorNames,
       },
+      sql,
+      params,
     };
     if (command.format === "json" || command.format === "csv") {
       printJson(ctx.io, plan);

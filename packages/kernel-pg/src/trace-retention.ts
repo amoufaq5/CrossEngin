@@ -1306,9 +1306,10 @@ export class PostgresTraceRetention {
     };
   }
 
-  async listOptOutHistory(
-    input: ListOptOutHistoryInput = {},
-  ): Promise<ReadonlyArray<OptOutHistoryEntry>> {
+  buildListOptOutHistoryQuery(input: ListOptOutHistoryInput = {}): {
+    sql: string;
+    params: unknown[];
+  } {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (input.tenantId !== undefined) {
@@ -1407,6 +1408,21 @@ export class PostgresTraceRetention {
     const joinClause = joinActor
       ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
       : "";
+    const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at,
+              h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       ${where}
+       ORDER BY h.occurred_at DESC, h.id DESC
+       LIMIT $${params.length}`;
+    return { sql, params };
+  }
+
+  async listOptOutHistory(
+    input: ListOptOutHistoryInput = {},
+  ): Promise<ReadonlyArray<OptOutHistoryEntry>> {
+    const { sql, params } = this.buildListOptOutHistoryQuery(input);
+    const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
@@ -1419,16 +1435,7 @@ export class PostgresTraceRetention {
       prev_state: Record<string, unknown> | null;
       next_state: Record<string, unknown> | null;
       attributes: Record<string, unknown>;
-    }>(
-      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at,
-              h.prev_state, h.next_state, h.attributes${selectActorCols}
-       FROM ${SCHEMA}.${HISTORY_TABLE} h
-       ${joinClause}
-       ${where}
-       ORDER BY h.occurred_at DESC, h.id DESC
-       LIMIT $${params.length}`,
-      params,
-    );
+    }>(sql, params);
     return result.rows.map((r) => {
       if (!isOptOutHistoryEventKind(r.event_kind)) {
         throw new Error(
@@ -1595,9 +1602,10 @@ export class PostgresTraceRetention {
     };
   }
 
-  async diffHistoryEntries(
-    input: DiffHistoryEntriesInput,
-  ): Promise<DiffHistoryEntriesResult> {
+  buildDiffHistoryEntriesQuery(input: DiffHistoryEntriesInput): {
+    sql: string;
+    params: unknown[];
+  } {
     const joinActor = input.joinActor === true;
     const selectCols = joinActor
       ? "h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at, h.next_state, u.display_name AS actor_display_name, u.email AS actor_email"
@@ -1605,6 +1613,18 @@ export class PostgresTraceRetention {
     const joinClause = joinActor
       ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
       : "";
+    const sql = `SELECT ${selectCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE h.id IN ($1, $2)`;
+    return { sql, params: [input.idA, input.idB] };
+  }
+
+  async diffHistoryEntries(
+    input: DiffHistoryEntriesInput,
+  ): Promise<DiffHistoryEntriesResult> {
+    const { sql, params } = this.buildDiffHistoryEntriesQuery(input);
+    const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
@@ -1615,13 +1635,7 @@ export class PostgresTraceRetention {
       next_state: Record<string, unknown> | null;
       actor_display_name?: string | null;
       actor_email?: string | null;
-    }>(
-      `SELECT ${selectCols}
-       FROM ${SCHEMA}.${HISTORY_TABLE} h
-       ${joinClause}
-       WHERE h.id IN ($1, $2)`,
-      [input.idA, input.idB],
-    );
+    }>(sql, params);
     const found = new Map(result.rows.map((r) => [r.id, r]));
     const missing = [input.idA, input.idB].filter((id) => !found.has(id));
     if (missing.length > 0) {
@@ -1920,9 +1934,10 @@ export class PostgresTraceRetention {
     return base;
   }
 
-  async diffHistoryTimeline(
-    input: DiffHistoryTimelineInput,
-  ): Promise<DiffHistoryTimelineResult> {
+  buildDiffHistoryTimelineQuery(input: DiffHistoryTimelineInput): {
+    sql: string;
+    params: unknown[];
+  } {
     const limit = input.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error(`limit must be an integer >= 1, got ${limit}`);
@@ -2014,6 +2029,21 @@ export class PostgresTraceRetention {
     const joinClause = joinActor
       ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
       : "";
+    const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
+              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY h.occurred_at ASC, h.id ASC
+       LIMIT $${params.length}`;
+    return { sql, params };
+  }
+
+  async diffHistoryTimeline(
+    input: DiffHistoryTimelineInput,
+  ): Promise<DiffHistoryTimelineResult> {
+    const { sql, params } = this.buildDiffHistoryTimelineQuery(input);
+    const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
@@ -2026,16 +2056,7 @@ export class PostgresTraceRetention {
       prev_state: Record<string, unknown> | null;
       next_state: Record<string, unknown> | null;
       attributes: Record<string, unknown>;
-    }>(
-      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
-              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
-       FROM ${SCHEMA}.${HISTORY_TABLE} h
-       ${joinClause}
-       WHERE ${conditions.join(" AND ")}
-       ORDER BY h.occurred_at ASC, h.id ASC
-       LIMIT $${params.length}`,
-      params,
-    );
+    }>(sql, params);
     const entries: TimelineEntry[] = result.rows.map((r) => {
       if (!isOptOutHistoryEventKind(r.event_kind)) {
         throw new Error(
@@ -2071,9 +2092,10 @@ export class PostgresTraceRetention {
     };
   }
 
-  async diffHistoryTimelineNway(
-    input: DiffHistoryTimelineNwayInput,
-  ): Promise<DiffHistoryTimelineNwayResult> {
+  buildDiffHistoryTimelineNwayQuery(input: DiffHistoryTimelineNwayInput): {
+    sql: string;
+    params: unknown[];
+  } {
     if (input.tenantIds.length < 2) {
       throw new Error(
         `diffHistoryTimelineNway: at least 2 tenantIds required, got ${input.tenantIds.length}`,
@@ -2175,6 +2197,21 @@ export class PostgresTraceRetention {
     const joinClause = joinActor
       ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
       : "";
+    const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
+              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY h.occurred_at ASC, h.id ASC
+       LIMIT $${params.length}`;
+    return { sql, params };
+  }
+
+  async diffHistoryTimelineNway(
+    input: DiffHistoryTimelineNwayInput,
+  ): Promise<DiffHistoryTimelineNwayResult> {
+    const { sql, params } = this.buildDiffHistoryTimelineNwayQuery(input);
+    const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
@@ -2187,16 +2224,7 @@ export class PostgresTraceRetention {
       prev_state: Record<string, unknown> | null;
       next_state: Record<string, unknown> | null;
       attributes: Record<string, unknown>;
-    }>(
-      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
-              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
-       FROM ${SCHEMA}.${HISTORY_TABLE} h
-       ${joinClause}
-       WHERE ${conditions.join(" AND ")}
-       ORDER BY h.occurred_at ASC, h.id ASC
-       LIMIT $${params.length}`,
-      params,
-    );
+    }>(sql, params);
     const labelByTenantId = new Map<string, string>();
     input.tenantIds.forEach((id, i) => {
       if (!labelByTenantId.has(id)) {
@@ -2238,9 +2266,9 @@ export class PostgresTraceRetention {
     };
   }
 
-  async diffHistoryTimelineCrossTable(
+  buildDiffHistoryTimelineCrossTableQuery(
     input: DiffHistoryTimelineCrossTableInput,
-  ): Promise<DiffHistoryTimelineCrossTableResult> {
+  ): { sql: string; params: unknown[] } {
     if (input.tableNames.length < 2) {
       throw new Error(
         `diffHistoryTimelineCrossTable: at least 2 tableNames required, got ${input.tableNames.length}`,
@@ -2342,6 +2370,21 @@ export class PostgresTraceRetention {
     const joinClause = joinActor
       ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
       : "";
+    const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
+              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
+       FROM ${SCHEMA}.${HISTORY_TABLE} h
+       ${joinClause}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY h.occurred_at ASC, h.id ASC
+       LIMIT $${params.length}`;
+    return { sql, params };
+  }
+
+  async diffHistoryTimelineCrossTable(
+    input: DiffHistoryTimelineCrossTableInput,
+  ): Promise<DiffHistoryTimelineCrossTableResult> {
+    const { sql, params } = this.buildDiffHistoryTimelineCrossTableQuery(input);
+    const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
       id: string;
       tenant_id: string;
@@ -2354,16 +2397,7 @@ export class PostgresTraceRetention {
       prev_state: Record<string, unknown> | null;
       next_state: Record<string, unknown> | null;
       attributes: Record<string, unknown>;
-    }>(
-      `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
-              h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
-       FROM ${SCHEMA}.${HISTORY_TABLE} h
-       ${joinClause}
-       WHERE ${conditions.join(" AND ")}
-       ORDER BY h.occurred_at ASC, h.id ASC
-       LIMIT $${params.length}`,
-      params,
-    );
+    }>(sql, params);
     const labelByTableName = new Map<string, string>();
     input.tableNames.forEach((t, i) => {
       if (!labelByTableName.has(t)) {

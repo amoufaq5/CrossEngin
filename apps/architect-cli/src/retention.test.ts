@@ -238,6 +238,30 @@ function fakeRetention(opts: {
       if (opts.throws !== undefined) throw opts.throws;
       return opts.historyEntries ?? [];
     },
+    buildListOptOutHistoryQuery: (_input: ListOptOutHistoryInput = {}) => ({
+      sql: "SELECT * FROM meta.opt_out_history (fake)",
+      params: [] as unknown[],
+    }),
+    buildDiffHistoryEntriesQuery: (_input: DiffHistoryEntriesInput) => ({
+      sql: "SELECT * FROM meta.opt_out_history WHERE h.id IN ($1, $2) (fake)",
+      params: [] as unknown[],
+    }),
+    buildDiffHistoryTimelineQuery: (_input: DiffHistoryTimelineInput) => ({
+      sql: "SELECT * FROM meta.opt_out_history (fake pair-wise)",
+      params: [] as unknown[],
+    }),
+    buildDiffHistoryTimelineNwayQuery: (
+      _input: DiffHistoryTimelineNwayInput,
+    ) => ({
+      sql: "SELECT * FROM meta.opt_out_history (fake nway)",
+      params: [] as unknown[],
+    }),
+    buildDiffHistoryTimelineCrossTableQuery: (
+      _input: DiffHistoryTimelineCrossTableInput,
+    ) => ({
+      sql: "SELECT * FROM meta.opt_out_history (fake cross-table)",
+      params: [] as unknown[],
+    }),
     restoreTenantPolicy: async (input: RestoreTenantPolicyInput) => {
       opts.restoreCapture?.push(input);
       if (opts.throws !== undefined) throw opts.throws;
@@ -15549,6 +15573,123 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
       );
       expect(code).toBe(2);
       expect(err()).toContain("share value(s)");
+    });
+  });
+
+  describe("--explain raw SQL output (ADR-0229)", () => {
+    it("history --explain plan includes sql + params from buildListOptOutHistoryQuery", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "history",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(typeof plan.sql).toBe("string");
+      expect(plan.sql.length).toBeGreaterThan(0);
+      expect(Array.isArray(plan.params)).toBe(true);
+    });
+
+    it("diff-history --explain plan includes sql + params + sqlNote about post-fetch expectations", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-history",
+          ID_A,
+          ID_B,
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(typeof plan.sql).toBe("string");
+      expect(Array.isArray(plan.params)).toBe(true);
+      expect(typeof plan.sqlNote).toBe("string");
+      expect(plan.sqlNote).toContain("expectation checks");
+    });
+
+    it("diff-timeline pair-wise --explain plan includes sql + params", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(typeof plan.sql).toBe("string");
+      expect(Array.isArray(plan.params)).toBe(true);
+    });
+
+    it("diff-timeline N-way --explain plan includes sql + params (different builder)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--add-tenant",
+          "00000000-0000-4000-8000-00000000000C",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.sql).toContain("nway");
+    });
+
+    it("diff-timeline cross-table --explain plan includes sql + params (different builder)", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          "workflow_traces",
+          "tenant_opt_outs",
+          "--cross-table",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.sql).toContain("cross-table");
     });
   });
 });
