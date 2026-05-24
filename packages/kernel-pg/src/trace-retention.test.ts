@@ -11446,4 +11446,45 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(sql).toContain("ORDER BY COUNT(*) DESC");
     expect(sql).toContain("LIMIT");
   });
+
+  it("explainAnalyzeQuery: wraps SQL in EXPLAIN (ANALYZE, FORMAT JSON) + returns QUERY PLAN", async () => {
+    const capture: Capture[] = [];
+    const planJson = [{ Plan: { "Node Type": "Seq Scan", "Actual Total Time": 0.5 } }];
+    const conn = mockConnection(
+      () => ({ rows: [{ "QUERY PLAN": planJson }], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const plan = await r.explainAnalyzeQuery(
+      "SELECT * FROM meta.foo WHERE x = $1",
+      ["abc"],
+    );
+    expect(capture[0]?.sql).toBe(
+      "EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM meta.foo WHERE x = $1",
+    );
+    expect(capture[0]?.params).toEqual(["abc"]);
+    expect(plan).toEqual(planJson);
+  });
+
+  it("explainAnalyzeQuery: returns null when no plan row", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const r = new PostgresTraceRetention({ conn });
+    const plan = await r.explainAnalyzeQuery("SELECT 1", []);
+    expect(plan).toBeNull();
+  });
+
+  it("explainAnalyzeQuery: composes with a builder-produced query", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection(
+      () => ({ rows: [{ "QUERY PLAN": [{ Plan: {} }] }], rowCount: 1 }),
+      capture,
+    );
+    const r = new PostgresTraceRetention({ conn });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+    });
+    await r.explainAnalyzeQuery(sql, params);
+    expect(capture[0]?.sql).toContain("EXPLAIN (ANALYZE, FORMAT JSON) SELECT");
+    expect(capture[0]?.sql).toContain("GROUP BY h.event_kind");
+  });
 });

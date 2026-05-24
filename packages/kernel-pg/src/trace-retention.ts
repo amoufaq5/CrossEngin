@@ -1605,6 +1605,21 @@ export class PostgresTraceRetention {
     return { sql, params };
   }
 
+  // Runs EXPLAIN (ANALYZE, FORMAT JSON) on a read query built by one of
+  // the buildXxxQuery helpers. ANALYZE executes the query (read-only
+  // SELECT — output discarded) and returns PG's execution plan with
+  // actual timing + row counts as a JSON structure.
+  async explainAnalyzeQuery(
+    sql: string,
+    params: ReadonlyArray<unknown>,
+  ): Promise<unknown> {
+    const result = await this.conn.query<{ "QUERY PLAN": unknown }>(
+      `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`,
+      params,
+    );
+    return result.rows[0]?.["QUERY PLAN"] ?? null;
+  }
+
   buildSummarizeOptOutHistoryQuery(input: SummarizeOptOutHistoryInput): {
     sql: string;
     params: unknown[];

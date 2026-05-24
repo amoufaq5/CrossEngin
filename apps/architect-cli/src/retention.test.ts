@@ -114,6 +114,8 @@ function fakeRetention(opts: {
   historyCapture?: ListOptOutHistoryInput[];
   summaryResult?: OptOutHistorySummaryResult;
   summaryCapture?: SummarizeOptOutHistoryInput[];
+  explainAnalyzePlan?: unknown;
+  explainAnalyzeCapture?: { sql: string; params: ReadonlyArray<unknown> }[];
   restoreResult?: RestoreTenantPolicyResult;
   restoreCapture?: RestoreTenantPolicyInput[];
   diffResult?: DiffHistoryEntriesResult;
@@ -281,6 +283,18 @@ function fakeRetention(opts: {
           totalCount: 0,
           buckets: [],
         }
+      );
+    },
+    explainAnalyzeQuery: async (
+      sql: string,
+      params: ReadonlyArray<unknown>,
+    ) => {
+      opts.explainAnalyzeCapture?.push({ sql, params });
+      if (opts.throws !== undefined) throw opts.throws;
+      return (
+        opts.explainAnalyzePlan ?? [
+          { Plan: { "Node Type": "Seq Scan", "Actual Total Time": 0.42 } },
+        ]
       );
     },
     restoreTenantPolicy: async (input: RestoreTenantPolicyInput) => {
@@ -17622,6 +17636,144 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       const plan = JSON.parse(out());
       expect(plan.top).toBe(5);
       expect(plan.minCount).toBe(2);
+    });
+  });
+
+  describe("--explain-analyze (ADR-0240)", () => {
+    const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+    const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+    const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+    const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+
+    it("history: executes EXPLAIN ANALYZE and emits plan (JSON)", async () => {
+      const capture: { sql: string; params: ReadonlyArray<unknown> }[] = [];
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--kind", "opt_out_set", "--explain-analyze", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            explainAnalyzeCapture: capture,
+            explainAnalyzePlan: [{ Plan: { "Node Type": "Index Scan" } }],
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture).toHaveLength(1);
+      const env = JSON.parse(out());
+      expect(env.action).toBe("history");
+      expect(env.explainAnalyze).toBe(true);
+      expect(env.executed).toBe(true);
+      expect(env.plan).toEqual([{ Plan: { "Node Type": "Index Scan" } }]);
+    });
+
+    it("history: human format prints plan with header", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--explain-analyze"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("EXPLAIN ANALYZE plan for retention history");
+      expect(out()).toContain("Node Type");
+    });
+
+    it("history: exits 2 when both --explain and --explain-analyze set", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--explain", "--explain-analyze"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--explain and --explain-analyze are mutually exclusive",
+      );
+    });
+
+    it("history: adapter error propagates as exit 1", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--explain-analyze"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            throws: new Error("EXPLAIN failed: relation missing"),
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(1);
+      expect(err()).toContain("retention history:");
+      expect(err()).toContain("EXPLAIN failed");
+    });
+
+    it("summary: executes EXPLAIN ANALYZE", async () => {
+      const capture: { sql: string; params: ReadonlyArray<unknown> }[] = [];
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--group-by", "day", "--explain-analyze", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ explainAnalyzeCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture).toHaveLength(1);
+      const env = JSON.parse(out());
+      expect(env.action).toBe("summary");
+      expect(env.explainAnalyze).toBe(true);
+    });
+
+    it("diff-history: executes EXPLAIN ANALYZE", async () => {
+      const capture: { sql: string; params: ReadonlyArray<unknown> }[] = [];
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "diff-history", ID_A, ID_B, "--explain-analyze", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ explainAnalyzeCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture).toHaveLength(1);
+      const env = JSON.parse(out());
+      expect(env.action).toBe("diff-history");
+    });
+
+    it("diff-timeline: executes EXPLAIN ANALYZE (pair-wise)", async () => {
+      const capture: { sql: string; params: ReadonlyArray<unknown> }[] = [];
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--explain-analyze", "--format=json"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ explainAnalyzeCapture: capture }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture).toHaveLength(1);
+      const env = JSON.parse(out());
+      expect(env.action).toBe("diff-timeline");
+    });
+
+    it("diff-timeline: exits 2 when both --explain and --explain-analyze set", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--explain", "--explain-analyze"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--explain and --explain-analyze are mutually exclusive",
+      );
     });
   });
 });

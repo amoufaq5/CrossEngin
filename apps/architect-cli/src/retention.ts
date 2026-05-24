@@ -85,6 +85,42 @@ function formatExplainPlan(plan: ExplainPlan): string {
   return lines.join("\n");
 }
 
+async function runExplainAnalyze(
+  ctx: RunContext,
+  command: ParsedCommand,
+  retention: PostgresTraceRetention,
+  action: string,
+  sql: string,
+  params: ReadonlyArray<unknown>,
+): Promise<number> {
+  let plan: unknown;
+  try {
+    plan = await retention.explainAnalyzeQuery(sql, params);
+  } catch (err) {
+    printError(
+      ctx.io,
+      `retention ${action}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
+  if (command.format === "human") {
+    ctx.io.stdout.write(
+      `EXPLAIN ANALYZE plan for retention ${action} (query executed; SELECT output discarded):\n`,
+    );
+    ctx.io.stdout.write(JSON.stringify(plan, null, 2) + "\n");
+  } else {
+    printJson(ctx.io, {
+      action,
+      explainAnalyze: true,
+      executed: true,
+      sql,
+      params,
+      plan,
+    });
+  }
+  return 0;
+}
+
 function findContradictoryValues<T>(
   positive: ReadonlyArray<T> | undefined,
   negative: ReadonlyArray<T> | undefined,
@@ -901,6 +937,7 @@ async function runRetentionHistory(
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const explainFlag = getBooleanFlag(command, "explain");
+  const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
     printError(
@@ -1060,22 +1097,35 @@ async function runRetentionHistory(
     limit = parsed;
   }
 
+  const historyInput = {
+    tenantId: tenantFilter ?? undefined,
+    tableName: tableFilter ?? undefined,
+    eventKinds,
+    eventKindsNot,
+    actorIds,
+    actorIdsNot,
+    actorPresence,
+    since,
+    until,
+    limit,
+    afterId: effectiveAfterId,
+    beforeId: effectiveBeforeId,
+    joinActor: withActorNames || undefined,
+  };
+
+  if (explainFlag && explainAnalyzeFlag) {
+    printError(
+      ctx.io,
+      "retention history: --explain and --explain-analyze are mutually exclusive",
+    );
+    return 2;
+  }
+  if (explainAnalyzeFlag) {
+    const { sql, params } = retention.buildListOptOutHistoryQuery(historyInput);
+    return runExplainAnalyze(ctx, command, retention, "history", sql, params);
+  }
   if (explainFlag) {
-    const { sql, params } = retention.buildListOptOutHistoryQuery({
-      tenantId: tenantFilter ?? undefined,
-      tableName: tableFilter ?? undefined,
-      eventKinds,
-      eventKindsNot,
-      actorIds,
-      actorIdsNot,
-      actorPresence,
-      since,
-      until,
-      limit,
-      afterId: effectiveAfterId,
-      beforeId: effectiveBeforeId,
-      joinActor: withActorNames || undefined,
-    });
+    const { sql, params } = retention.buildListOptOutHistoryQuery(historyInput);
     const plan = {
       action: "history",
       explain: true,
@@ -1114,21 +1164,7 @@ async function runRetentionHistory(
 
   let entries: ReadonlyArray<OptOutHistoryEntry>;
   try {
-    entries = await retention.listOptOutHistory({
-      tenantId: tenantFilter ?? undefined,
-      tableName: tableFilter ?? undefined,
-      eventKinds,
-      eventKindsNot,
-      actorIds,
-      actorIdsNot,
-      actorPresence,
-      since,
-      until,
-      limit,
-      afterId: effectiveAfterId,
-      beforeId: effectiveBeforeId,
-      joinActor: withActorNames || undefined,
-    });
+    entries = await retention.listOptOutHistory(historyInput);
   } catch (err) {
     printError(
       ctx.io,
@@ -1300,6 +1336,7 @@ async function runRetentionSummary(
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
   const explainFlag = getBooleanFlag(command, "explain");
+  const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
     printError(ctx.io, "retention summary: --csv-separator cannot be '\"' or newline");
@@ -1529,6 +1566,18 @@ async function runRetentionSummary(
     minCount,
   };
 
+  if (explainFlag && explainAnalyzeFlag) {
+    printError(
+      ctx.io,
+      "retention summary: --explain and --explain-analyze are mutually exclusive",
+    );
+    return 2;
+  }
+  if (explainAnalyzeFlag) {
+    const { sql, params } =
+      retention.buildSummarizeOptOutHistoryQuery(summaryInput);
+    return runExplainAnalyze(ctx, command, retention, "summary", sql, params);
+  }
   if (explainFlag) {
     const { sql, params } = retention.buildSummarizeOptOutHistoryQuery(summaryInput);
     const plan = {
@@ -1982,6 +2031,7 @@ async function runRetentionDiffHistory(
   const noSystemBFlag = getBooleanFlag(command, "no-system-b");
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const explainFlag = getBooleanFlag(command, "explain");
+  const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
     printError(
@@ -2057,6 +2107,28 @@ async function runRetentionDiffHistory(
     }
   }
 
+  if (explainFlag && explainAnalyzeFlag) {
+    printError(
+      ctx.io,
+      "retention diff-history: --explain and --explain-analyze are mutually exclusive",
+    );
+    return 2;
+  }
+  if (explainAnalyzeFlag) {
+    const { sql, params } = retention.buildDiffHistoryEntriesQuery({
+      idA,
+      idB,
+      joinActor: withActorNames ? true : undefined,
+    });
+    return runExplainAnalyze(
+      ctx,
+      command,
+      retention,
+      "diff-history",
+      sql,
+      params,
+    );
+  }
   if (explainFlag) {
     const { sql, params } = retention.buildDiffHistoryEntriesQuery({
       idA,
@@ -2458,6 +2530,7 @@ async function runRetentionDiffTimeline(
 
   const withActorNames = getBooleanFlag(command, "with-actor-names");
   const explainFlag = getBooleanFlag(command, "explain");
+  const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
     printError(
@@ -2589,7 +2662,14 @@ async function runRetentionDiffTimeline(
     return 2;
   }
 
-  if (explainFlag) {
+  if (explainFlag && explainAnalyzeFlag) {
+    printError(
+      ctx.io,
+      "retention diff-timeline: --explain and --explain-analyze are mutually exclusive",
+    );
+    return 2;
+  }
+  if (explainFlag || explainAnalyzeFlag) {
     const dispatchPath = crossTable
       ? "cross-table"
       : hasAddTenant
@@ -2652,6 +2732,16 @@ async function runRetentionDiffTimeline(
       });
       sql = built.sql;
       params = built.params;
+    }
+    if (explainAnalyzeFlag) {
+      return runExplainAnalyze(
+        ctx,
+        command,
+        retention,
+        "diff-timeline",
+        sql,
+        params,
+      );
     }
     const plan = {
       action: "diff-timeline",
