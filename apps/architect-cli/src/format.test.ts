@@ -9,12 +9,15 @@ import {
   formatNdjson,
   formatTsv,
   formatValidationErrors,
+  formatYaml,
   printCsv,
   printError,
   printJson,
   printNdjson,
+  printStructured,
   printSuccess,
   printTsv,
+  printYaml,
   type IoStreams,
 } from "./format.js";
 
@@ -337,5 +340,116 @@ describe("printNdjson", () => {
     };
     printNdjson(io, [{ a: 1 }, { b: 2 }]);
     expect(stdoutBuf).toBe('{"a":1}\n{"b":2}\n');
+  });
+});
+
+describe("formatYaml", () => {
+  it("renders a flat object as key: value lines", () => {
+    expect(formatYaml({ a: 1, b: "x", c: true, d: null })).toBe(
+      "a: 1\nb: x\nc: true\nd: null\n",
+    );
+  });
+
+  it("quotes strings that look numeric / reserved / have special chars", () => {
+    const yaml = formatYaml({
+      uuid: "11111111-0000-4000-8000-000000000001",
+      kind: "opt_out_set",
+      reserved: "null",
+      withColon: "a: b",
+      ts: "2026-05-20 00:00:00",
+    });
+    expect(yaml).toContain('uuid: "11111111-0000-4000-8000-000000000001"');
+    expect(yaml).toContain("kind: opt_out_set");
+    expect(yaml).toContain('reserved: "null"');
+    expect(yaml).toContain('withColon: "a: b"');
+    expect(yaml).toContain('ts: "2026-05-20 00:00:00"');
+  });
+
+  it("renders nested objects with indentation", () => {
+    expect(formatYaml({ outer: { inner: 1 } })).toBe(
+      "outer:\n  inner: 1\n",
+    );
+  });
+
+  it("renders arrays of scalars", () => {
+    expect(formatYaml({ kinds: ["opt_out_set", "policy_deleted"] })).toBe(
+      "kinds:\n  - opt_out_set\n  - policy_deleted\n",
+    );
+  });
+
+  it("renders arrays of objects (buckets)", () => {
+    const yaml = formatYaml({
+      buckets: [
+        { key: "opt_out_set", count: 12 },
+        { key: "policy_deleted", count: 1 },
+      ],
+    });
+    expect(yaml).toBe(
+      "buckets:\n  - key: opt_out_set\n    count: 12\n  - key: policy_deleted\n    count: 1\n",
+    );
+  });
+
+  it("renders empty array as [] and empty object as {}", () => {
+    expect(formatYaml({ a: [], b: {} })).toBe("a: []\nb: {}\n");
+  });
+
+  it("renders null array values", () => {
+    expect(formatYaml({ kinds: null })).toBe("kinds: null\n");
+  });
+
+  it("round-trips a retention summary envelope shape", () => {
+    const yaml = formatYaml({
+      action: "summary",
+      groupBy: "kind",
+      totalCount: 16,
+      buckets: [{ key: "opt_out_set", count: 12 }],
+    });
+    expect(yaml).toContain("action: summary");
+    expect(yaml).toContain("groupBy: kind");
+    expect(yaml).toContain("totalCount: 16");
+    expect(yaml).toContain("buckets:");
+    expect(yaml).toContain("    count: 12");
+  });
+});
+
+describe("printYaml + printStructured", () => {
+  it("printYaml writes YAML to stdout", () => {
+    let buf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { buf += s; } },
+      stderr: { write: () => {} },
+    };
+    printYaml(io, { a: 1 });
+    expect(buf).toBe("a: 1\n");
+  });
+
+  it("printStructured emits JSON for format=json", () => {
+    let buf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { buf += s; } },
+      stderr: { write: () => {} },
+    };
+    printStructured(io, "json", { a: 1 });
+    expect(buf).toBe('{\n  "a": 1\n}\n');
+  });
+
+  it("printStructured emits YAML for format=yaml", () => {
+    let buf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { buf += s; } },
+      stderr: { write: () => {} },
+    };
+    printStructured(io, "yaml", { a: 1 });
+    expect(buf).toBe("a: 1\n");
+  });
+
+  it("printStructured falls back to JSON for non-yaml formats", () => {
+    let buf = "";
+    const io: IoStreams = {
+      stdout: { write: (s) => { buf += s; } },
+      stderr: { write: () => {} },
+    };
+    printStructured(io, "csv", { a: 1 });
+    expect(buf).toBe('{\n  "a": 1\n}\n');
   });
 });

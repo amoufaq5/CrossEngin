@@ -9,6 +9,99 @@ export function printJson(io: IoStreams, value: unknown): void {
   io.stdout.write(JSON.stringify(value, null, 2) + "\n");
 }
 
+function yamlScalar(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  const str = String(value);
+  const needsQuote =
+    str === "" ||
+    /^\s|\s$/.test(str) ||
+    /^[-?:,[\]{}#&*!|>'"%@`]/.test(str) ||
+    /:\s|\s#/.test(str) ||
+    /[\n\t]/.test(str) ||
+    /^(true|false|null|yes|no|on|off|~)$/i.test(str) ||
+    /^[+-]?(\d|\.\d)/.test(str);
+  if (needsQuote) {
+    const escaped = str
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\t/g, "\\t");
+    return `"${escaped}"`;
+  }
+  return str;
+}
+
+function isContainer(v: unknown): boolean {
+  return v !== null && typeof v === "object";
+}
+
+function isEmptyContainer(v: unknown): boolean {
+  if (Array.isArray(v)) return v.length === 0;
+  if (isContainer(v)) return Object.keys(v as object).length === 0;
+  return false;
+}
+
+// Minimal YAML emitter (block style). Returns lines with NO leading
+// indentation; the caller indents via indentYamlLines. Handles the
+// scalar / array / object shapes the retention envelopes produce.
+function yamlNode(value: unknown): string[] {
+  if (!isContainer(value)) return [yamlScalar(value)];
+  if (Array.isArray(value)) {
+    if (value.length === 0) return ["[]"];
+    const out: string[] = [];
+    for (const item of value) {
+      const itemLines = yamlNode(item);
+      out.push(`- ${itemLines[0] ?? ""}`);
+      for (let i = 1; i < itemLines.length; i++) {
+        out.push(`  ${itemLines[i]}`);
+      }
+    }
+    return out;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return ["{}"];
+  const out: string[] = [];
+  for (const [k, v] of entries) {
+    const key = yamlScalar(k);
+    if (isContainer(v) && !isEmptyContainer(v)) {
+      out.push(`${key}:`);
+      out.push(...indentYamlLines(yamlNode(v), "  "));
+    } else {
+      out.push(`${key}: ${yamlNode(v)[0] ?? ""}`);
+    }
+  }
+  return out;
+}
+
+function indentYamlLines(lines: string[], pad: string): string[] {
+  return lines.map((l) => (l.length > 0 ? pad + l : l));
+}
+
+export function formatYaml(value: unknown): string {
+  return yamlNode(value).join("\n") + "\n";
+}
+
+export function printYaml(io: IoStreams, value: unknown): void {
+  io.stdout.write(formatYaml(value));
+}
+
+// Emit a structured envelope as JSON or YAML based on format. Used by
+// retention surfaces where --format=json and --format=yaml share the
+// same envelope shape.
+export function printStructured(
+  io: IoStreams,
+  format: string,
+  value: unknown,
+): void {
+  if (format === "yaml") {
+    printYaml(io, value);
+  } else {
+    printJson(io, value);
+  }
+}
+
 export function printSuccess(io: IoStreams, message: string): void {
   io.stdout.write(message + "\n");
 }

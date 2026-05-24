@@ -21,15 +21,87 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,353 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.explain-analyze
+**56 packages + 1 app, 129 meta-schema tables, 9,371 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.format-yaml
+closes ADR-0231 future Q1 by adding --format=yaml — the 6th
+output format (human / json / csv / tsv / ndjson / yaml).
+Unlike csv/tsv (tabular, one row per record) or ndjson (one
+JSON object per line), yaml is STRUCTURED like json: it emits
+the same nested envelope (filters echo + result/entries/
+buckets) in YAML syntax, so --format=yaml is wired everywhere
+--format=json is NOT to the tabular code paths. Dependency-
+free YAML emitter in format.ts (~60 lines, no js-yaml per
+ADR-0227's in-repo-helper precedent) — formatYaml(value) +
+printYaml(io, value) + printStructured(io, format, value)
+dispatch helper (yaml → printYaml else → printJson). The
+emitter yamlNode handles the shapes retention envelopes
+produce — scalars (null → null, bool → true/false, number
+as-is, string bare or double-quoted), objects (key: value
+lines, nested objects/arrays indented 2 spaces under key:),
+arrays (- item block style, arrays of objects render - key:
+val with subsequent keys aligned), empty containers ([] / {}
+inline). Conservative string quoting — double-quote (with
+\/"/\n/\t escaped) when a string could be misinterpreted as
+YAML: empty string, leading/trailing whitespace, starts with
+a YAML indicator char (-?:,[]{}#&*!|>'"%@`), contains ": " or
+" #", contains newline/tab, matches a reserved word (true/
+false/null/yes/no/on/off/~ case-insensitive), or looks
+numeric (^[+-]?(\d|\.\d)); otherwise bare. Over-quotes
+ambiguous strings (UUIDs starting with a digit, timestamps,
+reserved words) — harmless + safe; event kinds (opt_out_set)
+render bare. printStructured transformation — rather than add
+a yaml branch to every surface, ALL retention printJson(ctx
+.io, envelope) calls were replaced with printStructured(ctx
+.io, command.format, envelope) (28 calls), and every command
+.format === "json" condition was widened to command.format
+=== "json" || command.format === "yaml" (23 conditions).
+Behavior-preserving for all non-yaml formats (printStructured
+→ printJson when format ≠ yaml); adds yaml uniformly across
+all 23 envelope-emitting branches (history / summary / diff-
+history / diff-timeline / diff / mutation actions / restore /
+prune / explain / explain-analyze). Wiring scope — because the
+transformation was global, --format=yaml works on EVERY
+retention action that emits a JSON envelope, not just the 4
+read surfaces: mutation actions (opt-out, set, etc.), restore,
+prune, diff, and the --explain / --explain-analyze plans all
+honor it. cli.ts OUTPUT_FORMATS extended ["human", "json",
+"csv", "tsv", "ndjson", "yaml"]; parser accepts yaml; help
+text --format human|json|csv|tsv|ndjson|yaml + note "yaml
+emits the same structured envelope as json, in YAML."
+format.test.ts NEW describe blocks for formatYaml (scalars/
+objects/arrays/empty/quoting) + printYaml + printStructured
+dispatch — 12 new unit tests (42 → 54). retention.test.ts NEW
+"--format=yaml (ADR-0241)" describe with 6 CLI tests — yaml on
+history / summary / diff-history / diff-timeline / explain /
+explain-analyze. Test count: 9,353 → 9,371 (+18 net: 12
+format-unit + 6 CLI). ADR-0241 documents the design + 8
+rejected alternatives (js-yaml dependency, wire yaml only to
+the 4 read surfaces like csv/tsv/ndjson, YAML flow style
+{a: 1}, bare strings everywhere, single-quote strings, --yaml
+boolean flag instead of --format=yaml, YAML document markers
+--- / ..., comments/anchors/tags) + 6 future Qs (YAML round-
+trip fidelity test defer yaml-parse dependency, flow-style for
+compact leaf arrays defer, yaml for chat/gateway/apply
+surfaces via reusable printStructured defer, YAML 1.2 strict
+compliance defer, configurable indent width defer 2 is
+convention, anchor/alias for repeated structures defer). The
+retention CLI now has 6 output formats — human + json + csv +
+tsv + ndjson + yaml — across all surfaces; ADR-0231's future
+Qs are now fully closed (tsv + ndjson + csv-separator + yaml).
+printStructured is reusable for future surfaces (chat /
+gateway / apply). Natural follow-up milestones — --format=yaml
+for chat/gateway/apply surfaces via the reusable
+printStructured helper, --explain-analyze-buffers (ADR-0240
+Q1), --top-per-group window function cross-tab (ADR-0238 Q1),
+or move beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.explain-analyze
 closes ADR-0228 Q2 by adding --explain-analyze to the 4 read
 surfaces (history, summary, diff-history, diff-timeline) —
 unlike --explain (offline plan + raw SQL), this EXECUTES
@@ -14234,6 +14306,50 @@ guard + effective surfaces + EXPLAIN-only --explain-plan +
 actual-vs-estimated auto-flag. The retention CLI now has 3
 query-inspection modes — --explain offline SQL + --explain-
 analyze executed plan + JSON envelope filter echo).
+ADR-0241 covers M6.7.zz.tenant.opt-out.cli.format-yaml
+(retention CLI --format=yaml output — closes ADR-0231 future
+Q1; the 6th output format human/json/csv/tsv/ndjson/yaml;
+unlike csv/tsv (tabular) or ndjson (one JSON object per line)
+yaml is STRUCTURED like json emitting the same nested envelope
+(filters echo + result/entries/buckets) in YAML syntax so it
+is wired everywhere --format=json is NOT to the tabular code
+paths; dependency-free emitter in format.ts ~60 lines no
+js-yaml per ADR-0227's in-repo-helper precedent — formatYaml +
+printYaml + printStructured(io, format, value) dispatch helper
+yaml → printYaml else → printJson; emitter handles scalars
+(null/bool/number/string) + objects (key: value 2-space
+nested) + arrays (- item block style) + empty containers ([]
+/ {} inline); conservative string quoting double-quotes with
+escapes when a string could be misinterpreted as YAML (empty,
+leading/trailing whitespace, YAML indicator char, ": " or
+" #", newline/tab, reserved word true/false/null/yes/no/on/
+off/~, or numeric-looking) else bare — over-quotes UUIDs +
+timestamps + reserved words harmless+safe, event kinds render
+bare; printStructured transformation replaced ALL retention
+printJson(ctx.io, envelope) calls with printStructured(ctx.io,
+command.format, envelope) (28 calls) + widened every command
+.format === "json" to include "yaml" (23 conditions) —
+behavior-preserving for non-yaml (printStructured → printJson)
++ adds yaml uniformly across all 23 envelope-emitting branches;
+wiring scope global so --format=yaml works on EVERY retention
+action emitting a JSON envelope not just the 4 read surfaces —
+mutation actions + restore + prune + diff + --explain /
+--explain-analyze plans all honor it; cli.ts OUTPUT_FORMATS
+extended with "yaml" + parser accepts it + help text updated;
+12 format-unit tests (formatYaml + printYaml + printStructured)
++ 6 CLI tests (yaml on history/summary/diff-history/diff-
+timeline/explain/explain-analyze); test count 9,353 → 9,371
+(+18 net: 12 format-unit + 6 CLI); rejected js-yaml dependency,
+wire yaml only to 4 read surfaces, YAML flow style, bare
+strings everywhere, single-quote strings, --yaml boolean flag,
+YAML document markers --- / ..., comments/anchors/tags; future
+Qs YAML round-trip fidelity test, flow-style for compact leaf
+arrays, yaml for chat/gateway/apply via reusable
+printStructured, YAML 1.2 strict compliance, configurable
+indent width, anchor/alias for repeated structures. The
+retention CLI now has 6 output formats across all surfaces;
+ADR-0231's future Qs fully closed — tsv + ndjson + csv-
+separator + yaml).
 
 ## Architecture in 90 seconds
 

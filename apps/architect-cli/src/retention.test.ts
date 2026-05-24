@@ -17776,4 +17776,109 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       );
     });
   });
+
+  describe("--format=yaml (ADR-0241)", () => {
+    const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+    const TENANT_B = "00000000-0000-4000-8000-00000000000B";
+    const ID_A = "aa000000-0000-4000-8000-0000000000aa";
+    const ID_B = "bb000000-0000-4000-8000-0000000000bb";
+
+    it("history --format=yaml emits the envelope as YAML", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--kind", "opt_out_set", "--format=yaml"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({ historyEntries: [] }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const text = out();
+      // YAML, not JSON — no enclosing braces; key: value lines
+      expect(text).toContain("action: history");
+      expect(text).toContain("kinds:");
+      expect(text).toContain("  - opt_out_set");
+      expect(text).not.toContain("{");
+    });
+
+    it("summary --format=yaml emits buckets as a YAML sequence", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--format=yaml"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryResult: {
+              groupBy: "kind",
+              totalCount: 16,
+              buckets: [
+                { key: "opt_out_set", count: 12 },
+                { key: "policy_deleted", count: 1 },
+              ],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const text = out();
+      expect(text).toContain("action: summary");
+      expect(text).toContain("totalCount: 16");
+      expect(text).toContain("buckets:");
+      expect(text).toContain("    count: 12");
+    });
+
+    it("diff-history --format=yaml emits the result envelope as YAML", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "diff-history", ID_A, ID_B, "--format=yaml"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("action: diff-history");
+    });
+
+    it("diff-timeline --format=yaml emits the envelope as YAML", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--format=yaml"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("action: diff-timeline");
+    });
+
+    it("--explain --format=yaml emits the plan as YAML", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "history", "--explain", "--format=yaml"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const text = out();
+      expect(text).toContain("explain: true");
+      expect(text).toContain("executed: false");
+    });
+
+    it("summary --explain-analyze --format=yaml emits the plan envelope as YAML", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--group-by", "day", "--explain-analyze", "--format=yaml"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(out()).toContain("explainAnalyze: true");
+    });
+  });
 });

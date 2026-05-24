@@ -37,8 +37,8 @@ import type { RunContext } from "./commands.js";
 import {
   printCsv,
   printError,
-  printJson,
   printNdjson,
+  printStructured,
   printSuccess,
   printTsv,
 } from "./format.js";
@@ -109,7 +109,7 @@ async function runExplainAnalyze(
     );
     ctx.io.stdout.write(JSON.stringify(plan, null, 2) + "\n");
   } else {
-    printJson(ctx.io, {
+    printStructured(ctx.io, command.format, {
       action,
       explainAnalyze: true,
       executed: true,
@@ -261,8 +261,8 @@ async function runRetentionExpiring(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       withinDays,
       includeExpired,
       count: results.length,
@@ -329,8 +329,8 @@ async function runRetentionEffective(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { tenantId, tableName, resolution });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { tenantId, tableName, resolution });
     return 0;
   }
 
@@ -464,8 +464,8 @@ async function runRetentionEffectiveBatch(
     return { tenantId: p.tenantId, tableName: p.tableName, resolution };
   });
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "effective-batch",
       count: results.length,
       results,
@@ -633,8 +633,8 @@ async function runRetentionOptOut(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "opt-out", policy });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "opt-out", policy });
     return 0;
   }
   ctx.io.stdout.write(formatPolicyChange("opted out", policy));
@@ -679,8 +679,8 @@ async function runRetentionOptIn(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "opt-in", policy });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "opt-in", policy });
     return 0;
   }
   if (policy === null) {
@@ -747,8 +747,8 @@ async function runRetentionListPolicies(
       (tableFilter === null || p.tableName === tableFilter),
   );
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
       platform: filteredPlatform,
@@ -904,8 +904,8 @@ async function runRetentionSet(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "set", policy });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "set", policy });
     return 0;
   }
   ctx.io.stdout.write(formatPolicyChange("retention set", policy));
@@ -1155,7 +1155,7 @@ async function runRetentionHistory(
       params,
     };
     if (command.format !== "human") {
-      printJson(ctx.io, plan);
+      printStructured(ctx.io, command.format, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
     }
@@ -1178,8 +1178,8 @@ async function runRetentionHistory(
   const nextBeforeId =
     entries.length === limit ? (entries[0]?.id ?? null) : null;
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "history",
       tenantFilter: tenantFilter ?? null,
       tableFilter: tableFilter ?? null,
@@ -1605,7 +1605,7 @@ async function runRetentionSummary(
       params,
     };
     if (command.format !== "human") {
-      printJson(ctx.io, plan);
+      printStructured(ctx.io, command.format, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
     }
@@ -1623,8 +1623,8 @@ async function runRetentionSummary(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "summary",
       groupBy: result.groupBy,
       ...(result.thenBy !== undefined ? { thenBy: result.thenBy } : {}),
@@ -1730,8 +1730,8 @@ async function runRetentionDelete(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "delete",
       deleted,
       tenantId,
@@ -1779,8 +1779,8 @@ async function runRetentionRestore(
       );
       return 1;
     }
-    if (command.format === "json") {
-      printJson(ctx.io, {
+    if (command.format === "json" || command.format === "yaml") {
+      printStructured(ctx.io, command.format, {
         action: "restore",
         dryRun: true,
         historyId,
@@ -1814,8 +1814,8 @@ async function runRetentionRestore(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "restore", dryRun: false, historyId, result });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "restore", dryRun: false, historyId, result });
     return 0;
   }
   if (result.kind === "deleted") {
@@ -2167,7 +2167,7 @@ async function runRetentionDiffHistory(
         "expectation checks (kind/actor/per-side/presence) are applied in adapter post-fetch; only base SELECT shown",
     };
     if (command.format !== "human") {
-      printJson(ctx.io, plan);
+      printStructured(ctx.io, command.format, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
     }
@@ -2204,8 +2204,8 @@ async function runRetentionDiffHistory(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "diff-history",
       kinds: eventKinds ?? null,
       kindsA: eventKindsA ?? null,
@@ -2314,8 +2314,8 @@ async function runRetentionPrune(
       );
       return 1;
     }
-    if (command.format === "json") {
-      printJson(ctx.io, { action: "prune", dryRun: true, results });
+    if (command.format === "json" || command.format === "yaml") {
+      printStructured(ctx.io, command.format, { action: "prune", dryRun: true, results });
       return 0;
     }
     ctx.io.stdout.write(formatPrunePreview(results));
@@ -2332,8 +2332,8 @@ async function runRetentionPrune(
     );
     return 1;
   }
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "prune", dryRun: false, results });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "prune", dryRun: false, results });
     return 0;
   }
   ctx.io.stdout.write(formatPruneRun(results));
@@ -2777,7 +2777,7 @@ async function runRetentionDiffTimeline(
       params,
     };
     if (command.format !== "human") {
-      printJson(ctx.io, plan);
+      printStructured(ctx.io, command.format, plan);
     } else {
       ctx.io.stdout.write(formatExplainPlan(plan) + "\n");
     }
@@ -2821,8 +2821,8 @@ async function runRetentionDiffTimeline(
         ? (crossResult.entries[0]?.id ?? null)
         : null;
 
-    if (command.format === "json") {
-      printJson(ctx.io, {
+    if (command.format === "json" || command.format === "yaml") {
+      printStructured(ctx.io, command.format, {
         action: "diff-timeline",
         crossTable: true,
         since: since ?? null,
@@ -2942,8 +2942,8 @@ async function runRetentionDiffTimeline(
         ? (nwayResult.entries[0]?.id ?? null)
         : null;
 
-    if (command.format === "json") {
-      printJson(ctx.io, {
+    if (command.format === "json" || command.format === "yaml") {
+      printStructured(ctx.io, command.format, {
         action: "diff-timeline",
         nway: true,
         since: since ?? null,
@@ -3058,8 +3058,8 @@ async function runRetentionDiffTimeline(
       ? (result.entries[0]?.id ?? null)
       : null;
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "diff-timeline",
       since: since ?? null,
       until: until ?? null,
@@ -3382,8 +3382,8 @@ async function runRetentionDiff(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "diff", result });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "diff", result });
   } else {
     ctx.io.stdout.write(formatTenantDiff(result));
   }
@@ -3416,8 +3416,8 @@ async function runRetentionDiffVsPlatform(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "diff", vsPlatform: true, result });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "diff", vsPlatform: true, result });
   } else {
     ctx.io.stdout.write(formatTenantVsPlatformDiff(result));
   }
@@ -3459,8 +3459,8 @@ async function runRetentionDiffCrossTable(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "diff", crossTable: true, result });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "diff", crossTable: true, result });
   } else {
     ctx.io.stdout.write(formatTenantTablesDiff(result));
   }
@@ -3500,8 +3500,8 @@ async function runRetentionDiffNway(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, { action: "diff", nway: true, result });
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, { action: "diff", nway: true, result });
   } else {
     ctx.io.stdout.write(formatTenantNwayDiff(result));
   }
@@ -3541,8 +3541,8 @@ async function runRetentionDiffCrossTableNway(
     return 1;
   }
 
-  if (command.format === "json") {
-    printJson(ctx.io, {
+  if (command.format === "json" || command.format === "yaml") {
+    printStructured(ctx.io, command.format, {
       action: "diff",
       nway: true,
       crossTable: true,
