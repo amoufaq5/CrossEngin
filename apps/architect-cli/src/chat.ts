@@ -157,13 +157,13 @@ export function userContentToTranscriptText(content: UserContent): string {
         parts.push(block.text);
         break;
       case "image":
-        parts.push(`[image:${block.mediaType}:${block.data.length.toString()}b]`);
+        parts.push(`[image:${block.format}:${block.bytes.length.toString()}b]`);
         break;
       case "image_url":
         parts.push(`[image_url:${block.url}]`);
         break;
       case "document":
-        parts.push(`[document:${block.format}:${block.data.length.toString()}b]`);
+        parts.push(`[document:${block.format}:${block.bytes.length.toString()}b]`);
         break;
       case "document_url":
         parts.push(`[document_url:${block.url}]`);
@@ -199,11 +199,15 @@ export interface ChatTurnResult {
   readonly history: readonly LlmMessage[];
 }
 
+function toMessageContent(content: UserContent): string | LlmContentBlock[] {
+  return typeof content === "string" ? content : [...content];
+}
+
 export function buildCompletionRequest(input: ChatTurnInput): CompletionRequest {
   const messages: LlmMessage[] = [
     { role: "system", content: input.systemPrompt },
     ...input.history,
-    { role: "user", content: input.userInput },
+    { role: "user", content: toMessageContent(input.userInput) },
   ];
   return {
     task: "executor",
@@ -285,9 +289,9 @@ export function describeAttachment(block: LlmContentBlock): string {
     case "text":
       return `text: ${block.text.slice(0, 80)}${block.text.length > 80 ? "…" : ""}`;
     case "image":
-      return `image: ${block.mediaType} (${block.data.length.toString()}b)`;
+      return `image: ${block.format} (${block.bytes.length.toString()}b)`;
     case "document":
-      return `document: ${block.format} (${block.data.length.toString()}b)`;
+      return `document: ${block.format} (${block.bytes.length.toString()}b)`;
     case "tool_use":
       return `tool_use: ${block.name}`;
     case "tool_result":
@@ -376,7 +380,7 @@ export async function runChatTurn(
   const stream = await streamCompletion(provider, request, renderer);
   const history: LlmMessage[] = [
     ...input.history,
-    { role: "user", content: input.userInput },
+    { role: "user", content: toMessageContent(input.userInput) },
     {
       role: "assistant",
       content: stream.assistantText,

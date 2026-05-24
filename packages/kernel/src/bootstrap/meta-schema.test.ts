@@ -117,7 +117,7 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 128 tables", () => {
+  it("contains 129 tables", () => {
     expect(META_TABLES).toHaveLength(129);
   });
 

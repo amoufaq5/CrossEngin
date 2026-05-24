@@ -1445,11 +1445,11 @@ describe("userContentToTranscriptText (M5.10.5)", () => {
     const out = userContentToTranscriptText([
       {
         type: "image",
-        mediaType: "image/png",
-        data: "iVBORw0KGgoAAA",
+        format: "png",
+        bytes: "iVBORw0KGgoAAA",
       },
     ]);
-    expect(out).toContain("image:image/png:");
+    expect(out).toContain("image:png:");
     expect(out).toContain("b]");
   });
 });

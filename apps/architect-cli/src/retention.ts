@@ -3730,11 +3730,6 @@ export function formatTenantNwayDiff(
   return lines.join("\n") + "\n";
 }
 
-function labelForIndex(i: number): string {
-  if (i < 26) return String.fromCharCode(65 + i);
-  return `T${i + 1}`;
-}
-
 export function formatTenantTablesNwayDiff(
   result: DiffTenantTablesNwayResult,
 ): string {

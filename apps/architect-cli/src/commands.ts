@@ -247,6 +247,11 @@ export async function runChat(
   command: ParsedCommand,
   ctx: RunContext,
 ): Promise<number> {
+  if (command.format !== "human" && command.format !== "json") {
+    printError(ctx.io, "chat: --format must be 'human' or 'json'");
+    return 2;
+  }
+  const format: "human" | "json" = command.format;
   const modelFlag = getStringFlag(command, "model");
   const model = modelFlag ?? undefined;
   const maxTokensFlag = getStringFlag(command, "max-tokens");
@@ -397,7 +402,7 @@ export async function runChat(
       sessionId,
       model,
       maxTokens,
-      format: command.format,
+      format,
       prompt,
       oneShot,
       toolCatalog,

@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M-maint.typecheck-test-debt + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -29,7 +29,54 @@ M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
 **56 packages + 1 app, 129 meta-schema tables, 9,383 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.top-per-group
+all green, no type errors. M-maint.typecheck-test-debt restored
+the "all green, zero type errors" invariant — which README +
+CLAUDE.md claimed while pnpm -r typecheck reported 13 errors and
+pnpm -r test had 1 failing test. Two gaps let the drift hide:
+(1) *.test.ts files are NOT type-checked (pnpm typecheck runs
+tsc over src/** per package; test files are Vitest transpile-
+only) so a src file can carry type errors while tests pass + a
+test fixture can use a stale shape unnoticed, (2) stale
+assertions track stale code (a test whose fixture + assertion
+both use an outdated shape passes at runtime even when production
+code is type-broken). Fixes — (a) retention.ts labelForIndex
+TS2440 redeclaration: removed the byte-identical local copy, kept
+the kernel-pg import (single source per ADR-0191); (b) chat.ts ×4
+stale .mediaType/.data field access in userContentToTranscriptText
++ describeAttachment: image/document content blocks are {format,
+bytes} (ADR-0078/0088/0097) not {mediaType, data} — would throw
+undefined.length at runtime on attachment rendering; now read
+block.format + block.bytes; (c) chat.ts ×5 readonly→mutable
+variance: UserContent is string | readonly LlmContentBlock[]
+(ADR-0119) but LlmMessage.content wants mutable — added a
+toMessageContent helper copying via [...content] (contained to
+the CLI, doesn't widen the kernel type); (d) commands.ts chat
+--format: command.format is the 6-value OutputFormat union (since
+csv ADR-0227) but runChatRepl.format is "human" | "json" — chat
+only streams those two; now validated at runChat entry (exit 2 on
+csv/tsv/ndjson/yaml) + narrowed to a const, codifying the chat
+output contract; (e) apply.test.ts stale toBe(128) → 129 (the
+actual failing test; meta-schema hit 129 tables at ADR-0170);
+(f) meta-schema.test.ts stale test NAME "contains 128 tables" →
+"129" (body already asserted 129). After: pnpm -r typecheck 0
+errors, pnpm -r test fully green. Test count unchanged 9,383 (no
+tests added/removed; the formerly-failing apply.test.ts now
+passes). Rejected — @ts-expect-error/as any suppression (hides
+genuinely-broken code), widen LlmMessage.content to readonly
+(kernel ripple to every provider), widen runChatRepl format to
+full OutputFormat (chat can't emit tabular), keep labelForIndex
+local (duplicates an exported helper), preserve image/png media-
+type placeholder via imageMediaType (asymmetry with documents),
+type-check *.test.ts in this milestone (surfaces a workspace-wide
+backlog — out of scope). ADR-0243 documents the design + 6
+rejected alternatives + 4 future Qs (type-check *.test.ts in CI
+to catch src/test drift = durable fix for the systemic cause,
+pnpm -r typecheck && test pre-push/CI gate so the invariant can't
+silently regress, lint rule against duplicate-of-imported locals,
+runtime test for chat image/document attachment rendering). The
+systemic cause — *.test.ts not type-checked — is documented as
+the recurrence risk; closing it (future Q1) is the durable fix.
+M6.7.zz.tenant.opt-out.cli.summary.top-per-group
 closes ADR-0238 Q1 by adding --top-per-group N to retention
 summary — a per-group leaderboard for cross-tab grids. ADR-0238's
 --top N limits the TOTAL bucket count globally; in cross-tab mode
@@ -14447,6 +14494,29 @@ ties, n-way per-group, window gap-filling per group, expose rn
 column. The retention summary action is now exhaustively
 analytic — 8 dimensions + cross-tab + gap-filling + timezone +
 global --top/--min-count + per-group --top-per-group).
+ADR-0243 covers M-maint.typecheck-test-debt (type-check + test-
+suite debt paydown — restored the workspace's "all green, zero
+type errors" invariant which README/CLAUDE.md claimed while
+pnpm -r typecheck had 13 errors + pnpm -r test had 1 failing
+test; drift hid because *.test.ts files are NOT type-checked
+(Vitest transpile-only) so src type errors + stale-shape fixtures
+went unnoticed; fixes — retention.ts labelForIndex TS2440 dup
+removed (kept kernel-pg import single-source per ADR-0191),
+chat.ts stale .mediaType/.data → .format/.bytes on image/document
+blocks (would throw undefined.length at runtime), chat.ts
+UserContent readonly→mutable via toMessageContent [...content]
+copy, commands.ts chat --format validated to human|json at entry
+(exit 2 otherwise; codifies chat output contract since csv/tsv/
+ndjson/yaml are tabular), apply.test.ts toBe(128)→129 (the
+failing test; meta-schema hit 129 at ADR-0170), meta-schema.test
+.ts stale name 128→129; after: 0 type errors + 0 test failures
+workspace-wide; test count unchanged 9,383; rejected ts-expect-
+error suppression, widen kernel LlmMessage.content, widen
+runChatRepl format, keep labelForIndex local, imageMediaType
+placeholder, type-check test files in-milestone; future Qs type-
+check *.test.ts in CI [durable fix for the systemic cause],
+typecheck+test pre-push/CI gate, lint against duplicate-of-
+imported locals, chat attachment-render test).
 
 ## Architecture in 90 seconds
 
