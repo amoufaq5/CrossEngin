@@ -17455,4 +17455,173 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       expect(plan.timezone).toBe("Asia/Tokyo");
     });
   });
+
+  describe("--top + --min-count", () => {
+    it("threads top to adapter", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--group-by", "actor", "--top", "5"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: "actor", totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.top).toBe(5);
+    });
+
+    it("threads minCount to adapter", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--min-count", "3"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: "kind", totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.minCount).toBe(3);
+    });
+
+    it("exits 2 on invalid --top (non-positive)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--top", "0"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("invalid --top '0'");
+    });
+
+    it("exits 2 on invalid --min-count (negative)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "summary", "--min-count", "-1"),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("invalid --min-count '-1'");
+    });
+
+    it("--top + --min-count compose, both threaded", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "tenant",
+          "--min-count",
+          "2",
+          "--top",
+          "10",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: { groupBy: "tenant", totalCount: 0, buckets: [] },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.top).toBe(10);
+      expect(capture[0]?.minCount).toBe(2);
+    });
+
+    it("exits 2 when --top combined with --fill-gaps", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-07",
+          "--fill-gaps",
+          "--top",
+          "3",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--fill-gaps cannot be combined with --top or --min-count",
+      );
+    });
+
+    it("exits 2 when --min-count >= 1 combined with --fill-gaps", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--since",
+          "2026-05-01",
+          "--until",
+          "2026-05-07",
+          "--fill-gaps",
+          "--min-count",
+          "1",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--fill-gaps cannot be combined with --top or --min-count",
+      );
+    });
+
+    it("--explain plan echoes top + minCount", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "actor",
+          "--top",
+          "5",
+          "--min-count",
+          "2",
+          "--explain",
+          "--format=json",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({}),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.top).toBe(5);
+      expect(plan.minCount).toBe(2);
+    });
+  });
 });

@@ -309,6 +309,8 @@ export interface SummarizeOptOutHistoryInput {
   readonly thenBy?: OptOutHistorySummaryGroupBy;
   readonly fillGaps?: boolean;
   readonly timezone?: string;
+  readonly top?: number;
+  readonly minCount?: number;
 }
 
 export interface OptOutHistorySummaryBucket {
@@ -1723,25 +1725,48 @@ export class PostgresTraceRetention {
     }
     const where =
       conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    // HAVING (minCount) + LIMIT (top) are shared across single-dimension
+    // and cross-tab. --top forces count-DESC ordering to select the
+    // highest-count buckets.
+    let having = "";
+    if (input.minCount !== undefined) {
+      params.push(input.minCount);
+      having = `HAVING COUNT(*) >= $${params.length}`;
+    }
+    let limit = "";
+    let topOrder = false;
+    if (input.top !== undefined) {
+      params.push(input.top);
+      limit = `LIMIT $${params.length}`;
+      topOrder = true;
+    }
     if (secondary === undefined) {
-      const orderBy = isTemporal
-        ? `${col} ASC`
-        : `COUNT(*) DESC, ${col} ASC`;
+      const orderBy =
+        topOrder || !isTemporal
+          ? `COUNT(*) DESC, ${col} ASC`
+          : `${col} ASC`;
       const sql = `SELECT ${keyExpr} AS key, COUNT(*)::bigint AS count
        FROM ${SCHEMA}.${HISTORY_TABLE} h
        ${where}
        GROUP BY ${col}
-       ORDER BY ${orderBy}`;
+       ${having}
+       ORDER BY ${orderBy}
+       ${limit}`;
       return { sql, params };
     }
     // Cross-tab: two-dimensional grid ordered (primary ASC, secondary ASC)
     // for a deterministic, readable grid (temporal chronological;
-    // categorical alphabetical).
+    // categorical alphabetical). --top overrides to count-DESC.
+    const crossOrder = topOrder
+      ? `COUNT(*) DESC, ${col} ASC, ${secondary.col} ASC`
+      : `${col} ASC, ${secondary.col} ASC`;
     const sql = `SELECT ${keyExpr} AS key, ${secondary.keyExpr} AS sub_key, COUNT(*)::bigint AS count
        FROM ${SCHEMA}.${HISTORY_TABLE} h
        ${where}
        GROUP BY ${col}, ${secondary.col}
-       ORDER BY ${col} ASC, ${secondary.col} ASC`;
+       ${having}
+       ORDER BY ${crossOrder}
+       ${limit}`;
     return { sql, params };
   }
 

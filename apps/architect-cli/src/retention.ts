@@ -1477,6 +1477,40 @@ async function runRetentionSummary(
     }
   }
 
+  const topFlag = getStringFlag(command, "top");
+  let top: number | undefined;
+  if (topFlag !== null) {
+    const parsed = Number.parseInt(topFlag, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --top '${topFlag}' (must be a positive integer)`,
+      );
+      return 2;
+    }
+    top = parsed;
+  }
+  const minCountFlag = getStringFlag(command, "min-count");
+  let minCount: number | undefined;
+  if (minCountFlag !== null) {
+    const parsed = Number.parseInt(minCountFlag, 10);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --min-count '${minCountFlag}' (must be a non-negative integer)`,
+      );
+      return 2;
+    }
+    minCount = parsed;
+  }
+  if (fillGaps && (top !== undefined || (minCount !== undefined && minCount >= 1))) {
+    printError(
+      ctx.io,
+      "retention summary: --fill-gaps cannot be combined with --top or --min-count (gap-filling adds zero-count buckets; top/min-count remove buckets — opposite intents)",
+    );
+    return 2;
+  }
+
   const summaryInput = {
     tenantId: tenantFilter ?? undefined,
     tableName: tableFilter ?? undefined,
@@ -1491,6 +1525,8 @@ async function runRetentionSummary(
     thenBy,
     fillGaps,
     timezone,
+    top,
+    minCount,
   };
 
   if (explainFlag) {
@@ -1503,6 +1539,8 @@ async function runRetentionSummary(
       thenBy: thenBy ?? null,
       fillGaps,
       timezone: timezone ?? null,
+      top: top ?? null,
+      minCount: minCount ?? null,
       filters: {
         tenantId: tenantFilter ?? null,
         tableName: tableFilter ?? null,

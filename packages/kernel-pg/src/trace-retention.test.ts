@@ -11365,4 +11365,85 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(sql).toContain("AT TIME ZONE $1");
     expect(params[0]).toBe("Asia/Tokyo");
   });
+
+  it("top: adds LIMIT + forces count-DESC ordering on temporal dimension", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      top: 5,
+    });
+    // --top overrides chronological ordering with count-DESC to pick top
+    expect(sql).toContain("ORDER BY COUNT(*) DESC, date_trunc");
+    expect(sql).toContain("LIMIT $1");
+    expect(params).toEqual([5]);
+  });
+
+  it("top: LIMIT on categorical retains count-DESC ordering", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "actor",
+      top: 10,
+    });
+    expect(sql).toContain("ORDER BY COUNT(*) DESC, h.actor_id ASC");
+    expect(sql).toContain("LIMIT $1");
+    expect(params).toEqual([10]);
+  });
+
+  it("minCount: adds HAVING COUNT(*) >= threshold", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      minCount: 3,
+    });
+    expect(sql).toContain("HAVING COUNT(*) >= $1");
+    expect(params).toEqual([3]);
+  });
+
+  it("top + minCount compose (HAVING then ORDER BY count DESC LIMIT)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "tenant",
+      minCount: 2,
+      top: 5,
+    });
+    expect(sql).toContain("HAVING COUNT(*) >= $1");
+    expect(sql).toContain("LIMIT $2");
+    expect(sql).toContain("ORDER BY COUNT(*) DESC");
+    expect(params).toEqual([2, 5]);
+  });
+
+  it("top + filters: top param follows filter params", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      tenantId: "00000000-0000-4000-8000-00000000000A",
+      top: 3,
+    });
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("LIMIT $2");
+    expect(params).toEqual(["00000000-0000-4000-8000-00000000000A", 3]);
+  });
+
+  it("top + cross-tab: forces count-DESC grid ordering + LIMIT", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "kind",
+      top: 10,
+    });
+    expect(sql).toContain("ORDER BY COUNT(*) DESC");
+    expect(sql).toContain("LIMIT");
+  });
 });
