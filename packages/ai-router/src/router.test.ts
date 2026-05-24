@@ -42,6 +42,7 @@ class StubProvider implements LlmProvider {
     embedding: false,
     maxContextTokens: 100_000,
     supportsThinking: false,
+    vision: false,
   };
   readonly pricing: ProviderPricing = {
     inputPerMillionTokens: 1,
@@ -79,7 +80,12 @@ class StubProvider implements LlmProvider {
 
   async embed(_req: EmbeddingRequest): Promise<EmbeddingResponse> {
     if (this.behavior === "fatal") throw new FatalError("no embed");
-    return { vectors: [[1, 2, 3]], usage: { inputTokens: 1, outputTokens: 0, cost: 0 } };
+    return {
+      vectors: [[1, 2, 3]],
+      dim: 3,
+      model: `${this.id}-embed`,
+      usage: { inputTokens: 1, outputTokens: 0, cost: 0 },
+    };
   }
 }
 
@@ -291,7 +297,7 @@ describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
     constructor(id: string, private readonly modKind: string) {
       super(id, "ok");
     }
-    async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
       void _req;
       throw Object.assign(new Error("blocked"), { kind: this.modKind });
     }
@@ -303,7 +309,7 @@ describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback" };
@@ -329,7 +335,7 @@ describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback" };
@@ -355,7 +361,7 @@ describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback ok" };
@@ -379,7 +385,7 @@ describe("DefaultLlmRouter.complete — conflict early-exit (M6.6.x)", () => {
     constructor(id: string) {
       super(id, "ok");
     }
-    async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
       void _req;
       throw Object.assign(new Error("resource state conflict"), {
         kind: "conflict_error",
@@ -395,7 +401,7 @@ describe("DefaultLlmRouter.complete — conflict early-exit (M6.6.x)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback" };
@@ -424,7 +430,7 @@ describe("DefaultLlmRouter.complete — conflict early-exit (M6.6.x)", () => {
       constructor() {
         super("anthropic", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         attempts += 1;
         throw Object.assign(new Error("conflict"), { kind: "conflict_error" });
@@ -465,7 +471,7 @@ describe("DefaultLlmRouter.complete — conflict early-exit (M6.6.x)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         fallbackAttempts += 1;
         yield { kind: "text", text: "fallback" };
@@ -494,7 +500,7 @@ describe("DefaultLlmRouter.complete — conflict early-exit (M6.6.x)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback ok" };
@@ -521,7 +527,7 @@ describe("DefaultLlmRouter.complete — not-found early-exit (M6.6.y)", () => {
     constructor(id: string) {
       super(id, "ok");
     }
-    async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+    override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
       void _req;
       throw Object.assign(new Error("resource missing"), {
         kind: "not_found_error",
@@ -536,7 +542,7 @@ describe("DefaultLlmRouter.complete — not-found early-exit (M6.6.y)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback" };
@@ -565,7 +571,7 @@ describe("DefaultLlmRouter.complete — not-found early-exit (M6.6.y)", () => {
       constructor() {
         super("anthropic", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         attempts += 1;
         throw Object.assign(new Error("missing"), { kind: "not_found_error" });
@@ -602,7 +608,7 @@ describe("DefaultLlmRouter.complete — not-found early-exit (M6.6.y)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         fallbackAttempts += 1;
         yield { kind: "text", text: "fallback" };
@@ -631,7 +637,7 @@ describe("DefaultLlmRouter.complete — not-found early-exit (M6.6.y)", () => {
       constructor() {
         super("openai", "ok");
       }
-      async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+      override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
         void _req;
         openaiAttempts += 1;
         yield { kind: "text", text: "fallback ok" };
@@ -664,7 +670,7 @@ describe("DefaultLlmRouter.complete — array content cost estimation (M6.6)", (
     // The test verifies the call does NOT throw — even with rich content the estimate is sane.
     const router = buildRouter({
       providers,
-      costCeiling: { perTenantUsdPerHour: 1 },
+      costCeiling: { maxUsdPerWindow: 1 },
       costTracker: new InMemoryCostTracker(),
     });
     const chunks: CompletionChunk[] = [];

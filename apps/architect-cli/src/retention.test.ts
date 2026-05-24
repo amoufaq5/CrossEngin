@@ -3675,7 +3675,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
       ),
       {
         ...ctx,
-        retentionOverride: fakeRetention({ historyResults: [] }),
+        retentionOverride: fakeRetention({ historyEntries: [] }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
@@ -3698,7 +3698,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
       ),
       {
         ...ctx,
-        retentionOverride: fakeRetention({ historyResults: [] }),
+        retentionOverride: fakeRetention({ historyEntries: [] }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
@@ -3712,7 +3712,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
       parsed("retention", "history", "--format", "json"),
       {
         ...ctx,
-        retentionOverride: fakeRetention({ historyResults: [] }),
+        retentionOverride: fakeRetention({ historyEntries: [] }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
@@ -3826,7 +3826,7 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
       parsed("retention", "history", "--system-only", "--format", "json"),
       {
         ...ctx,
-        retentionOverride: fakeRetention({ historyResults: [] }),
+        retentionOverride: fakeRetention({ historyEntries: [] }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
@@ -3841,7 +3841,7 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
       parsed("retention", "history", "--no-system", "--format", "json"),
       {
         ...ctx,
-        retentionOverride: fakeRetention({ historyResults: [] }),
+        retentionOverride: fakeRetention({ historyEntries: [] }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
@@ -3856,7 +3856,7 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
       parsed("retention", "history", "--format", "json"),
       {
         ...ctx,
-        retentionOverride: fakeRetention({ historyResults: [] }),
+        retentionOverride: fakeRetention({ historyEntries: [] }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
@@ -4971,6 +4971,8 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
             occurredAtB: "2026-05-21T12:00:00.000Z",
             eventKindA: "opt_out_set",
             eventKindB: "opt_out_set",
+            actorIdA: null,
+            actorIdB: null,
             fieldDiffs: [],
           },
         }),
@@ -4996,6 +4998,8 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
             occurredAtB: "2026-05-21T12:00:00.000Z",
             eventKindA: "opt_out_set",
             eventKindB: "retention_set",
+            actorIdA: null,
+            actorIdB: null,
             fieldDiffs: [
               { field: "opt_out", valueA: true, valueB: false },
               { field: "retention_days", valueA: 365, valueB: 30 },
@@ -5033,6 +5037,8 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
             occurredAtB: "2026-05-21T12:00:00.000Z",
             eventKindA: "policy_deleted",
             eventKindB: "opt_out_set",
+            actorIdA: null,
+            actorIdB: null,
             fieldDiffs: [
               { field: "opt_out", valueA: undefined, valueB: true },
             ],
@@ -5060,6 +5066,8 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
             occurredAtB: "2026-05-21T12:00:00.000Z",
             eventKindA: "opt_out_set",
             eventKindB: "retention_set",
+            actorIdA: null,
+            actorIdB: null,
             fieldDiffs: [{ field: "opt_out", valueA: true, valueB: false }],
           },
         }),
@@ -7693,6 +7701,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
                 id: "h1",
                 tenantId: TENANT_A,
                 tenantSide: "A",
+                actorId: null,
                 tableName: "workflow_traces",
                 eventKind: "opt_out_set",
                 occurredAt: "2026-01-01T00:00:00.000Z",
@@ -7708,6 +7717,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
                 id: "h2",
                 tenantId: TENANT_B,
                 tenantSide: "B",
+                actorId: null,
                 tableName: "workflow_traces",
                 eventKind: "retention_set",
                 occurredAt: "2026-01-15T00:00:00.000Z",
@@ -7758,6 +7768,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
                 id: "h1",
                 tenantId: TENANT_A,
                 tenantSide: "A",
+                actorId: null,
                 tableName: "workflow_traces",
                 eventKind: "policy_deleted",
                 occurredAt: "2026-02-01T00:00:00.000Z",
@@ -11282,6 +11293,7 @@ describe("formatTimelineDiff", () => {
           id: "h1",
           tenantId: TENANT_A,
           tenantSide: "A",
+          actorId: null,
           tableName: "workflow_traces",
           eventKind: "opt_out_set",
           occurredAt: "2026-01-01T00:00:00.000Z",
@@ -11312,6 +11324,7 @@ describe("formatTimelineDiff", () => {
           id: "h1",
           tenantId: TENANT_B,
           tenantSide: "B",
+          actorId: null,
           tableName: "workflow_traces",
           eventKind: "policy_deleted",
           occurredAt: "2026-02-01T00:00:00.000Z",
@@ -11335,6 +11348,7 @@ describe("formatTimelineDiff", () => {
           id: "h1",
           tenantId: TENANT_A,
           tenantSide: "A",
+          actorId: null,
           tableName: "workflow_traces",
           eventKind: "opt_out_set",
           occurredAt: "2026-01-01T00:00:00.000Z",
@@ -11346,6 +11360,7 @@ describe("formatTimelineDiff", () => {
           id: "h2",
           tenantId: TENANT_B,
           tenantSide: "B",
+          actorId: null,
           tableName: "workflow_traces",
           eventKind: "retention_set",
           occurredAt: "2026-01-15T00:00:00.000Z",
@@ -11357,6 +11372,7 @@ describe("formatTimelineDiff", () => {
           id: "h3",
           tenantId: TENANT_A,
           tenantSide: "A",
+          actorId: null,
           tableName: "workflow_traces",
           eventKind: "opt_out_cleared",
           occurredAt: "2026-02-01T00:00:00.000Z",
