@@ -311,6 +311,7 @@ export interface SummarizeOptOutHistoryInput {
   readonly timezone?: string;
   readonly top?: number;
   readonly minCount?: number;
+  readonly topPerGroup?: number;
 }
 
 export interface OptOutHistorySummaryBucket {
@@ -1768,6 +1769,25 @@ export class PostgresTraceRetention {
        ORDER BY ${orderBy}
        ${limit}`;
       return { sql, params };
+    }
+    // Cross-tab top-per-group: rank sub-keys within each primary group via a
+    // ROW_NUMBER() window and keep the top N per partition. HAVING (minCount)
+    // applies inside the subquery (before windowing). --top-per-group is
+    // mutually exclusive with --top at the CLI and applies only in cross-tab.
+    if (input.topPerGroup !== undefined) {
+      params.push(input.topPerGroup);
+      const rnParam = `$${params.length}`;
+      const windowed = `SELECT key, sub_key, count FROM (
+         SELECT ${keyExpr} AS key, ${secondary.keyExpr} AS sub_key, COUNT(*)::bigint AS count,
+                ROW_NUMBER() OVER (PARTITION BY ${col} ORDER BY COUNT(*) DESC, ${secondary.col} ASC) AS rn
+         FROM ${SCHEMA}.${HISTORY_TABLE} h
+         ${where}
+         GROUP BY ${col}, ${secondary.col}
+         ${having}
+       ) ranked
+       WHERE rn <= ${rnParam}
+       ORDER BY key ASC, count DESC, sub_key ASC`;
+      return { sql: windowed, params };
     }
     // Cross-tab: two-dimensional grid ordered (primary ASC, secondary ASC)
     // for a deterministic, readable grid (temporal chronological;

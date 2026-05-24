@@ -11447,6 +11447,104 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(sql).toContain("LIMIT");
   });
 
+  it("topPerGroup: builds ROW_NUMBER() window for cross-tab", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "actor",
+      topPerGroup: 3,
+    });
+    expect(sql).toContain("ROW_NUMBER() OVER (PARTITION BY");
+    expect(sql).toContain("ORDER BY COUNT(*) DESC, h.actor_id ASC) AS rn");
+    expect(sql).toContain("WHERE rn <= $1");
+    expect(params).toEqual([3]);
+  });
+
+  it("topPerGroup: partitions by primary col + orders output key/count/sub_key", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      thenBy: "actor",
+      topPerGroup: 2,
+    });
+    expect(sql).toContain("PARTITION BY h.event_kind");
+    expect(sql).toContain("ORDER BY key ASC, count DESC, sub_key ASC");
+    expect(sql).toContain("GROUP BY h.event_kind, h.actor_id");
+  });
+
+  it("topPerGroup + minCount compose (HAVING in subquery, rn filter outside)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "tenant",
+      thenBy: "kind",
+      minCount: 5,
+      topPerGroup: 2,
+    });
+    expect(sql).toContain("HAVING COUNT(*) >= $1");
+    expect(sql).toContain("WHERE rn <= $2");
+    expect(params).toEqual([5, 2]);
+  });
+
+  it("topPerGroup + filters: filter params precede the topPerGroup param", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "actor",
+      tenantId: "00000000-0000-4000-8000-00000000000A",
+      topPerGroup: 4,
+    });
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("WHERE rn <= $2");
+    expect(params).toEqual(["00000000-0000-4000-8000-00000000000A", 4]);
+  });
+
+  it("topPerGroup: temporal primary partitions by date_trunc", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "kind",
+      topPerGroup: 1,
+    });
+    expect(sql).toContain(
+      "PARTITION BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')",
+    );
+  });
+
+  it("topPerGroup: method returns per-group buckets with subKey", async () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({
+        rows: [
+          { key: "2026-05-20 00:00:00", sub_key: "actor-1", count: "5" },
+          { key: "2026-05-20 00:00:00", sub_key: "actor-2", count: "3" },
+          { key: "2026-05-21 00:00:00", sub_key: "actor-9", count: "7" },
+        ],
+        rowCount: 3,
+      })),
+    });
+    const result = await r.summarizeOptOutHistory({
+      groupBy: "day",
+      thenBy: "actor",
+      topPerGroup: 2,
+    });
+    expect(result.thenBy).toBe("actor");
+    expect(result.buckets).toEqual([
+      { key: "2026-05-20 00:00:00", subKey: "actor-1", count: 5 },
+      { key: "2026-05-20 00:00:00", subKey: "actor-2", count: 3 },
+      { key: "2026-05-21 00:00:00", subKey: "actor-9", count: 7 },
+    ]);
+    expect(result.totalCount).toBe(15);
+  });
+
   it("explainAnalyzeQuery: wraps SQL in EXPLAIN (ANALYZE, FORMAT JSON) + returns QUERY PLAN", async () => {
     const capture: Capture[] = [];
     const planJson = [{ Plan: { "Node Type": "Seq Scan", "Actual Total Time": 0.5 } }];

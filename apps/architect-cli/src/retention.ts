@@ -1540,6 +1540,33 @@ async function runRetentionSummary(
     }
     minCount = parsed;
   }
+  const topPerGroupFlag = getStringFlag(command, "top-per-group");
+  let topPerGroup: number | undefined;
+  if (topPerGroupFlag !== null) {
+    const parsed = Number.parseInt(topPerGroupFlag, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --top-per-group '${topPerGroupFlag}' (must be a positive integer)`,
+      );
+      return 2;
+    }
+    topPerGroup = parsed;
+  }
+  if (topPerGroup !== undefined && thenBy === undefined) {
+    printError(
+      ctx.io,
+      "retention summary: --top-per-group requires --then-by (it limits to the top N sub-keys within each primary group; use --top for a global limit)",
+    );
+    return 2;
+  }
+  if (topPerGroup !== undefined && top !== undefined) {
+    printError(
+      ctx.io,
+      "retention summary: --top and --top-per-group are mutually exclusive (--top limits total buckets by count; --top-per-group limits sub-keys within each primary group)",
+    );
+    return 2;
+  }
   if (fillGaps && (top !== undefined || (minCount !== undefined && minCount >= 1))) {
     printError(
       ctx.io,
@@ -1564,6 +1591,7 @@ async function runRetentionSummary(
     timezone,
     top,
     minCount,
+    topPerGroup,
   };
 
   if (explainFlag && explainAnalyzeFlag) {
@@ -1590,6 +1618,7 @@ async function runRetentionSummary(
       timezone: timezone ?? null,
       top: top ?? null,
       minCount: minCount ?? null,
+      topPerGroup: topPerGroup ?? null,
       filters: {
         tenantId: tenantFilter ?? null,
         tableName: tableFilter ?? null,

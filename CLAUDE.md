@@ -21,15 +21,84 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,371 tests**,
-all green, no type errors. M6.7.zz.tenant.opt-out.cli.format-yaml
+**56 packages + 1 app, 129 meta-schema tables, 9,383 tests**,
+all green, no type errors. M6.7.zz.tenant.opt-out.cli.summary.top-per-group
+closes ADR-0238 Q1 by adding --top-per-group N to retention
+summary — a per-group leaderboard for cross-tab grids. ADR-0238's
+--top N limits the TOTAL bucket count globally; in cross-tab mode
+(--group-by X --then-by Y) operators usually want the top N
+sub-keys WITHIN each primary group ("top 3 actors per day", not
+"the 3 highest-count day×actor pairs overall" which could all be
+one busy day). --top-per-group ranks sub-keys per primary group
+via a ROW_NUMBER() window. SQL — the cross-tab branch emits a
+ranked subquery: SELECT key, sub_key, count FROM (SELECT
+primary::text AS key, secondary AS sub_key, COUNT(*)::bigint AS
+count, ROW_NUMBER() OVER (PARTITION BY primary ORDER BY COUNT(*)
+DESC, secondary ASC) AS rn FROM history WHERE <filters> GROUP BY
+primary, secondary HAVING <minCount>) ranked WHERE rn <= $N
+ORDER BY key ASC, count DESC, sub_key ASC. Key design — (1)
+ROW_NUMBER() runs AFTER GROUP BY/HAVING so --min-count (HAVING)
+filters buckets BEFORE ranking the survivors per group (clean
+composition), (2) PARTITION BY primary ranks secondaries
+independently per primary group, ORDER BY COUNT(*) DESC makes
+rank 1 the highest-count secondary (tiebreak secondary ASC), (3)
+outer WHERE rn <= $N keeps top N per partition, (4) outer ORDER
+BY key ASC, count DESC, sub_key ASC renders a grid — primary
+groups ascending (chronological temporal / alphabetical
+categorical matching existing cross-tab order) + within each
+group a count-DESC leaderboard, (5) topPerGroup is the last
+positional param after filters + HAVING minCount param. Bucket
+shape unchanged {key, subKey, count}; totalCount is sum of
+returned per-group top-N buckets (same as --top per ADR-0238).
+CLI validation — positive integer (exit 2 on non-positive/non-
+integer), REQUIRES --then-by (no per-group concept without
+cross-tab; exit 2 pointing at --then-by / --top), MUTUALLY
+EXCLUSIVE with --top (two different limit semantics; exit 2
+rather than silent double-filter), transitively incompatible
+with --fill-gaps (fill-gaps forbids --then-by + top-per-group
+requires it so one precondition fires first — no separate
+check). Composes with --min-count (HAVING inside subquery) +
+full filter family (WHERE inside subquery).
+SummarizeOptOutHistoryInput gains topPerGroup?: number; builder
+branches to windowed cross-tab SQL when set. --explain plan
+echoes topPerGroup (input flag — in plan not result JSON
+envelope, matching --top/--min-count). cli.ts help text + usage
+line gain [--top-per-group N] + per-group leaderboard
+description. Adapter test block extended — 6 tests: builds
+ROW_NUMBER() window for cross-tab, partitions by primary col +
+orders output key/count/sub_key, composes with minCount (HAVING
+in subquery + rn filter outside), composes with filters
+(topPerGroup param last), temporal primary partitions by
+date_trunc, method returns per-group buckets with subKey. CLI
+test block NEW "--top-per-group (ADR-0242)" describe with 6
+tests: threads topPerGroup with --then-by, exit 2 invalid
+non-positive, exit 2 without --then-by, exit 2 combined with
+--top, composes with --min-count both threaded, --explain
+echoes topPerGroup. Test count: 9,371 → 9,383 (+12 net: 6
+adapter + 6 CLI). ADR-0242 documents the design + 8 rejected
+alternatives (compose --top + --top-per-group double-limit,
+--top-per-group without --then-by overloads flag, DISTINCT ON
+only one row per group, LATERAL join verbose, application-side
+ranking breaks at scale, rank ascending bottom-N, top-per-group
+on single-dimension meaningless, annotate human header) + 6
+future Qs (--bottom-per-group, --top + --top-per-group
+composition, RANK()/DENSE_RANK() ties, n-way --then-by per-
+group, window-function gap-filling per group, expose rn rank
+column). The retention summary action is now exhaustively
+analytic — 8 dimensions + cross-tab (any × any) + gap-filling +
+timezone + global --top/--min-count + per-group --top-per-group.
+Natural follow-up milestones — --bottom-per-group leaderboards
+(ADR-0242 Q1), --format=yaml for chat/gateway/apply surfaces
+(ADR-0241 Q3), --explain-analyze-buffers (ADR-0240 Q1), or move
+beyond retention to other Phase 2 deferred Qs.
+M6.7.zz.tenant.opt-out.cli.format-yaml
 closes ADR-0231 future Q1 by adding --format=yaml — the 6th
 output format (human / json / csv / tsv / ndjson / yaml).
 Unlike csv/tsv (tabular, one row per record) or ndjson (one
@@ -14350,6 +14419,34 @@ indent width, anchor/alias for repeated structures. The
 retention CLI now has 6 output formats across all surfaces;
 ADR-0231's future Qs fully closed — tsv + ndjson + csv-
 separator + yaml).
+ADR-0242 covers M6.7.zz.tenant.opt-out.cli.summary.top-per-group
+(retention summary --top-per-group N — closes ADR-0238 Q1; per-
+group leaderboard for cross-tab grids; ADR-0238's --top limits
+TOTAL buckets globally, --top-per-group keeps the top N sub-keys
+WITHIN each primary group via ROW_NUMBER() OVER (PARTITION BY
+primary ORDER BY COUNT(*) DESC) window — "top 3 actors per day"
+not "3 highest day×actor pairs overall"; cross-tab branch emits
+ranked subquery WHERE rn <= $N; ROW_NUMBER runs after GROUP BY/
+HAVING so --min-count filters before ranking (clean
+composition); outer ORDER BY key ASC, count DESC, sub_key ASC
+renders primary-ascending grid with count-DESC leaderboard per
+group; bucket shape unchanged {key, subKey, count}, totalCount
+sum of returned per-group top-N; CLI requires --then-by (exit 2
+without — no per-group concept in single-dimension) + mutually
+exclusive with --top (exit 2 — different limit semantics) +
+transitively incompatible with --fill-gaps; composes with
+--min-count + full filter family;
+SummarizeOptOutHistoryInput gains topPerGroup?: number; builder
+branches to windowed cross-tab SQL; --explain echoes it; 6
+adapter + 6 CLI tests; test count 9,371 → 9,383; rejected
+compose --top + --top-per-group, overload flag without
+--then-by, DISTINCT ON, LATERAL join, app-side ranking, bottom-N,
+single-dimension, header annotation; future Qs --bottom-per-
+group, --top + --top-per-group composition, RANK/DENSE_RANK
+ties, n-way per-group, window gap-filling per group, expose rn
+column. The retention summary action is now exhaustively
+analytic — 8 dimensions + cross-tab + gap-filling + timezone +
+global --top/--min-count + per-group --top-per-group).
 
 ## Architecture in 90 seconds
 
