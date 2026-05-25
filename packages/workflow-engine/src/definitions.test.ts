@@ -190,6 +190,44 @@ describe("WorkflowDefinitionSchema", () => {
     ).toThrow(/cancel_timer action requires timerName/);
   });
 
+  it("rejects send_signal action without signalName", () => {
+    expect(() =>
+      WorkflowDefinitionSchema.parse({
+        ...baseDefinition,
+        states: [
+          {
+            name: "submitted",
+            kind: "initial",
+            label: "Submitted",
+            onEntryActions: [{ kind: "send_signal", parameters: { correlationKey: "po-1" } }],
+            onExitActions: [],
+            slaSeconds: null,
+          },
+          ...baseDefinition.states.slice(1),
+        ],
+      }),
+    ).toThrow(/send_signal action requires signalName/);
+  });
+
+  it("rejects send_signal action without correlationKey", () => {
+    expect(() =>
+      WorkflowDefinitionSchema.parse({
+        ...baseDefinition,
+        states: [
+          {
+            name: "submitted",
+            kind: "initial",
+            label: "Submitted",
+            onEntryActions: [{ kind: "send_signal", parameters: { signalName: "proceed" } }],
+            onExitActions: [],
+            slaSeconds: null,
+          },
+          ...baseDefinition.states.slice(1),
+        ],
+      }),
+    ).toThrow(/send_signal action requires correlationKey/);
+  });
+
   it("rejects transition referencing undeclared fromState", () => {
     expect(() =>
       WorkflowDefinitionSchema.parse({

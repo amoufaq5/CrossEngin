@@ -212,6 +212,20 @@ export const StateActionSchema = z
         message: "set_variable action requires variableName parameter",
       });
     }
+    if (a.kind === "send_signal" && !a.parameters.signalName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "signalName"],
+        message: "send_signal action requires signalName parameter",
+      });
+    }
+    if (a.kind === "send_signal" && !a.parameters.correlationKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "correlationKey"],
+        message: "send_signal action requires correlationKey parameter",
+      });
+    }
   });
 export type StateAction = z.infer<typeof StateActionSchema>;
 

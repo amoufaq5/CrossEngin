@@ -6,6 +6,7 @@ export const WORKFLOW_INSTRUMENTATION_KINDS = [
   "state_transitioned",
   "signal_received",
   "signal_consumed",
+  "signal_emitted",
   "timer_set",
   "timer_fired",
   "timer_cancelled",

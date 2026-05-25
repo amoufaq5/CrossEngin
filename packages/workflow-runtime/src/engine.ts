@@ -600,9 +600,11 @@ export class WorkflowEngine {
       case "cancel_timer":
         await this.applyCancelTimer(instanceId, tenantId, action);
         return;
-      case "spawn_child_workflow":
       case "send_signal":
-        throw new Error(`action kind ${action.kind} is not implemented in M3`);
+        await this.applySendSignal(instanceId, tenantId, action);
+        return;
+      case "spawn_child_workflow":
+        throw new Error("action kind spawn_child_workflow is not yet implemented");
     }
     void signalId;
     void timerId;
@@ -981,6 +983,54 @@ export class WorkflowEngine {
         causationEventId: null,
       });
     }
+  }
+
+  // send_signal: emit a signal to other instances correlated by the action's
+  // correlationKey, reusing the submitSignal delivery path (the saga-coordinator
+  // → participants pattern). Signals are tenant-scoped — the sender reaches only
+  // instances in its own tenant. Signal delivery lives as signal_received /
+  // signal_consumed events on the *receivers*; the sender's instanceId is threaded
+  // as sourceSystem so each receiver's signal_received names the emitting instance,
+  // and the sender records a signal_emitted instrumentation trace (with the
+  // resulting signalId + matched count) for observability.
+  private async applySendSignal(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const signalName =
+      typeof action.parameters["signalName"] === "string"
+        ? (action.parameters["signalName"] as string)
+        : null;
+    const correlationKey =
+      typeof action.parameters["correlationKey"] === "string"
+        ? (action.parameters["correlationKey"] as string)
+        : null;
+    if (signalName === null || correlationKey === null) return;
+    const rawPayload = action.parameters["payload"];
+    const payload =
+      typeof rawPayload === "object" && rawPayload !== null && !Array.isArray(rawPayload)
+        ? (rawPayload as Record<string, unknown>)
+        : undefined;
+    const result = await this.submitSignal({
+      tenantId,
+      signalName,
+      correlationKey,
+      payload,
+      sourceSystem: instanceId,
+    });
+    await this.emitInstrumentation("signal_emitted", {
+      tenantId,
+      instanceId,
+      definitionId: this.instanceDefinition.get(instanceId) ?? null,
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+      attributes: {
+        signalName,
+        targetCorrelationKey: correlationKey,
+        signalId: result.signalId,
+        matchedInstanceCount: result.matchedInstanceIds.length,
+      },
+    });
   }
 
   private async emitTerminalForStateKind(

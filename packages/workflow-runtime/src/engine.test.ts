@@ -1564,3 +1564,244 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
     expect(enabled).toContain("timer_cancelled");
   });
 });
+
+describe("send_signal action (M8.4)", () => {
+  const TENANT_B = "00000000-0000-4000-8000-000000000002";
+
+  // A coordinator workflow whose terminal state's on-entry send_signal emits a
+  // signal to participants correlated by a batch key, and a participant workflow
+  // that advances on that signal. Both live on one engine (submitSignal matches
+  // across instances). Start the participant first, then the coordinator — the
+  // coordinator's send_signal fires during its startInstance step loop.
+  function makeSignalEngine(
+    opts: {
+      readonly instrumentation?: WorkflowInstrumentation;
+      readonly sendParams?: Record<string, unknown>;
+    } = {},
+  ) {
+    const participant = definitionFixture({
+      id: "wfd_participant",
+      definitionKey: "batch.participant",
+      initialState: "waiting",
+      states: [
+        {
+          name: "waiting",
+          kind: "waiting",
+          label: "Waiting",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "Done",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "proceed",
+          fromState: "waiting",
+          toState: "done",
+          trigger: { kind: "signal_received", signalName: "proceed" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+    const sendParams = opts.sendParams ?? { signalName: "proceed", correlationKey: "batch-1" };
+    const coordinator = definitionFixture({
+      id: "wfd_coordina1",
+      definitionKey: "batch.coordinator",
+      initialState: "start",
+      states: [
+        {
+          name: "start",
+          kind: "initial",
+          label: "Start",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "sent",
+          kind: "terminal_success",
+          label: "Sent",
+          onEntryActions: [{ kind: "send_signal", parameters: sendParams }],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "go",
+          fromState: "start",
+          toState: "sent",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+    const log = new InMemoryEventLog();
+    const engine = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([
+        [participant.id, participant],
+        [coordinator.id, coordinator],
+      ]),
+      activityRegistry: createDefaultRegistry(),
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+      ...(opts.instrumentation !== undefined ? { instrumentation: opts.instrumentation } : {}),
+    });
+    return { engine, participant, coordinator, log };
+  }
+
+  it("emits a signal that advances a correlated receiver instance", async () => {
+    const { engine, participant, coordinator } = makeSignalEngine();
+    const recv = await engine.startInstance({
+      definitionId: participant.id,
+      tenantId: TENANT,
+      correlationKey: "batch-1",
+    });
+    expect(recv.status).toBe("waiting_for_signal");
+    await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT,
+      correlationKey: "coordinator",
+    });
+    const recvState = await engine.getInstanceState(recv.instanceId);
+    expect(recvState?.status).toBe("completed");
+    expect(recvState?.currentState).toBe("done");
+    const kinds = (await engine.listEvents(recv.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("signal_received");
+    expect(kinds).toContain("signal_consumed");
+  });
+
+  it("records a signal_emitted instrumentation trace on the sender", async () => {
+    const cap = captureInstrumentation();
+    const { engine, participant, coordinator } = makeSignalEngine({
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      definitionId: participant.id,
+      tenantId: TENANT,
+      correlationKey: "batch-1",
+    });
+    const send = await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT,
+      correlationKey: "coordinator",
+    });
+    const emitted = cap.events.find((e) => e.kind === "signal_emitted");
+    expect(emitted).toBeDefined();
+    expect(emitted?.instanceId).toBe(send.instanceId);
+    expect(emitted?.attributes["signalName"]).toBe("proceed");
+    expect(emitted?.attributes["targetCorrelationKey"]).toBe("batch-1");
+    expect(emitted?.attributes["matchedInstanceCount"]).toBe(1);
+    expect(emitted?.attributes["signalId"]).not.toBeNull();
+  });
+
+  it("threads the sender instanceId as sourceSystem on the receiver's signal_received", async () => {
+    const { engine, participant, coordinator } = makeSignalEngine();
+    const recv = await engine.startInstance({
+      definitionId: participant.id,
+      tenantId: TENANT,
+      correlationKey: "batch-1",
+    });
+    const send = await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT,
+      correlationKey: "coordinator",
+    });
+    const received = (await engine.listEvents(recv.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(received?.actorSystemId).toBe(send.instanceId);
+  });
+
+  it("emits with matchedInstanceCount 0 and changes no receiver when nothing is correlated", async () => {
+    const cap = captureInstrumentation();
+    const { engine, coordinator } = makeSignalEngine({ instrumentation: cap.instrumentation });
+    const send = await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT,
+      correlationKey: "coordinator",
+    });
+    const emitted = cap.events.find((e) => e.kind === "signal_emitted");
+    expect(emitted?.attributes["matchedInstanceCount"]).toBe(0);
+    // The sender still completes its own transition regardless of matches.
+    const sendState = await engine.getInstanceState(send.instanceId);
+    expect(sendState?.currentState).toBe("sent");
+  });
+
+  it("delivers to every correlated receiver (matchedInstanceCount = N)", async () => {
+    const cap = captureInstrumentation();
+    const { engine, participant, coordinator } = makeSignalEngine({
+      instrumentation: cap.instrumentation,
+    });
+    const r1 = await engine.startInstance({
+      definitionId: participant.id,
+      tenantId: TENANT,
+      correlationKey: "batch-1",
+    });
+    const r2 = await engine.startInstance({
+      definitionId: participant.id,
+      tenantId: TENANT,
+      correlationKey: "batch-1",
+    });
+    await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT,
+      correlationKey: "coordinator",
+    });
+    expect((await engine.getInstanceState(r1.instanceId))?.currentState).toBe("done");
+    expect((await engine.getInstanceState(r2.instanceId))?.currentState).toBe("done");
+    const emitted = cap.events.find((e) => e.kind === "signal_emitted");
+    expect(emitted?.attributes["matchedInstanceCount"]).toBe(2);
+  });
+
+  it("does not cross tenant boundaries (sender tenant scopes delivery)", async () => {
+    const cap = captureInstrumentation();
+    const { engine, participant, coordinator } = makeSignalEngine({
+      instrumentation: cap.instrumentation,
+    });
+    const recv = await engine.startInstance({
+      definitionId: participant.id,
+      tenantId: TENANT,
+      correlationKey: "batch-1",
+    });
+    await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT_B,
+      correlationKey: "coordinator",
+    });
+    const emitted = cap.events.find((e) => e.kind === "signal_emitted");
+    expect(emitted?.attributes["matchedInstanceCount"]).toBe(0);
+    expect((await engine.getInstanceState(recv.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("no-ops (no signal_emitted) when signalName / correlationKey are missing", async () => {
+    const cap = captureInstrumentation();
+    const { engine, coordinator } = makeSignalEngine({
+      instrumentation: cap.instrumentation,
+      sendParams: {},
+    });
+    await engine.startInstance({
+      definitionId: coordinator.id,
+      tenantId: TENANT,
+      correlationKey: "coordinator",
+    });
+    expect(cap.events.some((e) => e.kind === "signal_emitted")).toBe(false);
+  });
+
+  it("includes signal_emitted in the kinds enum", () => {
+    expect(WORKFLOW_INSTRUMENTATION_KINDS as readonly string[]).toContain("signal_emitted");
+  });
+});
