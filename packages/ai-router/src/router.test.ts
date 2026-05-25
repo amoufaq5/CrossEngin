@@ -292,6 +292,90 @@ describe("DefaultLlmRouter.embed", () => {
   });
 });
 
+describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
+  it("blocks an embed when estimated cost exceeds maxUsdPerRequest", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      costCeiling: { maxUsdPerRequest: 0.0000001 },
+    });
+    await expect(
+      router.embed({ texts: ["hello"], tenantId: TENANT }),
+    ).rejects.toThrow(CostCeilingExceededError);
+  });
+
+  it("allows the embed when the estimated cost is under the ceiling", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      costCeiling: { maxUsdPerRequest: 1.0 },
+    });
+    const res = await router.embed({ texts: ["hello"], tenantId: TENANT });
+    expect(res.vectors).toEqual([[1, 2, 3]]);
+  });
+
+  it("honors a per-tenant ceiling (getTenantCostCeiling)", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      getTenantCostCeiling: async () => ({ maxUsdPerRequest: 0.0000001 }),
+    });
+    await expect(
+      router.embed({ texts: ["hello"], tenantId: TENANT }),
+    ).rejects.toThrow(CostCeilingExceededError);
+  });
+
+  it("emits ceiling_resolved BEFORE embed_call_started", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      costCeiling: { maxUsdPerRequest: 1.0 },
+      instrumentation: cap.instrumentation,
+    });
+    await router.embed({ texts: ["hello"], tenantId: TENANT, sessionId: "s1" });
+    const kinds = cap.events.map((e) => e.kind);
+    expect(kinds[0]).toBe("ceiling_resolved");
+    expect(kinds.indexOf("ceiling_resolved")).toBeLessThan(
+      kinds.indexOf("embed_call_started"),
+    );
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.task).toBe("embedding");
+    expect(resolved.providerId).toBe("openai");
+    expect(resolved.attributes["hasCeiling"]).toBe(true);
+  });
+
+  it("emits ceiling_resolved with source='none' when no ceiling configured (still embeds)", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      instrumentation: cap.instrumentation,
+    });
+    const res = await router.embed({ texts: ["hello"], tenantId: TENANT });
+    const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
+    expect(resolved.attributes["source"]).toBe("none");
+    expect(resolved.attributes["hasCeiling"]).toBe(false);
+    expect(res.dim).toBe(3);
+  });
+
+  it("does NOT emit embed_call_started when the ceiling blocks the request", async () => {
+    const openai = new StubProvider("openai", "ok");
+    const cap = captureRouterInstrumentation();
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      costCeiling: { maxUsdPerRequest: 0.0000001 },
+      instrumentation: cap.instrumentation,
+    });
+    await expect(
+      router.embed({ texts: ["hello"], tenantId: TENANT }),
+    ).rejects.toThrow(CostCeilingExceededError);
+    const kinds = cap.events.map((e) => e.kind);
+    expect(kinds).toContain("ceiling_resolved");
+    expect(kinds).not.toContain("embed_call_started");
+  });
+});
+
 describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
   class ModerationProvider extends StubProvider {
     constructor(id: string, private readonly modKind: string) {
@@ -951,7 +1035,11 @@ describe("DefaultLlmRouter.embed — RouterInstrumentation (M6.7.z.embed)", () =
     const router = buildRouter({ providers, instrumentation: cap.instrumentation });
     await router.embed({ texts: ["hello"], tenantId: TENANT, sessionId: "sess-1" });
     const kinds = cap.events.map((e) => e.kind);
-    expect(kinds).toEqual(["embed_call_started", "embed_call_completed"]);
+    expect(kinds).toEqual([
+      "ceiling_resolved",
+      "embed_call_started",
+      "embed_call_completed",
+    ]);
   });
 
   it("threads tenantId + sessionId + task='embedding' + providerId + modelId", async () => {

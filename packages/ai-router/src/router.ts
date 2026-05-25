@@ -143,7 +143,7 @@ export class DefaultLlmRouter implements LlmRouter {
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
     const choices = await this.chooseProviders(req.task, req.tenantId);
     await this.enforceCeilingPreflight(
-      req,
+      { tenantId: req.tenantId, sessionId: req.sessionId, task: req.task },
       choices[0]!,
       this.estimatePreflightCost(req, choices[0]!),
     );
@@ -315,6 +315,11 @@ export class DefaultLlmRouter implements LlmRouter {
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
     const choices = await this.chooseProviders("embedding", req.tenantId);
     const sessionId = req.sessionId ?? "";
+    await this.enforceCeilingPreflight(
+      { tenantId: req.tenantId, sessionId, task: "embedding" },
+      choices[0]!,
+      this.estimateEmbedPreflightCost(req, choices[0]!),
+    );
     let lastError: unknown;
     for (let i = 0; i < choices.length; i++) {
       const choice = choices[i]!;
@@ -396,12 +401,16 @@ export class DefaultLlmRouter implements LlmRouter {
     });
   }
 
+  // Resolves the effective ceiling, emits ceiling_resolved (BEFORE the check,
+  // so the audit trail records the resolution even when the request is
+  // blocked), then enforces it. Generic over complete() + embed() — it only
+  // needs tenant/session/task, not the full request.
   private async enforceCeilingPreflight(
-    req: CompletionRequest,
+    ctx: { tenantId: string; sessionId: string; task: TaskKind },
     choice: { provider: LlmProvider; modelId: string; providerId: string },
     estimatedCostUsd: number,
   ): Promise<void> {
-    const resolution = await this.resolveCeilingDetailed(req.tenantId);
+    const resolution = await this.resolveCeilingDetailed(ctx.tenantId);
     const occurredAt = new Date(this.clock()).toISOString();
     const ceilingAttr: Record<string, unknown> = {
       source: resolution.source,
@@ -415,9 +424,9 @@ export class DefaultLlmRouter implements LlmRouter {
     }
     await this.instrumentation.onEvent({
       kind: "ceiling_resolved",
-      tenantId: req.tenantId,
-      sessionId: req.sessionId,
-      task: req.task,
+      tenantId: ctx.tenantId,
+      sessionId: ctx.sessionId,
+      task: ctx.task,
       providerId: choice.providerId,
       modelId: choice.modelId,
       occurredAt,
@@ -426,7 +435,7 @@ export class DefaultLlmRouter implements LlmRouter {
     });
     if (resolution.ceiling === undefined) return;
     const check = await this.costTracker.checkCeiling({
-      tenantId: req.tenantId,
+      tenantId: ctx.tenantId,
       estimatedCostUsd,
       ceiling: resolution.ceiling,
     });
@@ -464,6 +473,19 @@ export class DefaultLlmRouter implements LlmRouter {
       (expectedInputTokens * pricing.inputPerMillionTokens) / 1_000_000 +
       (expectedOutputTokens * pricing.outputPerMillionTokens) / 1_000_000
     );
+  }
+
+  // Embeddings are priced on input tokens only (no output). Estimate from the
+  // input text length; the real cost is recorded post-call from usage_final.
+  private estimateEmbedPreflightCost(
+    req: EmbeddingRequest,
+    choice: { provider: LlmProvider; modelId: string },
+  ): number {
+    const pricing = choice.provider.pricing;
+    let chars = 0;
+    for (const text of req.texts) chars += text.length;
+    const expectedInputTokens = Math.max(1, Math.ceil(chars / 4));
+    return (expectedInputTokens * pricing.inputPerMillionTokens) / 1_000_000;
   }
 }
 
