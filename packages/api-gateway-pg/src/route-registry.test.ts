@@ -129,7 +129,7 @@ describe("PostgresRouteRegistry — caching", () => {
   it("does not requery within the cache TTL", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const conn = mockConnection([routeRow()], capture);
-    let nowMs = 1_000;
+    const nowMs = 1_000;
     const registry = new PostgresRouteRegistry({ conn, cacheTtlMs: 5_000, now: () => nowMs });
     await registry.ensureLoaded();
     await registry.ensureLoaded();

@@ -19,8 +19,9 @@ import {
   resolvePrincipalForCredential,
   verifyBearerJwt,
 } from "./auth.js";
+import type {
+  HandlerRegistry} from "./dispatcher.js";
 import {
-  HandlerRegistry,
   handlerOutputToResponse,
   type HandlerOutput,
 } from "./dispatcher.js";

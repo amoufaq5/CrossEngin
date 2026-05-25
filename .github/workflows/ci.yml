@@ -35,6 +35,9 @@ jobs:
       - name: Build all packages
         run: pnpm -r build
 
+      - name: Lint (ESLint flat config, whole workspace)
+        run: pnpm lint
+
       - name: Type-check src (per package)
         run: pnpm -r typecheck
 

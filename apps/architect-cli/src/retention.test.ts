@@ -1998,7 +1998,7 @@ describe("runRetention list-policies", () => {
     } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Platform defaults (0 total)");
-    expect(out()).toMatch(/Platform defaults \(0 total\):\s*\n  \(none configured\)/);
+    expect(out()).toMatch(/Platform defaults \(0 total\):\s*\n {2}\(none configured\)/);
   });
 
   it("empty per-tenant section renders '(none configured)'", async () => {
@@ -2012,7 +2012,7 @@ describe("runRetention list-policies", () => {
     } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Per-tenant policies (0 total)");
-    expect(out()).toMatch(/Per-tenant policies \(0 total\):\s*\n  \(none configured\)/);
+    expect(out()).toMatch(/Per-tenant policies \(0 total\):\s*\n {2}\(none configured\)/);
   });
 
   it("renders the filter suffix when --tenant or --table is set", async () => {

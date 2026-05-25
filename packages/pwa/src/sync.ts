@@ -134,7 +134,7 @@ export function advanceWatermark(
   operations: readonly SyncDeltaOperation[],
 ): SyncWatermark | null {
   let maxUpdatedAt = current?.updatedAtCursor ?? null;
-  let tenantId = current?.tenantId ?? null;
+  const tenantId = current?.tenantId ?? null;
   let entity = current?.entity ?? null;
   for (const op of operations) {
     const ts = op.op === "upsert" ? op.updatedAt : op.deletedAt;

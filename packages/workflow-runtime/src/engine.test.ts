@@ -1,8 +1,9 @@
 import type { WorkflowDefinition } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
+import type {
+  ActivityRegistry} from "./activity-handlers.js";
 import {
-  ActivityRegistry,
   createDefaultRegistry,
   type ActivityHandler,
 } from "./activity-handlers.js";

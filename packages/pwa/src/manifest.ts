@@ -24,7 +24,7 @@ export const ManifestIconSchema = z
     sizes: z.string().regex(/^(?:any|\d+x\d+(?:\s+\d+x\d+)*)$/, {
       message: "sizes must be 'any' or one-or-more 'WxH' tokens",
     }),
-    type: z.string().regex(/^image\/[a-z0-9.+\-]+$/),
+    type: z.string().regex(/^image\/[a-z0-9.+-]+$/),
     purpose: IconPurposeSchema.default("any"),
   })
   .superRefine((v, ctx) => {
