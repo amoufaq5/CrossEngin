@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   verify:
-    name: build · typecheck · typecheck:tests · test
+    name: build · lint · format · typecheck · typecheck:tests · test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -37,6 +37,12 @@ jobs:
 
       - name: Lint (ESLint flat config, whole workspace)
         run: pnpm lint
+
+      # Prettier --check over TS/JS source (ADR-0250). Scoped via .prettierignore
+      # to source only; markdown/JSON/YAML are hand-maintained. Fails the job if
+      # any file would be reformatted — keeps `pnpm format` idempotent on main.
+      - name: Format check (Prettier --check)
+        run: pnpm format:check
 
       - name: Type-check src (per package)
         run: pnpm -r typecheck
