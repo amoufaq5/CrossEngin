@@ -27,7 +27,7 @@ describe("ENCOUNTER_LIFECYCLE_WORKFLOW", () => {
   it("only no_show transition is automatic (used by the sweep job)", () => {
     const wf = ENCOUNTER_LIFECYCLE_WORKFLOW;
     if (wf.kind !== "entityLifecycle") throw new Error("not entityLifecycle");
-    const automatic = wf.transitions.filter((t) => t.trigger.kind === "automatic");
+    const automatic = wf.transitions.filter((t) => t.trigger?.kind === "automatic");
     expect(automatic.map((t) => t.name)).toEqual(["mark_no_show"]);
   });
 

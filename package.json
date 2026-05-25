@@ -14,6 +14,7 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
+    "typecheck:tests": "pnpm build && tsc -p tsconfig.typecheck-tests.json",
     "dev": "turbo run dev",
     "clean": "turbo run clean && rm -rf node_modules"
   },

@@ -265,7 +265,7 @@ describe("WorkflowSignalBridge.handle — engine failure", () => {
 
 describe("WorkflowSignalBridge — passes idempotencyKey to engine", () => {
   it("threads idempotency key into submitSignal call", async () => {
-    let captured: Parameters<SignalSubmitter["submitSignal"]>[0] | null = null;
+    let captured!: Parameters<SignalSubmitter["submitSignal"]>[0];
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
         captured = input;

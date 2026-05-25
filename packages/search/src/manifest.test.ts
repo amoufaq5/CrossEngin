@@ -139,7 +139,7 @@ describe("indexedEntities / indexedFieldPaths / globallyIndexedEntities", () => 
   });
 
   it("indexedEntities returns all keys", () => {
-    expect(indexedEntities(manifest).sort()).toEqual(["AuditEvent", "Prescription"]);
+    expect([...indexedEntities(manifest)].sort()).toEqual(["AuditEvent", "Prescription"]);
   });
 
   it("indexedFieldPaths returns paths for one entity", () => {

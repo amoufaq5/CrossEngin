@@ -8968,7 +8968,7 @@ describe("PostgresTraceRetention.previewRestoreTenantPolicy (M6.7.zz.tenant.opt-
 
   it("kind discriminates which mutation method would run", async () => {
     // Three calls — same lookup shape but different prev_state → different kinds
-    const conn = mockConnection((sql, params) => {
+    const conn = mockConnection((_sql, params) => {
       const id = params?.[0] as string;
       if (id === "id-delete") {
         return { rows: [historyRow({ prev_state: null })], rowCount: 1 };

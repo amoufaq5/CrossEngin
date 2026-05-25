@@ -54,7 +54,7 @@ describe("FHIR_EXPORT_JOB", () => {
 
   it("retries up to 5 times with exponential backoff", () => {
     expect(FHIR_EXPORT_JOB.retry?.maxAttempts).toBe(5);
-    expect(FHIR_EXPORT_JOB.retry?.backoff.kind).toBe("exponential");
+    expect(FHIR_EXPORT_JOB.retry?.backoff?.kind).toBe("exponential");
   });
 
   it("uses dead-letter as the failure strategy (consumer downstream)", () => {

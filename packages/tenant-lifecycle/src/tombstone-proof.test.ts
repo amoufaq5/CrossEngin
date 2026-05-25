@@ -39,6 +39,7 @@ const FIXTURE_BASE = {
       anchoredAt: "2026-05-16T12:00:01.000Z",
     },
   ],
+  invalidationOfPriorTombstoneId: null,
 };
 
 describe("canonicalContentManifest", () => {

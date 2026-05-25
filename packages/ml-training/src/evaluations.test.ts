@@ -224,6 +224,7 @@ describe("helpers", () => {
         score: 1,
         actualOutputSha256: SHA,
         latencyMs: 100,
+        costUsd: 0.01,
       },
       {
         exampleId: "ex-2",
@@ -231,6 +232,7 @@ describe("helpers", () => {
         score: 0,
         actualOutputSha256: SHA,
         latencyMs: 100,
+        costUsd: 0.01,
       },
     ],
     blocksPromotion: false,

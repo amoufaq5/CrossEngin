@@ -58,7 +58,7 @@ describe("FixedExtractor", () => {
   });
 
   it("fixedExtractor() is the function form", () => {
-    expect(fixedExtractor("x").extract()).toBe("x");
+    expect(fixedExtractor("x").extract({})).toBe("x");
   });
 });
 

@@ -102,7 +102,7 @@ describe("InMemoryIdempotencyStore", () => {
 
   it("scopes records by tenantId", async () => {
     const s = new InMemoryIdempotencyStore();
-    await s.put({ tenantId: TENANT, record: fixtureIdemRecord({ key: "shared" }) });
+    await s.put({ tenantId: TENANT, record: fixtureIdemRecord({ idempotencyKey: "shared" }) });
     expect(await s.get({ tenantId: "00000000-0000-4000-8000-000000000002", key: "shared" })).toBeNull();
   });
 

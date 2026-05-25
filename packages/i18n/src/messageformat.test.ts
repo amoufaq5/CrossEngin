@@ -21,7 +21,7 @@ describe("parsePlaceholders", () => {
     expect(phs).toHaveLength(1);
     if (phs[0] !== undefined) {
       expect(phs[0].kind).toBe("plural");
-      expect(phs[0].cases?.sort()).toEqual(["=0", "one", "other"]);
+      expect([...(phs[0].cases ?? [])].sort()).toEqual(["=0", "one", "other"]);
     }
   });
 

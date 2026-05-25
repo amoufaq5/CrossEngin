@@ -21,15 +21,17 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M-maint.typecheck-test-debt + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M6.8 + M6.8.x + M6.8.x.trace + M6.8.y + M8 + M8.1 + M8.2 +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,383 tests**,
-all green, no type errors. M-maint.typecheck-test-debt restored
+**56 packages + 1 app, 129 meta-schema tables, 9,381 tests**,
+all green, no type errors — in src AND in `*.test.ts` files
+(M-maint.typecheck-tests closed the last gap; see below).
+M-maint.typecheck-test-debt restored
 the "all green, zero type errors" invariant — which README +
 CLAUDE.md claimed while pnpm -r typecheck reported 13 errors and
 pnpm -r test had 1 failing test. Two gaps let the drift hide:
@@ -76,6 +78,75 @@ silently regress, lint rule against duplicate-of-imported locals,
 runtime test for chat image/document attachment rendering). The
 systemic cause — *.test.ts not type-checked — is documented as
 the recurrence risk; closing it (future Q1) is the durable fix.
+M-maint.typecheck-tests closes ADR-0243's future Q1 — the
+systemic gap — by type-checking *.test.ts workspace-wide.
+Mechanism: a single root tsconfig.typecheck-tests.json (extends
+config/typescript/base, noEmit + composite:false, includes
+packages/*/src/**/*.test.ts + apps/*/src/**/*.test.ts; cross-
+package @crossengin/* resolves via built dist/*.d.ts so it needs
+a prior build) — one file, no per-package config churn. Running
+it surfaced 134 pre-existing test-file type errors across 24
+packages, NONE caught by pnpm -r test (they're type-only; tests
+pass at runtime). All 134 fixed at the source, zero suppression
+(no @ts-expect-error / as any). Fix families — (a) stale/
+incomplete fixtures missing required fields: evaluations costUsd,
+backfill durationSeconds, ediscovery producedSizeBytes +
+productionSha256 + productionStorageUri, split-brain
+permanentPartitionAt, tombstone FIXTURE_BASE
+invalidationOfPriorTombstoneId (the .nullable().default(null)
+field is required in the inferred OUTPUT type though optional in
+input — one add fixes all 5 populateTombstoneHashes call sites);
+(b) vision capability completeness (ADR-0078) — vision:false on
+chat/commands/ai-router resolve capability fixtures; (c)
+readonly[] .sort() mutation → [...arr].sort() in active-active/
+crdts, dr/replication, i18n/messageformat + plurals,
+observability/redaction, search/manifest + permissions, views;
+(d) unused imports/params (noUnusedLocals/Parameters) deleted or
+_-prefixed in access-reviews/exceptions, forensics/sealing, pack-
+erp-healthcare/entities, workflow-engine/instances, api-gateway/
+negotiation, ai-router-pg/latency-tracker, kernel-pg/trace-
+retention; (e) Record-vs-array fixture manifest-io workflows is a
+keyed map not an array; (f) implicit-any binding sessions
+getBySessionId param annotated; (g) wrong fixture field name
+stores key → idempotencyKey (test now genuinely exercises tenant
+scoping); (h) optional-chain depth hc-jobs retry?.backoff?.kind +
+hc-workflows t.trigger?.kind; (i) undeclared cross-package import
+— workflow-signal-bridge gateway-handler.test imported
+IncomingRequest/ResolvedPrincipal/RouteDefinition from
+@crossengin/api-gateway (not a dep; only api-gateway-runtime is)
+→ rerouted via indexed access on the already-imported HandlerInput
+(HandlerInput["request"], NonNullable<HandlerInput["principal"]>,
+HandlerInput["route"]), install-free + structurally identical;
+(j) closure-assignment narrow-to-never — let captured: T | null =
+null assigned only inside a vi.fn closure narrows to null at the
+read site so captured?.x accesses a property on never → fixed
+with definite-assignment assertion let captured!: T (no | null;
+the closure always runs before the assertion) in bridge/gateway-
+handler; (k) mutable mock-state fields applier
+transactionsCommitted/transactionsRolledBack + replayer recentIds
+un-readonly'd (the mock mutates them). Guard wired: root script
+typecheck:tests = pnpm build && tsc -p tsconfig.typecheck-tests
+.json (self-contained — builds then checks every test file; CI
+gate is one command). pnpm typecheck (per-package src via turbo)
+left unchanged so the fast local loop is unaffected; CI runs both.
+Test count 9,381 — no tests added/removed (every fix is type-only
+or fixture-completion); the 9,383 figure prior docs carried was
+itself an instance of the claimed-vs-actual drift this work
+closes, corrected to the measured value. Rejected — drop
+**/*.test.ts from each package tsconfig exclude (build would emit
+test files into dist; needs 25 second-configs), per-package
+tsconfig.test.json (25 near-identical configs defer until the
+root pass is slow), @ts-expect-error/as any to reach zero fast
+(hides broken fixtures — the exact ADR-0243 failure mode), chain
+typecheck:tests into default typecheck (forces full build on every
+local typecheck). ADR-0244 documents the design + 4 rejected
+alternatives + 4 future Qs (wire pnpm typecheck:tests into the CI
+workflow as a required gate, lint rule forbidding @ts-expect-error
+/as any in *.test.ts, pre-push hook running typecheck:tests, per-
+package tsconfig.test.json migration if the root pass slows at
+>100 packages). The invariant is now genuinely workspace-wide —
+0 src type errors + 0 test-file type errors + 0 failing tests —
+and the guard makes silent src/test drift impossible to reopen.
 M6.7.zz.tenant.opt-out.cli.summary.top-per-group
 closes ADR-0238 Q1 by adding --top-per-group N to retention
 summary — a per-group leaderboard for cross-tab grids. ADR-0238's
@@ -14517,6 +14588,41 @@ placeholder, type-check test files in-milestone; future Qs type-
 check *.test.ts in CI [durable fix for the systemic cause],
 typecheck+test pre-push/CI gate, lint against duplicate-of-
 imported locals, chat attachment-render test).
+ADR-0244 covers M-maint.typecheck-tests (type-check *.test.ts
+workspace-wide — closes ADR-0243 future Q1, the systemic gap;
+single root tsconfig.typecheck-tests.json includes packages/*/
+src/**/*.test.ts + apps/*/src/**/*.test.ts, cross-package
+@crossengin/* via built dist so it needs a prior build; surfaced
+134 pre-existing test-file type errors across 24 packages none
+caught by pnpm -r test (type-only; pass at runtime), all 134
+fixed at source zero suppression; fix families — stale/incomplete
+fixtures (costUsd, durationSeconds, ediscovery production fields,
+permanentPartitionAt, tombstone invalidationOfPriorTombstoneId
+which is required in inferred OUTPUT type from .nullable()
+.default(null) — one add fixes all 5 call sites), vision:false
+capability completeness (ADR-0078), readonly[] .sort() →
+[...arr].sort(), unused imports/params deleted or _-prefixed,
+manifest-io workflows Record-not-array, sessions implicit-any
+binding annotated, stores key→idempotencyKey, hc optional-chain
+retry?.backoff?.kind + t.trigger?.kind, workflow-signal-bridge
+gateway-handler.test undeclared @crossengin/api-gateway import
+rerouted via indexed access on HandlerInput (install-free), bridge
+/gateway-handler closure-narrow-to-never let captured!: T definite-
+assignment, applier/replayer mutable mock-state fields un-readonly;
+guard wired root script typecheck:tests = pnpm build && tsc -p
+tsconfig.typecheck-tests.json self-contained CI gate, default
+pnpm typecheck per-package src via turbo left unchanged for the
+fast local loop; test count 9,381 no tests added/removed the 9,383
+prior figure was itself the claimed-vs-actual drift this closes;
+rejected drop **/*.test.ts from per-package exclude (build emits
+test files), per-package tsconfig.test.json (25 configs defer),
+@ts-expect-error/as any (hides broken fixtures), chain into default
+typecheck (forces build every local run); future Qs CI required
+gate, lint forbidding @ts-expect-error/as any in *.test.ts, pre-
+push hook, per-package config migration at scale. The all-green
+invariant is now genuinely workspace-wide — 0 src + 0 test-file
+type errors + 0 failing tests — and the guard makes silent src/
+test drift impossible to reopen).
 
 ## Architecture in 90 seconds
 

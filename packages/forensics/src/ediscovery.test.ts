@@ -208,6 +208,9 @@ describe("helpers", () => {
     completeAt: null,
     estimatedDocumentCount: 1000,
     producedDocumentCount: 500,
+    producedSizeBytes: null,
+    productionSha256: null,
+    productionStorageUri: null,
     privilegedExclusionCount: 0,
     deadlineAt: "2026-07-01T00:00:00Z",
   };

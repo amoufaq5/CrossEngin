@@ -160,7 +160,7 @@ describe("helpers", () => {
   const topology = [edge("eu-central", "eu-west"), edge("eu-central", "us-east")];
 
   it("targetsFor returns all replication targets for a source", () => {
-    expect(targetsFor(topology, "eu-central").sort()).toEqual(["eu-west", "us-east"]);
+    expect([...targetsFor(topology, "eu-central")].sort()).toEqual(["eu-west", "us-east"]);
   });
 
   it("sourcesFor returns all sources for a target", () => {

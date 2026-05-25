@@ -257,7 +257,7 @@ describe("view reference helpers", () => {
       rowAction: { kind: "workflow", name: "verify" },
       bulkActions: [{ kind: "workflow", name: "release", label: { en: "Release" } }],
     });
-    expect(viewReferencedWorkflows(list).sort()).toEqual(["release", "verify"]);
+    expect([...viewReferencedWorkflows(list)].sort()).toEqual(["release", "verify"]);
 
     const kanban = ViewDeclarationSchema.parse({
       kind: "kanban",

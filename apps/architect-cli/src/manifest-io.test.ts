@@ -98,7 +98,7 @@ describe("buildManifestSummary", () => {
     const manifest: Manifest = {
       ...emptyManifest({ name: "Test", slug: "test-pack" }),
       entities: [{ name: "Customer", fields: [] } as never, { name: "Order", fields: [] } as never],
-      workflows: [{ id: "wfd_x", definitionKey: "k" } as never],
+      workflows: { wfd_x: { id: "wfd_x", definitionKey: "k" } as never },
     };
     const summary = buildManifestSummary(manifest);
     expect(summary.counts.entities).toBe(2);

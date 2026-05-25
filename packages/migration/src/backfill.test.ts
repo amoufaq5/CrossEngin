@@ -207,6 +207,7 @@ describe("helpers", () => {
     queuedAt: "2026-05-14T10:00:00Z",
     startedAt: "2026-05-14T10:00:30Z",
     completedAt: null,
+    durationSeconds: null,
     totalRowsEstimate: 1000,
     rowsProcessed: 250,
     rowsInserted: 250,

@@ -15,8 +15,8 @@ interface FakeDbState {
   readonly appliedHashes: Set<string>;
   readonly failOn: Set<string>;
   readonly lockAcquisitions: { key: bigint }[];
-  readonly transactionsCommitted: number;
-  readonly transactionsRolledBack: number;
+  transactionsCommitted: number;
+  transactionsRolledBack: number;
 }
 
 function freshState(overrides: Partial<FakeDbState> = {}): FakeDbState {

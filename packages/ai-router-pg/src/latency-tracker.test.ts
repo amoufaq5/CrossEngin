@@ -176,7 +176,7 @@ describe("PostgresLatencyTracker.stats", () => {
     const calls: { provider: string; params: readonly unknown[] | undefined }[] = [];
     let nextSamples = 5;
     const conn: PgConnection = {
-      query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
+      query: vi.fn(async (_sql: string, params?: readonly unknown[]) => {
         calls.push({ provider: params?.[0] as string, params });
         const samples = nextSamples;
         nextSamples += 5;

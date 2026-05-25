@@ -113,7 +113,7 @@ function fakeStores(opts: {
       listForTenant: async () => opts.sessions ?? [],
       getById: async (id: string) =>
         (opts.sessions ?? []).find((s) => s.id === id) ?? null,
-      getBySessionId: async ({ tenantId, sessionId }) =>
+      getBySessionId: async ({ tenantId, sessionId }: { tenantId: string; sessionId: string }) =>
         (opts.sessions ?? []).find(
           (s) => s.tenantId === tenantId && s.sessionId === sessionId,
         ) ?? null,

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   ACTIVE_INSTANCE_STATUSES,
   INSTANCE_STATUSES,
-  INSTANCE_TRANSITIONS,
   RELATED_ENTITY_KINDS,
   RelatedEntityRefSchema,
   TERMINAL_INSTANCE_STATUSES,

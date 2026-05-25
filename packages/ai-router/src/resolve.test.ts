@@ -34,6 +34,7 @@ function fakeProvider(opts: {
       embedding: false,
       maxContextTokens: 100_000,
       supportsThinking: false,
+      vision: false,
     } satisfies ProviderCapabilities,
     pricing: {
       inputPerMillionTokens: 1,

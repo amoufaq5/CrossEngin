@@ -57,6 +57,7 @@ class StubProvider implements LlmProvider {
     embedding: false,
     maxContextTokens: 100_000,
     supportsThinking: false,
+    vision: false,
   };
   readonly residency: readonly Region[] = ["us"];
   readonly pricing: ProviderPricing = {

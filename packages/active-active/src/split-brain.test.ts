@@ -226,6 +226,7 @@ describe("helpers", () => {
     healedAt: "2026-05-15T10:30:00Z",
     healingStrategy: "auto_merge_concurrent",
     conflictRecordIds: [],
+    permanentPartitionAt: null,
     requiresIncidentResponse: true,
     incidentRecordId: "INC-2026-0042",
     durationSeconds: 1800,

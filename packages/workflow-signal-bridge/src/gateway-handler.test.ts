@@ -1,6 +1,5 @@
 import { SIGNATURE_HEADER_NAME, generateWebhookSecret, signWebhookDelivery } from "@crossengin/sdk";
 import type { HandlerInput } from "@crossengin/api-gateway-runtime";
-import type { IncomingRequest, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import { describe, expect, it, vi } from "vitest";
 
 import { WorkflowSignalBridge, type SignalSubmitter } from "./bridge.js";
@@ -41,7 +40,7 @@ function buildBridge(opts: { engine?: SignalSubmitter } = {}) {
   });
 }
 
-function fixtureRoute(): RouteDefinition {
+function fixtureRoute(): HandlerInput["route"] {
   return {
     id: "rt_route0001",
     operationId: "webhooks.order_shipped",
@@ -61,7 +60,7 @@ function fixtureRoute(): RouteDefinition {
   };
 }
 
-function fixturePrincipal(): ResolvedPrincipal {
+function fixturePrincipal(): NonNullable<HandlerInput["principal"]> {
   return {
     principalId: USER,
     tenantId: TENANT,
@@ -73,7 +72,7 @@ function fixturePrincipal(): ResolvedPrincipal {
   };
 }
 
-function fixtureRequest(overrides: Partial<IncomingRequest> = {}): IncomingRequest {
+function fixtureRequest(overrides: Partial<HandlerInput["request"]> = {}): HandlerInput["request"] {
   return {
     id: "req_test00000001",
     receivedAt: "2026-05-16T12:00:00.000Z",
@@ -146,7 +145,7 @@ describe("createSignalBridgeHandler — success", () => {
   });
 
   it("threads Idempotency-Key into the bridge", async () => {
-    let captured: Parameters<SignalSubmitter["submitSignal"]>[0] | null = null;
+    let captured!: Parameters<SignalSubmitter["submitSignal"]>[0];
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
         captured = input;
@@ -165,7 +164,7 @@ describe("createSignalBridgeHandler — success", () => {
   });
 
   it("uses sourceSystem option when provided", async () => {
-    let captured: Parameters<SignalSubmitter["submitSignal"]>[0] | null = null;
+    let captured!: Parameters<SignalSubmitter["submitSignal"]>[0];
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
         captured = input;

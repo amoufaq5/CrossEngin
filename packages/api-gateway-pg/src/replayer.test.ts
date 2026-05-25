@@ -61,7 +61,7 @@ function fixtureExecution(overrides: Partial<PipelineExecution> = {}): PipelineE
 interface MockState {
   readonly executions: Map<string, PipelineExecution>;
   readonly decisionIds: Set<string>;
-  readonly recentIds: string[];
+  recentIds: string[];
 }
 
 function buildMock(state: MockState): PgConnection {
