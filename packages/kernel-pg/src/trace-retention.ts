@@ -312,6 +312,7 @@ export interface SummarizeOptOutHistoryInput {
   readonly top?: number;
   readonly minCount?: number;
   readonly topPerGroup?: number;
+  readonly bottomPerGroup?: number;
 }
 
 export interface OptOutHistorySummaryBucket {
@@ -1770,23 +1771,27 @@ export class PostgresTraceRetention {
        ${limit}`;
       return { sql, params };
     }
-    // Cross-tab top-per-group: rank sub-keys within each primary group via a
-    // ROW_NUMBER() window and keep the top N per partition. HAVING (minCount)
-    // applies inside the subquery (before windowing). --top-per-group is
-    // mutually exclusive with --top at the CLI and applies only in cross-tab.
-    if (input.topPerGroup !== undefined) {
-      params.push(input.topPerGroup);
+    // Cross-tab top/bottom-per-group: rank sub-keys within each primary group
+    // via a ROW_NUMBER() window and keep the top (DESC) or bottom (ASC) N per
+    // partition. HAVING (minCount) applies inside the subquery (before
+    // windowing). Both are mutually exclusive with --top (and with each other)
+    // at the CLI and apply only in cross-tab. --top-per-group takes precedence
+    // if both are somehow set.
+    const perGroupN = input.topPerGroup ?? input.bottomPerGroup;
+    if (perGroupN !== undefined) {
+      const dir = input.topPerGroup !== undefined ? "DESC" : "ASC";
+      params.push(perGroupN);
       const rnParam = `$${params.length}`;
       const windowed = `SELECT key, sub_key, count FROM (
          SELECT ${keyExpr} AS key, ${secondary.keyExpr} AS sub_key, COUNT(*)::bigint AS count,
-                ROW_NUMBER() OVER (PARTITION BY ${col} ORDER BY COUNT(*) DESC, ${secondary.col} ASC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY ${col} ORDER BY COUNT(*) ${dir}, ${secondary.col} ASC) AS rn
          FROM ${SCHEMA}.${HISTORY_TABLE} h
          ${where}
          GROUP BY ${col}, ${secondary.col}
          ${having}
        ) ranked
        WHERE rn <= ${rnParam}
-       ORDER BY key ASC, count DESC, sub_key ASC`;
+       ORDER BY key ASC, count ${dir}, sub_key ASC`;
       return { sql: windowed, params };
     }
     // Cross-tab: two-dimensional grid ordered (primary ASC, secondary ASC)

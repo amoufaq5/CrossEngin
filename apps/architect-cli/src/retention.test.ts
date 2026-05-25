@@ -17804,6 +17804,179 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     });
   });
 
+  describe("--bottom-per-group (ADR-0247)", () => {
+    it("threads bottomPerGroup to adapter with --then-by", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "actor",
+          "--bottom-per-group",
+          "3",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: {
+              groupBy: "day",
+              thenBy: "actor",
+              totalCount: 0,
+              buckets: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.bottomPerGroup).toBe(3);
+      expect(capture[0]?.topPerGroup).toBeUndefined();
+    });
+
+    it("exits 2 on invalid --bottom-per-group (non-positive)", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "actor",
+          "--bottom-per-group",
+          "0",
+        ),
+        { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("invalid --bottom-per-group '0'");
+    });
+
+    it("exits 2 when --bottom-per-group used without --then-by", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--bottom-per-group",
+          "3",
+        ),
+        { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--bottom-per-group requires --then-by");
+    });
+
+    it("exits 2 when --bottom-per-group combined with --top", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "actor",
+          "--bottom-per-group",
+          "3",
+          "--top",
+          "10",
+        ),
+        { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--top and --bottom-per-group are mutually exclusive",
+      );
+    });
+
+    it("exits 2 when --bottom-per-group combined with --top-per-group", async () => {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "actor",
+          "--top-per-group",
+          "3",
+          "--bottom-per-group",
+          "3",
+        ),
+        { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain(
+        "--top-per-group and --bottom-per-group are mutually exclusive",
+      );
+    });
+
+    it("composes with --min-count, both threaded", async () => {
+      const capture: SummarizeOptOutHistoryInput[] = [];
+      const { ctx } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "tenant",
+          "--then-by",
+          "kind",
+          "--min-count",
+          "2",
+          "--bottom-per-group",
+          "1",
+        ),
+        {
+          ...ctx,
+          retentionOverride: fakeRetention({
+            summaryCapture: capture,
+            summaryResult: {
+              groupBy: "tenant",
+              thenBy: "kind",
+              totalCount: 0,
+              buckets: [],
+            },
+          }),
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      expect(capture[0]?.bottomPerGroup).toBe(1);
+      expect(capture[0]?.minCount).toBe(2);
+    });
+
+    it("--explain plan echoes bottomPerGroup", async () => {
+      const { ctx, out } = buffers();
+      const code = await runRetention(
+        parsed(
+          "retention",
+          "summary",
+          "--group-by",
+          "day",
+          "--then-by",
+          "actor",
+          "--bottom-per-group",
+          "5",
+          "--explain",
+          "--format=json",
+        ),
+        { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const plan = JSON.parse(out());
+      expect(plan.bottomPerGroup).toBe(5);
+      expect(plan.thenBy).toBe("actor");
+    });
+  });
+
   describe("--explain-analyze (ADR-0240)", () => {
     const ID_A = "aa000000-0000-4000-8000-0000000000aa";
     const ID_B = "bb000000-0000-4000-8000-0000000000bb";

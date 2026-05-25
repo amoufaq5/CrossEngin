@@ -11545,6 +11545,105 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(result.totalCount).toBe(15);
   });
 
+  it("bottomPerGroup: builds ROW_NUMBER() window with ASC ranking for cross-tab", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "actor",
+      bottomPerGroup: 3,
+    });
+    expect(sql).toContain("ROW_NUMBER() OVER (PARTITION BY");
+    expect(sql).toContain("ORDER BY COUNT(*) ASC, h.actor_id ASC) AS rn");
+    expect(sql).toContain("WHERE rn <= $1");
+    expect(params).toEqual([3]);
+  });
+
+  it("bottomPerGroup: orders output key ASC, count ASC, sub_key ASC", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "kind",
+      thenBy: "actor",
+      bottomPerGroup: 2,
+    });
+    expect(sql).toContain("PARTITION BY h.event_kind");
+    expect(sql).toContain("ORDER BY key ASC, count ASC, sub_key ASC");
+    expect(sql).toContain("GROUP BY h.event_kind, h.actor_id");
+  });
+
+  it("bottomPerGroup + minCount compose (HAVING in subquery, rn filter outside)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "tenant",
+      thenBy: "kind",
+      minCount: 5,
+      bottomPerGroup: 2,
+    });
+    expect(sql).toContain("HAVING COUNT(*) >= $1");
+    expect(sql).toContain("WHERE rn <= $2");
+    expect(params).toEqual([5, 2]);
+  });
+
+  it("bottomPerGroup + filters: filter params precede the bottomPerGroup param", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "actor",
+      tenantId: "00000000-0000-4000-8000-00000000000A",
+      bottomPerGroup: 4,
+    });
+    expect(sql).toContain("h.tenant_id = $1");
+    expect(sql).toContain("WHERE rn <= $2");
+    expect(params).toEqual(["00000000-0000-4000-8000-00000000000A", 4]);
+  });
+
+  it("topPerGroup takes precedence over bottomPerGroup when both set (DESC)", () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
+    });
+    const { sql, params } = r.buildSummarizeOptOutHistoryQuery({
+      groupBy: "day",
+      thenBy: "actor",
+      topPerGroup: 2,
+      bottomPerGroup: 5,
+    });
+    expect(sql).toContain("ORDER BY COUNT(*) DESC, h.actor_id ASC) AS rn");
+    expect(sql).toContain("ORDER BY key ASC, count DESC, sub_key ASC");
+    expect(params).toEqual([2]);
+  });
+
+  it("bottomPerGroup: method returns per-group buckets with subKey", async () => {
+    const r = new PostgresTraceRetention({
+      conn: mockConnection(() => ({
+        rows: [
+          { key: "2026-05-20 00:00:00", sub_key: "actor-7", count: "1" },
+          { key: "2026-05-20 00:00:00", sub_key: "actor-2", count: "2" },
+          { key: "2026-05-21 00:00:00", sub_key: "actor-9", count: "1" },
+        ],
+        rowCount: 3,
+      })),
+    });
+    const result = await r.summarizeOptOutHistory({
+      groupBy: "day",
+      thenBy: "actor",
+      bottomPerGroup: 2,
+    });
+    expect(result.thenBy).toBe("actor");
+    expect(result.buckets).toEqual([
+      { key: "2026-05-20 00:00:00", subKey: "actor-7", count: 1 },
+      { key: "2026-05-20 00:00:00", subKey: "actor-2", count: 2 },
+      { key: "2026-05-21 00:00:00", subKey: "actor-9", count: 1 },
+    ]);
+    expect(result.totalCount).toBe(4);
+  });
+
   it("explainAnalyzeQuery: wraps SQL in EXPLAIN (ANALYZE, FORMAT JSON) + returns QUERY PLAN", async () => {
     const capture: Capture[] = [];
     const planJson = [{ Plan: { "Node Type": "Seq Scan", "Actual Total Time": 0.5 } }];

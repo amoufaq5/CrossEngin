@@ -1567,6 +1567,40 @@ async function runRetentionSummary(
     );
     return 2;
   }
+  const bottomPerGroupFlag = getStringFlag(command, "bottom-per-group");
+  let bottomPerGroup: number | undefined;
+  if (bottomPerGroupFlag !== null) {
+    const parsed = Number.parseInt(bottomPerGroupFlag, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      printError(
+        ctx.io,
+        `retention summary: invalid --bottom-per-group '${bottomPerGroupFlag}' (must be a positive integer)`,
+      );
+      return 2;
+    }
+    bottomPerGroup = parsed;
+  }
+  if (bottomPerGroup !== undefined && thenBy === undefined) {
+    printError(
+      ctx.io,
+      "retention summary: --bottom-per-group requires --then-by (it limits to the bottom N sub-keys within each primary group; use --top for a global limit)",
+    );
+    return 2;
+  }
+  if (bottomPerGroup !== undefined && top !== undefined) {
+    printError(
+      ctx.io,
+      "retention summary: --top and --bottom-per-group are mutually exclusive (--top limits total buckets by count; --bottom-per-group limits sub-keys within each primary group)",
+    );
+    return 2;
+  }
+  if (bottomPerGroup !== undefined && topPerGroup !== undefined) {
+    printError(
+      ctx.io,
+      "retention summary: --top-per-group and --bottom-per-group are mutually exclusive (opposite ranking directions within each primary group)",
+    );
+    return 2;
+  }
   if (fillGaps && (top !== undefined || (minCount !== undefined && minCount >= 1))) {
     printError(
       ctx.io,
@@ -1592,6 +1626,7 @@ async function runRetentionSummary(
     top,
     minCount,
     topPerGroup,
+    bottomPerGroup,
   };
 
   if (explainFlag && explainAnalyzeFlag) {
@@ -1619,6 +1654,7 @@ async function runRetentionSummary(
       top: top ?? null,
       minCount: minCount ?? null,
       topPerGroup: topPerGroup ?? null,
+      bottomPerGroup: bottomPerGroup ?? null,
       filters: {
         tenantId: tenantFilter ?? null,
         tableName: tableFilter ?? null,
