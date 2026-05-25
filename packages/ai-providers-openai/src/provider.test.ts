@@ -135,7 +135,7 @@ describe("OpenAIProvider.complete — streaming", () => {
     expect(captured[0]?.method).toBe("POST");
     expect(captured[0]?.headers["authorization"]).toBe(`Bearer ${API_KEY}`);
     expect(captured[0]?.headers["accept"]).toBe("text/event-stream");
-    const body = JSON.parse(captured[0]!.body) as Record<string, unknown>;
+    const body = JSON.parse(captured[0]!.body as string) as Record<string, unknown>;
     expect(body["stream"]).toBe(true);
     expect((body["stream_options"] as { include_usage: boolean }).include_usage).toBe(true);
   });
@@ -391,7 +391,7 @@ describe("OpenAIProvider — Responses API path", () => {
       fetch: buildFetch({ asStream: true, capture: captured, responseBody: RESPONSES_STREAM_SAMPLE }),
     });
     for await (const _ of provider.completeViaResponses(fixtureRequest())) void _;
-    const body = JSON.parse(captured[0]!.body) as { reasoning?: { effort: string } };
+    const body = JSON.parse(captured[0]!.body as string) as { reasoning?: { effort: string } };
     expect(body.reasoning?.effort).toBe("high");
   });
 
@@ -686,7 +686,7 @@ describe("OpenAIProvider.moderate (M2.X.8)", () => {
     const result = await provider.moderate({ input: "is this OK?" });
     expect(captured[0]!.url).toBe("https://api.openai.com/v1/moderations");
     expect(captured[0]!.method).toBe("POST");
-    const body = JSON.parse(captured[0]!.body) as {
+    const body = JSON.parse(captured[0]!.body as string) as {
       model: string;
       input: string;
     };
@@ -724,7 +724,7 @@ describe("OpenAIProvider.moderate (M2.X.8)", () => {
       input: "x",
       model: "text-moderation-latest",
     });
-    const body = JSON.parse(captured[0]!.body) as { model: string };
+    const body = JSON.parse(captured[0]!.body as string) as { model: string };
     expect(body.model).toBe("text-moderation-latest");
   });
 
@@ -738,7 +738,7 @@ describe("OpenAIProvider.moderate (M2.X.8)", () => {
       }),
     });
     await provider.moderate({ input: ["one", "two", "three"] });
-    const body = JSON.parse(captured[0]!.body) as { input: string[] };
+    const body = JSON.parse(captured[0]!.body as string) as { input: string[] };
     expect(body.input).toEqual(["one", "two", "three"]);
   });
 
@@ -756,7 +756,7 @@ describe("OpenAIProvider.moderate (M2.X.8)", () => {
       }),
     });
     await provider.moderate({ input: "x" });
-    const body = JSON.parse(captured[0]!.body) as { model: string };
+    const body = JSON.parse(captured[0]!.body as string) as { model: string };
     expect(body.model).toBe("text-moderation-stable");
   });
 

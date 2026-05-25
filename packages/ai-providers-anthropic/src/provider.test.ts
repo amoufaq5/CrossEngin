@@ -1,5 +1,5 @@
 import type { CompletionChunk, CompletionRequest } from "@crossengin/ai-providers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { AnthropicError } from "./errors.js";
 import { AnthropicProvider, type FetchLike, summarizeResponse } from "./provider.js";
@@ -85,7 +85,7 @@ function buildFetch(opts: {
 
 function fixtureRequest(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
   return {
-    task: "architect_chat",
+    task: "executor",
     messages: [{ role: "user", content: "Hello" }],
     tenantId: TENANT,
     sessionId: SESSION,
@@ -152,7 +152,7 @@ describe("AnthropicProvider.complete (streaming)", () => {
     expect(captured[0]?.headers["x-api-key"]).toBe(API_KEY);
     expect(captured[0]?.headers["anthropic-version"]).toBe("2023-06-01");
     expect(captured[0]?.headers["accept"]).toBe("text/event-stream");
-    const body = JSON.parse(captured[0]!.body) as Record<string, unknown>;
+    const body = JSON.parse(captured[0]!.body as string) as Record<string, unknown>;
     expect(body["stream"]).toBe(true);
     expect(body["model"]).toBe("claude-sonnet-4-6");
   });

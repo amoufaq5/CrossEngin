@@ -352,7 +352,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[0]).toEqual({ type: "input_text", text: "what's in this?" });
     expect(userMsg.content[1]).toEqual({
@@ -366,7 +366,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       req([{ role: "user", content: "hello" }]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content).toEqual([{ type: "input_text", text: "hello" }]);
   });
 
@@ -383,7 +383,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[0]).toEqual({ type: "input_text", text: "describe" });
     expect(userMsg.content[1]).toEqual({
@@ -429,7 +429,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content.map((b) => b.type)).toEqual([
       "input_text",
       "input_image",
@@ -469,7 +469,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[1]).toEqual({
       type: "input_image",
@@ -495,7 +495,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[1]).toEqual({
       type: "input_file",
@@ -517,7 +517,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, unknown>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, unknown>> };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[1]).toEqual({
       type: "input_file",
@@ -560,7 +560,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
         ]),
         { defaultModel: "gpt-4o" },
       );
-      const block = built.input[0]!.content[0] as {
+      const block = (built.input[0]! as unknown as { content: ReadonlyArray<Record<string, unknown>> }).content[0] as {
         type: string;
         filename: string;
         file_data: string;
@@ -608,7 +608,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       req([{ role: "user", content: "" }]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
     expect(userMsg.content).toEqual([{ type: "input_text", text: "" }]);
   });
 });

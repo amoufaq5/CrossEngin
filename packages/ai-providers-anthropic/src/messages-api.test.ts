@@ -14,7 +14,7 @@ const SESSION = "sess_abc";
 
 function fixtureCompletionRequest(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
   return {
-    task: "architect_chat",
+    task: "executor",
     messages: [{ role: "user", content: "Hello" }],
     tenantId: TENANT,
     sessionId: SESSION,
@@ -837,7 +837,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       ]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -849,7 +849,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       base([{ type: "text", text: "no caching" }]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -867,7 +867,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       ]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -887,7 +887,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       ]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -902,7 +902,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       ]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -932,7 +932,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       },
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -958,7 +958,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
     // Anthropic puts tool messages as user-role with tool_result block.
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
@@ -977,7 +977,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
       ]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
-    const blocks = req.messages[0]!.content as Array<{
+    const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
     }>;
