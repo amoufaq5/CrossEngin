@@ -164,6 +164,25 @@ describe("WorkflowDefinitionSchema", () => {
     ).toThrow(/duplicate state name/);
   });
 
+  it("rejects cancel_timer action without timerName", () => {
+    expect(() =>
+      WorkflowDefinitionSchema.parse({
+        ...baseDefinition,
+        states: [
+          {
+            name: "submitted",
+            kind: "initial",
+            label: "Submitted",
+            onEntryActions: [{ kind: "cancel_timer", parameters: {} }],
+            onExitActions: [],
+            slaSeconds: null,
+          },
+          ...baseDefinition.states.slice(1),
+        ],
+      }),
+    ).toThrow(/cancel_timer action requires timerName/);
+  });
+
   it("rejects transition referencing undeclared fromState", () => {
     expect(() =>
       WorkflowDefinitionSchema.parse({

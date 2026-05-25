@@ -1299,10 +1299,177 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
     );
   });
 
+  // A scheduled timer puts the instance in waiting_for_timer, so the cancel is
+  // driven by a *firing* timer: a short "checkpoint" (60s) fires and transitions
+  // into "settled", whose on-entry cancels the still-pending long "deadline"
+  // (3600s) — the canonical SLA "completed early, cancel the deadline" pattern.
+  function timerCancellingDefinition(): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "armed",
+          kind: "waiting",
+          label: "Armed",
+          onEntryActions: [
+            { kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds: 3_600 } },
+            { kind: "schedule_timer", parameters: { timerName: "checkpoint", relativeSeconds: 60 } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "settled",
+          kind: "terminal_success",
+          label: "Settled",
+          onEntryActions: [
+            { kind: "cancel_timer", parameters: { timerName: "deadline" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "arm",
+          fromState: "draft",
+          toState: "armed",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "checkpoint_fired",
+          fromState: "armed",
+          toState: "settled",
+          trigger: { kind: "timer_fired", timerName: "checkpoint" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    };
+  }
+
+  it("emits timer_cancelled when cancel_timer runs", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerCancellingDefinition();
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    const { instanceId } = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-cancel",
+    });
+    await engine.tickTimers(new Date("2026-05-16T12:02:00.000Z").getTime());
+    const cancelled = cap.events.find((e) => e.kind === "timer_cancelled");
+    expect(cancelled).toBeDefined();
+    expect(cancelled!.tenantId).toBe(TENANT);
+    expect(cancelled!.instanceId).toBe(instanceId);
+    expect(cancelled!.definitionId).toBe(def.id);
+    expect(cancelled!.attributes["timerName"]).toBe("deadline");
+  });
+
+  it("timer_cancelled carries the SAME timerId as the timer_set it cancels", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerCancellingDefinition();
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-cancel-id",
+    });
+    await engine.tickTimers(new Date("2026-05-16T12:02:00.000Z").getTime());
+    const deadlineSet = cap.events.find(
+      (e) => e.kind === "timer_set" && e.attributes["timerName"] === "deadline",
+    );
+    const cancelled = cap.events.find((e) => e.kind === "timer_cancelled");
+    expect(deadlineSet).toBeDefined();
+    expect(cancelled).toBeDefined();
+    expect(cancelled!.attributes["timerId"]).toBe(
+      deadlineSet!.attributes["timerId"],
+    );
+  });
+
+  it("a cancelled timer does NOT fire on a later tick", async () => {
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerCancellingDefinition();
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-cancel-nofire",
+    });
+    // First tick fires "checkpoint" (60s) and cancels "deadline" (3600s = 13:00).
+    await engine.tickTimers(new Date("2026-05-16T12:02:00.000Z").getTime());
+    // Tick past the deadline's original fireAt — it must NOT fire (cancelled).
+    await engine.tickTimers(new Date("2026-05-16T14:00:00.000Z").getTime());
+    expect(cap.events.some((e) => e.kind === "timer_cancelled")).toBe(true);
+    const fired = cap.events.filter((e) => e.kind === "timer_fired");
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.attributes["timerName"]).toBe("checkpoint");
+  });
+
+  it("cancel_timer for an unknown timer is a safe no-op", async () => {
+    const def: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "cancel_timer", parameters: { timerName: "ghost" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+    };
+    const cap = captureInstrumentation();
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({
+      definition: def,
+      clock,
+      instrumentation: cap.instrumentation,
+    });
+    const { instanceId } = await engine.startInstance({
+      tenantId: TENANT,
+      definitionId: def.id,
+      correlationKey: "po-cancel-ghost",
+    });
+    expect(cap.events.some((e) => e.kind === "timer_cancelled")).toBe(false);
+    const state = await engine.getInstanceState(instanceId);
+    expect(state!.currentState).toBe("draft");
+  });
+
   it("includes timer_set + timer_cancelled in the kinds enum", () => {
-    // timer_cancelled is reserved for when the cancel_timer action is
-    // implemented in a future milestone; the CHECK constraint allows it
-    // so future emit sites can land without a schema migration.
+    // Both timer_set (emitted by schedule_timer) and timer_cancelled (emitted
+    // by cancel_timer) are first-class instrumentation kinds and CHECK-allowed.
     const enabled = WORKFLOW_INSTRUMENTATION_KINDS as readonly string[];
     expect(enabled).toContain("timer_set");
     expect(enabled).toContain("timer_fired");

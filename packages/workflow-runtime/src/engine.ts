@@ -344,16 +344,7 @@ export class WorkflowEngine {
       const definition = this.definitions.get(state.definitionId);
       if (definition === undefined) continue;
       const events = await this.eventLog.listByInstance(instanceId);
-      const scheduled = new Map<string, { id: string; name: string; fireAt: number }>();
-      for (const e of events) {
-        if (e.kind === "timer_scheduled" && e.timerId !== null) {
-          const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
-          const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
-          scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
-        } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
-          scheduled.delete(e.timerId);
-        }
-      }
+      const scheduled = this.activeTimersFromEvents(events);
       for (const timer of scheduled.values()) {
         if (timer.fireAt > nowMs) continue;
         await this.emitInstrumentation("timer_fired", {
@@ -598,6 +589,8 @@ export class WorkflowEngine {
         await this.applyScheduleTimer(instanceId, tenantId, action);
         return;
       case "cancel_timer":
+        await this.applyCancelTimer(instanceId, tenantId, action);
+        return;
       case "spawn_child_workflow":
       case "send_signal":
         throw new Error(`action kind ${action.kind} is not implemented in M3`);
@@ -906,6 +899,75 @@ export class WorkflowEngine {
       correlationId: null,
       causationEventId: null,
     });
+  }
+
+  // Reconstruct the still-active timers for an instance from its event log:
+  // every timer_scheduled minus those later fired or cancelled.
+  private activeTimersFromEvents(
+    events: readonly WorkflowEvent[],
+  ): Map<string, { id: string; name: string; fireAt: number }> {
+    const scheduled = new Map<string, { id: string; name: string; fireAt: number }>();
+    for (const e of events) {
+      if (e.kind === "timer_scheduled" && e.timerId !== null) {
+        const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
+        const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
+        scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
+      } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
+        scheduled.delete(e.timerId);
+      }
+    }
+    return scheduled;
+  }
+
+  // cancel_timer: cancel every still-active timer matching the action's
+  // timerName (rescheduling can leave more than one). Cancelling an already-
+  // fired / unknown timer is a safe no-op (common in saga compensation).
+  private async applyCancelTimer(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const timerName =
+      typeof action.parameters["timerName"] === "string"
+        ? (action.parameters["timerName"] as string)
+        : null;
+    if (timerName === null) return;
+    const events = await this.eventLog.listByInstance(instanceId);
+    const matches = [...this.activeTimersFromEvents(events).values()].filter(
+      (t) => t.name === timerName,
+    );
+    for (const timer of matches) {
+      await this.emitInstrumentation("timer_cancelled", {
+        tenantId,
+        instanceId,
+        definitionId: this.instanceDefinition.get(instanceId) ?? null,
+        correlationId: this.instanceCorrelation.get(instanceId) ?? null,
+        attributes: {
+          timerId: timer.id,
+          timerName: timer.name,
+        },
+      });
+      const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+      await this.appendEvent({
+        instanceId,
+        tenantId,
+        sequenceNumber: nextSeq + 1,
+        kind: "timer_cancelled",
+        occurredAt: this.clock.nowIso(),
+        actorPrincipalId: null,
+        actorSystemId: this.systemActorId,
+        previousState: null,
+        newState: null,
+        activityId: null,
+        signalId: null,
+        timerId: timer.id,
+        childInstanceId: null,
+        variableName: null,
+        payload: { timerName: timer.name },
+        correlationId: null,
+        causationEventId: null,
+      });
+    }
   }
 
   private async emitTerminalForStateKind(

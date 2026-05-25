@@ -197,6 +197,13 @@ export const StateActionSchema = z
         message: "schedule_timer action requires timerName parameter",
       });
     }
+    if (a.kind === "cancel_timer" && !a.parameters.timerName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "timerName"],
+        message: "cancel_timer action requires timerName parameter",
+      });
+    }
     if (a.kind === "set_variable" && !a.parameters.variableName) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
