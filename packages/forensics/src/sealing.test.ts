@@ -222,9 +222,7 @@ describe("sealEvidence + verifyEvidenceSeal", () => {
       publicKeyBase64: kp.publicKeyBase64,
       sealedAt: "2026-05-16T12:00:00.000Z",
     });
-    expect(verifyEvidenceSeal({ bytes, seal, publicKeyBase64: kp.publicKeyBase64 })).toBe(
-      true,
-    );
+    expect(verifyEvidenceSeal({ bytes, seal, publicKeyBase64: kp.publicKeyBase64 })).toBe(true);
   });
 
   it("rejects a tampered payload", () => {

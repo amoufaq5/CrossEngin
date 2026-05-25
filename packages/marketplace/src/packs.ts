@@ -58,7 +58,8 @@ export const PackDependencySchema = z
   .object({
     packId: z.string().regex(PACK_ID_REGEX),
     versionRange: z.string().regex(/^[~^]?\d+\.\d+\.\d+$/, {
-      message: "versionRange must be exact or ~/^ prefixed semver (e.g. '1.2.3', '^1.2.0', '~1.2.0')",
+      message:
+        "versionRange must be exact or ~/^ prefixed semver (e.g. '1.2.3', '^1.2.0', '~1.2.0')",
     }),
     optional: z.boolean().default(false),
   })
@@ -79,8 +80,7 @@ export type PackLicense = (typeof PACK_LICENSES)[number];
 export const PackManifestSchema = z
   .object({
     id: z.string().regex(PACK_ID_REGEX, {
-      message:
-        "pack id must be reverse-DNS dotted lowercase (e.g. 'com.crossengin.pharmacy')",
+      message: "pack id must be reverse-DNS dotted lowercase (e.g. 'com.crossengin.pharmacy')",
     }),
     name: z.string().min(1).max(80),
     description: z.string().min(1).max(500),
@@ -201,9 +201,7 @@ function compareSemver(a: string, b: string): number {
 }
 
 export function packAuthorTrusted(author: PackAuthor): boolean {
-  return (
-    author.kind === "crossengin_official" || author.kind === "certified_partner"
-  );
+  return author.kind === "crossengin_official" || author.kind === "certified_partner";
 }
 
 export function requiresElevatedReview(pack: PackManifest): boolean {

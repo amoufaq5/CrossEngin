@@ -1,9 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import {
-  InMemoryJwksProvider,
-  type JwksProvider,
-} from "@crossengin/api-gateway-runtime";
+import { InMemoryJwksProvider, type JwksProvider } from "@crossengin/api-gateway-runtime";
 
 export interface JwksFile {
   readonly keys: ReadonlyArray<{
@@ -86,9 +83,7 @@ export async function loadJwksFromUrl(
     clearTimeout(timer);
   }
   if (!response.ok) {
-    throw new JwksLoadError(
-      `JWKS url '${url}' returned status ${response.status.toString()}`,
-    );
+    throw new JwksLoadError(`JWKS url '${url}' returned status ${response.status.toString()}`);
   }
   const raw = await response.text();
   let parsed: unknown;
@@ -256,9 +251,7 @@ export interface ResolveJwtFlagsInput {
 
 export const DEFAULT_JWKS_REFRESH_SECONDS = 300;
 
-export async function resolveJwtFlags(
-  input: ResolveJwtFlagsInput,
-): Promise<JwtFlagsResult> {
+export async function resolveJwtFlags(input: ResolveJwtFlagsInput): Promise<JwtFlagsResult> {
   if (input.jwksFile !== null && input.jwksUrl !== null) {
     throw new JwksLoadError("--jwks-file and --jwks-url are mutually exclusive");
   }

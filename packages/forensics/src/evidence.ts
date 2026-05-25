@@ -81,7 +81,7 @@ export const EvidenceItemSchema = z
         message: "retentionUntil must be after collectedAt",
       });
     }
-    if (v.collectedBy === v.sealedBy && v.kind !== "automated_collection" as never) {
+    if (v.collectedBy === v.sealedBy && v.kind !== ("automated_collection" as never)) {
       // collectedBy and sealedBy must differ for human collection (two-person integrity)
       if (v.provenance === "human_collection" || v.provenance === "forensic_imaging") {
         ctx.addIssue({
@@ -107,10 +107,7 @@ export const EvidenceItemSchema = z
         });
       }
     }
-    if (
-      v.sensitivity === "attorney_client_privileged" &&
-      v.provenance === "automated_collection"
-    ) {
+    if (v.sensitivity === "attorney_client_privileged" && v.provenance === "automated_collection") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["provenance"],
@@ -136,17 +133,11 @@ export function isEvidenceSealed(item: EvidenceItem): boolean {
   return item.destroyedAt === null;
 }
 
-export function isEvidenceRetentionExpired(
-  item: EvidenceItem,
-  now: Date = new Date(),
-): boolean {
+export function isEvidenceRetentionExpired(item: EvidenceItem, now: Date = new Date()): boolean {
   return now.getTime() >= new Date(item.retentionUntil).getTime();
 }
 
-export function canDestroyEvidence(
-  item: EvidenceItem,
-  now: Date = new Date(),
-): boolean {
+export function canDestroyEvidence(item: EvidenceItem, now: Date = new Date()): boolean {
   if (item.destroyedAt !== null) return false;
   if (item.legalHoldIds.length > 0) return false;
   return isEvidenceRetentionExpired(item, now);

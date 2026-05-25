@@ -71,14 +71,33 @@ export const WorkflowEventSchema = z
     actorSystemId: z.string().max(120).nullable(),
     previousState: z.string().max(80).nullable(),
     newState: z.string().max(80).nullable(),
-    activityId: z.string().regex(/^wfa_[a-z0-9]{8,40}$/).nullable(),
-    signalId: z.string().regex(/^wfs_[a-z0-9]{8,40}$/).nullable(),
-    timerId: z.string().regex(/^wft_[a-z0-9]{8,40}$/).nullable(),
-    childInstanceId: z.string().regex(/^wfi_[a-z0-9]{8,40}$/).nullable(),
-    variableName: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80).nullable(),
+    activityId: z
+      .string()
+      .regex(/^wfa_[a-z0-9]{8,40}$/)
+      .nullable(),
+    signalId: z
+      .string()
+      .regex(/^wfs_[a-z0-9]{8,40}$/)
+      .nullable(),
+    timerId: z
+      .string()
+      .regex(/^wft_[a-z0-9]{8,40}$/)
+      .nullable(),
+    childInstanceId: z
+      .string()
+      .regex(/^wfi_[a-z0-9]{8,40}$/)
+      .nullable(),
+    variableName: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(80)
+      .nullable(),
     payload: z.record(z.string(), z.unknown()).default({}),
     correlationId: z.string().max(200).nullable(),
-    causationEventId: z.string().regex(/^wfe_[a-z0-9]{8,40}$/).nullable(),
+    causationEventId: z
+      .string()
+      .regex(/^wfe_[a-z0-9]{8,40}$/)
+      .nullable(),
   })
   .superRefine((e, ctx) => {
     if (e.kind === "state_transitioned") {
@@ -86,8 +105,7 @@ export const WorkflowEventSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["newState"],
-          message:
-            "state_transitioned event requires previousState + newState",
+          message: "state_transitioned event requires previousState + newState",
         });
       }
       if (e.previousState === e.newState) {
@@ -127,8 +145,7 @@ export const WorkflowEventSchema = z
       });
     }
     if (
-      (e.kind === "child_workflow_spawned" ||
-        e.kind === "child_workflow_completed") &&
+      (e.kind === "child_workflow_spawned" || e.kind === "child_workflow_completed") &&
       e.childInstanceId === null
     ) {
       ctx.addIssue({
@@ -235,9 +252,7 @@ export const summarizeInstanceHistory = (
 
 export const isHistoryDense = (events: readonly WorkflowEvent[]): boolean => {
   if (events.length === 0) return true;
-  const sorted = [...events].sort(
-    (a, b) => a.sequenceNumber - b.sequenceNumber,
-  );
+  const sorted = [...events].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
   for (let i = 0; i < sorted.length; i++) {
     if (sorted[i]?.sequenceNumber !== i) return false;
   }
@@ -247,9 +262,7 @@ export const isHistoryDense = (events: readonly WorkflowEvent[]): boolean => {
 export const reconstructStateTimeline = (
   events: readonly WorkflowEvent[],
 ): readonly { readonly state: string; readonly enteredAt: string }[] => {
-  const sorted = [...events].sort(
-    (a, b) => a.sequenceNumber - b.sequenceNumber,
-  );
+  const sorted = [...events].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
   const timeline: { state: string; enteredAt: string }[] = [];
   for (const e of sorted) {
     if (e.kind === "instance_started" && e.newState !== null) {

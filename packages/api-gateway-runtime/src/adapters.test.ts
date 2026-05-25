@@ -51,9 +51,7 @@ describe("buildIncomingRequest", () => {
     expect(req.forwardedProto).toBe("https");
     expect(req.bodyBytes).toBe(15);
     expect(req.bodySha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(req.traceparent).toBe(
-      "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
-    );
+    expect(req.traceparent).toBe("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01");
   });
 
   it("normalizes header names to lowercase", () => {
@@ -78,7 +76,7 @@ describe("buildIncomingRequest", () => {
       receivedAt: "2026-05-16T12:00:00.000Z",
       method: "GET",
       path: "/",
-      headers: { "accept": ["text/html", "application/json"] },
+      headers: { accept: ["text/html", "application/json"] },
       host: "x.example",
       scheme: "https",
       bodyBytes: null,

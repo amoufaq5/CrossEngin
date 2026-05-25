@@ -77,9 +77,7 @@ describe("DatasetSchema", () => {
     expect(() =>
       DatasetSchema.parse({
         ...base,
-        splits: [
-          { name: "validation", sampleCount: 10_000, sha256: SHA, sizeBytes: 1 },
-        ],
+        splits: [{ name: "validation", sampleCount: 10_000, sha256: SHA, sizeBytes: 1 }],
         totalSampleCount: 10_000,
       }),
     ).toThrow(/must include a 'train' split/);
@@ -116,9 +114,7 @@ describe("DatasetSchema", () => {
   });
 
   it("rejects frozen without frozenSha256", () => {
-    expect(() =>
-      DatasetSchema.parse({ ...base, frozenSha256: null }),
-    ).toThrow(/frozenSha256/);
+    expect(() => DatasetSchema.parse({ ...base, frozenSha256: null })).toThrow(/frozenSha256/);
   });
 
   it("rejects PII + differential_privacy with low k-anonymity", () => {
@@ -202,8 +198,8 @@ describe("helpers", () => {
 
   it("isDatasetUsableForTraining requires frozen + sha", () => {
     expect(isDatasetUsableForTraining(ds)).toBe(true);
-    expect(
-      isDatasetUsableForTraining({ ...ds, status: "drafting", frozenSha256: null }),
-    ).toBe(false);
+    expect(isDatasetUsableForTraining({ ...ds, status: "drafting", frozenSha256: null })).toBe(
+      false,
+    );
   });
 });

@@ -27,9 +27,11 @@ import {
 } from "./commands.js";
 import { emptyManifest, type Manifest } from "./manifest-io.js";
 
-function buffers(
-  overrides: Partial<RunContext> = {},
-): { ctx: RunContext; out: () => string; err: () => string } {
+function buffers(overrides: Partial<RunContext> = {}): {
+  ctx: RunContext;
+  out: () => string;
+  err: () => string;
+} {
   const out: string[] = [];
   const err: string[] = [];
   const ctx: RunContext = {
@@ -318,10 +320,7 @@ describe("runChat", () => {
       env: { ANTHROPIC_API_KEY: "sk-test" },
       providerOverride: provider,
     });
-    const code = await runChat(
-      parsed("chat", "--model=claude-sonnet-4-6", "--prompt=hi"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--model=claude-sonnet-4-6", "--prompt=hi"), ctx);
     expect(code).toBe(0);
     expect(out()).toContain("claude says hi");
   });
@@ -334,10 +333,7 @@ describe("runChat", () => {
         { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
       ]),
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--cost-ceiling-usd=zero"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--cost-ceiling-usd=zero"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("--cost-ceiling-usd");
   });
@@ -351,10 +347,7 @@ describe("runChat", () => {
       env: { ANTHROPIC_API_KEY: "sk-test" },
       providerOverride: provider,
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--cost-ceiling-usd=0.05"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--cost-ceiling-usd=0.05"), ctx);
     expect(code).toBe(0);
     expect(out()).toContain("fine");
   });
@@ -367,10 +360,7 @@ describe("runChat", () => {
         { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
       ]),
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--max-cost-usd=-1"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--max-cost-usd=-1"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("--max-cost-usd");
   });
@@ -384,10 +374,7 @@ describe("runChat", () => {
       env: { ANTHROPIC_API_KEY: "sk-test" },
       providerOverride: provider,
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--max-cost-usd=1.0"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--max-cost-usd=1.0"), ctx);
     expect(code).toBe(0);
     expect(out()).toContain("ok");
   });
@@ -481,10 +468,7 @@ describe("runChat", () => {
       env: { ANTHROPIC_API_KEY: "sk-test" },
       providerOverride: provider,
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--system-file", path),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--system-file", path), ctx);
     expect(code).toBe(0);
     expect(out()).toContain("yes");
   });
@@ -494,10 +478,7 @@ describe("runChat", () => {
       env: { ANTHROPIC_API_KEY: "sk-test" },
       providerOverride: new StubProvider([]),
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--max-tool-iterations=zero"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--max-tool-iterations=zero"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --max-tool-iterations");
   });
@@ -510,10 +491,7 @@ describe("runChat", () => {
         { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
       ]),
     });
-    const code = await runChat(
-      parsed("chat", "--prompt=hi", "--allow-file-write"),
-      ctx,
-    );
+    const code = await runChat(parsed("chat", "--prompt=hi", "--allow-file-write"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("--auto-approve-writes");
   });

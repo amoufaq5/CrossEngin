@@ -4,17 +4,11 @@ import { InMemoryEventLog } from "@crossengin/workflow-runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresActivityStore } from "./activity-store.js";
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 import { PostgresInstanceStore } from "./instance-store.js";
 import { PostgresSignalStore } from "./signal-store.js";
 import { PostgresTimerStore } from "./timer-store.js";
-import {
-  ProjectingEventLog,
-  buildPersistentStores,
-} from "./projecting-event-log.js";
+import { ProjectingEventLog, buildPersistentStores } from "./projecting-event-log.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const DEF_UUID = "00000000-0000-4000-8000-000000000900";
@@ -30,9 +24,30 @@ function fixtureDefinition(): WorkflowDefinition {
     description: "",
     status: "published",
     states: [
-      { name: "draft", kind: "initial", label: "D", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "awaiting", kind: "waiting", label: "W", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "approved", kind: "terminal_success", label: "A", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "draft",
+        kind: "initial",
+        label: "D",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "awaiting",
+        kind: "waiting",
+        label: "W",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "approved",
+        kind: "terminal_success",
+        label: "A",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
     ],
     transitions: [
       {
@@ -190,9 +205,7 @@ describe("ProjectingEventLog.append — subsequent events", () => {
       correlationId: null,
       causationEventId: null,
     });
-    const updateInstance = capture.find((c) =>
-      c.sql.includes("UPDATE meta.workflow_instances"),
-    );
+    const updateInstance = capture.find((c) => c.sql.includes("UPDATE meta.workflow_instances"));
     expect(updateInstance).toBeDefined();
   });
 
@@ -251,9 +264,7 @@ describe("ProjectingEventLog.append — subsequent events", () => {
       correlationId: null,
       causationEventId: null,
     });
-    const signalInsert = capture.find((c) =>
-      c.sql.includes("INSERT INTO meta.workflow_signals"),
-    );
+    const signalInsert = capture.find((c) => c.sql.includes("INSERT INTO meta.workflow_signals"));
     expect(signalInsert).toBeDefined();
     expect(signalInsert?.params?.[0]).toBe("wfs_sig00001");
   });
@@ -282,9 +293,7 @@ describe("ProjectingEventLog.append — subsequent events", () => {
       correlationId: null,
       causationEventId: null,
     });
-    const timerInsert = capture.find((c) =>
-      c.sql.includes("INSERT INTO meta.workflow_timers"),
-    );
+    const timerInsert = capture.find((c) => c.sql.includes("INSERT INTO meta.workflow_timers"));
     expect(timerInsert).toBeDefined();
     expect(timerInsert?.params?.[0]).toBe("wft_tim00001");
   });
@@ -336,9 +345,7 @@ describe("ProjectingEventLog — read-through helpers", () => {
         causationEventId: null,
       },
     ]);
-    const updates = capture.filter((c) =>
-      c.sql.includes("UPDATE meta.workflow_instances"),
-    );
+    const updates = capture.filter((c) => c.sql.includes("UPDATE meta.workflow_instances"));
     expect(updates.length).toBeGreaterThan(0);
   });
 });

@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  chunksFromResponsesSse,
-  parseResponsesSseEvents,
-} from "./responses-streaming.js";
+import { chunksFromResponsesSse, parseResponsesSseEvents } from "./responses-streaming.js";
 
 const TEXT_STREAM = [
   `event: response.created\ndata: {"response":{"id":"resp_1"}}`,
@@ -26,9 +23,7 @@ const TOOL_STREAM = [
 
 describe("parseResponsesSseEvents", () => {
   it("captures event name + data per block", () => {
-    const events = parseResponsesSseEvents(
-      `event: a\ndata: hello\n\nevent: b\ndata: world\n\n`,
-    );
+    const events = parseResponsesSseEvents(`event: a\ndata: hello\n\nevent: b\ndata: world\n\n`);
     expect(events).toHaveLength(2);
     expect(events[0]).toEqual({ event: "a", data: "hello" });
     expect(events[1]).toEqual({ event: "b", data: "world" });
@@ -50,10 +45,7 @@ describe("chunksFromResponsesSse — text-only stream", () => {
   it("yields text deltas in order", () => {
     const chunks = [...chunksFromResponsesSse(TEXT_STREAM, "gpt-4o")];
     const texts = chunks.filter((c) => c.kind === "text");
-    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual([
-      "Hello",
-      " there",
-    ]);
+    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual(["Hello", " there"]);
   });
 
   it("emits usage_final with real token counts at the end", () => {
@@ -88,9 +80,7 @@ describe("chunksFromResponsesSse — tool-call stream", () => {
     const chunks = [...chunksFromResponsesSse(TOOL_STREAM, "gpt-4o")];
     const deltas = chunks.filter((c) => c.kind === "tool_call_arg_delta");
     expect(deltas.length).toBeGreaterThanOrEqual(2);
-    const joined = deltas
-      .map((c) => (c.kind === "tool_call_arg_delta" ? c.delta : ""))
-      .join("");
+    const joined = deltas.map((c) => (c.kind === "tool_call_arg_delta" ? c.delta : "")).join("");
     expect(JSON.parse(joined)).toEqual({ q: "x" });
   });
 

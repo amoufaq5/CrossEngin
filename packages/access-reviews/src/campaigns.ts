@@ -24,9 +24,7 @@ export const CAMPAIGN_STATUSES = [
 ] as const;
 export type CampaignStatus = (typeof CAMPAIGN_STATUSES)[number];
 
-export const CAMPAIGN_TRANSITIONS: Readonly<
-  Record<CampaignStatus, readonly CampaignStatus[]>
-> = {
+export const CAMPAIGN_TRANSITIONS: Readonly<Record<CampaignStatus, readonly CampaignStatus[]>> = {
   draft: ["scheduled", "cancelled"],
   scheduled: ["in_progress", "cancelled"],
   in_progress: ["in_remediation", "completed", "cancelled"],
@@ -36,10 +34,8 @@ export const CAMPAIGN_TRANSITIONS: Readonly<
   cancelled: [],
 };
 
-export const canTransitionCampaign = (
-  from: CampaignStatus,
-  to: CampaignStatus,
-): boolean => CAMPAIGN_TRANSITIONS[from].includes(to);
+export const canTransitionCampaign = (from: CampaignStatus, to: CampaignStatus): boolean =>
+  CAMPAIGN_TRANSITIONS[from].includes(to);
 
 export const REVIEWER_ASSIGNMENT_POLICIES = [
   "principal_manager",
@@ -48,8 +44,7 @@ export const REVIEWER_ASSIGNMENT_POLICIES = [
   "ai_suggested_human_confirmed",
   "round_robin_pool",
 ] as const;
-export type ReviewerAssignmentPolicy =
-  (typeof REVIEWER_ASSIGNMENT_POLICIES)[number];
+export type ReviewerAssignmentPolicy = (typeof REVIEWER_ASSIGNMENT_POLICIES)[number];
 
 export const AUTO_REVOKE_POLICIES = [
   "auto_revoke_on_deadline",
@@ -81,12 +76,7 @@ export const ReviewerAssignmentSchema = z
       .regex(/^[a-z][a-z0-9_-]*$/)
       .nullable(),
     escalationChainUserIds: z.array(z.string().uuid()).max(10).default([]),
-    escalationTimeoutHours: z
-      .number()
-      .int()
-      .min(1)
-      .max(720)
-      .default(72),
+    escalationTimeoutHours: z.number().int().min(1).max(720).default(72),
   })
   .superRefine((r, ctx) => {
     if (r.policy === "specific_user" && r.specificReviewerUserId === null) {
@@ -103,10 +93,7 @@ export const ReviewerAssignmentSchema = z
         message: "role_based policy requires roleBasedReviewerRoleSlug",
       });
     }
-    if (
-      r.policy === "round_robin_pool" &&
-      r.reviewerPoolUserIds.length === 0
-    ) {
+    if (r.policy === "round_robin_pool" && r.reviewerPoolUserIds.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["reviewerPoolUserIds"],
@@ -187,15 +174,11 @@ export const AccessReviewCampaignSchema = z
         message: "cancelled campaign requires cancelledReason",
       });
     }
-    if (
-      c.decidedItems + c.autoRevokedItems + c.exceptionItems >
-      c.totalItems
-    ) {
+    if (c.decidedItems + c.autoRevokedItems + c.exceptionItems > c.totalItems) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["totalItems"],
-        message:
-          "decided + auto_revoked + exception counts cannot exceed totalItems",
+        message: "decided + auto_revoked + exception counts cannot exceed totalItems",
       });
     }
     if (
@@ -205,14 +188,10 @@ export const AccessReviewCampaignSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["status"],
-        message:
-          "completed campaign must have all items decided/auto-revoked/excepted",
+        message: "completed campaign must have all items decided/auto-revoked/excepted",
       });
     }
-    if (
-      c.framework === "sox_quarterly" as never &&
-      c.frequency !== "sox_quarterly"
-    ) {
+    if (c.framework === ("sox_quarterly" as never) && c.frequency !== "sox_quarterly") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["frequency"],
@@ -221,11 +200,7 @@ export const AccessReviewCampaignSchema = z
     }
     const startedAt = c.startedAt ? Date.parse(c.startedAt) : null;
     const completedAt = c.completedAt ? Date.parse(c.completedAt) : null;
-    if (
-      startedAt !== null &&
-      completedAt !== null &&
-      completedAt < startedAt
-    ) {
+    if (startedAt !== null && completedAt !== null && completedAt < startedAt) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["completedAt"],
@@ -235,32 +210,22 @@ export const AccessReviewCampaignSchema = z
   });
 export type AccessReviewCampaign = z.infer<typeof AccessReviewCampaignSchema>;
 
-export const computeCampaignProgress = (
-  campaign: AccessReviewCampaign,
-): number => {
+export const computeCampaignProgress = (campaign: AccessReviewCampaign): number => {
   if (campaign.totalItems === 0) return 1;
-  const resolved =
-    campaign.decidedItems + campaign.autoRevokedItems + campaign.exceptionItems;
+  const resolved = campaign.decidedItems + campaign.autoRevokedItems + campaign.exceptionItems;
   return resolved / campaign.totalItems;
 };
 
-export const isPastDeadline = (
-  campaign: AccessReviewCampaign,
-  now: Date,
-): boolean => now.getTime() > Date.parse(campaign.deadlineAt);
+export const isPastDeadline = (campaign: AccessReviewCampaign, now: Date): boolean =>
+  now.getTime() > Date.parse(campaign.deadlineAt);
 
-export const isPastGracePeriod = (
-  campaign: AccessReviewCampaign,
-  now: Date,
-): boolean => {
+export const isPastGracePeriod = (campaign: AccessReviewCampaign, now: Date): boolean => {
   const deadlineMs = Date.parse(campaign.deadlineAt);
   const graceMs = campaign.gracePeriodHours * 3_600_000;
   return now.getTime() > deadlineMs + graceMs;
 };
 
-export const computeNextScheduledStart = (
-  current: AccessReviewCampaign,
-): string | null => {
+export const computeNextScheduledStart = (current: AccessReviewCampaign): string | null => {
   if (current.frequency === "one_time") return null;
   if (current.frequency === "ad_hoc") return null;
   if (current.frequency === "post_incident") return null;

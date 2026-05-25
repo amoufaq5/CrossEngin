@@ -141,9 +141,7 @@ describe("isTemplateUsable", () => {
   });
 
   it("returns false for retired template", () => {
-    expect(
-      isTemplateUsable({ ...baseTemplate, status: "retired" }, now),
-    ).toBe(false);
+    expect(isTemplateUsable({ ...baseTemplate, status: "retired" }, now)).toBe(false);
   });
 
   it("returns false for draft template", () => {

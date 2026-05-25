@@ -101,11 +101,7 @@ export function signDecisionAttestation(input: {
 }): SignedAttestation {
   const bytes = canonicalAttestationBytes(input.attestation);
   const sha256Hex = sha256(bytes);
-  const signatureBase64 = signEd25519(
-    input.privateKeyBase64,
-    input.publicKeyBase64,
-    bytes,
-  );
+  const signatureBase64 = signEd25519(input.privateKeyBase64, input.publicKeyBase64, bytes);
   const out: SignedAttestation = {
     kind: input.attestation.kind,
     attestedAt: input.attestation.attestedAt,
@@ -129,9 +125,7 @@ export async function signDecisionAttestationWithStore(input: {
   readonly tenantId: string | null;
 }): Promise<SignedAttestation> {
   if (input.handle.algorithm !== "ed25519") {
-    throw new Error(
-      `attestation signing requires an ed25519 key, got ${input.handle.algorithm}`,
-    );
+    throw new Error(`attestation signing requires an ed25519 key, got ${input.handle.algorithm}`);
   }
   if (input.handle.purpose !== "evidence_sealing") {
     throw new Error(
@@ -170,8 +164,7 @@ export function verifyDecisionAttestation(input: {
   if (input.attestation.signatureSha256 === null) return false;
   if (input.attestation.signingKeyFingerprint === null) return false;
   if (
-    ed25519PublicKeyFingerprint(input.publicKeyBase64) !==
-    input.attestation.signingKeyFingerprint
+    ed25519PublicKeyFingerprint(input.publicKeyBase64) !== input.attestation.signingKeyFingerprint
   ) {
     return false;
   }

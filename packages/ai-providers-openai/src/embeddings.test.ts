@@ -46,9 +46,7 @@ describe("normalizeEmbeddingResponse", () => {
     const raw: OpenAIEmbeddingsResponse = {
       object: "list",
       model: "text-embedding-3-small",
-      data: [
-        { object: "embedding", embedding: [0.1, 0.2, 0.3], index: 0 },
-      ],
+      data: [{ object: "embedding", embedding: [0.1, 0.2, 0.3], index: 0 }],
       usage: { prompt_tokens: 1_000_000, total_tokens: 1_000_000 },
     };
     const norm = normalizeEmbeddingResponse("text-embedding-3-small", raw);

@@ -55,10 +55,12 @@ export function canPerform(
   if (entityVerdict === undefined) {
     return { allowed: false, reason: `no permission entry for entity '${entityName}'` };
   }
-  return entityVerdict.operations[operation] ?? {
-    allowed: false,
-    reason: `no verdict for operation '${operation}'`,
-  };
+  return (
+    entityVerdict.operations[operation] ?? {
+      allowed: false,
+      reason: `no verdict for operation '${operation}'`,
+    }
+  );
 }
 
 export function isFieldRedacted(

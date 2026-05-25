@@ -55,9 +55,7 @@ describe("OpenAIError.isRetryable", () => {
   });
 
   it("returns false for content_filtered (M2.X.6 — terminal)", () => {
-    expect(
-      new OpenAIError({ kind: "content_filtered", message: "x" }).isRetryable(),
-    ).toBe(false);
+    expect(new OpenAIError({ kind: "content_filtered", message: "x" }).isRetryable()).toBe(false);
   });
 });
 
@@ -79,12 +77,12 @@ describe("OpenAIError x kernel isRetryableError (M2.X.7)", () => {
 
   it("kernel isRetryableError returns false for content_filtered + authentication_error", async () => {
     const { isRetryableError } = await import("@crossengin/ai-providers");
-    expect(
-      isRetryableError(new OpenAIError({ kind: "content_filtered", message: "" })),
-    ).toBe(false);
-    expect(
-      isRetryableError(new OpenAIError({ kind: "authentication_error", message: "" })),
-    ).toBe(false);
+    expect(isRetryableError(new OpenAIError({ kind: "content_filtered", message: "" }))).toBe(
+      false,
+    );
+    expect(isRetryableError(new OpenAIError({ kind: "authentication_error", message: "" }))).toBe(
+      false,
+    );
   });
 });
 
@@ -98,12 +96,12 @@ describe("OpenAIError x kernel isInputTooLargeError (M2.X.9)", () => {
 
   it("kernel isInputTooLargeError returns false for other kinds", async () => {
     const { isInputTooLargeError } = await import("@crossengin/ai-providers");
-    expect(
-      isInputTooLargeError(new OpenAIError({ kind: "rate_limit_error", message: "" })),
-    ).toBe(false);
-    expect(
-      isInputTooLargeError(new OpenAIError({ kind: "content_filtered", message: "" })),
-    ).toBe(false);
+    expect(isInputTooLargeError(new OpenAIError({ kind: "rate_limit_error", message: "" }))).toBe(
+      false,
+    );
+    expect(isInputTooLargeError(new OpenAIError({ kind: "content_filtered", message: "" }))).toBe(
+      false,
+    );
   });
 });
 

@@ -10,12 +10,9 @@ export const BEDROCK_GUARDRAIL_STATUSES = [
 ] as const;
 export type BedrockGuardrailStatus = (typeof BEDROCK_GUARDRAIL_STATUSES)[number];
 
-export function isBedrockGuardrailStatus(
-  value: unknown,
-): value is BedrockGuardrailStatus {
+export function isBedrockGuardrailStatus(value: unknown): value is BedrockGuardrailStatus {
   return (
-    typeof value === "string" &&
-    (BEDROCK_GUARDRAIL_STATUSES as readonly string[]).includes(value)
+    typeof value === "string" && (BEDROCK_GUARDRAIL_STATUSES as readonly string[]).includes(value)
   );
 }
 
@@ -82,9 +79,7 @@ export function buildGuardrailListQuery(
   return out;
 }
 
-export function parseGuardrailListResponse(
-  raw: unknown,
-): BedrockGuardrailListResponse {
+export function parseGuardrailListResponse(raw: unknown): BedrockGuardrailListResponse {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -167,14 +162,8 @@ function expectString(obj: Record<string, unknown>, key: string): string {
   return v;
 }
 
-export const BEDROCK_GUARDRAIL_FILTER_STRENGTHS = [
-  "NONE",
-  "LOW",
-  "MEDIUM",
-  "HIGH",
-] as const;
-export type BedrockGuardrailFilterStrength =
-  (typeof BEDROCK_GUARDRAIL_FILTER_STRENGTHS)[number];
+export const BEDROCK_GUARDRAIL_FILTER_STRENGTHS = ["NONE", "LOW", "MEDIUM", "HIGH"] as const;
+export type BedrockGuardrailFilterStrength = (typeof BEDROCK_GUARDRAIL_FILTER_STRENGTHS)[number];
 
 export const BEDROCK_GUARDRAIL_CONTENT_FILTER_TYPES = [
   "SEXUAL",
@@ -326,10 +315,7 @@ export function parseGuardrailDetail(raw: unknown): BedrockGuardrailDetail {
   }
   const failureRecommendations = j["failureRecommendations"];
   if (Array.isArray(failureRecommendations)) {
-    out.failureRecommendations = parseStringArray(
-      failureRecommendations,
-      "failureRecommendations",
-    );
+    out.failureRecommendations = parseStringArray(failureRecommendations, "failureRecommendations");
   }
   if (j["contentPolicy"] !== undefined) {
     out.contentPolicy = parseContentPolicy(j["contentPolicy"]);
@@ -346,9 +332,7 @@ export function parseGuardrailDetail(raw: unknown): BedrockGuardrailDetail {
     );
   }
   if (j["contextualGroundingPolicy"] !== undefined) {
-    out.contextualGroundingPolicy = parseContextualGroundingPolicy(
-      j["contextualGroundingPolicy"],
-    );
+    out.contextualGroundingPolicy = parseContextualGroundingPolicy(j["contextualGroundingPolicy"]);
   }
   return out;
 }
@@ -385,9 +369,7 @@ function isFilterStrength(value: unknown): value is BedrockGuardrailFilterStreng
   );
 }
 
-function isContentFilterType(
-  value: unknown,
-): value is BedrockGuardrailContentFilterType {
+function isContentFilterType(value: unknown): value is BedrockGuardrailContentFilterType {
   return (
     typeof value === "string" &&
     (BEDROCK_GUARDRAIL_CONTENT_FILTER_TYPES as readonly string[]).includes(value)
@@ -399,9 +381,7 @@ function isContextualGroundingFilterType(
 ): value is BedrockGuardrailContextualGroundingFilterType {
   return (
     typeof value === "string" &&
-    (BEDROCK_GUARDRAIL_CONTEXTUAL_GROUNDING_FILTER_TYPES as readonly string[]).includes(
-      value,
-    )
+    (BEDROCK_GUARDRAIL_CONTEXTUAL_GROUNDING_FILTER_TYPES as readonly string[]).includes(value)
   );
 }
 
@@ -547,9 +527,7 @@ function parseWordPolicy(raw: unknown): BedrockGuardrailWordPolicy {
   return out;
 }
 
-function parseSensitiveInformationPolicy(
-  raw: unknown,
-): BedrockGuardrailSensitiveInformationPolicy {
+function parseSensitiveInformationPolicy(raw: unknown): BedrockGuardrailSensitiveInformationPolicy {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -616,9 +594,7 @@ function parseRegex(raw: unknown, index: number): BedrockGuardrailRegex {
   return out;
 }
 
-function parseContextualGroundingPolicy(
-  raw: unknown,
-): BedrockGuardrailContextualGroundingPolicy {
+function parseContextualGroundingPolicy(raw: unknown): BedrockGuardrailContextualGroundingPolicy {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",

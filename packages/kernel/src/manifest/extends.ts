@@ -123,10 +123,7 @@ function mergeContent(base: Manifest, overlay: Manifest): Manifest {
   };
 }
 
-function mergeSearch(
-  base: Manifest["search"],
-  overlay: Manifest["search"],
-): Manifest["search"] {
+function mergeSearch(base: Manifest["search"], overlay: Manifest["search"]): Manifest["search"] {
   if (base === undefined && overlay === undefined) return undefined;
   const baseEntities = base?.entities ?? {};
   const overlayEntities = overlay?.entities ?? {};
@@ -138,22 +135,17 @@ function mergeSearch(
           globalIndex: overlayFiles?.globalIndex ?? baseFiles?.globalIndex ?? false,
           ocr: overlayFiles?.ocr ?? baseFiles?.ocr ?? false,
           embedding: overlayFiles?.embedding ?? baseFiles?.embedding ?? false,
-          embeddingScope:
-            overlayFiles?.embeddingScope ?? baseFiles?.embeddingScope ?? "tenant",
+          embeddingScope: overlayFiles?.embeddingScope ?? baseFiles?.embeddingScope ?? "tenant",
         }
       : undefined;
   return {
     entities: { ...baseEntities, ...overlayEntities },
-    defaultDictionary:
-      overlay?.defaultDictionary ?? base?.defaultDictionary ?? "simple",
+    defaultDictionary: overlay?.defaultDictionary ?? base?.defaultDictionary ?? "simple",
     ...(mergedFiles !== undefined ? { files: mergedFiles } : {}),
   };
 }
 
-function mergeI18nBundles(
-  base: Manifest["i18n"],
-  overlay: Manifest["i18n"],
-): Manifest["i18n"] {
+function mergeI18nBundles(base: Manifest["i18n"], overlay: Manifest["i18n"]): Manifest["i18n"] {
   if (base === undefined) return overlay;
   if (overlay === undefined) return base;
   const translations: Record<string, Record<string, string>> = {};

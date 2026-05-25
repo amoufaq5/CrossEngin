@@ -62,9 +62,9 @@ describe("ParsedAuthCredentialSchema", () => {
   });
 
   it("rejects bearer_jwt without tokenSha256", () => {
-    expect(() =>
-      ParsedAuthCredentialSchema.parse({ ...baseJwt, tokenSha256: null }),
-    ).toThrow(/bearer_jwt requires tokenSha256/);
+    expect(() => ParsedAuthCredentialSchema.parse({ ...baseJwt, tokenSha256: null })).toThrow(
+      /bearer_jwt requires tokenSha256/,
+    );
   });
 
   it("rejects api_key_header without prefix + secret", () => {

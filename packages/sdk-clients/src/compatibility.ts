@@ -15,14 +15,13 @@ export const COMPATIBILITY_LEVELS = [
 export type CompatibilityLevel = (typeof COMPATIBILITY_LEVELS)[number];
 export const CompatibilityLevelSchema = z.enum(COMPATIBILITY_LEVELS);
 
-export const COMPATIBILITY_RANK: Readonly<Record<CompatibilityLevel, number>> =
-  Object.freeze({
-    fully_compatible: 4,
-    compatible_with_warnings: 3,
-    deprecated_supported: 2,
-    unsupported: 1,
-    blocked: 0,
-  });
+export const COMPATIBILITY_RANK: Readonly<Record<CompatibilityLevel, number>> = Object.freeze({
+  fully_compatible: 4,
+  compatible_with_warnings: 3,
+  deprecated_supported: 2,
+  unsupported: 1,
+  blocked: 0,
+});
 
 export const CompatibilityEntrySchema = z
   .object({
@@ -138,14 +137,9 @@ export function clientsAffectedByApiVersion(
   minLevel: CompatibilityLevel = "unsupported",
 ): readonly CompatibilityEntry[] {
   const min = COMPATIBILITY_RANK[minLevel];
-  return matrix.filter(
-    (e) => e.apiVersion === apiVersion && COMPATIBILITY_RANK[e.level] <= min,
-  );
+  return matrix.filter((e) => e.apiVersion === apiVersion && COMPATIBILITY_RANK[e.level] <= min);
 }
 
-export function meetsLevel(
-  actual: CompatibilityLevel,
-  required: CompatibilityLevel,
-): boolean {
+export function meetsLevel(actual: CompatibilityLevel, required: CompatibilityLevel): boolean {
   return COMPATIBILITY_RANK[actual] >= COMPATIBILITY_RANK[required];
 }

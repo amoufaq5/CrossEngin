@@ -20,12 +20,7 @@ describe("constants", () => {
   });
 
   it("API_VERSION_STATUSES has 4 entries", () => {
-    expect(API_VERSION_STATUSES).toEqual([
-      "preview",
-      "stable",
-      "deprecated",
-      "sunset",
-    ]);
+    expect(API_VERSION_STATUSES).toEqual(["preview", "stable", "deprecated", "sunset"]);
   });
 
   it("declares header name constants", () => {
@@ -94,19 +89,14 @@ describe("ApiVersionSpecSchema", () => {
 });
 
 describe("ApiVersionCatalogSchema", () => {
-  const spec = (
-    version: "v1" | "v2",
-    status: ApiVersionSpec["status"],
-  ): ApiVersionSpec => ({
+  const spec = (version: "v1" | "v2", status: ApiVersionSpec["status"]): ApiVersionSpec => ({
     version,
     status,
     releasedAt: "2026-01-01T00:00:00Z",
     deprecatedAt: status === "deprecated" || status === "sunset" ? "2026-06-01T00:00:00Z" : null,
     sunsetAt: status === "sunset" ? "2027-01-01T00:00:00Z" : null,
     migrationGuideUrl:
-      status === "deprecated" || status === "sunset"
-        ? "https://docs.x.io/v2"
-        : undefined,
+      status === "deprecated" || status === "sunset" ? "https://docs.x.io/v2" : undefined,
     breakingChangeCount: 0,
   });
 

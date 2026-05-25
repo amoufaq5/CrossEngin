@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  CollisionError,
-  PackParameterError,
-  UnknownPackError,
-} from "./errors.js";
+import { CollisionError, PackParameterError, UnknownPackError } from "./errors.js";
 
 describe("UnknownPackError", () => {
   it("is an Error subclass with the right name", () => {
@@ -54,11 +50,7 @@ describe("PackParameterError", () => {
   });
 
   it("includes pack id, parameter name, and message", () => {
-    const err = new PackParameterError(
-      "hipaa",
-      "audit_retention_years",
-      "must be >= 7",
-    );
+    const err = new PackParameterError("hipaa", "audit_retention_years", "must be >= 7");
     expect(err.message).toBe(
       "compliance pack 'hipaa' parameter 'audit_retention_years': must be >= 7",
     );

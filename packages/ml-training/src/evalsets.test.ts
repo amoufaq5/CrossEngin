@@ -54,21 +54,19 @@ describe("EvalExampleSchema", () => {
   });
 
   it("rejects exact_match with threshold < 1", () => {
-    expect(() =>
-      EvalExampleSchema.parse({ ...base, passThreshold: 0.5 }),
-    ).toThrow(/exact_match.*passThreshold=1/);
+    expect(() => EvalExampleSchema.parse({ ...base, passThreshold: 0.5 })).toThrow(
+      /exact_match.*passThreshold=1/,
+    );
   });
 
   it("rejects duplicate tags", () => {
-    expect(() =>
-      EvalExampleSchema.parse({ ...base, tags: ["sql", "sql"] }),
-    ).toThrow(/duplicate tag/);
+    expect(() => EvalExampleSchema.parse({ ...base, tags: ["sql", "sql"] })).toThrow(
+      /duplicate tag/,
+    );
   });
 
   it("rejects malformed example id", () => {
-    expect(() =>
-      EvalExampleSchema.parse({ ...base, id: "EX-1" }),
-    ).toThrow();
+    expect(() => EvalExampleSchema.parse({ ...base, id: "EX-1" })).toThrow();
   });
 });
 

@@ -23,7 +23,11 @@ const ISSUER = "https://issuer.example";
 const AUDIENCE = "https://api.crossengin.io";
 
 function base64UrlEncode(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return Buffer.from(bytes)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 function buildJwt(opts: {
@@ -99,7 +103,9 @@ function fixtureRequest(overrides: Partial<IncomingRequest> = {}): IncomingReque
         ...(o.method !== undefined ? { method: o.method } : {}),
         ...(o.path !== undefined ? { path: o.path } : {}),
         ...(o.headers !== undefined ? { headers: o.headers } : {}),
-        ...(o.bodyBytes !== undefined && o.bodyBytes > 0 ? { bodyBytes: new TextEncoder().encode("x".repeat(o.bodyBytes)) } : {}),
+        ...(o.bodyBytes !== undefined && o.bodyBytes > 0
+          ? { bodyBytes: new TextEncoder().encode("x".repeat(o.bodyBytes)) }
+          : {}),
       };
     })(),
   });
@@ -129,15 +135,17 @@ function buildRuntime(opts: BuildRuntimeOpts = {}) {
       status: 201,
       body: { id: "tenant_abc", created: true },
     }));
-  const principalResolver = opts.principalResolver ?? new InMemoryPrincipalResolver().register(USER, {
-    principalId: USER,
-    tenantId: TENANT,
-    principalKind: "user",
-    authScheme: "bearer_jwt",
-    grantedScopes: ["tenants:write"],
-    mfaProofAgeSeconds: 30,
-    resolvedAt: "2026-05-16T12:00:00.000Z",
-  });
+  const principalResolver =
+    opts.principalResolver ??
+    new InMemoryPrincipalResolver().register(USER, {
+      principalId: USER,
+      tenantId: TENANT,
+      principalKind: "user",
+      authScheme: "bearer_jwt",
+      grantedScopes: ["tenants:write"],
+      mfaProofAgeSeconds: 30,
+      resolvedAt: "2026-05-16T12:00:00.000Z",
+    });
   const idempotencyStore = opts.idempotency ?? new InMemoryIdempotencyStore();
   const rateLimitChecker = opts.rateLimit ?? new InMemoryRateLimitChecker({ limit: 100 });
   const runtime = new GatewayRuntime({
@@ -162,7 +170,10 @@ describe("GatewayRuntime — unauthenticated POST returns 401 + authentication_r
     const { response, execution } = await runtime.handleRequest(request);
     expect(response.status).toBe(401);
     expect(response.headers["www-authenticate"]).toBeDefined();
-    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<string, unknown>;
+    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<
+      string,
+      unknown
+    >;
     expect(body["type"]).toContain("authentication-required");
     expect(execution.finalOutcome).toBe("deny");
     expect(execution.finalStage).toBe("dispatch_handler");
@@ -207,7 +218,10 @@ describe("GatewayRuntime — valid JWT but rate-limit exceeded returns 429 + ret
     );
     expect(second.response.status).toBe(429);
     expect(second.response.headers["retry-after"]).toBeDefined();
-    const body = JSON.parse(new TextDecoder().decode(second.response.bodyBytes!)) as Record<string, unknown>;
+    const body = JSON.parse(new TextDecoder().decode(second.response.bodyBytes!)) as Record<
+      string,
+      unknown
+    >;
     expect(body["type"]).toContain("too-many-requests");
     expect(second.execution.finalOutcome).toBe("deny");
     expect(second.execution.finalStage).toBe("check_rate_limit");
@@ -229,7 +243,9 @@ describe("GatewayRuntime — idempotency-key replay returns cached response", ()
       resolvedAt: "2026-05-16T12:00:00.000Z",
     });
     const idempotency = new InMemoryIdempotencyStore();
-    const routes = new InMemoryRouteRegistry().register(fixtureRoute({ idempotencyRequired: true }));
+    const routes = new InMemoryRouteRegistry().register(
+      fixtureRoute({ idempotencyRequired: true }),
+    );
     const { runtime } = buildRuntime({ jwks, principalResolver, idempotency, routes });
     const token = buildJwt({
       privateKeyBase64: kp.privateKeyBase64,
@@ -345,7 +361,10 @@ describe("GatewayRuntime — insufficient scope returns 403", () => {
       fixtureRequest({ headers: { authorization: `Bearer ${token}` } }),
     );
     expect(response.status).toBe(403);
-    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<string, unknown>;
+    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<
+      string,
+      unknown
+    >;
     expect(body["type"]).toContain("insufficient-scope");
     expect(execution.finalStage).toBe("dispatch_handler");
   });
@@ -410,7 +429,10 @@ describe("GatewayRuntime — weak TLS rejected", () => {
     const { response, execution } = await runtime.handleRequest(req);
     expect(response.status).toBe(400);
     expect(execution.finalStage).toBe("validate_tls");
-    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<string, unknown>;
+    const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<
+      string,
+      unknown
+    >;
     expect(body["type"]).toContain("weak-tls-rejected");
   });
 });
@@ -420,7 +442,9 @@ describe("GatewayRuntime — idempotency_required without key denies", () => {
     const kp = generateEd25519Keypair();
     const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
     const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
-    const routes = new InMemoryRouteRegistry().register(fixtureRoute({ idempotencyRequired: true }));
+    const routes = new InMemoryRouteRegistry().register(
+      fixtureRoute({ idempotencyRequired: true }),
+    );
     const { runtime } = buildRuntime({ jwks, routes });
     const token = buildJwt({
       privateKeyBase64: kp.privateKeyBase64,

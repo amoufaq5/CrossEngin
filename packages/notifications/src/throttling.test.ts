@@ -317,9 +317,9 @@ describe("DigestBatchSchema", () => {
   });
 
   it("rejects itemCount > maxItems", () => {
-    expect(() =>
-      DigestBatchSchema.parse({ ...baseDigest, itemCount: 200, maxItems: 100 }),
-    ).toThrow(/exceeds maxItems/);
+    expect(() => DigestBatchSchema.parse({ ...baseDigest, itemCount: 200, maxItems: 100 })).toThrow(
+      /exceeds maxItems/,
+    );
   });
 
   it("rejects scheduledDispatchAt <= openedAt", () => {

@@ -106,9 +106,7 @@ describe("nextPendingStep", () => {
   it("advances after completing earlier steps", () => {
     const advanced = {
       ...plan,
-      steps: plan.steps.map((s, i) =>
-        i < 3 ? { ...s, status: "completed" as const } : s,
-      ),
+      steps: plan.steps.map((s, i) => (i < 3 ? { ...s, status: "completed" as const } : s)),
     };
     expect(nextPendingStep(advanced)).toBe(MIGRATION_STEPS[3]);
   });

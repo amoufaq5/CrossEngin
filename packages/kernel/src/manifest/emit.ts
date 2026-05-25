@@ -10,10 +10,7 @@ export interface EmitManifestContext {
   readonly schema: string;
 }
 
-export function emitManifestCreate(
-  manifest: Manifest,
-  context: EmitManifestContext,
-): string[] {
+export function emitManifestCreate(manifest: Manifest, context: EmitManifestContext): string[] {
   const entities = manifest.entities ?? [];
   const customTraits: readonly Trait[] = manifest.traits ?? [];
 

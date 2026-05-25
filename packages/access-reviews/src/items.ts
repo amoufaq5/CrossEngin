@@ -17,12 +17,7 @@ export const REVIEW_ITEM_TRANSITIONS: Readonly<
   Record<ReviewItemStatus, readonly ReviewItemStatus[]>
 > = {
   pending: ["in_review", "deferred_to_next_campaign", "withdrawn"],
-  in_review: [
-    "decided",
-    "escalated",
-    "exception_pending",
-    "deferred_to_next_campaign",
-  ],
+  in_review: ["decided", "escalated", "exception_pending", "deferred_to_next_campaign"],
   escalated: ["decided", "auto_revoked", "exception_pending"],
   exception_pending: ["decided", "auto_revoked"],
   decided: [],
@@ -31,10 +26,8 @@ export const REVIEW_ITEM_TRANSITIONS: Readonly<
   withdrawn: [],
 };
 
-export const canTransitionItem = (
-  from: ReviewItemStatus,
-  to: ReviewItemStatus,
-): boolean => REVIEW_ITEM_TRANSITIONS[from].includes(to);
+export const canTransitionItem = (from: ReviewItemStatus, to: ReviewItemStatus): boolean =>
+  REVIEW_ITEM_TRANSITIONS[from].includes(to);
 
 export const REVIEWER_KINDS = [
   "human_user",
@@ -54,9 +47,7 @@ export const ReviewerAssignmentStateSchema = z.object({
   lastReminderAt: z.string().datetime({ offset: true }).nullable(),
   escalationLevel: z.number().int().min(0).max(10),
 });
-export type ReviewerAssignmentState = z.infer<
-  typeof ReviewerAssignmentStateSchema
->;
+export type ReviewerAssignmentState = z.infer<typeof ReviewerAssignmentStateSchema>;
 
 export const AccessReviewItemSchema = z
   .object({
@@ -123,10 +114,7 @@ export const AccessReviewItemSchema = z
         });
       }
     }
-    if (
-      (it.status === "in_review" || it.status === "escalated") &&
-      it.currentReviewer === null
-    ) {
+    if ((it.status === "in_review" || it.status === "escalated") && it.currentReviewer === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["currentReviewer"],
@@ -156,8 +144,7 @@ export const computeRiskLevel = (input: {
   let score = 0;
   if (input.principalType === "service_account") score += 2;
   if (input.principalType === "external_partner") score += 3;
-  if (input.grantKind === "role" || input.grantKind === "tenant_membership")
-    score += 2;
+  if (input.grantKind === "role" || input.grantKind === "tenant_membership") score += 2;
   if (input.grantKind === "api_key_scope") score += 2;
   if (input.mfaStatus === "none") score += 3;
   if (input.mfaStatus === "weak_only_sms") score += 1;
@@ -170,10 +157,7 @@ export const computeRiskLevel = (input: {
   return "low";
 };
 
-export const isItemOverdue = (
-  item: AccessReviewItem,
-  now: Date,
-): boolean => {
+export const isItemOverdue = (item: AccessReviewItem, now: Date): boolean => {
   if (
     item.status === "decided" ||
     item.status === "auto_revoked" ||
@@ -204,14 +188,10 @@ export const assignReviewer = (
   now: Date,
 ): AccessReviewItem => {
   if (reviewerUserId === item.principalId) {
-    throw new Error(
-      "four-eyes: cannot assign principal as reviewer of their own grant",
-    );
+    throw new Error("four-eyes: cannot assign principal as reviewer of their own grant");
   }
   if (!canTransitionItem(item.status, "in_review")) {
-    throw new Error(
-      `cannot transition item from ${item.status} to in_review`,
-    );
+    throw new Error(`cannot transition item from ${item.status} to in_review`);
   }
   return {
     ...item,

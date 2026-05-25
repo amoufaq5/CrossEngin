@@ -192,12 +192,7 @@ describe("isFlagActive / isFlagInEnvironment / isHighRiskFlag", () => {
   });
 
   it("isFlagActive false past expiresAt", () => {
-    expect(
-      isFlagActive(
-        { ...baseFlag, expiresAt: "2026-05-15T00:00:00.000Z" },
-        now,
-      ),
-    ).toBe(false);
+    expect(isFlagActive({ ...baseFlag, expiresAt: "2026-05-15T00:00:00.000Z" }, now)).toBe(false);
   });
 
   it("isFlagInEnvironment matches declared", () => {

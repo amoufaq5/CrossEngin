@@ -31,20 +31,14 @@ export const ExampleResultSchema = z
         message: "error outcome requires errorMessage",
       });
     }
-    if (
-      (v.outcome === "pass" || v.outcome === "fail") &&
-      v.actualOutputSha256 === null
-    ) {
+    if ((v.outcome === "pass" || v.outcome === "fail") && v.actualOutputSha256 === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["actualOutputSha256"],
         message: `outcome '${v.outcome}' requires actualOutputSha256`,
       });
     }
-    if (
-      (v.outcome === "pass" || v.outcome === "fail") &&
-      v.score === null
-    ) {
+    if ((v.outcome === "pass" || v.outcome === "fail") && v.score === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["score"],
@@ -86,16 +80,10 @@ export const EvaluationRunSchema = z
     results: z.array(ExampleResultSchema).default([]),
     blocksPromotion: z.boolean(),
     triggeredBy: z.string().min(1),
-    trigger: z.enum([
-      "manual",
-      "ci_pipeline",
-      "training_completed",
-      "scheduled_regression",
-    ]),
+    trigger: z.enum(["manual", "ci_pipeline", "training_completed", "scheduled_regression"]),
   })
   .superRefine((v, ctx) => {
-    const sum =
-      v.examplesPassed + v.examplesFailed + v.examplesErrored + v.examplesSkipped;
+    const sum = v.examplesPassed + v.examplesFailed + v.examplesErrored + v.examplesSkipped;
     if (sum !== v.examplesEvaluated) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -120,9 +108,7 @@ export const EvaluationRunSchema = z
         message: "p99LatencyMs must be >= p50LatencyMs",
       });
     }
-    if (
-      v.verdict === "regressed" || v.verdict === "improved"
-    ) {
+    if (v.verdict === "regressed" || v.verdict === "improved") {
       if (v.baselineRunId === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -145,10 +131,7 @@ export const EvaluationRunSchema = z
         message: `verdict='failed' requires passRate (${v.passRate.toString()}) < requiredPassRate (${v.requiredPassRate.toString()})`,
       });
     }
-    if (
-      (v.verdict === "failed" || v.verdict === "regressed") &&
-      !v.blocksPromotion
-    ) {
+    if ((v.verdict === "failed" || v.verdict === "regressed") && !v.blocksPromotion) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["blocksPromotion"],
@@ -165,18 +148,12 @@ export const EvaluationRunSchema = z
   });
 export type EvaluationRun = z.infer<typeof EvaluationRunSchema>;
 
-export function isRegression(
-  current: EvaluationRun,
-  baseline: EvaluationRun,
-): boolean {
+export function isRegression(current: EvaluationRun, baseline: EvaluationRun): boolean {
   if (current.evalSetId !== baseline.evalSetId) return false;
   return current.passRate < baseline.passRate;
 }
 
-export function passRateDelta(
-  current: EvaluationRun,
-  baseline: EvaluationRun,
-): number {
+export function passRateDelta(current: EvaluationRun, baseline: EvaluationRun): number {
   return current.passRate - baseline.passRate;
 }
 
@@ -185,9 +162,7 @@ export function blocksPromotion(run: EvaluationRun): boolean {
   return run.verdict === "failed" || run.verdict === "regressed";
 }
 
-export function failedExampleIds(
-  run: EvaluationRun,
-): readonly string[] {
+export function failedExampleIds(run: EvaluationRun): readonly string[] {
   return run.results
     .filter((r) => r.outcome === "fail" || r.outcome === "error")
     .map((r) => r.exampleId);

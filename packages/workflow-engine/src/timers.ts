@@ -8,34 +8,28 @@ export const TIMER_KINDS = [
 ] as const;
 export type TimerKind = (typeof TIMER_KINDS)[number];
 
-export const TIMER_STATUSES = [
-  "scheduled",
-  "fired",
-  "cancelled",
-  "expired_before_fire",
-] as const;
+export const TIMER_STATUSES = ["scheduled", "fired", "cancelled", "expired_before_fire"] as const;
 export type TimerStatus = (typeof TIMER_STATUSES)[number];
 
-export const TIMER_TRANSITIONS: Readonly<
-  Record<TimerStatus, readonly TimerStatus[]>
-> = {
+export const TIMER_TRANSITIONS: Readonly<Record<TimerStatus, readonly TimerStatus[]>> = {
   scheduled: ["fired", "cancelled", "expired_before_fire"],
   fired: [],
   cancelled: [],
   expired_before_fire: [],
 };
 
-export const canTransitionTimer = (
-  from: TimerStatus,
-  to: TimerStatus,
-): boolean => TIMER_TRANSITIONS[from].includes(to);
+export const canTransitionTimer = (from: TimerStatus, to: TimerStatus): boolean =>
+  TIMER_TRANSITIONS[from].includes(to);
 
 export const WorkflowTimerSchema = z
   .object({
     id: z.string().regex(/^wft_[a-z0-9]{8,40}$/),
     instanceId: z.string().regex(/^wfi_[a-z0-9]{8,40}$/),
     tenantId: z.string().uuid(),
-    timerName: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+    timerName: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(80),
     kind: z.enum(TIMER_KINDS),
     status: z.enum(TIMER_STATUSES),
     scheduledAt: z.string().datetime({ offset: true }),
@@ -134,9 +128,7 @@ export const fireTimer = (
   nextFireAt: string | null,
 ): WorkflowTimer => {
   if (!canTransitionTimer(timer.status, "fired")) {
-    throw new Error(
-      `cannot transition timer from ${timer.status} to fired`,
-    );
+    throw new Error(`cannot transition timer from ${timer.status} to fired`);
   }
   if (timer.kind === "cron_schedule" && nextFireAt === null) {
     throw new Error("cron_schedule timer requires nextFireAt on fire");
@@ -150,15 +142,9 @@ export const fireTimer = (
   };
 };
 
-export const cancelTimer = (
-  timer: WorkflowTimer,
-  reason: string,
-  now: Date,
-): WorkflowTimer => {
+export const cancelTimer = (timer: WorkflowTimer, reason: string, now: Date): WorkflowTimer => {
   if (!canTransitionTimer(timer.status, "cancelled")) {
-    throw new Error(
-      `cannot transition timer from ${timer.status} to cancelled`,
-    );
+    throw new Error(`cannot transition timer from ${timer.status} to cancelled`);
   }
   return {
     ...timer,

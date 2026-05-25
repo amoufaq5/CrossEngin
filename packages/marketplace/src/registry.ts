@@ -27,10 +27,7 @@ export const PACK_VERSION_TRANSITIONS: Readonly<
   withdrawn: [],
 });
 
-export function canTransitionVersion(
-  from: PackVersionStatus,
-  to: PackVersionStatus,
-): boolean {
+export function canTransitionVersion(from: PackVersionStatus, to: PackVersionStatus): boolean {
   return PACK_VERSION_TRANSITIONS[from].includes(to);
 }
 
@@ -142,10 +139,7 @@ export const PackVersionRecordSchema = z
         });
       }
     }
-    if (
-      v.securityReviewStatus === "passed" ||
-      v.securityReviewStatus === "failed"
-    ) {
+    if (v.securityReviewStatus === "passed" || v.securityReviewStatus === "failed") {
       if (v.securityReviewedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -220,8 +214,6 @@ export function versionsRequiringResign(
   rotatedFingerprint: string,
 ): readonly PackVersionRecord[] {
   return versions.filter(
-    (v) =>
-      v.status === "published" &&
-      v.signature.publicKeyFingerprint === rotatedFingerprint,
+    (v) => v.status === "published" && v.signature.publicKeyFingerprint === rotatedFingerprint,
   );
 }

@@ -67,16 +67,15 @@ describe("buildProvisionedThroughputListQuery (M2.X.5.aa.z.26)", () => {
 
   it("threads modelArnEquals through", () => {
     const q = buildProvisionedThroughputListQuery({
-      modelArnEquals:
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet",
+      modelArnEquals: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet",
     });
     expect(q["modelArnEquals"]).toContain("claude-3-sonnet");
   });
 
   it("rejects blank modelArnEquals", () => {
-    expect(() =>
-      buildProvisionedThroughputListQuery({ modelArnEquals: "" }),
-    ).toThrow(/modelArnEquals must be a non-empty/);
+    expect(() => buildProvisionedThroughputListQuery({ modelArnEquals: "" })).toThrow(
+      /modelArnEquals must be a non-empty/,
+    );
   });
 
   it("threads nameContains through", () => {
@@ -85,9 +84,9 @@ describe("buildProvisionedThroughputListQuery (M2.X.5.aa.z.26)", () => {
   });
 
   it("rejects blank nameContains", () => {
-    expect(() =>
-      buildProvisionedThroughputListQuery({ nameContains: "" }),
-    ).toThrow(/nameContains must be a non-empty/);
+    expect(() => buildProvisionedThroughputListQuery({ nameContains: "" })).toThrow(
+      /nameContains must be a non-empty/,
+    );
   });
 
   it("threads sortBy + sortOrder through", () => {
@@ -100,15 +99,15 @@ describe("buildProvisionedThroughputListQuery (M2.X.5.aa.z.26)", () => {
   });
 
   it("rejects unknown sortBy", () => {
-    expect(() =>
-      buildProvisionedThroughputListQuery({ sortBy: "Name" as never }),
-    ).toThrow(/invalid sortBy/);
+    expect(() => buildProvisionedThroughputListQuery({ sortBy: "Name" as never })).toThrow(
+      /invalid sortBy/,
+    );
   });
 
   it("rejects unknown sortOrder", () => {
-    expect(() =>
-      buildProvisionedThroughputListQuery({ sortOrder: "Random" as never }),
-    ).toThrow(/invalid sortOrder/);
+    expect(() => buildProvisionedThroughputListQuery({ sortOrder: "Random" as never })).toThrow(
+      /invalid sortOrder/,
+    );
   });
 
   it("threads maxResults as a string", () => {
@@ -133,9 +132,7 @@ describe("buildProvisionedThroughputListQuery (M2.X.5.aa.z.26)", () => {
   });
 
   it("rejects non-integer maxResults", () => {
-    expect(() =>
-      buildProvisionedThroughputListQuery({ maxResults: 10.5 }),
-    ).toThrow(/maxResults/);
+    expect(() => buildProvisionedThroughputListQuery({ maxResults: 10.5 })).toThrow(/maxResults/);
   });
 
   it("threads nextToken through", () => {
@@ -151,13 +148,10 @@ describe("buildProvisionedThroughputListQuery (M2.X.5.aa.z.26)", () => {
 });
 
 describe("parseProvisionedModelSummary (M2.X.5.aa.z.26)", () => {
-  function sample(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sample(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       provisionedModelName: "tenant-a-pt",
-      provisionedModelArn:
-        "arn:aws:bedrock:us-east-1:123:provisioned-model/abc123",
+      provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/abc123",
       modelArn:
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
       desiredModelArn:
@@ -198,50 +192,45 @@ describe("parseProvisionedModelSummary (M2.X.5.aa.z.26)", () => {
   });
 
   it("rejects unknown status", () => {
-    expect(() =>
-      parseProvisionedModelSummary(sample({ status: "Pending" })),
-    ).toThrow(/unknown status/);
+    expect(() => parseProvisionedModelSummary(sample({ status: "Pending" }))).toThrow(
+      /unknown status/,
+    );
   });
 
   it("rejects unknown commitmentDuration", () => {
-    expect(() =>
-      parseProvisionedModelSummary(sample({ commitmentDuration: "OneYear" })),
-    ).toThrow(/unknown commitmentDuration/);
+    expect(() => parseProvisionedModelSummary(sample({ commitmentDuration: "OneYear" }))).toThrow(
+      /unknown commitmentDuration/,
+    );
   });
 
   it("rejects missing required string fields", () => {
-    expect(() =>
-      parseProvisionedModelSummary(sample({ provisionedModelArn: undefined })),
-    ).toThrow(/missing required string field 'provisionedModelArn'/);
+    expect(() => parseProvisionedModelSummary(sample({ provisionedModelArn: undefined }))).toThrow(
+      /missing required string field 'provisionedModelArn'/,
+    );
   });
 
   it("rejects missing required integer fields", () => {
-    expect(() =>
-      parseProvisionedModelSummary(sample({ modelUnits: undefined })),
-    ).toThrow(/missing required integer field 'modelUnits'/);
+    expect(() => parseProvisionedModelSummary(sample({ modelUnits: undefined }))).toThrow(
+      /missing required integer field 'modelUnits'/,
+    );
   });
 
   it("rejects non-integer modelUnits (e.g., 1.5)", () => {
-    expect(() =>
-      parseProvisionedModelSummary(sample({ modelUnits: 1.5 })),
-    ).toThrow(/missing required integer field 'modelUnits'/);
+    expect(() => parseProvisionedModelSummary(sample({ modelUnits: 1.5 }))).toThrow(
+      /missing required integer field 'modelUnits'/,
+    );
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseProvisionedModelSummary(null)).toThrow(
-      /summary is not an object/,
-    );
+    expect(() => parseProvisionedModelSummary(null)).toThrow(/summary is not an object/);
   });
 });
 
 describe("parseProvisionedModelDetail (M2.X.5.aa.z.26)", () => {
-  function sample(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sample(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       provisionedModelName: "tenant-a-pt",
-      provisionedModelArn:
-        "arn:aws:bedrock:us-east-1:123:provisioned-model/abc123",
+      provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/abc123",
       modelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
       desiredModelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
       foundationModelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
@@ -268,9 +257,9 @@ describe("parseProvisionedModelDetail (M2.X.5.aa.z.26)", () => {
   });
 
   it("delegates summary validation (rejects unknown status)", () => {
-    expect(() =>
-      parseProvisionedModelDetail(sample({ status: "Pending" })),
-    ).toThrow(/unknown status/);
+    expect(() => parseProvisionedModelDetail(sample({ status: "Pending" }))).toThrow(
+      /unknown status/,
+    );
   });
 });
 
@@ -313,15 +302,13 @@ describe("parseProvisionedModelListResponse (M2.X.5.aa.z.26)", () => {
   });
 
   it("rejects non-array summaries", () => {
-    expect(() =>
-      parseProvisionedModelListResponse({ provisionedModelSummaries: "nope" }),
-    ).toThrow(/provisionedModelSummaries is not an array/);
+    expect(() => parseProvisionedModelListResponse({ provisionedModelSummaries: "nope" })).toThrow(
+      /provisionedModelSummaries is not an array/,
+    );
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseProvisionedModelListResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseProvisionedModelListResponse(null)).toThrow(/not a JSON object/);
   });
 });
 
@@ -340,9 +327,10 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
   }
 
   it("emits required fields verbatim into JSON", () => {
-    const body = JSON.parse(
-      buildCreateProvisionedModelThroughputBody(valid()),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(buildCreateProvisionedModelThroughputBody(valid())) as Record<
+      string,
+      unknown
+    >;
     expect(body["clientRequestToken"]).toBe("req-abc-123");
     expect(body["modelUnits"]).toBe(1);
     expect(body["provisionedModelName"]).toBe("tenant-a-pt");
@@ -350,27 +338,24 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
   });
 
   it("omits optional fields when not provided", () => {
-    const body = JSON.parse(
-      buildCreateProvisionedModelThroughputBody(valid()),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(buildCreateProvisionedModelThroughputBody(valid())) as Record<
+      string,
+      unknown
+    >;
     expect("commitmentDuration" in body).toBe(false);
     expect("tags" in body).toBe(false);
   });
 
   it("emits commitmentDuration when provided", () => {
     const body = JSON.parse(
-      buildCreateProvisionedModelThroughputBody(
-        valid({ commitmentDuration: "OneMonth" }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ commitmentDuration: "OneMonth" })),
     ) as Record<string, unknown>;
     expect(body["commitmentDuration"]).toBe("OneMonth");
   });
 
   it("emits tags when provided", () => {
     const body = JSON.parse(
-      buildCreateProvisionedModelThroughputBody(
-        valid({ tags: [{ key: "env", value: "prod" }] }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ tags: [{ key: "env", value: "prod" }] })),
     ) as Record<string, unknown>;
     expect(body["tags"]).toEqual([{ key: "env", value: "prod" }]);
   });
@@ -385,9 +370,7 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
     expect(() =>
       buildCreateProvisionedModelThroughputBody(
         valid({
-          clientRequestToken: "a".repeat(
-            BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN + 1,
-          ),
+          clientRequestToken: "a".repeat(BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN + 1),
         }),
       ),
     ).toThrow(/clientRequestToken/);
@@ -395,16 +378,14 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
 
   it("rejects clientRequestToken violating the pattern (e.g., spaces)", () => {
     expect(() =>
-      buildCreateProvisionedModelThroughputBody(
-        valid({ clientRequestToken: "has spaces" }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ clientRequestToken: "has spaces" })),
     ).toThrow(/clientRequestToken/);
   });
 
   it(`rejects modelUnits below ${BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MIN.toString()}`, () => {
-    expect(() =>
-      buildCreateProvisionedModelThroughputBody(valid({ modelUnits: 0 })),
-    ).toThrow(/modelUnits/);
+    expect(() => buildCreateProvisionedModelThroughputBody(valid({ modelUnits: 0 }))).toThrow(
+      /modelUnits/,
+    );
   });
 
   it(`rejects modelUnits above ${BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MAX.toString()}`, () => {
@@ -418,16 +399,14 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
   });
 
   it("rejects non-integer modelUnits (e.g., 1.5)", () => {
-    expect(() =>
-      buildCreateProvisionedModelThroughputBody(valid({ modelUnits: 1.5 })),
-    ).toThrow(/modelUnits/);
+    expect(() => buildCreateProvisionedModelThroughputBody(valid({ modelUnits: 1.5 }))).toThrow(
+      /modelUnits/,
+    );
   });
 
   it("rejects blank provisionedModelName", () => {
     expect(() =>
-      buildCreateProvisionedModelThroughputBody(
-        valid({ provisionedModelName: "" }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ provisionedModelName: "" })),
     ).toThrow(/provisionedModelName/);
   });
 
@@ -435,9 +414,7 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
     expect(() =>
       buildCreateProvisionedModelThroughputBody(
         valid({
-          provisionedModelName: "a".repeat(
-            BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN + 1,
-          ),
+          provisionedModelName: "a".repeat(BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN + 1),
         }),
       ),
     ).toThrow(/provisionedModelName/);
@@ -445,49 +422,39 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
 
   it("rejects provisionedModelName violating the pattern (spaces)", () => {
     expect(() =>
-      buildCreateProvisionedModelThroughputBody(
-        valid({ provisionedModelName: "has spaces" }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ provisionedModelName: "has spaces" })),
     ).toThrow(/provisionedModelName/);
   });
 
   it("rejects blank modelId", () => {
-    expect(() =>
-      buildCreateProvisionedModelThroughputBody(valid({ modelId: "" })),
-    ).toThrow(/modelId length/);
+    expect(() => buildCreateProvisionedModelThroughputBody(valid({ modelId: "" }))).toThrow(
+      /modelId length/,
+    );
   });
 
   it("rejects modelId > 2048 chars", () => {
     expect(() =>
-      buildCreateProvisionedModelThroughputBody(
-        valid({ modelId: "a".repeat(2049) }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ modelId: "a".repeat(2049) })),
     ).toThrow(/modelId length/);
   });
 
   it("rejects unknown commitmentDuration", () => {
     expect(() =>
-      buildCreateProvisionedModelThroughputBody(
-        valid({ commitmentDuration: "OneYear" as never }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ commitmentDuration: "OneYear" as never })),
     ).toThrow(/invalid commitmentDuration/);
   });
 
   it(`rejects more than ${BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS.toString()} tags`, () => {
-    const tags = Array.from(
-      { length: BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS + 1 },
-      (_, i) => ({ key: `k${i.toString()}`, value: "v" }),
-    );
-    expect(() =>
-      buildCreateProvisionedModelThroughputBody(valid({ tags })),
-    ).toThrow(/tags count/);
+    const tags = Array.from({ length: BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS + 1 }, (_, i) => ({
+      key: `k${i.toString()}`,
+      value: "v",
+    }));
+    expect(() => buildCreateProvisionedModelThroughputBody(valid({ tags }))).toThrow(/tags count/);
   });
 
   it("rejects a tag with blank key", () => {
     expect(() =>
-      buildCreateProvisionedModelThroughputBody(
-        valid({ tags: [{ key: "", value: "v" }] }),
-      ),
+      buildCreateProvisionedModelThroughputBody(valid({ tags: [{ key: "", value: "v" }] })),
     ).toThrow(/tag key length/);
   });
 
@@ -517,8 +484,7 @@ describe("buildCreateProvisionedModelThroughputBody (M2.X.5.aa.z.27)", () => {
 describe("parseCreateProvisionedModelThroughputResponse (M2.X.5.aa.z.27)", () => {
   it("parses provisionedModelArn from a valid response", () => {
     const r = parseCreateProvisionedModelThroughputResponse({
-      provisionedModelArn:
-        "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+      provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
     });
     expect(r.provisionedModelArn).toContain("provisioned-model/abc");
   });
@@ -530,9 +496,7 @@ describe("parseCreateProvisionedModelThroughputResponse (M2.X.5.aa.z.27)", () =>
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseCreateProvisionedModelThroughputResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseCreateProvisionedModelThroughputResponse(null)).toThrow(/not a JSON object/);
   });
 });
 
@@ -574,9 +538,9 @@ describe("buildUpdateProvisionedModelThroughputBody (M2.X.5.aa.z.28)", () => {
   });
 
   it("rejects blank desiredModelId", () => {
-    expect(() =>
-      buildUpdateProvisionedModelThroughputBody({ desiredModelId: "" }),
-    ).toThrow(/desiredModelId length/);
+    expect(() => buildUpdateProvisionedModelThroughputBody({ desiredModelId: "" })).toThrow(
+      /desiredModelId length/,
+    );
   });
 
   it("rejects desiredModelId > 2048 chars", () => {

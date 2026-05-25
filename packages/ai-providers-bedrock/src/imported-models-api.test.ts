@@ -16,10 +16,7 @@ import {
 describe("BEDROCK_IMPORTED_MODEL constants", () => {
   it("documents AWS-supported sort dimensions", () => {
     expect(BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES).toEqual(["CreationTime"]);
-    expect(BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES).toEqual([
-      "Ascending",
-      "Descending",
-    ]);
+    expect(BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES).toEqual(["Ascending", "Descending"]);
   });
 });
 
@@ -38,12 +35,12 @@ describe("buildImportedModelListQuery", () => {
   });
 
   it("rejects unparseable creationTime values", () => {
-    expect(() =>
-      buildImportedModelListQuery({ creationTimeAfter: "yesterday" }),
-    ).toThrow(/creationTimeAfter/);
-    expect(() =>
-      buildImportedModelListQuery({ creationTimeBefore: "not-a-date" }),
-    ).toThrow(/creationTimeBefore/);
+    expect(() => buildImportedModelListQuery({ creationTimeAfter: "yesterday" })).toThrow(
+      /creationTimeAfter/,
+    );
+    expect(() => buildImportedModelListQuery({ creationTimeBefore: "not-a-date" })).toThrow(
+      /creationTimeBefore/,
+    );
   });
 
   it("threads valid nameContains", () => {
@@ -53,9 +50,7 @@ describe("buildImportedModelListQuery", () => {
   });
 
   it("rejects nameContains length out of [1, 63]", () => {
-    expect(() => buildImportedModelListQuery({ nameContains: "" })).toThrow(
-      /nameContains/,
-    );
+    expect(() => buildImportedModelListQuery({ nameContains: "" })).toThrow(/nameContains/);
     expect(() =>
       buildImportedModelListQuery({
         nameContains: "x".repeat(BEDROCK_IMPORTED_MODEL_NAME_CONTAINS_MAX_LEN + 1),
@@ -91,18 +86,14 @@ describe("buildImportedModelListQuery", () => {
         maxResults: BEDROCK_IMPORTED_MODEL_LIST_MAX_RESULTS_MAX + 1,
       }),
     ).toThrow(/maxResults/);
-    expect(() => buildImportedModelListQuery({ maxResults: 1.5 })).toThrow(
-      /maxResults/,
-    );
+    expect(() => buildImportedModelListQuery({ maxResults: 1.5 })).toThrow(/maxResults/);
   });
 
   it("threads + validates nextToken", () => {
     expect(buildImportedModelListQuery({ nextToken: "page-2" })).toEqual({
       nextToken: "page-2",
     });
-    expect(() => buildImportedModelListQuery({ nextToken: "" })).toThrow(
-      /nextToken/,
-    );
+    expect(() => buildImportedModelListQuery({ nextToken: "" })).toThrow(/nextToken/);
   });
 
   it("threads sortBy + sortOrder", () => {
@@ -115,12 +106,8 @@ describe("buildImportedModelListQuery", () => {
   });
 
   it("rejects unknown sortBy / sortOrder", () => {
-    expect(() =>
-      buildImportedModelListQuery({ sortBy: "Name" as never }),
-    ).toThrow(/sortBy/);
-    expect(() =>
-      buildImportedModelListQuery({ sortOrder: "asc" as never }),
-    ).toThrow(/sortOrder/);
+    expect(() => buildImportedModelListQuery({ sortBy: "Name" as never })).toThrow(/sortBy/);
+    expect(() => buildImportedModelListQuery({ sortOrder: "asc" as never })).toThrow(/sortOrder/);
   });
 
   it("composes all parameters together", () => {
@@ -146,9 +133,7 @@ describe("buildImportedModelListQuery", () => {
   });
 
   it("throws BedrockError (not Error) on invalid input", () => {
-    expect(() => buildImportedModelListQuery({ maxResults: -1 })).toThrow(
-      BedrockError,
-    );
+    expect(() => buildImportedModelListQuery({ maxResults: -1 })).toThrow(BedrockError);
   });
 });
 
@@ -257,24 +242,22 @@ describe("parseImportedModelListResponse", () => {
   });
 
   it("rejects non-array modelSummaries field", () => {
-    expect(() =>
-      parseImportedModelListResponse({ modelSummaries: "oops" }),
-    ).toThrow(/not an array/);
+    expect(() => parseImportedModelListResponse({ modelSummaries: "oops" })).toThrow(
+      /not an array/,
+    );
   });
 });
 
 describe("parseImportedModelDetail", () => {
   function minimal(): Record<string, unknown> {
     return {
-      modelArn:
-        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
+      modelArn: "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
       modelName: "tenant-x-llama3-finetune",
       creationTime: "2026-04-15T12:00:00Z",
       instructSupported: true,
       modelArchitecture: "LLAMA3",
       jobName: "import-tenant-x-2026-04-15",
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/xyz789",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-import-job/xyz789",
       modelDataSource: {
         s3DataSource: {
           s3Uri: "s3://tenant-x-artifacts/llama3-finetune/",
@@ -288,9 +271,7 @@ describe("parseImportedModelDetail", () => {
     expect(d.modelArn).toMatch(/abc123def456$/);
     expect(d.jobName).toBe("import-tenant-x-2026-04-15");
     expect(d.jobArn).toMatch(/^arn:aws:bedrock:/);
-    expect(d.modelDataSource.s3DataSource.s3Uri).toBe(
-      "s3://tenant-x-artifacts/llama3-finetune/",
-    );
+    expect(d.modelDataSource.s3DataSource.s3Uri).toBe("s3://tenant-x-artifacts/llama3-finetune/");
     expect(d.modelKmsKeyArn).toBeUndefined();
   });
 
@@ -309,9 +290,9 @@ describe("parseImportedModelDetail", () => {
   });
 
   it("rejects non-boolean instructSupported", () => {
-    expect(() =>
-      parseImportedModelDetail({ ...minimal(), instructSupported: "yes" }),
-    ).toThrow(/instructSupported/);
+    expect(() => parseImportedModelDetail({ ...minimal(), instructSupported: "yes" })).toThrow(
+      /instructSupported/,
+    );
   });
 
   it("rejects missing modelDataSource", () => {
@@ -321,9 +302,9 @@ describe("parseImportedModelDetail", () => {
   });
 
   it("rejects modelDataSource without s3DataSource", () => {
-    expect(() =>
-      parseImportedModelDetail({ ...minimal(), modelDataSource: {} }),
-    ).toThrow(/s3DataSource/);
+    expect(() => parseImportedModelDetail({ ...minimal(), modelDataSource: {} })).toThrow(
+      /s3DataSource/,
+    );
   });
 
   it("rejects s3DataSource without s3Uri", () => {

@@ -31,9 +31,7 @@ export const INVOICE_LIFECYCLE_WORKFLOW: Workflow = {
       from: ["sent", "overdue"],
       to: "paid",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Invoice.transition.mark_paid" },
-      ],
+      guards: [{ kind: "permission", permission: "Invoice.transition.mark_paid" }],
     },
     {
       name: "void",

@@ -92,11 +92,7 @@ export function gCounterValue(counter: GCounter): number {
   return Object.values(counter.perRegion).reduce((acc, v) => acc + v, 0);
 }
 
-export function gCounterIncrement(
-  counter: GCounter,
-  region: Region,
-  by: number = 1,
-): GCounter {
+export function gCounterIncrement(counter: GCounter, region: Region, by: number = 1): GCounter {
   if (by < 0) throw new Error("G-Counter cannot decrement (use PN-Counter)");
   return {
     kind: "g_counter",
@@ -185,10 +181,7 @@ export function lwwMapMerge(a: LwwMap, b: LwwMap): LwwMap {
   return { kind: "lww_map", entries: [...byKey.values()] };
 }
 
-export function lwwMapGet(
-  map: LwwMap,
-  key: string,
-): LwwMapEntry["value"] | undefined {
+export function lwwMapGet(map: LwwMap, key: string): LwwMapEntry["value"] | undefined {
   const entry = map.entries.find((e) => e.key === key);
   if (entry === undefined || entry.tombstone) return undefined;
   return entry.value;
@@ -199,9 +192,7 @@ export function mvRegisterMerge(a: MvRegister, b: MvRegister): MvRegister {
   for (const e of b.entries) {
     const dup = merged.find(
       (x) =>
-        x.timestamp === e.timestamp &&
-        x.originRegion === e.originRegion &&
-        x.value === e.value,
+        x.timestamp === e.timestamp && x.originRegion === e.originRegion && x.value === e.value,
     );
     if (dup === undefined) merged.push(e);
   }

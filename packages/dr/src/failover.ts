@@ -25,21 +25,17 @@ export const FAILOVER_STATUSES = [
 export type FailoverStatus = (typeof FAILOVER_STATUSES)[number];
 export const FailoverStatusSchema = z.enum(FAILOVER_STATUSES);
 
-export const FAILOVER_TRANSITIONS: Readonly<
-  Record<FailoverStatus, readonly FailoverStatus[]>
-> = Object.freeze({
-  queued: ["in_progress", "aborted"],
-  in_progress: ["succeeded", "failed", "aborted"],
-  succeeded: ["reverted"],
-  failed: [],
-  aborted: [],
-  reverted: [],
-});
+export const FAILOVER_TRANSITIONS: Readonly<Record<FailoverStatus, readonly FailoverStatus[]>> =
+  Object.freeze({
+    queued: ["in_progress", "aborted"],
+    in_progress: ["succeeded", "failed", "aborted"],
+    succeeded: ["reverted"],
+    failed: [],
+    aborted: [],
+    reverted: [],
+  });
 
-export function canTransitionFailover(
-  from: FailoverStatus,
-  to: FailoverStatus,
-): boolean {
+export function canTransitionFailover(from: FailoverStatus, to: FailoverStatus): boolean {
   return FAILOVER_TRANSITIONS[from].includes(to);
 }
 
@@ -137,9 +133,7 @@ export function lastFailover(
   fromRegion?: Region,
 ): FailoverRecord | null {
   const filtered =
-    fromRegion === undefined
-      ? records
-      : records.filter((r) => r.fromRegion === fromRegion);
+    fromRegion === undefined ? records : records.filter((r) => r.fromRegion === fromRegion);
   const sorted = [...filtered].sort(
     (a, b) => new Date(b.triggeredAt).getTime() - new Date(a.triggeredAt).getTime(),
   );

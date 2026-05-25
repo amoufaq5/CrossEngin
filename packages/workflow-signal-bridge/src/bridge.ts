@@ -155,7 +155,10 @@ export class WorkflowSignalBridge {
   }
 }
 
-function outcome(input: { readonly kind: BridgeOutcome["kind"]; readonly reason: string }): BridgeOutcome {
+function outcome(input: {
+  readonly kind: BridgeOutcome["kind"];
+  readonly reason: string;
+}): BridgeOutcome {
   return {
     kind: input.kind,
     reason: input.reason,

@@ -45,9 +45,7 @@ describe("constants", () => {
 
 describe("IdempotencyKeyShapeSchema", () => {
   it("accepts a valid key", () => {
-    expect(() =>
-      IdempotencyKeyShapeSchema.parse("client-key-2026-05-16-abc"),
-    ).not.toThrow();
+    expect(() => IdempotencyKeyShapeSchema.parse("client-key-2026-05-16-abc")).not.toThrow();
   });
   it("rejects too-short key", () => {
     expect(() => IdempotencyKeyShapeSchema.parse("short")).toThrow();

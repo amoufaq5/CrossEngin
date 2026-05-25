@@ -37,7 +37,10 @@ export const ProblemDetailsSchema = z.object({
   detail: z.string().min(1).max(2000),
   instance: z.string().min(1).max(500).optional(),
   retryAfterSeconds: z.number().int().min(0).optional(),
-  rateLimitPolicy: z.string().regex(/^rlp_[a-z0-9]{8,40}$/).optional(),
+  rateLimitPolicy: z
+    .string()
+    .regex(/^rlp_[a-z0-9]{8,40}$/)
+    .optional(),
   rateLimitScope: z.string().max(200).optional(),
 });
 export type ProblemDetails = z.infer<typeof ProblemDetailsSchema>;
@@ -47,7 +50,10 @@ export const RateLimitHeadersSchema = z.object({
   remaining: z.number().int().min(0),
   resetAt: z.string().datetime({ offset: true }),
   retryAfterSeconds: z.number().int().min(0).nullable(),
-  policy: z.string().regex(/^rlp_[a-z0-9]{8,40}$/).nullable(),
+  policy: z
+    .string()
+    .regex(/^rlp_[a-z0-9]{8,40}$/)
+    .nullable(),
 });
 export type RateLimitHeaders = z.infer<typeof RateLimitHeadersSchema>;
 
@@ -55,8 +61,14 @@ export const RateLimitDecisionSchema = z
   .object({
     id: z.string().regex(/^rld_[a-z0-9]{8,40}$/),
     tenantId: z.string().uuid().nullable(),
-    policyId: z.string().regex(/^rlp_[a-z0-9]{8,40}$/).nullable(),
-    quotaDefinitionId: z.string().regex(/^rlq_[a-z0-9]{8,40}$/).nullable(),
+    policyId: z
+      .string()
+      .regex(/^rlp_[a-z0-9]{8,40}$/)
+      .nullable(),
+    quotaDefinitionId: z
+      .string()
+      .regex(/^rlq_[a-z0-9]{8,40}$/)
+      .nullable(),
     scopeKey: z.string().min(1).max(500),
     principalId: z.string().uuid().nullable(),
     apiKeyPrefix: z
@@ -77,10 +89,7 @@ export const RateLimitDecisionSchema = z
     bypassReason: z.string().max(200).nullable(),
   })
   .superRefine((d, ctx) => {
-    if (
-      DENIED_OUTCOMES.has(d.outcome) &&
-      d.retryAfterSeconds === null
-    ) {
+    if (DENIED_OUTCOMES.has(d.outcome) && d.retryAfterSeconds === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["retryAfterSeconds"],
@@ -94,10 +103,7 @@ export const RateLimitDecisionSchema = z
         message: `denied outcome ${d.outcome} requires remainingAfter=0`,
       });
     }
-    if (
-      DENIED_OUTCOMES.has(d.outcome) &&
-      d.problemDetails === null
-    ) {
+    if (DENIED_OUTCOMES.has(d.outcome) && d.problemDetails === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["problemDetails"],
@@ -121,14 +127,10 @@ export const RateLimitDecisionSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["softThrottleDelayMs"],
-        message:
-          "throttled_soft_delayed outcome requires softThrottleDelayMs > 0",
+        message: "throttled_soft_delayed outcome requires softThrottleDelayMs > 0",
       });
     }
-    if (
-      d.outcome === "bypassed_critical_priority" ||
-      d.outcome === "bypassed_exempt_principal"
-    ) {
+    if (d.outcome === "bypassed_critical_priority" || d.outcome === "bypassed_exempt_principal") {
       if (d.bypassReason === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -160,9 +162,7 @@ export interface DecisionAggregate {
   readonly outcomeCounts: Readonly<Partial<Record<DecisionOutcome, number>>>;
 }
 
-export const aggregateDecisions = (
-  decisions: readonly RateLimitDecision[],
-): DecisionAggregate => {
+export const aggregateDecisions = (decisions: readonly RateLimitDecision[]): DecisionAggregate => {
   const outcomeCounts: Partial<Record<DecisionOutcome, number>> = {};
   let allowedCount = 0;
   let deniedCount = 0;
@@ -181,8 +181,7 @@ export const aggregateDecisions = (
     deniedCount,
     bypassedCount,
     throttledCount,
-    denialRate:
-      decisions.length === 0 ? 0 : deniedCount / decisions.length,
+    denialRate: decisions.length === 0 ? 0 : deniedCount / decisions.length,
     outcomeCounts,
   };
 };

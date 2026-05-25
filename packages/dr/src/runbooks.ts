@@ -15,12 +15,7 @@ export const RUNBOOK_KINDS = [
 export type RunbookKind = (typeof RUNBOOK_KINDS)[number];
 export const RunbookKindSchema = z.enum(RUNBOOK_KINDS);
 
-export const RUNBOOK_STATUSES = [
-  "draft",
-  "approved",
-  "deprecated",
-  "broken",
-] as const;
+export const RUNBOOK_STATUSES = ["draft", "approved", "deprecated", "broken"] as const;
 export type RunbookStatus = (typeof RUNBOOK_STATUSES)[number];
 export const RunbookStatusSchema = z.enum(RUNBOOK_STATUSES);
 
@@ -61,11 +56,7 @@ export const RunbookSpecSchema = z
         message: "approved runbooks must record lastTestedBy",
       });
     }
-    if (
-      v.kind === "failover" ||
-      v.kind === "regional_evacuation" ||
-      v.kind === "data_loss_event"
-    ) {
+    if (v.kind === "failover" || v.kind === "regional_evacuation" || v.kind === "data_loss_event") {
       if (!v.requiresIncidentCommander) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -74,10 +65,7 @@ export const RunbookSpecSchema = z
         });
       }
     }
-    if (
-      v.appliesToTiers.includes("tier_0_mission_critical") &&
-      v.requiredApprovers.length < 2
-    ) {
+    if (v.appliesToTiers.includes("tier_0_mission_critical") && v.requiredApprovers.length < 2) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["requiredApprovers"],
@@ -117,9 +105,7 @@ export function runbookFreshness(
   const daysSinceTest =
     runbook.lastTestedAt === null
       ? null
-      : Math.floor(
-          (nowTime - new Date(runbook.lastTestedAt).getTime()) / 1000 / SECONDS_PER_DAY,
-        );
+      : Math.floor((nowTime - new Date(runbook.lastTestedAt).getTime()) / 1000 / SECONDS_PER_DAY);
   const stale =
     daysSinceReview > maxDaysSinceReview ||
     (daysSinceTest !== null && daysSinceTest > maxDaysSinceTest) ||

@@ -91,10 +91,7 @@ export function indexedEntities(search: SearchManifest): readonly string[] {
   return Object.keys(search.entities);
 }
 
-export function indexedFieldPaths(
-  search: SearchManifest,
-  entityName: string,
-): readonly string[] {
+export function indexedFieldPaths(search: SearchManifest, entityName: string): readonly string[] {
   const entry = search.entities[entityName];
   if (entry === undefined) return [];
   return entry.indexedFields.map((f) => f.field);

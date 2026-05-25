@@ -120,7 +120,14 @@ export const pack: CompliancePack = {
             name: "status",
             type: {
               kind: "enum",
-              values: ["pending", "verifying_identity", "in_progress", "completed", "rejected", "withdrawn"],
+              values: [
+                "pending",
+                "verifying_identity",
+                "in_progress",
+                "completed",
+                "rejected",
+                "withdrawn",
+              ],
             },
             required: true,
             default: { kind: "literal", value: "pending" },
@@ -168,7 +175,13 @@ export const pack: CompliancePack = {
             name: "source",
             type: {
               kind: "enum",
-              values: ["web_form", "paper_form", "verbal_recorded", "double_opt_in_email", "in_app"],
+              values: [
+                "web_form",
+                "paper_form",
+                "verbal_recorded",
+                "double_opt_in_email",
+                "in_app",
+              ],
             },
             required: true,
           },

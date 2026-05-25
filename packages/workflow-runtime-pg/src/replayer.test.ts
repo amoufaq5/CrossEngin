@@ -2,10 +2,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 import { WorkflowReplayer } from "./replayer.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -31,9 +28,30 @@ function fixtureDefinition(): WorkflowDefinition {
     description: "",
     status: "published",
     states: [
-      { name: "draft", kind: "initial", label: "D", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "awaiting", kind: "waiting", label: "W", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "approved", kind: "terminal_success", label: "A", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "draft",
+        kind: "initial",
+        label: "D",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "awaiting",
+        kind: "waiting",
+        label: "W",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "approved",
+        kind: "terminal_success",
+        label: "A",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
     ],
     transitions: [
       {

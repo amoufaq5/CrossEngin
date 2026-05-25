@@ -1,10 +1,6 @@
 #!/usr/bin/env node
 
-import {
-  META_SCHEMA_NAME,
-  META_TABLES,
-  emitMetaBootstrapSql,
-} from "@crossengin/kernel/bootstrap";
+import { META_SCHEMA_NAME, META_TABLES, emitMetaBootstrapSql } from "@crossengin/kernel/bootstrap";
 
 import { MigrationApplier, formatApplyReport } from "../src/applier.js";
 import {
@@ -160,7 +156,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.stack ?? err.message : String(err);
+  const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
   process.stderr.write(message + "\n");
   process.exit(1);
 });

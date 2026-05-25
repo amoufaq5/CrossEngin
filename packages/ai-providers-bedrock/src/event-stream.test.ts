@@ -30,10 +30,7 @@ function encodeHeader(name: string, value: string): Uint8Array {
   return buf;
 }
 
-function encodeFrame(
-  headers: Readonly<Record<string, string>>,
-  payload: Uint8Array,
-): Uint8Array {
+function encodeFrame(headers: Readonly<Record<string, string>>, payload: Uint8Array): Uint8Array {
   const headerChunks: Uint8Array[] = [];
   let headersLen = 0;
   for (const [name, value] of Object.entries(headers)) {
@@ -105,7 +102,9 @@ describe("parseEventStreamMessage", () => {
 describe("mapEventToChunks", () => {
   const MODEL = "anthropic.claude-3-5-sonnet-20241022-v2:0";
 
-  function stateWithToolBlocks(blocks: ReadonlyArray<readonly [number, string]> = []): ConverseStreamState {
+  function stateWithToolBlocks(
+    blocks: ReadonlyArray<readonly [number, string]> = [],
+  ): ConverseStreamState {
     const s = newConverseStreamState();
     for (const [i, id] of blocks) s.toolBlocks.set(i, id);
     return s;
@@ -118,9 +117,7 @@ describe("mapEventToChunks", () => {
   ) {
     const frame = encodeEvent(eventType, payload);
     const parsed = parseEventStreamMessage(frame)!;
-    return Array.from(
-      mapEventToChunks(parsed.message, state, { model: MODEL }),
-    );
+    return Array.from(mapEventToChunks(parsed.message, state, { model: MODEL }));
   }
 
   it("messageStart emits no chunks", () => {
@@ -137,9 +134,7 @@ describe("mapEventToChunks", () => {
       },
       state,
     );
-    expect(chunks).toEqual([
-      { kind: "tool_call_start", id: "tu_1", name: "search" },
-    ]);
+    expect(chunks).toEqual([{ kind: "tool_call_start", id: "tu_1", name: "search" }]);
     expect(state.toolBlocks.get(0)).toBe("tu_1");
   });
 
@@ -245,9 +240,7 @@ describe("mapEventToChunks", () => {
     );
     const parsed = parseEventStreamMessage(frame)!;
     expect(() =>
-      Array.from(
-        mapEventToChunks(parsed.message, newConverseStreamState(), { model: MODEL }),
-      ),
+      Array.from(mapEventToChunks(parsed.message, newConverseStreamState(), { model: MODEL })),
     ).toThrow(BedrockError);
   });
 
@@ -268,9 +261,7 @@ describe("readConverseEventStream — integration", () => {
     });
   }
 
-  async function collect(
-    body: ReadableStream<Uint8Array>,
-  ): Promise<ReturnType<typeof Array.from>> {
+  async function collect(body: ReadableStream<Uint8Array>): Promise<ReturnType<typeof Array.from>> {
     const out: unknown[] = [];
     for await (const chunk of readConverseEventStream(body, { model: MODEL })) {
       out.push(chunk);
@@ -304,9 +295,7 @@ describe("readConverseEventStream — integration", () => {
         usage: { inputTokens: 12, outputTokens: 8 },
       }),
     ];
-    const combined = new Uint8Array(
-      frames.reduce((n, f) => n + f.byteLength, 0),
-    );
+    const combined = new Uint8Array(frames.reduce((n, f) => n + f.byteLength, 0));
     let off = 0;
     for (const f of frames) {
       combined.set(f, off);
@@ -415,9 +404,7 @@ describe("readConverseEventStream — integration", () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(BedrockGuardrailViolationError);
-    expect((caught as BedrockGuardrailViolationError).stopReason).toBe(
-      "content_filtered",
-    );
+    expect((caught as BedrockGuardrailViolationError).stopReason).toBe("content_filtered");
   });
 
   it("guardrail trace from metadata flows into the thrown error", async () => {

@@ -11,9 +11,7 @@ export const EVIDENCE_STATUSES = [
 ] as const;
 export type EvidenceStatus = (typeof EVIDENCE_STATUSES)[number];
 
-export const EVIDENCE_TRANSITIONS: Readonly<
-  Record<EvidenceStatus, readonly EvidenceStatus[]>
-> = {
+export const EVIDENCE_TRANSITIONS: Readonly<Record<EvidenceStatus, readonly EvidenceStatus[]>> = {
   draft: ["compiled"],
   compiled: ["sealed"],
   sealed: ["submitted_to_auditor"],
@@ -22,21 +20,13 @@ export const EVIDENCE_TRANSITIONS: Readonly<
   rejected_by_auditor: ["draft"],
 };
 
-export const canTransitionEvidence = (
-  from: EvidenceStatus,
-  to: EvidenceStatus,
-): boolean => EVIDENCE_TRANSITIONS[from].includes(to);
+export const canTransitionEvidence = (from: EvidenceStatus, to: EvidenceStatus): boolean =>
+  EVIDENCE_TRANSITIONS[from].includes(to);
 
-export const CONTROL_MAPPINGS: Readonly<
-  Record<string, readonly string[]>
-> = {
+export const CONTROL_MAPPINGS: Readonly<Record<string, readonly string[]>> = {
   soc2_type2: ["CC6.1", "CC6.2", "CC6.3", "CC6.7"],
   iso27001: ["A.5.18", "A.5.15", "A.9.2.5"],
-  hipaa_security_rule: [
-    "164.308(a)(3)(ii)(B)",
-    "164.308(a)(4)(ii)(C)",
-    "164.312(a)(1)",
-  ],
+  hipaa_security_rule: ["164.308(a)(3)(ii)(B)", "164.308(a)(4)(ii)(C)", "164.312(a)(1)"],
   pci_dss_v4: ["7.2.4", "7.2.5", "7.2.6"],
   gdpr_article_32: ["Art.32.1.b", "Art.32.4"],
   cfr_21_part_11: ["11.10(d)", "11.10(g)", "11.10(j)"],
@@ -77,8 +67,7 @@ export const computeCampaignEvidenceMetrics = (input: {
       overdueRate: 0,
     };
   }
-  const resolved =
-    input.decidedItems + input.autoRevokedItems + input.exceptionItems;
+  const resolved = input.decidedItems + input.autoRevokedItems + input.exceptionItems;
   const decidedNonZero = Math.max(1, input.decidedItems);
   return {
     completionRate: resolved / total,
@@ -87,9 +76,7 @@ export const computeCampaignEvidenceMetrics = (input: {
     autoRevokeRate: input.autoRevokedItems / total,
     exceptionRate: input.exceptionItems / total,
     strongAttestationRate:
-      input.decidedItems === 0
-        ? 0
-        : input.strongAttestationCount / input.decidedItems,
+      input.decidedItems === 0 ? 0 : input.strongAttestationCount / input.decidedItems,
     overdueRate: input.overdueAtCompletion / total,
   };
 };
@@ -114,7 +101,10 @@ export const AccessReviewEvidenceSchema = z
     status: z.enum(EVIDENCE_STATUSES),
     compiledAt: z.string().datetime({ offset: true }).nullable(),
     sealedAt: z.string().datetime({ offset: true }).nullable(),
-    sealedSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    sealedSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     submittedAt: z.string().datetime({ offset: true }).nullable(),
     submittedToAuditorId: z.string().min(1).max(200).nullable(),
     acceptedAt: z.string().datetime({ offset: true }).nullable(),
@@ -136,9 +126,7 @@ export const AccessReviewEvidenceSchema = z
       (e.status === "sealed" ||
         e.status === "submitted_to_auditor" ||
         e.status === "accepted_by_auditor") &&
-      (e.sealedAt === null ||
-        e.sealedSha256 === null ||
-        e.storageUri === null)
+      (e.sealedAt === null || e.sealedSha256 === null || e.storageUri === null)
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -153,8 +141,7 @@ export const AccessReviewEvidenceSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["submittedAt"],
-        message:
-          "submitted_to_auditor status requires submittedAt + submittedToAuditorId",
+        message: "submitted_to_auditor status requires submittedAt + submittedToAuditorId",
       });
     }
     if (
@@ -164,8 +151,7 @@ export const AccessReviewEvidenceSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["rejectedReason"],
-        message:
-          "rejected_by_auditor status requires rejectedAt + rejectedReason",
+        message: "rejected_by_auditor status requires rejectedAt + rejectedReason",
       });
     }
     if (e.status === "accepted_by_auditor" && e.acceptedAt === null) {
@@ -177,9 +163,7 @@ export const AccessReviewEvidenceSchema = z
     }
     const expectedControls = CONTROL_MAPPINGS[e.framework] ?? [];
     if (expectedControls.length > 0) {
-      const hasAtLeastOneExpected = expectedControls.some((c) =>
-        e.controlMappings.includes(c),
-      );
+      const hasAtLeastOneExpected = expectedControls.some((c) => e.controlMappings.includes(c));
       if (!hasAtLeastOneExpected) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -198,9 +182,7 @@ export const sealEvidence = (
   now: Date,
 ): AccessReviewEvidence => {
   if (!canTransitionEvidence(evidence.status, "sealed")) {
-    throw new Error(
-      `cannot transition evidence from ${evidence.status} to sealed`,
-    );
+    throw new Error(`cannot transition evidence from ${evidence.status} to sealed`);
   }
   return {
     ...evidence,
@@ -211,8 +193,5 @@ export const sealEvidence = (
   };
 };
 
-export const isEvidenceComplete = (
-  evidence: AccessReviewEvidence,
-): boolean =>
-  evidence.status === "submitted_to_auditor" ||
-  evidence.status === "accepted_by_auditor";
+export const isEvidenceComplete = (evidence: AccessReviewEvidence): boolean =>
+  evidence.status === "submitted_to_auditor" || evidence.status === "accepted_by_auditor";

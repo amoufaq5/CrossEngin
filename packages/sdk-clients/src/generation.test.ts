@@ -29,12 +29,7 @@ describe("constants", () => {
   });
 
   it("NAMING_CONVENTIONS has 4 entries", () => {
-    expect(NAMING_CONVENTIONS).toEqual([
-      "camelCase",
-      "snake_case",
-      "PascalCase",
-      "kebab-case",
-    ]);
+    expect(NAMING_CONVENTIONS).toEqual(["camelCase", "snake_case", "PascalCase", "kebab-case"]);
   });
 });
 
@@ -63,9 +58,7 @@ describe("canTransitionGeneration", () => {
 
 describe("GeneratorConfigSchema", () => {
   it("accepts default TS config", () => {
-    expect(() =>
-      GeneratorConfigSchema.parse(defaultConfigFor("typescript")),
-    ).not.toThrow();
+    expect(() => GeneratorConfigSchema.parse(defaultConfigFor("typescript"))).not.toThrow();
   });
 
   it("rejects naming convention mismatch", () => {
@@ -161,21 +154,17 @@ describe("GenerationRunSchema", () => {
   });
 
   it("rejects succeeded without outputArtifactSha256", () => {
-    expect(() =>
-      GenerationRunSchema.parse({ ...base, outputArtifactSha256: null }),
-    ).toThrow(/outputArtifactSha256/);
+    expect(() => GenerationRunSchema.parse({ ...base, outputArtifactSha256: null })).toThrow(
+      /outputArtifactSha256/,
+    );
   });
 
   it("rejects succeeded with failing tests", () => {
-    expect(() =>
-      GenerationRunSchema.parse({ ...base, testsFailed: 1 }),
-    ).toThrow(/testsFailed=0/);
+    expect(() => GenerationRunSchema.parse({ ...base, testsFailed: 1 })).toThrow(/testsFailed=0/);
   });
 
   it("rejects succeeded with lint errors", () => {
-    expect(() =>
-      GenerationRunSchema.parse({ ...base, lintErrors: 1 }),
-    ).toThrow(/lintErrors=0/);
+    expect(() => GenerationRunSchema.parse({ ...base, lintErrors: 1 })).toThrow(/lintErrors=0/);
   });
 
   it("rejects failed without failureReason", () => {
@@ -196,9 +185,7 @@ describe("helpers", () => {
   });
 
   it("defaultConfigFor produces a valid config", () => {
-    expect(() =>
-      GeneratorConfigSchema.parse(defaultConfigFor("python")),
-    ).not.toThrow();
+    expect(() => GeneratorConfigSchema.parse(defaultConfigFor("python"))).not.toThrow();
   });
 
   it("defaultConfigFor Go has generateSyncMethods=true", () => {

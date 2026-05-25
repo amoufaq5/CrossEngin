@@ -76,9 +76,7 @@ describe("canTransitionException", () => {
 
 describe("AccessReviewExceptionSchema", () => {
   it("accepts a valid approved exception", () => {
-    expect(() =>
-      AccessReviewExceptionSchema.parse(baseException),
-    ).not.toThrow();
+    expect(() => AccessReviewExceptionSchema.parse(baseException)).not.toThrow();
   });
 
   it("rejects requestedExpiresAt <= requestedAt", () => {
@@ -158,14 +156,10 @@ describe("AccessReviewExceptionSchema", () => {
 
 describe("isExceptionExpired", () => {
   it("returns false before grantedExpiresAt", () => {
-    expect(
-      isExceptionExpired(baseException, new Date("2026-05-01T00:00:00Z")),
-    ).toBe(false);
+    expect(isExceptionExpired(baseException, new Date("2026-05-01T00:00:00Z"))).toBe(false);
   });
   it("returns true past grantedExpiresAt", () => {
-    expect(
-      isExceptionExpired(baseException, new Date("2026-11-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isExceptionExpired(baseException, new Date("2026-11-01T00:00:00Z"))).toBe(true);
   });
   it("returns false for non-approved status", () => {
     expect(
@@ -179,16 +173,11 @@ describe("isExceptionExpired", () => {
 
 describe("daysRemainingOnException", () => {
   it("returns days left for approved exception", () => {
-    const r = daysRemainingOnException(
-      baseException,
-      new Date("2026-05-15T10:00:00Z"),
-    );
+    const r = daysRemainingOnException(baseException, new Date("2026-05-15T10:00:00Z"));
     expect(r).toBeGreaterThan(150);
   });
   it("returns 0 past expiry", () => {
-    expect(
-      daysRemainingOnException(baseException, new Date("2027-01-01T00:00:00Z")),
-    ).toBe(0);
+    expect(daysRemainingOnException(baseException, new Date("2027-01-01T00:00:00Z"))).toBe(0);
   });
   it("returns null for non-approved", () => {
     expect(
@@ -202,9 +191,7 @@ describe("daysRemainingOnException", () => {
 
 describe("requiresReattestation", () => {
   it("returns false when not configured", () => {
-    expect(
-      requiresReattestation(baseException, new Date("2026-05-15T10:00:00Z")),
-    ).toBe(false);
+    expect(requiresReattestation(baseException, new Date("2026-05-15T10:00:00Z"))).toBe(false);
   });
   it("returns true on first check when configured", () => {
     expect(

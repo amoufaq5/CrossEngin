@@ -11,10 +11,7 @@ import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
 import type { JobDeclaration } from "@crossengin/jobs";
-import type {
-  DashboardDeclaration,
-  ReportDeclaration,
-} from "@crossengin/reporting";
+import type { DashboardDeclaration, ReportDeclaration } from "@crossengin/reporting";
 import { widgetReferencedReports } from "@crossengin/reporting";
 import type { ViewDeclaration } from "@crossengin/views";
 import {
@@ -282,10 +279,7 @@ function validatePermissions(
             );
           }
           if (fieldPerm.read) {
-            checkGrant(
-              `permissions.${entityName}.fields.${fieldName}.read.roles`,
-              fieldPerm.read,
-            );
+            checkGrant(`permissions.${entityName}.fields.${fieldName}.read.roles`, fieldPerm.read);
           }
           if (fieldPerm.update) {
             checkGrant(
@@ -354,10 +348,7 @@ function validateFiles(manifest: Manifest): void {
   }
 }
 
-function validateReports(
-  manifest: Manifest,
-  entityNames: ReadonlySet<string>,
-): Set<string> {
+function validateReports(manifest: Manifest, entityNames: ReadonlySet<string>): Set<string> {
   const reports: Record<string, ReportDeclaration> = manifest.reports ?? {};
   const reportIds = new Set<string>();
   for (const [key, report] of Object.entries(reports)) {
@@ -375,18 +366,12 @@ function validateReports(
   return reportIds;
 }
 
-function validateDashboards(
-  manifest: Manifest,
-  reportIds: ReadonlySet<string>,
-): Set<string> {
+function validateDashboards(manifest: Manifest, reportIds: ReadonlySet<string>): Set<string> {
   const dashboards: Record<string, DashboardDeclaration> = manifest.dashboards ?? {};
   const ids = new Set<string>();
   for (const [key, dashboard] of Object.entries(dashboards)) {
     if (ids.has(key)) {
-      throw new ManifestValidationError(
-        `dashboards.${key}`,
-        `duplicate dashboard id '${key}'`,
-      );
+      throw new ManifestValidationError(`dashboards.${key}`, `duplicate dashboard id '${key}'`);
     }
     ids.add(key);
     for (const referenced of widgetReferencedReports(dashboard)) {
@@ -455,10 +440,7 @@ function validateViews(
   }
 }
 
-function validateSearch(
-  manifest: Manifest,
-  entityNames: ReadonlySet<string>,
-): void {
+function validateSearch(manifest: Manifest, entityNames: ReadonlySet<string>): void {
   const search: SearchManifest | undefined = manifest.search;
   if (search === undefined) return;
   const entities = manifest.entities ?? [];

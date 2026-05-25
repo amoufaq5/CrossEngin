@@ -70,9 +70,7 @@ describe("PostgresLatencyTracker.stats", () => {
 
   it("returns parsed stats when samples exist", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        { samples: 10, successes: 8, failures: 2, p50_ms: 150, p95_ms: 450 },
-      ],
+      rows: [{ samples: 10, successes: 8, failures: 2, p50_ms: 150, p95_ms: 450 }],
       rowCount: 1,
     }));
     const tracker = new PostgresLatencyTracker({ conn });
@@ -181,9 +179,7 @@ describe("PostgresLatencyTracker.stats", () => {
         const samples = nextSamples;
         nextSamples += 5;
         return {
-          rows: [
-            { samples, successes: samples, failures: 0, p50_ms: 100, p95_ms: 200 },
-          ],
+          rows: [{ samples, successes: samples, failures: 0, p50_ms: 100, p95_ms: 200 }],
           rowCount: 1,
         };
       }) as PgConnection["query"],
@@ -210,9 +206,7 @@ describe("PostgresLatencyTracker — LatencyTracker contract compat", () => {
       latencyMs: number;
       success: boolean;
     }) => Promise<void> = tracker.record.bind(tracker);
-    const statsFn: (providerId: string) => Promise<unknown> = tracker.stats.bind(
-      tracker,
-    );
+    const statsFn: (providerId: string) => Promise<unknown> = tracker.stats.bind(tracker);
     expect(typeof recordFn).toBe("function");
     expect(typeof statsFn).toBe("function");
   });

@@ -26,7 +26,14 @@ const baseDefinition: WorkflowDefinition = {
   description: "Standard purchase request approval workflow",
   status: "published",
   states: [
-    { name: "submitted", kind: "initial", label: "Submitted", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    {
+      name: "submitted",
+      kind: "initial",
+      label: "Submitted",
+      onEntryActions: [],
+      onExitActions: [],
+      slaSeconds: null,
+    },
     {
       name: "manager_review",
       kind: "manual_approval",
@@ -265,9 +272,7 @@ describe("WorkflowDefinitionSchema", () => {
     expect(() =>
       WorkflowDefinitionSchema.parse({
         ...baseDefinition,
-        states: baseDefinition.states.filter(
-          (s) => !TERMINAL_STATE_KINDS.has(s.kind),
-        ),
+        states: baseDefinition.states.filter((s) => !TERMINAL_STATE_KINDS.has(s.kind)),
         transitions: [baseDefinition.transitions[0]],
       }),
     ).toThrow(/terminal state/);

@@ -50,15 +50,11 @@ describe("ScopeGrantSchema", () => {
   });
 
   it("rejects granted without grantedAt", () => {
-    expect(() =>
-      ScopeGrantSchema.parse({ ...base, grantedAt: null }),
-    ).toThrow(/grantedAt/);
+    expect(() => ScopeGrantSchema.parse({ ...base, grantedAt: null })).toThrow(/grantedAt/);
   });
 
   it("rejects granted without grantedBy", () => {
-    expect(() =>
-      ScopeGrantSchema.parse({ ...base, grantedBy: null }),
-    ).toThrow(/grantedBy/);
+    expect(() => ScopeGrantSchema.parse({ ...base, grantedBy: null })).toThrow(/grantedBy/);
   });
 
   it("rejects denied without deniedReason", () => {

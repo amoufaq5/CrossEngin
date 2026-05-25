@@ -55,10 +55,7 @@ export function createTenantResolver(config: TenantResolverConfig): TenantResolv
       );
 
       if (fromUrl !== null) {
-        if (
-          request.sessionTenantId !== undefined &&
-          request.sessionTenantId !== fromUrl.tenantId
-        ) {
+        if (request.sessionTenantId !== undefined && request.sessionTenantId !== fromUrl.tenantId) {
           throw new ConflictingTenantSourcesError(fromUrl.tenantId, request.sessionTenantId);
         }
         return { tenantId: fromUrl.tenantId, source: fromUrl.source };

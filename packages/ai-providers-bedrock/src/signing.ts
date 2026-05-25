@@ -46,8 +46,7 @@ export function signRequest(input: SignRequestInput): SignedRequest {
   }
 
   const signedHeaderNames = Object.keys(headers).sort();
-  const canonicalHeaders =
-    signedHeaderNames.map((n) => `${n}:${headers[n] ?? ""}\n`).join("");
+  const canonicalHeaders = signedHeaderNames.map((n) => `${n}:${headers[n] ?? ""}\n`).join("");
   const signedHeaders = signedHeaderNames.join(";");
 
   const canonicalQuery = canonicaliseQuery(input.query ?? {});
@@ -113,9 +112,7 @@ function canonicalisePath(path: string): string {
     .join("/");
 }
 
-function canonicaliseQuery(
-  query: Readonly<Record<string, string | readonly string[]>>,
-): string {
+function canonicaliseQuery(query: Readonly<Record<string, string | readonly string[]>>): string {
   const pairs: Array<[string, string]> = [];
   for (const [k, v] of Object.entries(query)) {
     const values = Array.isArray(v) ? v : [v];

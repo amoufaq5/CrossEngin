@@ -80,7 +80,10 @@ export const ClientRequestRecordSchema = z
     breadcrumbs: z.array(BreadcrumbSchema).max(50).default([]),
     idempotencyKey: z.string().min(1).optional(),
     userAgent: z.string().min(1),
-    errorCode: z.string().regex(/^[A-Z][A-Z0-9_]*$/).optional(),
+    errorCode: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]*$/)
+      .optional(),
     errorMessage: z.string().min(1).optional(),
   })
   .superRefine((v, ctx) => {
@@ -153,10 +156,7 @@ export const ClientRequestRecordSchema = z
         message: `outcome '${v.outcome}' requires errorCode`,
       });
     }
-    if (
-      (v.outcome === "network_error" || v.outcome === "timeout") &&
-      v.responseStatus !== null
-    ) {
+    if ((v.outcome === "network_error" || v.outcome === "timeout") && v.responseStatus !== null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["responseStatus"],
@@ -183,9 +183,7 @@ export interface UsageAggregate {
   readonly totalRetries: number;
 }
 
-export function aggregateUsage(
-  records: readonly ClientRequestRecord[],
-): UsageAggregate {
+export function aggregateUsage(records: readonly ClientRequestRecord[]): UsageAggregate {
   if (records.length === 0) {
     return {
       totalRequests: 0,

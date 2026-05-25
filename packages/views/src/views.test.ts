@@ -30,9 +30,7 @@ describe("ViewDeclarationSchema — list", () => {
       entity: "prescription",
       label: { en: "Prescription Inbox", ar: "صندوق الوصفات" },
       icon: "Pill",
-      filters: [
-        { field: "status", operator: "in", values: ["pending", "verified"] },
-      ],
+      filters: [{ field: "status", operator: "in", values: ["pending", "verified"] }],
       sort: [{ field: "writtenAt", direction: "desc" }],
       columns: [
         { field: "patient.name", label: { en: "Patient" }, width: 200 },
@@ -42,9 +40,7 @@ describe("ViewDeclarationSchema — list", () => {
         { field: "writtenAt", label: { en: "Written" }, render: "relativeTime" },
       ],
       rowAction: { kind: "openRecord", view: "prescriptionDetail" },
-      bulkActions: [
-        { kind: "workflow", name: "verifyPrescription", label: { en: "Verify" } },
-      ],
+      bulkActions: [{ kind: "workflow", name: "verifyPrescription", label: { en: "Verify" } }],
       permissions: "inherit",
     });
     expect(v.kind).toBe("list");
@@ -242,9 +238,7 @@ describe("view reference helpers", () => {
       kind: "record",
       entity: "x",
       sections: [{ id: "s", label: { en: "s" }, fields: ["n"] }],
-      related: [
-        { id: "r", label: { en: "r" }, relation: "rel", view: "subList" },
-      ],
+      related: [{ id: "r", label: { en: "r" }, relation: "rel", view: "subList" }],
     });
     expect(viewReferencedViews(record)).toEqual(["subList"]);
   });

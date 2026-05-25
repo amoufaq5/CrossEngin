@@ -35,21 +35,19 @@ describe("CostCenterSchema", () => {
   });
 
   it("rejects malformed cost center id", () => {
-    expect(() =>
-      CostCenterSchema.parse({ ...base, id: "cc-1" }),
-    ).toThrow();
+    expect(() => CostCenterSchema.parse({ ...base, id: "cc-1" })).toThrow();
   });
 
   it("rejects self-parenting", () => {
-    expect(() =>
-      CostCenterSchema.parse({ ...base, parentCostCenterId: "cc-0001" }),
-    ).toThrow(/cannot parent itself/);
+    expect(() => CostCenterSchema.parse({ ...base, parentCostCenterId: "cc-0001" })).toThrow(
+      /cannot parent itself/,
+    );
   });
 
   it("rejects archivedAt without reason", () => {
-    expect(() =>
-      CostCenterSchema.parse({ ...base, archivedAt: "2026-06-01T00:00:00Z" }),
-    ).toThrow(/archivedReason/);
+    expect(() => CostCenterSchema.parse({ ...base, archivedAt: "2026-06-01T00:00:00Z" })).toThrow(
+      /archivedReason/,
+    );
   });
 });
 
@@ -139,15 +137,15 @@ describe("ChargebackStatementSchema", () => {
   });
 
   it("rejects approved/posted without approvedAt + approvedBy", () => {
-    expect(() =>
-      ChargebackStatementSchema.parse({ ...base, status: "approved" }),
-    ).toThrow(/approvedBy/);
+    expect(() => ChargebackStatementSchema.parse({ ...base, status: "approved" })).toThrow(
+      /approvedBy/,
+    );
   });
 
   it("rejects voided without voidedReason", () => {
-    expect(() =>
-      ChargebackStatementSchema.parse({ ...base, status: "voided" }),
-    ).toThrow(/voidedReason/);
+    expect(() => ChargebackStatementSchema.parse({ ...base, status: "voided" })).toThrow(
+      /voidedReason/,
+    );
   });
 });
 

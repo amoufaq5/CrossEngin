@@ -26,9 +26,7 @@ export function buildErpCorePack(opts: BuildErpCorePackOptions = {}): Manifest {
       description:
         opts.description ??
         "Core ERP entities (Account, Contact, Invoice, InvoiceLine) with billing workflow + scheduled overdue sweep + payment event handler.",
-      ...(opts.compliancePacks !== undefined
-        ? { compliancePacks: [...opts.compliancePacks] }
-        : {}),
+      ...(opts.compliancePacks !== undefined ? { compliancePacks: [...opts.compliancePacks] } : {}),
     },
     entities: [...ERP_CORE_ENTITIES],
     relations: [...ERP_CORE_RELATIONS],

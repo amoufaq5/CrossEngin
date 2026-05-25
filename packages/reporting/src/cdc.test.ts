@@ -68,9 +68,7 @@ describe("CdcCheckpointSchema", () => {
   });
 
   it("permits a snapshot-in-progress status", () => {
-    expect(() =>
-      CdcCheckpointSchema.parse({ ...base, status: "snapshot" }),
-    ).not.toThrow();
+    expect(() => CdcCheckpointSchema.parse({ ...base, status: "snapshot" })).not.toThrow();
   });
 });
 

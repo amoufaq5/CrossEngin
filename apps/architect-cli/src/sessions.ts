@@ -10,11 +10,7 @@ import {
   PostgresArchitectSessionStore,
   PostgresArchitectToolInvocationStore,
 } from "@crossengin/ai-architect-pg";
-import {
-  createNodePgConnection,
-  parsePgEnvConfig,
-  type PgConnection,
-} from "@crossengin/kernel-pg";
+import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 
 import { DEFAULT_TENANT_ID } from "./chat.js";
 import type { ParsedCommand } from "./cli.js";
@@ -40,10 +36,7 @@ interface ResolvedHandle {
   readonly close: () => Promise<void>;
 }
 
-export async function runSessions(
-  command: ParsedCommand,
-  ctx: SessionsContext,
-): Promise<number> {
+export async function runSessions(command: ParsedCommand, ctx: SessionsContext): Promise<number> {
   const action = command.positional[0];
   if (action === undefined) {
     printError(
@@ -110,8 +103,7 @@ async function runSessionsList(
 ): Promise<number> {
   const tenantId = getStringFlag(command, "tenant-id") ?? DEFAULT_TENANT_ID;
   const limitFlag = getStringFlag(command, "limit");
-  const limit =
-    limitFlag !== null ? Number.parseInt(limitFlag, 10) : DEFAULT_LIST_LIMIT;
+  const limit = limitFlag !== null ? Number.parseInt(limitFlag, 10) : DEFAULT_LIST_LIMIT;
   if (!Number.isFinite(limit) || limit <= 0) {
     printError(ctx.io, `sessions list: invalid --limit: ${limitFlag ?? ""}`);
     return 2;
@@ -219,9 +211,7 @@ export function formatSessionsTable(records: readonly ArchitectSessionRecord[]):
 }
 
 function renderTable(headers: readonly string[], rows: readonly (readonly string[])[]): string {
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)),
-  );
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
   const sep = widths.map((w) => "-".repeat(w)).join("  ");
   const lines: string[] = [];
   lines.push(headers.map((h, i) => h.padEnd(widths[i]!)).join("  "));
@@ -341,4 +331,3 @@ export function formatSessionReplay(input: {
   );
   return lines.join("\n") + "\n";
 }
-

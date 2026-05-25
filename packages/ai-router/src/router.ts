@@ -26,10 +26,7 @@ import {
   type CostCeilingResolution,
   type CostTracker,
 } from "./cost-tracker.js";
-import {
-  NoopRouterInstrumentation,
-  type RouterInstrumentation,
-} from "./instrumentation.js";
+import { NoopRouterInstrumentation, type RouterInstrumentation } from "./instrumentation.js";
 import { InMemoryLatencyTracker, type LatencyTracker } from "./latency-tracker.js";
 import { ProviderResolutionError, resolveProviders } from "./resolve.js";
 import {
@@ -49,9 +46,7 @@ export interface DefaultLlmRouterOptions extends RouterConfig {
   readonly retry?: RetryPolicy;
   readonly costCeiling?: CostCeiling;
   readonly getTenantCostCeiling?: (tenantId: string) => Promise<CostCeiling | undefined>;
-  readonly getTenantCostCeilingDetailed?: (
-    tenantId: string,
-  ) => Promise<CostCeilingResolution>;
+  readonly getTenantCostCeilingDetailed?: (tenantId: string) => Promise<CostCeilingResolution>;
   readonly costTracker?: CostTracker;
   readonly latencyTracker?: LatencyTracker;
   readonly instrumentation?: RouterInstrumentation;
@@ -444,9 +439,7 @@ export class DefaultLlmRouter implements LlmRouter {
     }
   }
 
-  private async resolveCeilingDetailed(
-    tenantId: string,
-  ): Promise<CostCeilingResolution> {
+  private async resolveCeilingDetailed(tenantId: string): Promise<CostCeilingResolution> {
     if (this.getTenantCostCeilingDetailed !== undefined) {
       const detailed = await this.getTenantCostCeilingDetailed(tenantId);
       if (detailed.source !== "none") return detailed;

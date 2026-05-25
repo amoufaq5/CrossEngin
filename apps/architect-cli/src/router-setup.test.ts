@@ -20,30 +20,20 @@ describe("DEFAULT_TASK_POLICIES", () => {
   });
 
   it("routes executor to Claude sonnet primary, OpenAI mini fallback", () => {
-    expect(DEFAULT_TASK_POLICIES["executor"]?.primary).toBe(
-      "anthropic/claude-sonnet-4-6",
-    );
-    expect(DEFAULT_TASK_POLICIES["executor"]?.fallback).toContain(
-      "openai/gpt-4o-mini",
-    );
+    expect(DEFAULT_TASK_POLICIES["executor"]?.primary).toBe("anthropic/claude-sonnet-4-6");
+    expect(DEFAULT_TASK_POLICIES["executor"]?.fallback).toContain("openai/gpt-4o-mini");
   });
 
   it("routes embeddings to OpenAI primary with Bedrock Titan v2 as fallback", () => {
-    expect(DEFAULT_TASK_POLICIES["embedding"]?.primary).toBe(
-      "openai/text-embedding-3-small",
-    );
+    expect(DEFAULT_TASK_POLICIES["embedding"]?.primary).toBe("openai/text-embedding-3-small");
     expect(DEFAULT_TASK_POLICIES["embedding"]?.fallback).toEqual([
       "bedrock/amazon.titan-embed-text-v2:0",
     ]);
   });
 
   it("routes cheap tasks (summarizer / classifier) to OpenAI gpt-4o-mini primary", () => {
-    expect(DEFAULT_TASK_POLICIES["summarizer"]?.primary).toBe(
-      "openai/gpt-4o-mini",
-    );
-    expect(DEFAULT_TASK_POLICIES["classifier"]?.primary).toBe(
-      "openai/gpt-4o-mini",
-    );
+    expect(DEFAULT_TASK_POLICIES["summarizer"]?.primary).toBe("openai/gpt-4o-mini");
+    expect(DEFAULT_TASK_POLICIES["classifier"]?.primary).toBe("openai/gpt-4o-mini");
   });
 
   it("every task fallback chain ends with a Bedrock entry (third control plane)", () => {
@@ -123,21 +113,19 @@ describe("buildChatCompleter", () => {
   });
 
   it("ignores AWS_ACCESS_KEY_ID alone without AWS_SECRET_ACCESS_KEY", () => {
-    expect(() =>
-      buildChatCompleter({ env: { AWS_ACCESS_KEY_ID: "AKIDEXAMPLE" } }),
-    ).toThrow(NoProvidersConfiguredError);
+    expect(() => buildChatCompleter({ env: { AWS_ACCESS_KEY_ID: "AKIDEXAMPLE" } })).toThrow(
+      NoProvidersConfiguredError,
+    );
   });
 
   it("ignores AWS_SECRET_ACCESS_KEY alone without AWS_ACCESS_KEY_ID", () => {
-    expect(() =>
-      buildChatCompleter({ env: { AWS_SECRET_ACCESS_KEY: "secret/secret" } }),
-    ).toThrow(NoProvidersConfiguredError);
+    expect(() => buildChatCompleter({ env: { AWS_SECRET_ACCESS_KEY: "secret/secret" } })).toThrow(
+      NoProvidersConfiguredError,
+    );
   });
 
   it("throws NoProvidersConfiguredError when no credentials are set", () => {
-    expect(() => buildChatCompleter({ env: {} })).toThrow(
-      NoProvidersConfiguredError,
-    );
+    expect(() => buildChatCompleter({ env: {} })).toThrow(NoProvidersConfiguredError);
   });
 
   it("error message mentions all three provider environment variables", () => {
@@ -170,9 +158,7 @@ describe("buildChatCompleter", () => {
       forceModel: "anthropic.claude-3-5-haiku-20241022-v1:0",
     });
     expect(out.provider.id).toBe("bedrock");
-    expect(out.provider.models).toContain(
-      "anthropic.claude-3-5-haiku-20241022-v1:0",
-    );
+    expect(out.provider.models).toContain("anthropic.claude-3-5-haiku-20241022-v1:0");
   });
 
   it("router exposes the union of all configured providers' model lists", () => {

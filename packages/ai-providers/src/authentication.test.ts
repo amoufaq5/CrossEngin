@@ -99,15 +99,11 @@ describe("isAuthenticationError — Error-shaped inputs", () => {
   }
 
   it("returns true for authentication_error (HTTP 401)", () => {
-    expect(isAuthenticationError(fakeProviderError("authentication_error"))).toBe(
-      true,
-    );
+    expect(isAuthenticationError(fakeProviderError("authentication_error"))).toBe(true);
   });
 
   it("returns false for permission_error (HTTP 403 — adjacent but distinct)", () => {
-    expect(isAuthenticationError(fakeProviderError("permission_error"))).toBe(
-      false,
-    );
+    expect(isAuthenticationError(fakeProviderError("permission_error"))).toBe(false);
   });
 
   it("returns false for not_found_error", () => {
@@ -119,9 +115,7 @@ describe("isAuthenticationError — Error-shaped inputs", () => {
   });
 
   it("returns false for invalid_request_error", () => {
-    expect(isAuthenticationError(fakeProviderError("invalid_request_error"))).toBe(
-      false,
-    );
+    expect(isAuthenticationError(fakeProviderError("invalid_request_error"))).toBe(false);
   });
 
   it("returns false for retryable kinds", () => {
@@ -130,9 +124,7 @@ describe("isAuthenticationError — Error-shaped inputs", () => {
   });
 
   it("returns false for moderation kinds", () => {
-    expect(isAuthenticationError(fakeProviderError("guardrail_intervened"))).toBe(
-      false,
-    );
+    expect(isAuthenticationError(fakeProviderError("guardrail_intervened"))).toBe(false);
     expect(isAuthenticationError(fakeProviderError("content_filtered"))).toBe(false);
   });
 

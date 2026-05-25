@@ -166,7 +166,10 @@ describe("CompletionRequestSchema", () => {
   it("parses a request with tools, cacheControl, and temperature", () => {
     const req = {
       task: "executor" as const,
-      messages: [{ role: "system" as const, content: "..." }, { role: "user" as const, content: "..." }],
+      messages: [
+        { role: "system" as const, content: "..." },
+        { role: "user" as const, content: "..." },
+      ],
       tools: [{ name: "x", description: "y", inputSchema: {} }],
       cacheControl: { systemPrompt: "stable" },
       temperature: 0.2,
@@ -210,9 +213,7 @@ describe("CompletionChunkSchema", () => {
     expect(() =>
       CompletionChunkSchema.parse({ kind: "tool_call_arg_delta", id: "a", delta: '{"x"' }),
     ).not.toThrow();
-    expect(() =>
-      CompletionChunkSchema.parse({ kind: "tool_call_end", id: "a" }),
-    ).not.toThrow();
+    expect(() => CompletionChunkSchema.parse({ kind: "tool_call_end", id: "a" })).not.toThrow();
     expect(() =>
       CompletionChunkSchema.parse({
         kind: "usage_final",
@@ -222,9 +223,7 @@ describe("CompletionChunkSchema", () => {
   });
 
   it("rejects unknown chunk kind", () => {
-    expect(() =>
-      CompletionChunkSchema.parse({ kind: "magic", text: "x" }),
-    ).toThrow();
+    expect(() => CompletionChunkSchema.parse({ kind: "magic", text: "x" })).toThrow();
   });
 });
 
@@ -250,9 +249,7 @@ describe("NormalizedCompletionSchema", () => {
 
 describe("EmbeddingRequestSchema / EmbeddingResponseSchema", () => {
   it("parses a minimal embedding request", () => {
-    expect(() =>
-      EmbeddingRequestSchema.parse({ texts: ["hello"], tenantId: "t" }),
-    ).not.toThrow();
+    expect(() => EmbeddingRequestSchema.parse({ texts: ["hello"], tenantId: "t" })).not.toThrow();
   });
 
   it("rejects empty texts array", () => {
@@ -414,9 +411,7 @@ describe("LlmMessageSchema name field validation (M2.X.10)", () => {
   });
 
   it("rejects empty name", () => {
-    expect(() =>
-      LlmMessageSchema.parse({ role: "user", content: "hi", name: "" }),
-    ).toThrow();
+    expect(() => LlmMessageSchema.parse({ role: "user", content: "hi", name: "" })).toThrow();
   });
 
   it("rejects name longer than 64 chars", () => {
@@ -440,9 +435,7 @@ describe("LlmMessageSchema name field validation (M2.X.10)", () => {
   });
 
   it("name is optional (omitted parses cleanly)", () => {
-    expect(() =>
-      LlmMessageSchema.parse({ role: "user", content: "hi" }),
-    ).not.toThrow();
+    expect(() => LlmMessageSchema.parse({ role: "user", content: "hi" })).not.toThrow();
   });
 });
 
@@ -529,16 +522,12 @@ describe("imageMediaType", () => {
 
 describe("TextContentBlockSchema", () => {
   it("accepts text blocks with arbitrary text including empty string", () => {
-    expect(() =>
-      TextContentBlockSchema.parse({ type: "text", text: "hello" }),
-    ).not.toThrow();
+    expect(() => TextContentBlockSchema.parse({ type: "text", text: "hello" })).not.toThrow();
     expect(() => TextContentBlockSchema.parse({ type: "text", text: "" })).not.toThrow();
   });
 
   it("rejects wrong type discriminator", () => {
-    expect(() =>
-      TextContentBlockSchema.parse({ type: "image", text: "x" }),
-    ).toThrow();
+    expect(() => TextContentBlockSchema.parse({ type: "image", text: "x" })).toThrow();
   });
 });
 
@@ -586,9 +575,7 @@ describe("LlmContentSchema", () => {
   });
 
   it("accepts an array with at least one block", () => {
-    expect(() =>
-      LlmContentSchema.parse([{ type: "text", text: "hi" }]),
-    ).not.toThrow();
+    expect(() => LlmContentSchema.parse([{ type: "text", text: "hi" }])).not.toThrow();
   });
 
   it("rejects an empty array (min(1))", () => {
@@ -607,7 +594,10 @@ describe("LlmMessageSchema with block content (M2.X.5)", () => {
     expect(() =>
       LlmMessageSchema.parse({
         role: "user",
-        content: [{ type: "text", text: "look" }, { type: "image", format: "png", bytes: "x" }],
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", format: "png", bytes: "x" },
+        ],
       }),
     ).not.toThrow();
   });
@@ -616,7 +606,10 @@ describe("LlmMessageSchema with block content (M2.X.5)", () => {
     expect(() =>
       LlmMessageSchema.parse({
         role: "assistant",
-        content: [{ type: "text", text: "here is the image" }, { type: "image", format: "png", bytes: "y" }],
+        content: [
+          { type: "text", text: "here is the image" },
+          { type: "image", format: "png", bytes: "y" },
+        ],
       }),
     ).not.toThrow();
   });
@@ -638,9 +631,7 @@ describe("LlmMessageSchema with block content (M2.X.5)", () => {
   });
 
   it("rejects empty-array content", () => {
-    expect(() =>
-      LlmMessageSchema.parse({ role: "user", content: [] }),
-    ).toThrow();
+    expect(() => LlmMessageSchema.parse({ role: "user", content: [] })).toThrow();
   });
 
   it("rejects array content + attachments simultaneously (mutually exclusive)", () => {
@@ -708,9 +699,7 @@ describe("contentToText", () => {
   });
 
   it("returns empty string when array has only image blocks", () => {
-    expect(
-      contentToText([{ type: "image", format: "png", bytes: "x" }]),
-    ).toBe("");
+    expect(contentToText([{ type: "image", format: "png", bytes: "x" }])).toBe("");
   });
 });
 
@@ -1032,9 +1021,7 @@ describe("FileReferenceContentBlockSchema (M2.X.5.aa.z)", () => {
   });
 
   it("rejects empty fileId", () => {
-    expect(() =>
-      LlmContentBlockSchema.parse({ type: "file_id", fileId: "" }),
-    ).toThrow();
+    expect(() => LlmContentBlockSchema.parse({ type: "file_id", fileId: "" })).toThrow();
   });
 
   it("rejects fileId > 120 chars", () => {

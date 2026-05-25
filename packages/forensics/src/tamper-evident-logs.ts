@@ -36,49 +36,47 @@ export const ChainedLogEntrySchema = z
   .strict();
 export type ChainedLogEntry = z.infer<typeof ChainedLogEntrySchema>;
 
-export const ChainedLogSchema = z
-  .array(ChainedLogEntrySchema)
-  .superRefine((entries, ctx) => {
-    if (entries.length === 0) return;
-    let expectedSeq = 0;
-    let expectedPrior = GENESIS_HASH;
-    entries.forEach((e, i) => {
-      if (e.sequenceNumber !== expectedSeq) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "sequenceNumber"],
-          message: `expected sequenceNumber ${expectedSeq.toString()}, got ${e.sequenceNumber.toString()}`,
-        });
-      }
-      if (e.priorEntryHash !== expectedPrior) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "priorEntryHash"],
-          message: `hash chain broken: expected priorEntryHash ${expectedPrior}, got ${e.priorEntryHash}`,
-        });
-      }
-      if (e.entryHash === e.priorEntryHash) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "entryHash"],
-          message: "entryHash must differ from priorEntryHash",
-        });
-      }
-      expectedSeq = e.sequenceNumber + 1;
-      expectedPrior = e.entryHash;
-    });
-    for (let i = 1; i < entries.length; i++) {
-      const prev = entries[i - 1]!;
-      const curr = entries[i]!;
-      if (new Date(curr.recordedAt).getTime() < new Date(prev.recordedAt).getTime()) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "recordedAt"],
-          message: "recordedAt must be non-decreasing along the chain",
-        });
-      }
+export const ChainedLogSchema = z.array(ChainedLogEntrySchema).superRefine((entries, ctx) => {
+  if (entries.length === 0) return;
+  let expectedSeq = 0;
+  let expectedPrior = GENESIS_HASH;
+  entries.forEach((e, i) => {
+    if (e.sequenceNumber !== expectedSeq) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "sequenceNumber"],
+        message: `expected sequenceNumber ${expectedSeq.toString()}, got ${e.sequenceNumber.toString()}`,
+      });
     }
+    if (e.priorEntryHash !== expectedPrior) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "priorEntryHash"],
+        message: `hash chain broken: expected priorEntryHash ${expectedPrior}, got ${e.priorEntryHash}`,
+      });
+    }
+    if (e.entryHash === e.priorEntryHash) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "entryHash"],
+        message: "entryHash must differ from priorEntryHash",
+      });
+    }
+    expectedSeq = e.sequenceNumber + 1;
+    expectedPrior = e.entryHash;
   });
+  for (let i = 1; i < entries.length; i++) {
+    const prev = entries[i - 1]!;
+    const curr = entries[i]!;
+    if (new Date(curr.recordedAt).getTime() < new Date(prev.recordedAt).getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "recordedAt"],
+        message: "recordedAt must be non-decreasing along the chain",
+      });
+    }
+  }
+});
 export type ChainedLog = z.infer<typeof ChainedLogSchema>;
 
 export const ChainCheckpointSchema = z
@@ -93,9 +91,11 @@ export const ChainCheckpointSchema = z
   .strict();
 export type ChainCheckpoint = z.infer<typeof ChainCheckpointSchema>;
 
-export function verifyChainIntegrity(
-  entries: readonly ChainedLogEntry[],
-): { readonly valid: boolean; readonly brokenAt: number | null; readonly reason?: string } {
+export function verifyChainIntegrity(entries: readonly ChainedLogEntry[]): {
+  readonly valid: boolean;
+  readonly brokenAt: number | null;
+  readonly reason?: string;
+} {
   let priorHash = GENESIS_HASH;
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];

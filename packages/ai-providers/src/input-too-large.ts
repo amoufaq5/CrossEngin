@@ -1,15 +1,11 @@
-export const INPUT_TOO_LARGE_ERROR_KINDS = [
-  "request_too_large",
-] as const;
+export const INPUT_TOO_LARGE_ERROR_KINDS = ["request_too_large"] as const;
 export type InputTooLargeErrorKind = (typeof INPUT_TOO_LARGE_ERROR_KINDS)[number];
 
 export interface InputTooLargeDiscriminator {
   readonly kind: string;
 }
 
-export function isInputTooLargeErrorKind(
-  value: string,
-): value is InputTooLargeErrorKind {
+export function isInputTooLargeErrorKind(value: string): value is InputTooLargeErrorKind {
   return (INPUT_TOO_LARGE_ERROR_KINDS as readonly string[]).includes(value);
 }
 

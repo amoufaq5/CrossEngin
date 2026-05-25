@@ -103,9 +103,7 @@ export function criticalPathMinutes(pipeline: CiPipeline): number {
     const job = byId.get(id);
     if (job === undefined) return 0;
     const depMax =
-      job.dependsOn.length === 0
-        ? 0
-        : Math.max(...job.dependsOn.map((d) => durationTo(d)));
+      job.dependsOn.length === 0 ? 0 : Math.max(...job.dependsOn.map((d) => durationTo(d)));
     const total = depMax + job.targetMinutes;
     memo.set(id, total);
     return total;
@@ -116,9 +114,7 @@ export function criticalPathMinutes(pipeline: CiPipeline): number {
 
 export function fitsBudget(pipeline: CiPipeline, trigger: CiJobTrigger): boolean {
   const budget =
-    trigger === "pull_request"
-      ? pipeline.pullRequestTargetMinutes
-      : pipeline.pushMainTargetMinutes;
+    trigger === "pull_request" ? pipeline.pullRequestTargetMinutes : pipeline.pushMainTargetMinutes;
   return criticalPathMinutes(pipeline) <= budget;
 }
 

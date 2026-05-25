@@ -193,8 +193,9 @@ describe("hasScope", () => {
 
 describe("normalizeScopes", () => {
   it("dedupes and sorts", () => {
-    expect(
-      normalizeScopes(["tenants:write", "tenants:read", "tenants:write"]),
-    ).toEqual(["tenants:read", "tenants:write"]);
+    expect(normalizeScopes(["tenants:write", "tenants:read", "tenants:write"])).toEqual([
+      "tenants:read",
+      "tenants:write",
+    ]);
   });
 });

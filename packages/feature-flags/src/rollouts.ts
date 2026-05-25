@@ -26,9 +26,7 @@ export const ROLLOUT_STAGE_PERCENTAGES: Readonly<Record<RolloutStage, number>> =
   rolled_back: 0,
 };
 
-export const ROLLOUT_STAGE_TRANSITIONS: Readonly<
-  Record<RolloutStage, readonly RolloutStage[]>
-> = {
+export const ROLLOUT_STAGE_TRANSITIONS: Readonly<Record<RolloutStage, readonly RolloutStage[]>> = {
   paused: ["ramping_1pct", "rolled_back"],
   ramping_1pct: ["ramping_5pct", "paused", "rolled_back"],
   ramping_5pct: ["ramping_10pct", "paused", "rolled_back"],
@@ -40,10 +38,8 @@ export const ROLLOUT_STAGE_TRANSITIONS: Readonly<
   rolled_back: ["paused"],
 };
 
-export const canTransitionStage = (
-  from: RolloutStage,
-  to: RolloutStage,
-): boolean => ROLLOUT_STAGE_TRANSITIONS[from].includes(to);
+export const canTransitionStage = (from: RolloutStage, to: RolloutStage): boolean =>
+  ROLLOUT_STAGE_TRANSITIONS[from].includes(to);
 
 export const ROLLOUT_RAMP_STRATEGIES = [
   "manual",
@@ -93,15 +89,12 @@ export const RolloutPlanSchema = z
       }
     }
     if (r.currentStage === "rolled_back") {
-      if (
-        r.rolledBackAt === null ||
-        r.rolledBackByUserId === null ||
-        r.rolledBackReason === null
-      ) {
+      if (r.rolledBackAt === null || r.rolledBackByUserId === null || r.rolledBackReason === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["rolledBackAt"],
-          message: "rolled_back stage requires rolledBackAt + rolledBackByUserId + rolledBackReason",
+          message:
+            "rolled_back stage requires rolledBackAt + rolledBackByUserId + rolledBackReason",
         });
       }
     }
@@ -110,8 +103,7 @@ export const RolloutPlanSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["blockingMetricSloIds"],
-          message:
-            "metric_driven_auto strategy requires at least one blockingMetricSloIds entry",
+          message: "metric_driven_auto strategy requires at least one blockingMetricSloIds entry",
         });
       }
       if (!r.autoAdvanceOnSuccessfulObservation) {
@@ -150,10 +142,7 @@ export const RolloutPlanSchema = z
   });
 export type RolloutPlan = z.infer<typeof RolloutPlanSchema>;
 
-export const isInRollout = (
-  plan: RolloutPlan,
-  bucketingValue: string,
-): boolean => {
+export const isInRollout = (plan: RolloutPlan, bucketingValue: string): boolean => {
   if (plan.currentStage === "paused" || plan.currentStage === "rolled_back") {
     return false;
   }
@@ -163,10 +152,7 @@ export const isInRollout = (
   return bucket < percentage * 100;
 };
 
-export const nextScheduledStage = (
-  plan: RolloutPlan,
-  now: Date,
-): RolloutScheduleStep | null => {
+export const nextScheduledStage = (plan: RolloutPlan, now: Date): RolloutScheduleStep | null => {
   const nowMs = now.getTime();
   for (const step of plan.schedule) {
     if (Date.parse(step.scheduledAt) > nowMs) return step;

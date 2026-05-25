@@ -98,10 +98,7 @@ export const CustodyEntrySchema = z
         });
       }
     }
-    if (
-      (v.action === "destroyed" || v.action === "duplicated") &&
-      v.sealNumber === undefined
-    ) {
+    if ((v.action === "destroyed" || v.action === "duplicated") && v.sealNumber === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["sealNumber"],
@@ -111,68 +108,66 @@ export const CustodyEntrySchema = z
   });
 export type CustodyEntry = z.infer<typeof CustodyEntrySchema>;
 
-export const CustodyChainSchema = z
-  .array(CustodyEntrySchema)
-  .superRefine((entries, ctx) => {
-    if (entries.length === 0) return;
-    const evidenceId = entries[0]?.evidenceId;
-    let priorTo: string | null = null;
-    entries.forEach((e, i) => {
-      if (e.evidenceId !== evidenceId) {
+export const CustodyChainSchema = z.array(CustodyEntrySchema).superRefine((entries, ctx) => {
+  if (entries.length === 0) return;
+  const evidenceId = entries[0]?.evidenceId;
+  let priorTo: string | null = null;
+  entries.forEach((e, i) => {
+    if (e.evidenceId !== evidenceId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "evidenceId"],
+        message: `chain must be for a single evidence id; got mixed '${evidenceId}' and '${e.evidenceId}'`,
+      });
+    }
+    if (i === 0) {
+      if (e.action !== "collected") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: [i, "evidenceId"],
-          message: `chain must be for a single evidence id; got mixed '${evidenceId}' and '${e.evidenceId}'`,
+          path: [i, "action"],
+          message: "first entry must be action='collected'",
         });
       }
-      if (i === 0) {
-        if (e.action !== "collected") {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "action"],
-            message: "first entry must be action='collected'",
-          });
-        }
-      } else {
-        if (e.action === "collected") {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "action"],
-            message: "only the first entry can be action='collected'",
-          });
-        }
-        if (e.fromCustodianId !== priorTo) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "fromCustodianId"],
-            message: `custody gap: previous toCustodian was '${priorTo}', this entry's fromCustodian is '${e.fromCustodianId}'`,
-          });
-        }
-      }
-      priorTo = e.toCustodianId;
-      if (i > 0) {
-        const prev = entries[i - 1]!;
-        if (new Date(e.occurredAt).getTime() < new Date(prev.occurredAt).getTime()) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "occurredAt"],
-            message: "custody entries must be in chronological order",
-          });
-        }
-      }
-    });
-    const ids = new Set<string>();
-    entries.forEach((e, i) => {
-      if (ids.has(e.id)) {
+    } else {
+      if (e.action === "collected") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate custody entry id '${e.id}'`,
+          path: [i, "action"],
+          message: "only the first entry can be action='collected'",
         });
       }
-      ids.add(e.id);
-    });
+      if (e.fromCustodianId !== priorTo) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i, "fromCustodianId"],
+          message: `custody gap: previous toCustodian was '${priorTo}', this entry's fromCustodian is '${e.fromCustodianId}'`,
+        });
+      }
+    }
+    priorTo = e.toCustodianId;
+    if (i > 0) {
+      const prev = entries[i - 1]!;
+      if (new Date(e.occurredAt).getTime() < new Date(prev.occurredAt).getTime()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i, "occurredAt"],
+          message: "custody entries must be in chronological order",
+        });
+      }
+    }
   });
+  const ids = new Set<string>();
+  entries.forEach((e, i) => {
+    if (ids.has(e.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate custody entry id '${e.id}'`,
+      });
+    }
+    ids.add(e.id);
+  });
+});
 export type CustodyChain = z.infer<typeof CustodyChainSchema>;
 
 export function currentCustodian(chain: CustodyChain): string | null {
@@ -182,10 +177,7 @@ export function currentCustodian(chain: CustodyChain): string | null {
   return last.toCustodianId;
 }
 
-export function chainAgeMinutes(
-  chain: CustodyChain,
-  now: Date = new Date(),
-): number | null {
+export function chainAgeMinutes(chain: CustodyChain, now: Date = new Date()): number | null {
   const first = chain[0];
   if (first === undefined) return null;
   return Math.floor((now.getTime() - new Date(first.occurredAt).getTime()) / 60_000);

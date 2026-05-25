@@ -36,9 +36,7 @@ export const findAncestors = (
   maxDepth = 50,
 ): ReadonlySet<string> => {
   const ancestors = new Set<string>();
-  const queue: { id: string; depth: number }[] = [
-    { id: startNodeId, depth: 0 },
-  ];
+  const queue: { id: string; depth: number }[] = [{ id: startNodeId, depth: 0 }];
   while (queue.length > 0) {
     const { id, depth } = queue.shift() as { id: string; depth: number };
     if (depth >= maxDepth) continue;
@@ -59,9 +57,7 @@ export const findDescendants = (
   maxDepth = 50,
 ): ReadonlySet<string> => {
   const descendants = new Set<string>();
-  const queue: { id: string; depth: number }[] = [
-    { id: startNodeId, depth: 0 },
-  ];
+  const queue: { id: string; depth: number }[] = [{ id: startNodeId, depth: 0 }];
   while (queue.length > 0) {
     const { id, depth } = queue.shift() as { id: string; depth: number };
     if (depth >= maxDepth) continue;
@@ -83,9 +79,7 @@ export const findShortestPath = (
 ): readonly string[] | null => {
   if (fromNodeId === toNodeId) return [fromNodeId];
   const visited = new Set<string>([fromNodeId]);
-  const queue: { id: string; path: readonly string[] }[] = [
-    { id: fromNodeId, path: [fromNodeId] },
-  ];
+  const queue: { id: string; path: readonly string[] }[] = [{ id: fromNodeId, path: [fromNodeId] }];
   while (queue.length > 0) {
     const { id, path } = queue.shift() as {
       id: string;
@@ -131,9 +125,7 @@ export const hasCycle = (graph: LineageGraph): boolean => {
   return false;
 };
 
-export const findRootNodes = (
-  graph: LineageGraph,
-): readonly string[] => {
+export const findRootNodes = (graph: LineageGraph): readonly string[] => {
   const roots: string[] = [];
   for (const id of graph.nodes.keys()) {
     const incoming = graph.edgesByTarget.get(id);
@@ -144,9 +136,7 @@ export const findRootNodes = (
   return roots;
 };
 
-export const findLeafNodes = (
-  graph: LineageGraph,
-): readonly string[] => {
+export const findLeafNodes = (graph: LineageGraph): readonly string[] => {
   const leaves: string[] = [];
   for (const id of graph.nodes.keys()) {
     const outgoing = graph.edgesBySource.get(id);

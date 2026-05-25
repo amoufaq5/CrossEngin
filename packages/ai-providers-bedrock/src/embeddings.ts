@@ -1,16 +1,11 @@
 import type { EmbeddingResponse, Usage } from "@crossengin/ai-providers";
 
 import { BedrockError } from "./errors.js";
-import {
-  buildBedrockEmbeddingUsage,
-  type BedrockEmbeddingModel,
-} from "./pricing.js";
+import { buildBedrockEmbeddingUsage, type BedrockEmbeddingModel } from "./pricing.js";
 
 export type BedrockEmbeddingFamily = "titan" | "cohere";
 
-export function bedrockEmbeddingFamily(
-  model: BedrockEmbeddingModel,
-): BedrockEmbeddingFamily {
+export function bedrockEmbeddingFamily(model: BedrockEmbeddingModel): BedrockEmbeddingFamily {
   if (model.startsWith("amazon.titan-embed-text")) return "titan";
   if (model.startsWith("cohere.embed-")) return "cohere";
   throw new BedrockError({
@@ -158,10 +153,7 @@ export function buildEmbeddingResponse(input: {
   readonly model: BedrockEmbeddingModel;
   readonly aggregation: EmbeddingAggregation;
 }): EmbeddingResponse {
-  const usage: Usage = buildBedrockEmbeddingUsage(
-    input.model,
-    input.aggregation.inputTokens,
-  );
+  const usage: Usage = buildBedrockEmbeddingUsage(input.model, input.aggregation.inputTokens);
   return {
     vectors: input.aggregation.vectors.map((v) => [...v]),
     dim: input.aggregation.dim,
@@ -200,8 +192,7 @@ export function buildTitanMultimodalRequest(
   input: BuildTitanMultimodalRequestInput,
 ): TitanMultimodalEmbedRequest {
   const hasText = typeof input.text === "string" && input.text.length > 0;
-  const hasImage =
-    typeof input.imageBase64 === "string" && input.imageBase64.length > 0;
+  const hasImage = typeof input.imageBase64 === "string" && input.imageBase64.length > 0;
   if (!hasText && !hasImage) {
     throw new BedrockError({
       kind: "invalid_request_error",
@@ -222,9 +213,7 @@ export function buildTitanMultimodalRequest(
   };
 }
 
-export function parseTitanMultimodalResponse(
-  raw: unknown,
-): TitanMultimodalEmbedResponse {
+export function parseTitanMultimodalResponse(raw: unknown): TitanMultimodalEmbedResponse {
   if (typeof raw !== "object" || raw === null) {
     throw new BedrockError({
       kind: "api_error",
@@ -242,8 +231,7 @@ export function parseTitanMultimodalResponse(
       message: "titan multimodal embedding response missing 'embedding' array",
     });
   }
-  const tokens =
-    typeof obj.inputTextTokenCount === "number" ? obj.inputTextTokenCount : 0;
+  const tokens = typeof obj.inputTextTokenCount === "number" ? obj.inputTextTokenCount : 0;
   const message = typeof obj.message === "string" ? obj.message : null;
   return {
     embedding: obj.embedding as readonly number[],

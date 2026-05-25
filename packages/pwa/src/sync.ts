@@ -121,9 +121,7 @@ export function hasConflict(input: ConflictDetectionInput): boolean {
   return new Date(input.serverUpdatedAt).getTime() > new Date(input.localUpdatedAt).getTime();
 }
 
-export function applyLastWriteWins(
-  input: ConflictDetectionInput,
-): "local" | "server" {
+export function applyLastWriteWins(input: ConflictDetectionInput): "local" | "server" {
   const localMs = new Date(input.localUpdatedAt).getTime();
   const serverMs = new Date(input.serverUpdatedAt).getTime();
   return localMs >= serverMs ? "local" : "server";

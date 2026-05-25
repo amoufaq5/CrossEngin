@@ -4,8 +4,16 @@ import type { LiveColumn, LiveSchema, LiveTable } from "./introspection.js";
 
 export interface ColumnDelta {
   readonly column: string;
-  readonly target: { readonly type: string; readonly nullable: boolean; readonly defaultExpr: string | null };
-  readonly live: { readonly type: string; readonly nullable: boolean; readonly defaultExpr: string | null };
+  readonly target: {
+    readonly type: string;
+    readonly nullable: boolean;
+    readonly defaultExpr: string | null;
+  };
+  readonly live: {
+    readonly type: string;
+    readonly nullable: boolean;
+    readonly defaultExpr: string | null;
+  };
   readonly reasons: readonly ("type" | "nullable" | "default")[];
 }
 
@@ -42,7 +50,11 @@ function normalizeDefault(value: string | null | undefined): string | null {
 }
 
 function compareColumn(
-  target: { readonly type: string; readonly notNull?: boolean; readonly default?: string | undefined },
+  target: {
+    readonly type: string;
+    readonly notNull?: boolean;
+    readonly default?: string | undefined;
+  },
   live: LiveColumn,
 ): ColumnDelta["reasons"] {
   const reasons: ColumnDelta["reasons"][number][] = [];
@@ -109,9 +121,7 @@ function diffOneTable(target: TableDefinition, live: LiveTable): TableDiff {
   }
 
   const livePolicies = new Map(live.policies.map((p) => [p.name, p] as const));
-  const targetPolicies = new Map(
-    (target.rls?.policies ?? []).map((p) => [p.name, p] as const),
-  );
+  const targetPolicies = new Map((target.rls?.policies ?? []).map((p) => [p.name, p] as const));
   const addedPolicies: string[] = [];
   const removedPolicies: string[] = [];
   for (const name of targetPolicies.keys()) {
@@ -148,10 +158,7 @@ function tableHasDrift(diff: TableDiff): boolean {
   );
 }
 
-export function diffSchema(
-  target: readonly TableDefinition[],
-  live: LiveSchema,
-): SchemaDiff {
+export function diffSchema(target: readonly TableDefinition[], live: LiveSchema): SchemaDiff {
   const liveByName = new Map(live.tables.map((t) => [t.name, t] as const));
   const targetByName = new Map(target.map((t) => [t.name, t] as const));
 
@@ -185,10 +192,7 @@ export function diffSchema(
     removedTables,
     modifiedTables,
     unchangedTables,
-    hasDrift:
-      addedTables.length > 0 ||
-      removedTables.length > 0 ||
-      modifiedTables.length > 0,
+    hasDrift: addedTables.length > 0 || removedTables.length > 0 || modifiedTables.length > 0,
   };
 }
 
@@ -220,9 +224,7 @@ export function formatSchemaDiff(diff: SchemaDiff): string {
       for (const p of m.addedPolicies) lines.push(`          + policy ${p}`);
       for (const p of m.removedPolicies) lines.push(`          - policy ${p}`);
       if (m.rlsTargetEnabled !== m.rlsLiveEnabled) {
-        lines.push(
-          `          ! RLS target=${m.rlsTargetEnabled} live=${m.rlsLiveEnabled}`,
-        );
+        lines.push(`          ! RLS target=${m.rlsTargetEnabled} live=${m.rlsLiveEnabled}`);
       }
     }
   }

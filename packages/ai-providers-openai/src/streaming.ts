@@ -1,10 +1,7 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import { normalizeChatUsage, type OpenAIChatUsage } from "./chat-api.js";
-import {
-  OpenAIContentFilteredError,
-  isContentFilterFinishReason,
-} from "./moderation.js";
+import { OpenAIContentFilteredError, isContentFilterFinishReason } from "./moderation.js";
 import type { OpenAIChatModel } from "./pricing.js";
 
 export interface SseEvent {

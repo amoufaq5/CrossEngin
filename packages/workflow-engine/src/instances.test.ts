@@ -128,9 +128,9 @@ describe("WorkflowInstanceSchema", () => {
   });
 
   it("rejects completed without completedAt", () => {
-    expect(() =>
-      WorkflowInstanceSchema.parse({ ...baseInstance, status: "completed" }),
-    ).toThrow(/completed instance requires completedAt/);
+    expect(() => WorkflowInstanceSchema.parse({ ...baseInstance, status: "completed" })).toThrow(
+      /completed instance requires completedAt/,
+    );
   });
 
   it("rejects cancelled without cancelledReason", () => {
@@ -209,14 +209,10 @@ describe("isInstanceActive / isInstanceTerminal", () => {
 
 describe("isInstanceTimedOut", () => {
   it("returns true past timeoutAt for active instance", () => {
-    expect(
-      isInstanceTimedOut(baseInstance, new Date("2026-05-24T00:00:00Z")),
-    ).toBe(true);
+    expect(isInstanceTimedOut(baseInstance, new Date("2026-05-24T00:00:00Z"))).toBe(true);
   });
   it("returns false within timeout", () => {
-    expect(
-      isInstanceTimedOut(baseInstance, new Date("2026-05-18T00:00:00Z")),
-    ).toBe(false);
+    expect(isInstanceTimedOut(baseInstance, new Date("2026-05-18T00:00:00Z"))).toBe(false);
   });
   it("returns false for terminal instance even past timeout", () => {
     const completed: WorkflowInstance = {
@@ -224,28 +220,20 @@ describe("isInstanceTimedOut", () => {
       status: "completed",
       completedAt: "2026-05-16T11:00:00.000Z",
     };
-    expect(
-      isInstanceTimedOut(completed, new Date("2026-05-24T00:00:00Z")),
-    ).toBe(false);
+    expect(isInstanceTimedOut(completed, new Date("2026-05-24T00:00:00Z"))).toBe(false);
   });
 });
 
 describe("elapsedSinceLastTransitionSeconds", () => {
   it("returns positive elapsed seconds", () => {
-    expect(
-      elapsedSinceLastTransitionSeconds(
-        baseInstance,
-        new Date("2026-05-16T10:05:00Z"),
-      ),
-    ).toBe(295);
+    expect(elapsedSinceLastTransitionSeconds(baseInstance, new Date("2026-05-16T10:05:00Z"))).toBe(
+      295,
+    );
   });
   it("returns 0 when now precedes lastTransitionAt", () => {
-    expect(
-      elapsedSinceLastTransitionSeconds(
-        baseInstance,
-        new Date("2026-05-16T10:00:00Z"),
-      ),
-    ).toBe(0);
+    expect(elapsedSinceLastTransitionSeconds(baseInstance, new Date("2026-05-16T10:00:00Z"))).toBe(
+      0,
+    );
   });
 });
 

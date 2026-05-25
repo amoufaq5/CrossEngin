@@ -71,10 +71,7 @@ const TYPE_TO_KIND: Readonly<Record<string, OpenAIErrorKind>> = {
   service_unavailable: "overloaded_error",
 };
 
-export function fromHttpResponse(input: {
-  status: number;
-  body: string;
-}): OpenAIError {
+export function fromHttpResponse(input: { status: number; body: string }): OpenAIError {
   let message = `OpenAI API responded with status ${input.status.toString()}`;
   let kind = classifyHttpStatus(input.status);
   let code: string | null = null;

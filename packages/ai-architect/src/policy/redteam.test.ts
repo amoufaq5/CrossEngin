@@ -31,9 +31,7 @@ describe("AdversarialTestCaseSchema", () => {
   it("requires expectedRefusal for refused_correctly outcomes", () => {
     const { expectedRefusal: _omit, ...rest } = baseCase;
     void _omit;
-    expect(() => AdversarialTestCaseSchema.parse(rest)).toThrow(
-      /must declare expectedRefusal/,
-    );
+    expect(() => AdversarialTestCaseSchema.parse(rest)).toThrow(/must declare expectedRefusal/);
   });
 
   it("rejects expectedRefusal on non-refusal outcomes", () => {
@@ -46,9 +44,7 @@ describe("AdversarialTestCaseSchema", () => {
   });
 
   it("rejects test ids that don't match 'rt-<kebab>'", () => {
-    expect(() =>
-      AdversarialTestCaseSchema.parse({ ...baseCase, id: "test-1" }),
-    ).toThrow();
+    expect(() => AdversarialTestCaseSchema.parse({ ...baseCase, id: "test-1" })).toThrow();
   });
 
   it("REDTEAM_CATEGORIES has six entries", () => {
@@ -60,9 +56,9 @@ describe("AdversarialTestCaseSchema", () => {
 
 describe("AdversarialTestSuiteSchema", () => {
   it("rejects duplicate ids", () => {
-    expect(() =>
-      AdversarialTestSuiteSchema.parse([baseCase, baseCase]),
-    ).toThrow(/duplicate redteam test id/);
+    expect(() => AdversarialTestSuiteSchema.parse([baseCase, baseCase])).toThrow(
+      /duplicate redteam test id/,
+    );
   });
 });
 

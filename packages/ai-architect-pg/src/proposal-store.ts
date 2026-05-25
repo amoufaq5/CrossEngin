@@ -1,7 +1,4 @@
-import type {
-  ArchitectProposalDecision,
-  ArchitectProposalRecord,
-} from "@crossengin/ai-architect";
+import type { ArchitectProposalDecision, ArchitectProposalRecord } from "@crossengin/ai-architect";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";

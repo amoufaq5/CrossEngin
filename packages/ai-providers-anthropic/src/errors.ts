@@ -53,10 +53,7 @@ export function classifyHttpStatus(status: number): AnthropicErrorKind {
   return "unknown_error";
 }
 
-export function fromHttpResponse(input: {
-  status: number;
-  body: string;
-}): AnthropicError {
+export function fromHttpResponse(input: { status: number; body: string }): AnthropicError {
   let message = `Anthropic API responded with status ${input.status.toString()}`;
   let kind = classifyHttpStatus(input.status);
   try {
@@ -79,7 +76,8 @@ export function fromHttpResponse(input: {
 export function fromNetworkError(err: unknown): AnthropicError {
   const message = err instanceof Error ? err.message : "network request failed";
   const isTimeout =
-    err instanceof Error && (err.name === "AbortError" || err.message.toLowerCase().includes("timeout"));
+    err instanceof Error &&
+    (err.name === "AbortError" || err.message.toLowerCase().includes("timeout"));
   return new AnthropicError({
     kind: isTimeout ? "timeout_error" : "network_error",
     message,

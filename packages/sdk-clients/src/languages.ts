@@ -93,7 +93,8 @@ export const PackageCoordinatesSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["packageName"],
-          message: "Go module paths must be a full import path (e.g., 'github.com/crossengin/crossengin-go')",
+          message:
+            "Go module paths must be a full import path (e.g., 'github.com/crossengin/crossengin-go')",
         });
       }
     }
@@ -101,7 +102,8 @@ export const PackageCoordinatesSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["moduleName"],
-        message: "Python clients must declare moduleName (the importable identifier, distinct from the PyPI package name)",
+        message:
+          "Python clients must declare moduleName (the importable identifier, distinct from the PyPI package name)",
       });
     }
     if (v.language === "java" || v.language === "kotlin") {

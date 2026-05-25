@@ -104,9 +104,7 @@ describe("SearchManifestSchema", () => {
 
   it("accepts every supported FTS dictionary", () => {
     for (const dict of FTS_DICTIONARIES) {
-      expect(() =>
-        SearchManifestSchema.parse({ defaultDictionary: dict }),
-      ).not.toThrow();
+      expect(() => SearchManifestSchema.parse({ defaultDictionary: dict })).not.toThrow();
     }
   });
 
@@ -143,10 +141,7 @@ describe("indexedEntities / indexedFieldPaths / globallyIndexedEntities", () => 
   });
 
   it("indexedFieldPaths returns paths for one entity", () => {
-    expect(indexedFieldPaths(manifest, "Prescription")).toEqual([
-      "drug.name",
-      "patient.name",
-    ]);
+    expect(indexedFieldPaths(manifest, "Prescription")).toEqual(["drug.name", "patient.name"]);
   });
 
   it("globallyIndexedEntities filters to globalIndex=true", () => {

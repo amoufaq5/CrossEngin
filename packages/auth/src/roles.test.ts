@@ -49,9 +49,7 @@ describe("resolveEffectiveRoles", () => {
   });
 
   it("throws UnknownRoleError on unknown primary role", () => {
-    expect(() => resolveEffectiveRoles(principal("nonexistent"), ROLES)).toThrow(
-      UnknownRoleError,
-    );
+    expect(() => resolveEffectiveRoles(principal("nonexistent"), ROLES)).toThrow(UnknownRoleError);
   });
 
   it("throws UnknownRoleError on unknown secondary role", () => {
@@ -61,9 +59,7 @@ describe("resolveEffectiveRoles", () => {
   });
 
   it("throws RoleInheritanceCycleError on a cycle", () => {
-    expect(() => resolveEffectiveRoles(principal("a"), ROLES)).toThrow(
-      RoleInheritanceCycleError,
-    );
+    expect(() => resolveEffectiveRoles(principal("a"), ROLES)).toThrow(RoleInheritanceCycleError);
   });
 });
 

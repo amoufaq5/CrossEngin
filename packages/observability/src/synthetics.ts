@@ -51,7 +51,10 @@ const SyntheticBrowserCheckSchema = z.object({
 });
 
 export const SyntheticCheckDeclarationSchema = z.object({
-  id: z.string().min(1).regex(/^[a-z][a-z0-9-]*[a-z0-9]$/),
+  id: z
+    .string()
+    .min(1)
+    .regex(/^[a-z][a-z0-9-]*[a-z0-9]$/),
   name: z.string().min(1),
   schedule: z.string().regex(CRON_REGEX),
   region: z.string().min(1),
@@ -99,12 +102,7 @@ export const StatusPageComponentSchema = z.object({
 });
 export type StatusPageComponent = z.infer<typeof StatusPageComponentSchema>;
 
-export const StatusIncidentImpactSchema = z.enum([
-  "none",
-  "minor",
-  "major",
-  "critical",
-]);
+export const StatusIncidentImpactSchema = z.enum(["none", "minor", "major", "critical"]);
 export type StatusIncidentImpact = z.infer<typeof StatusIncidentImpactSchema>;
 
 export const StatusIncidentSchema = z.object({

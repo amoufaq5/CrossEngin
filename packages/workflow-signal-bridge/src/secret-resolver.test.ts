@@ -9,9 +9,7 @@ const TENANT = "00000000-0000-4000-8000-000000000001";
 describe("StaticSecretResolver", () => {
   it("returns null when no entry matches", async () => {
     const r = new StaticSecretResolver([]);
-    expect(
-      await r.resolve({ tenantId: TENANT, sourceSystem: "stripe", hint: null }),
-    ).toBeNull();
+    expect(await r.resolve({ tenantId: TENANT, sourceSystem: "stripe", hint: null })).toBeNull();
   });
 
   it("matches an entry that has tenantId=null (platform-wide)", async () => {
@@ -72,8 +70,8 @@ describe("StaticSecretResolver", () => {
       { tenantId: null, sourceSystem: null, secretBytes: SECRET_A },
       { tenantId: null, sourceSystem: null, secretBytes: SECRET_B },
     ]);
-    expect(
-      (await r.resolve({ tenantId: null, sourceSystem: null, hint: null }))?.secretBytes,
-    ).toBe(SECRET_A);
+    expect((await r.resolve({ tenantId: null, sourceSystem: null, hint: null }))?.secretBytes).toBe(
+      SECRET_A,
+    );
   });
 });

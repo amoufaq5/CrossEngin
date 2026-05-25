@@ -154,9 +154,9 @@ describe("DeliveryAttemptSchema", () => {
   });
 
   it("rejects initial with attemptNumber != 1", () => {
-    expect(() =>
-      DeliveryAttemptSchema.parse({ ...baseAttempt, attemptNumber: 2 }),
-    ).toThrow(/initial attempt must have attemptNumber=1/);
+    expect(() => DeliveryAttemptSchema.parse({ ...baseAttempt, attemptNumber: 2 })).toThrow(
+      /initial attempt must have attemptNumber=1/,
+    );
   });
 
   it("rejects retry with attemptNumber 1", () => {
@@ -210,9 +210,9 @@ describe("DeliveryAttemptSchema", () => {
   });
 
   it("rejects latencyMs mismatch with finalizedAt - sentAt", () => {
-    expect(() =>
-      DeliveryAttemptSchema.parse({ ...baseAttempt, latencyMs: 9999 }),
-    ).toThrow(/does not match/);
+    expect(() => DeliveryAttemptSchema.parse({ ...baseAttempt, latencyMs: 9999 })).toThrow(
+      /does not match/,
+    );
   });
 });
 
@@ -310,9 +310,7 @@ describe("summarizeDispatches", () => {
       ...baseAttempt,
       id: `dlv_xxx${i.toString().padStart(5, "0")}`,
       latencyMs: ms,
-      finalizedAt: new Date(
-        Date.parse(baseAttempt.sentAt as string) + ms,
-      ).toISOString(),
+      finalizedAt: new Date(Date.parse(baseAttempt.sentAt as string) + ms).toISOString(),
     }));
     const s = summarizeDispatches([baseDispatch], attempts);
     expect(s.p99LatencyMs).toBe(500);

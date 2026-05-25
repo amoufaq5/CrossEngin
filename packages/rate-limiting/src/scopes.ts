@@ -34,10 +34,7 @@ export const ScopeSpecSchema = z
   .object({
     kind: z.enum(SCOPE_KINDS),
     routePattern: z.string().max(200).nullable(),
-    componentScopes: z
-      .array(z.enum(SCOPE_KINDS))
-      .max(8)
-      .default([]),
+    componentScopes: z.array(z.enum(SCOPE_KINDS)).max(8).default([]),
     bucketSalt: z.string().max(80).optional(),
   })
   .superRefine((s, ctx) => {
@@ -46,8 +43,7 @@ export const ScopeSpecSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["componentScopes"],
-          message:
-            "composite scope requires at least 2 componentScopes",
+          message: "composite scope requires at least 2 componentScopes",
         });
       }
       if (s.componentScopes.includes("composite")) {
@@ -85,10 +81,7 @@ export interface RateLimitKeyInputs {
   readonly oauthClientId: string | null;
 }
 
-export const computeRateLimitKey = (
-  spec: ScopeSpec,
-  inputs: RateLimitKeyInputs,
-): string | null => {
+export const computeRateLimitKey = (spec: ScopeSpec, inputs: RateLimitKeyInputs): string | null => {
   const parts: string[] = [];
   const kinds: readonly ScopeKind[] =
     spec.kind === "composite" ? spec.componentScopes : [spec.kind];
@@ -110,21 +103,15 @@ const singleScopeKeyPart = (
     case "per_tenant":
       return inputs.tenantId === null ? null : `tenant:${inputs.tenantId}`;
     case "per_principal":
-      return inputs.principalId === null
-        ? null
-        : `principal:${inputs.principalId}`;
+      return inputs.principalId === null ? null : `principal:${inputs.principalId}`;
     case "per_api_key":
-      return inputs.apiKeyPrefix === null
-        ? null
-        : `apikey:${inputs.apiKeyPrefix}`;
+      return inputs.apiKeyPrefix === null ? null : `apikey:${inputs.apiKeyPrefix}`;
     case "per_ip":
       return inputs.ipAddress === null ? null : `ip:${inputs.ipAddress}`;
     case "per_route":
       return routePattern === null ? null : `route:${routePattern}`;
     case "per_oauth_client":
-      return inputs.oauthClientId === null
-        ? null
-        : `oauth:${inputs.oauthClientId}`;
+      return inputs.oauthClientId === null ? null : `oauth:${inputs.oauthClientId}`;
     case "per_tenant_route":
       if (inputs.tenantId === null || routePattern === null) return null;
       return `tenant:${inputs.tenantId}|route:${routePattern}`;
@@ -152,10 +139,7 @@ export const requiredInputsFor = (
   return Array.from(required);
 };
 
-export const matchesRoutePattern = (
-  pattern: string,
-  route: string,
-): boolean => {
+export const matchesRoutePattern = (pattern: string, route: string): boolean => {
   if (pattern === route) return true;
   if (pattern === "*") return true;
   if (pattern.endsWith("/*")) {

@@ -57,12 +57,7 @@ export const QuotaDefinitionSchema = z
     softLimit: z.number().int().min(0).nullable(),
     overageAllowed: z.boolean(),
     overageUnitPriceCents: z.number().int().min(0).nullable(),
-    appliesAfterPlanSwitchSeconds: z
-      .number()
-      .int()
-      .min(0)
-      .max(86_400)
-      .default(0),
+    appliesAfterPlanSwitchSeconds: z.number().int().min(0).max(86_400).default(0),
     createdAt: z.string().datetime({ offset: true }),
     createdBy: z.string().uuid(),
   })
@@ -116,10 +111,7 @@ export const QuotaUsageSchema = z
     lastUpdatedAt: z.string().datetime({ offset: true }),
   })
   .superRefine((u, ctx) => {
-    if (
-      u.periodEndAt !== null &&
-      Date.parse(u.periodEndAt) <= Date.parse(u.periodStartAt)
-    ) {
+    if (u.periodEndAt !== null && Date.parse(u.periodEndAt) <= Date.parse(u.periodStartAt)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["periodEndAt"],
@@ -173,10 +165,7 @@ export const computePeriodStart = (
   return new Date(startSec * 1000).toISOString();
 };
 
-export const computePeriodEnd = (
-  period: QuotaPeriod,
-  periodStart: Date,
-): string | null => {
+export const computePeriodEnd = (period: QuotaPeriod, periodStart: Date): string | null => {
   if (period === "lifetime") return null;
   const periodSec = PERIOD_SECONDS[period];
   if (periodSec === null) return null;
@@ -203,15 +192,9 @@ export interface QuotaCheckResult {
 
 export const evaluateQuota = (input: QuotaCheckInput): QuotaCheckResult => {
   const projected = input.currentUsage + input.costUnits;
-  const remainingBeforeHard = Math.max(
-    0,
-    input.definition.hardLimit - projected,
-  );
+  const remainingBeforeHard = Math.max(0, input.definition.hardLimit - projected);
   if (projected <= input.definition.hardLimit) {
-    if (
-      input.definition.softLimit !== null &&
-      projected > input.definition.softLimit
-    ) {
+    if (input.definition.softLimit !== null && projected > input.definition.softLimit) {
       return {
         allowed: true,
         outcome: "soft_limit_exceeded",

@@ -1,10 +1,7 @@
 import { WorkflowSchema } from "@crossengin/kernel/workflow";
 import { describe, expect, it } from "vitest";
 
-import {
-  ERP_PAYMENTS_WORKFLOWS,
-  PAYMENT_LIFECYCLE_WORKFLOW,
-} from "./workflows.js";
+import { ERP_PAYMENTS_WORKFLOWS, PAYMENT_LIFECYCLE_WORKFLOW } from "./workflows.js";
 
 describe("PAYMENT_LIFECYCLE_WORKFLOW", () => {
   it("parses against WorkflowSchema", () => {
@@ -26,9 +23,7 @@ describe("PAYMENT_LIFECYCLE_WORKFLOW", () => {
 
   it("refund can fire from captured or settled (both must be active)", () => {
     if (PAYMENT_LIFECYCLE_WORKFLOW.kind !== "entityLifecycle") return;
-    const refund = PAYMENT_LIFECYCLE_WORKFLOW.transitions.find(
-      (t) => t.name === "refund",
-    );
+    const refund = PAYMENT_LIFECYCLE_WORKFLOW.transitions.find((t) => t.name === "refund");
     const froms = Array.isArray(refund?.from) ? refund?.from : [refund?.from];
     expect(froms?.sort()).toEqual(["captured", "settled"]);
   });
@@ -42,12 +37,8 @@ describe("PAYMENT_LIFECYCLE_WORKFLOW", () => {
 
   it("settle and capture are automatic transitions (driven by webhooks / sweep)", () => {
     if (PAYMENT_LIFECYCLE_WORKFLOW.kind !== "entityLifecycle") return;
-    const capture = PAYMENT_LIFECYCLE_WORKFLOW.transitions.find(
-      (t) => t.name === "capture",
-    );
-    const settle = PAYMENT_LIFECYCLE_WORKFLOW.transitions.find(
-      (t) => t.name === "settle",
-    );
+    const capture = PAYMENT_LIFECYCLE_WORKFLOW.transitions.find((t) => t.name === "capture");
+    const settle = PAYMENT_LIFECYCLE_WORKFLOW.transitions.find((t) => t.name === "settle");
     expect(capture?.trigger?.kind).toBe("automatic");
     expect(settle?.trigger?.kind).toBe("automatic");
   });

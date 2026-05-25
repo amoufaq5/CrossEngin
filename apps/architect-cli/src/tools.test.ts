@@ -170,7 +170,7 @@ describe("executeToolCall — read_file", () => {
   it("reads an allowed-extension file when allowFileRead is enabled", async () => {
     const dir = await tempDir();
     const path = join(dir, "test.json");
-    await writeFile(path, "{\"x\":1}", "utf8");
+    await writeFile(path, '{"x":1}', "utf8");
     const tools = buildToolCatalog({ allowFileRead: true, fileRootDir: dir });
     const result = await executeToolCall(tools, {
       id: "r1",
@@ -179,7 +179,7 @@ describe("executeToolCall — read_file", () => {
     });
     expect(result.isError).toBe(false);
     const parsed = JSON.parse(result.output) as { contents: string };
-    expect(parsed.contents).toBe("{\"x\":1}");
+    expect(parsed.contents).toBe('{"x":1}');
   });
 
   it("rejects disallowed extensions", async () => {
@@ -288,9 +288,9 @@ describe("autoApprover", () => {
 describe("buildToolCatalog — propose_manifest_edit gating", () => {
   it("is absent unless allowFileWrite + approver are both set", () => {
     expect(buildToolCatalog().map((t) => t.name)).not.toContain("propose_manifest_edit");
-    expect(
-      buildToolCatalog({ allowFileWrite: true }).map((t) => t.name),
-    ).not.toContain("propose_manifest_edit");
+    expect(buildToolCatalog({ allowFileWrite: true }).map((t) => t.name)).not.toContain(
+      "propose_manifest_edit",
+    );
     expect(
       buildToolCatalog({
         allowFileWrite: true,

@@ -19,12 +19,7 @@ describe("constants", () => {
   });
 
   it("UPDATE_POLICIES has 4 entries", () => {
-    expect(UPDATE_POLICIES).toEqual([
-      "manual",
-      "patch_auto",
-      "minor_auto",
-      "track_latest",
-    ]);
+    expect(UPDATE_POLICIES).toEqual(["manual", "patch_auto", "minor_auto", "track_latest"]);
   });
 });
 
@@ -75,15 +70,15 @@ describe("PackInstallationSchema", () => {
   });
 
   it("rejects installed without installedVersion", () => {
-    expect(() =>
-      PackInstallationSchema.parse({ ...base, installedVersion: null }),
-    ).toThrow(/installedVersion/);
+    expect(() => PackInstallationSchema.parse({ ...base, installedVersion: null })).toThrow(
+      /installedVersion/,
+    );
   });
 
   it("rejects installed without installedAt", () => {
-    expect(() =>
-      PackInstallationSchema.parse({ ...base, installedAt: null }),
-    ).toThrow(/installedAt/);
+    expect(() => PackInstallationSchema.parse({ ...base, installedAt: null })).toThrow(
+      /installedAt/,
+    );
   });
 
   it("rejects uninstalled without uninstalledAt + uninstalledBy", () => {
@@ -122,7 +117,11 @@ describe("PackInstallationSchema", () => {
 });
 
 describe("PackInstallationSetSchema", () => {
-  const inst = (id: string, packId: string, status: PackInstallation["status"] = "installed"): PackInstallation => ({
+  const inst = (
+    id: string,
+    packId: string,
+    status: PackInstallation["status"] = "installed",
+  ): PackInstallation => ({
     id,
     tenantId: "t-1",
     packId,

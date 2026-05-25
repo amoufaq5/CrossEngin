@@ -43,39 +43,27 @@ describe("FieldSchema", () => {
   });
 
   it("rejects field with PascalCase name", () => {
-    expect(() =>
-      FieldSchema.parse({ name: "PatientId", type: { kind: "uuid" } }),
-    ).toThrow();
+    expect(() => FieldSchema.parse({ name: "PatientId", type: { kind: "uuid" } })).toThrow();
   });
 
   it("rejects field with camelCase name", () => {
-    expect(() =>
-      FieldSchema.parse({ name: "patientId", type: { kind: "uuid" } }),
-    ).toThrow();
+    expect(() => FieldSchema.parse({ name: "patientId", type: { kind: "uuid" } })).toThrow();
   });
 
   it("rejects field with leading underscore", () => {
-    expect(() =>
-      FieldSchema.parse({ name: "_id", type: { kind: "uuid" } }),
-    ).toThrow();
+    expect(() => FieldSchema.parse({ name: "_id", type: { kind: "uuid" } })).toThrow();
   });
 
   it("rejects field with leading digit", () => {
-    expect(() =>
-      FieldSchema.parse({ name: "1st_place", type: { kind: "integer" } }),
-    ).toThrow();
+    expect(() => FieldSchema.parse({ name: "1st_place", type: { kind: "integer" } })).toThrow();
   });
 
   it("rejects field with hyphen", () => {
-    expect(() =>
-      FieldSchema.parse({ name: "first-name", type: { kind: "text" } }),
-    ).toThrow();
+    expect(() => FieldSchema.parse({ name: "first-name", type: { kind: "text" } })).toThrow();
   });
 
   it("rejects field with empty name", () => {
-    expect(() =>
-      FieldSchema.parse({ name: "", type: { kind: "uuid" } }),
-    ).toThrow();
+    expect(() => FieldSchema.parse({ name: "", type: { kind: "uuid" } })).toThrow();
   });
 
   it("rejects unique with empty scope array", () => {

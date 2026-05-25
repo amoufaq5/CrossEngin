@@ -137,12 +137,9 @@ export class OpenAIProvider implements LlmProvider {
     if (!isOpenAIEmbeddingModel(embedModel)) {
       throw new Error(`OpenAIProvider: unsupported defaultEmbeddingModel ${embedModel}`);
     }
-    const moderationModel =
-      opts.defaultModerationModel ?? OPENAI_DEFAULT_MODERATION_MODEL;
+    const moderationModel = opts.defaultModerationModel ?? OPENAI_DEFAULT_MODERATION_MODEL;
     if (!isOpenAIModerationModel(moderationModel)) {
-      throw new Error(
-        `OpenAIProvider: unsupported defaultModerationModel ${moderationModel}`,
-      );
+      throw new Error(`OpenAIProvider: unsupported defaultModerationModel ${moderationModel}`);
     }
     this.apiKey = opts.apiKey;
     this.defaultChatModel = chatModel;
@@ -439,14 +436,11 @@ export class OpenAIProvider implements LlmProvider {
     }
     let response;
     try {
-      response = await this.fetchImpl(
-        this.url(`/v1/files/${encodeURIComponent(fileId)}`),
-        {
-          method: "GET",
-          headers: this.headers({ stream: false }),
-          body: "",
-        },
-      );
+      response = await this.fetchImpl(this.url(`/v1/files/${encodeURIComponent(fileId)}`), {
+        method: "GET",
+        headers: this.headers({ stream: false }),
+        body: "",
+      });
     } catch (err) {
       throw fromNetworkError(err);
     }
@@ -474,14 +468,11 @@ export class OpenAIProvider implements LlmProvider {
     }
     let response;
     try {
-      response = await this.fetchImpl(
-        this.url(`/v1/files/${encodeURIComponent(fileId)}`),
-        {
-          method: "DELETE",
-          headers: this.headers({ stream: false }),
-          body: "",
-        },
-      );
+      response = await this.fetchImpl(this.url(`/v1/files/${encodeURIComponent(fileId)}`), {
+        method: "DELETE",
+        headers: this.headers({ stream: false }),
+        body: "",
+      });
     } catch (err) {
       throw fromNetworkError(err);
     }
@@ -500,12 +491,14 @@ export class OpenAIProvider implements LlmProvider {
     }
   }
 
-  async listFiles(options: {
-    readonly purpose?: OpenAIFilesPurpose;
-    readonly limit?: number;
-    readonly order?: "asc" | "desc";
-    readonly after?: string;
-  } = {}): Promise<OpenAIFileListResponse> {
+  async listFiles(
+    options: {
+      readonly purpose?: OpenAIFilesPurpose;
+      readonly limit?: number;
+      readonly order?: "asc" | "desc";
+      readonly after?: string;
+    } = {},
+  ): Promise<OpenAIFileListResponse> {
     if (options.purpose !== undefined && !isOpenAIFilesPurpose(options.purpose)) {
       throw new OpenAIError({
         kind: "invalid_request_error",

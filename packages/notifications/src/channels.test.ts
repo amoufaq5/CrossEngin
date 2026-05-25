@@ -93,9 +93,9 @@ describe("ProviderConfigSchema", () => {
   });
 
   it("rejects email without fromAddress", () => {
-    expect(() =>
-      ProviderConfigSchema.parse({ ...baseEmailProvider, fromAddress: null }),
-    ).toThrow(/email provider requires fromAddress/);
+    expect(() => ProviderConfigSchema.parse({ ...baseEmailProvider, fromAddress: null })).toThrow(
+      /email provider requires fromAddress/,
+    );
   });
 
   it("rejects provider/channel mismatch (sendgrid on sms)", () => {
@@ -122,9 +122,9 @@ describe("ProviderConfigSchema", () => {
   });
 
   it("rejects sendgrid without apiKeySha256", () => {
-    expect(() =>
-      ProviderConfigSchema.parse({ ...baseEmailProvider, apiKeySha256: null }),
-    ).toThrow(/apiKeySha256/);
+    expect(() => ProviderConfigSchema.parse({ ...baseEmailProvider, apiKeySha256: null })).toThrow(
+      /apiKeySha256/,
+    );
   });
 });
 

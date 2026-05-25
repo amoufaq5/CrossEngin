@@ -16,12 +16,7 @@ export const SCALING_SIGNALS = [
 export type ScalingSignal = (typeof SCALING_SIGNALS)[number];
 export const ScalingSignalSchema = z.enum(SCALING_SIGNALS);
 
-export const SCALING_DECISIONS = [
-  "scale_up",
-  "scale_down",
-  "hold",
-  "throttled",
-] as const;
+export const SCALING_DECISIONS = ["scale_up", "scale_down", "hold", "throttled"] as const;
 export type ScalingDecision = (typeof SCALING_DECISIONS)[number];
 export const ScalingDecisionSchema = z.enum(SCALING_DECISIONS);
 
@@ -63,14 +58,11 @@ export const ScalingPolicySchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["scaleDownThreshold"],
-        message: "scaleDownThreshold must be strictly less than scaleUpThreshold to prevent flapping",
+        message:
+          "scaleDownThreshold must be strictly less than scaleUpThreshold to prevent flapping",
       });
     }
-    const pctSignals: ReadonlyArray<ScalingSignal> = [
-      "cpu_pct",
-      "memory_pct",
-      "error_rate_pct",
-    ];
+    const pctSignals: ReadonlyArray<ScalingSignal> = ["cpu_pct", "memory_pct", "error_rate_pct"];
     if (pctSignals.includes(v.signal)) {
       if (v.scaleUpThreshold < 0 || v.scaleUpThreshold > 100) {
         ctx.addIssue({
@@ -205,10 +197,7 @@ export function proposeScalingDecision(
         toReplicas: input.currentReplicas,
       };
     }
-    const toReplicas = Math.min(
-      policy.maxReplicas,
-      input.currentReplicas + policy.scaleUpStep,
-    );
+    const toReplicas = Math.min(policy.maxReplicas, input.currentReplicas + policy.scaleUpStep);
     return {
       decision: "scale_up",
       reason: "threshold_exceeded",
@@ -223,10 +212,7 @@ export function proposeScalingDecision(
         toReplicas: input.currentReplicas,
       };
     }
-    const toReplicas = Math.max(
-      policy.minReplicas,
-      input.currentReplicas - policy.scaleDownStep,
-    );
+    const toReplicas = Math.max(policy.minReplicas, input.currentReplicas - policy.scaleDownStep);
     return {
       decision: "scale_down",
       reason: "threshold_recovered",

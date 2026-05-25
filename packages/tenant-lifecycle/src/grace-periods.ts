@@ -38,14 +38,13 @@ const GRACE_MAX_DAYS: Readonly<Record<GraceKind, number>> = Object.freeze({
   appeal_window: 60,
 });
 
-export const GRACE_FROM_STATE: Readonly<Record<GraceKind, TenantLifecycleState>> =
-  Object.freeze({
-    billing_grace: "past_due",
-    suspension_grace: "suspended",
-    archive_grace: "archived",
-    deletion_grace: "pending_deletion",
-    appeal_window: "pending_deletion",
-  });
+export const GRACE_FROM_STATE: Readonly<Record<GraceKind, TenantLifecycleState>> = Object.freeze({
+  billing_grace: "past_due",
+  suspension_grace: "suspended",
+  archive_grace: "archived",
+  deletion_grace: "pending_deletion",
+  appeal_window: "pending_deletion",
+});
 
 export const GracePeriodSchema = z
   .object({
@@ -146,18 +145,12 @@ export function effectiveExpiresAt(grace: GracePeriod): string {
   return grace.customerExtendedToExpiresAt ?? grace.expiresAt;
 }
 
-export function isGraceExpired(
-  grace: GracePeriod,
-  now: Date = new Date(),
-): boolean {
+export function isGraceExpired(grace: GracePeriod, now: Date = new Date()): boolean {
   if (grace.cancelledAt !== null) return false;
   return now.getTime() >= new Date(effectiveExpiresAt(grace)).getTime();
 }
 
-export function daysRemaining(
-  grace: GracePeriod,
-  now: Date = new Date(),
-): number {
+export function daysRemaining(grace: GracePeriod, now: Date = new Date()): number {
   if (grace.cancelledAt !== null) return 0;
   const expireMs = new Date(effectiveExpiresAt(grace)).getTime();
   const remainingMs = expireMs - now.getTime();

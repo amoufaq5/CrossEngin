@@ -8,10 +8,15 @@ const SESSION_UUID = "00000000-0000-4000-8000-000000000002";
 const TS = "2026-05-17T12:00:00.000Z";
 
 function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
+  handler: (
+    sql: string,
+    params: readonly unknown[] | undefined,
+  ) => PgQueryResult<Record<string, unknown>>,
 ): PgConnection {
   return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
+    query: vi.fn(async (sql: string, params?: readonly unknown[]) =>
+      handler(sql, params),
+    ) as PgConnection["query"],
     transaction: vi.fn() as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
@@ -165,9 +170,7 @@ describe("PostgresArchitectSessionStore.getBySessionId", () => {
   it("returns null when no row matches", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const store = new PostgresArchitectSessionStore(conn);
-    expect(
-      await store.getBySessionId({ tenantId: TENANT, sessionId: "missing" }),
-    ).toBeNull();
+    expect(await store.getBySessionId({ tenantId: TENANT, sessionId: "missing" })).toBeNull();
   });
 });
 

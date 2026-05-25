@@ -31,12 +31,9 @@ const baseSaml: SsoProvider = {
     idpSigningCertificateSha256: "a".repeat(64),
     spEntityId: "https://crossengin.io/sp/acme",
     spAcsUrl: "https://crossengin.io/sso/acme/acs",
-    signatureAlgorithm:
-      "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    signatureAlgorithm: "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
     digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256",
-    allowedNameIdFormats: [
-      "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
-    ],
+    allowedNameIdFormats: ["urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"],
     preferredBinding: "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
     wantAssertionsSigned: true,
     wantResponseSigned: true,
@@ -168,17 +165,11 @@ describe("isTenantScopedProvider", () => {
 describe("requiresMandatoryRetest", () => {
   const now = new Date("2026-05-15T10:00:00Z");
   it("returns true when never tested", () => {
-    expect(
-      requiresMandatoryRetest({ ...baseSaml, lastTestedAt: null }, now),
-    ).toBe(true);
+    expect(requiresMandatoryRetest({ ...baseSaml, lastTestedAt: null }, now)).toBe(true);
   });
   it("returns true when last test exceeds threshold", () => {
     expect(
-      requiresMandatoryRetest(
-        { ...baseSaml, lastTestedAt: "2026-01-01T00:00:00.000Z" },
-        now,
-        90,
-      ),
+      requiresMandatoryRetest({ ...baseSaml, lastTestedAt: "2026-01-01T00:00:00.000Z" }, now, 90),
     ).toBe(true);
   });
   it("returns false within threshold", () => {

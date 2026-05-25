@@ -189,9 +189,7 @@ describe("matchesRoutePattern", () => {
     expect(matchesRoutePattern("/v1/tenants/:id", "/v1/tenants/123")).toBe(true);
   });
   it("does not match path parameter at wrong depth", () => {
-    expect(matchesRoutePattern("/v1/tenants/:id", "/v1/tenants/123/users")).toBe(
-      false,
-    );
+    expect(matchesRoutePattern("/v1/tenants/:id", "/v1/tenants/123/users")).toBe(false);
   });
   it("global wildcard matches anything", () => {
     expect(matchesRoutePattern("*", "/anywhere")).toBe(true);

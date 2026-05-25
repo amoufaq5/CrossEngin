@@ -29,13 +29,15 @@ function buildEngine(
   };
 }
 
-function buildBridge(opts: {
-  engine?: SignalSubmitter;
-  signalName?: string;
-  correlationPath?: string;
-  secretBytes?: Uint8Array;
-  toleranceSeconds?: number;
-} = {}) {
+function buildBridge(
+  opts: {
+    engine?: SignalSubmitter;
+    signalName?: string;
+    correlationPath?: string;
+    secretBytes?: Uint8Array;
+    toleranceSeconds?: number;
+  } = {},
+) {
   const secretResolver = new StaticSecretResolver(
     [{ tenantId: null, sourceSystem: null, secretBytes: opts.secretBytes ?? SECRET }],
     { defaultToleranceSeconds: opts.toleranceSeconds ?? 300 },
@@ -60,13 +62,14 @@ function signedBody(body: unknown, secret = SECRET, ts = NOW_SECONDS) {
 
 describe("WorkflowSignalBridge — constructor", () => {
   it("rejects empty signalName", () => {
-    expect(() =>
-      new WorkflowSignalBridge({
-        engine: buildEngine(),
-        secretResolver: new StaticSecretResolver([]),
-        correlationExtractor: fieldPathExtractor("x"),
-        signalName: "",
-      }),
+    expect(
+      () =>
+        new WorkflowSignalBridge({
+          engine: buildEngine(),
+          secretResolver: new StaticSecretResolver([]),
+          correlationExtractor: fieldPathExtractor("x"),
+          signalName: "",
+        }),
     ).toThrow(/non-empty signalName/);
   });
 });

@@ -56,7 +56,9 @@ describe("parseSseEvents", () => {
 describe("chunksFromSse — text streaming", () => {
   it("emits text chunks for text_delta events", () => {
     const chunks = [...chunksFromSse(SAMPLE, "claude-sonnet-4-6")];
-    const texts = chunks.filter((c) => c.kind === "text").map((c) => (c.kind === "text" ? c.text : ""));
+    const texts = chunks
+      .filter((c) => c.kind === "text")
+      .map((c) => (c.kind === "text" ? c.text : ""));
     expect(texts).toEqual(["Hello", " world"]);
   });
 
@@ -95,7 +97,9 @@ data: {"type":"message_delta","usage":{"output_tokens":50}}
 
   it("emits tool_call_start / arg deltas / tool_call_end", () => {
     const chunks = [...chunksFromSse(TOOL_SAMPLE, "claude-sonnet-4-6")];
-    expect(chunks.some((c) => c.kind === "tool_call_start" && c.id === "toolu_1" && c.name === "search")).toBe(true);
+    expect(
+      chunks.some((c) => c.kind === "tool_call_start" && c.id === "toolu_1" && c.name === "search"),
+    ).toBe(true);
     const deltas = chunks.filter((c) => c.kind === "tool_call_arg_delta");
     expect(deltas).toHaveLength(2);
     expect(chunks.some((c) => c.kind === "tool_call_end" && c.id === "toolu_1")).toBe(true);

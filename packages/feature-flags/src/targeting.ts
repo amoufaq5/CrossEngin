@@ -40,26 +40,44 @@ const SpecificPrincipalsTargetingSchema = z.object({
 
 const TenantAttributeEqualsSchema = z.object({
   kind: z.literal("tenant_attribute_equals"),
-  attributePath: z.string().regex(/^[a-z][a-zA-Z0-9_.]*$/).max(120),
+  attributePath: z
+    .string()
+    .regex(/^[a-z][a-zA-Z0-9_.]*$/)
+    .max(120),
   expectedValue: z.union([z.string(), z.number(), z.boolean()]),
 });
 
 const TenantAttributeInSchema = z.object({
   kind: z.literal("tenant_attribute_in"),
-  attributePath: z.string().regex(/^[a-z][a-zA-Z0-9_.]*$/).max(120),
-  allowedValues: z.array(z.union([z.string(), z.number()])).min(1).max(1000),
+  attributePath: z
+    .string()
+    .regex(/^[a-z][a-zA-Z0-9_.]*$/)
+    .max(120),
+  allowedValues: z
+    .array(z.union([z.string(), z.number()]))
+    .min(1)
+    .max(1000),
 });
 
 const PrincipalAttributeEqualsSchema = z.object({
   kind: z.literal("principal_attribute_equals"),
-  attributePath: z.string().regex(/^[a-z][a-zA-Z0-9_.]*$/).max(120),
+  attributePath: z
+    .string()
+    .regex(/^[a-z][a-zA-Z0-9_.]*$/)
+    .max(120),
   expectedValue: z.union([z.string(), z.number(), z.boolean()]),
 });
 
 const PrincipalAttributeInSchema = z.object({
   kind: z.literal("principal_attribute_in"),
-  attributePath: z.string().regex(/^[a-z][a-zA-Z0-9_.]*$/).max(120),
-  allowedValues: z.array(z.union([z.string(), z.number()])).min(1).max(1000),
+  attributePath: z
+    .string()
+    .regex(/^[a-z][a-zA-Z0-9_.]*$/)
+    .max(120),
+  allowedValues: z
+    .array(z.union([z.string(), z.number()]))
+    .min(1)
+    .max(1000),
 });
 
 const PercentageBucketSchema = z.object({
@@ -131,16 +149,14 @@ export const TargetingRuleSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["servedVariantKey"],
-        message:
-          "rule must specify either servedVariantKey or servedValueJson",
+        message: "rule must specify either servedVariantKey or servedValueJson",
       });
     }
     if (r.servedVariantKey !== null && r.servedValueJson !== null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["servedVariantKey"],
-        message:
-          "rule cannot specify both servedVariantKey and servedValueJson",
+        message: "rule cannot specify both servedVariantKey and servedValueJson",
       });
     }
     if (r.servedValueJson !== null) {
@@ -160,7 +176,10 @@ export type TargetingRule = z.infer<typeof TargetingRuleSchema>;
 export const SegmentSchema = z.object({
   id: z.string().regex(/^fseg_[a-z0-9]{8,40}$/),
   tenantId: z.string().uuid().nullable(),
-  key: z.string().regex(/^[a-z][a-z0-9_.]*$/).max(120),
+  key: z
+    .string()
+    .regex(/^[a-z][a-z0-9_.]*$/)
+    .max(120),
   label: z.string().min(1).max(200),
   description: z.string().min(1).max(2000),
   kind: z.enum(SEGMENT_KINDS),
@@ -181,10 +200,7 @@ export interface TargetingContext {
   readonly device: string | null;
 }
 
-const readAttribute = (
-  attrs: Readonly<Record<string, unknown>>,
-  path: string,
-): unknown => {
+const readAttribute = (attrs: Readonly<Record<string, unknown>>, path: string): unknown => {
   const segments = path.split(".");
   let cursor: unknown = attrs;
   for (const s of segments) {
@@ -203,15 +219,9 @@ export const evaluateTargetingCondition = (
     case "all_users":
       return true;
     case "specific_tenants":
-      return (
-        context.tenantId !== null &&
-        condition.tenantIds.includes(context.tenantId)
-      );
+      return context.tenantId !== null && condition.tenantIds.includes(context.tenantId);
     case "specific_principals":
-      return (
-        context.principalId !== null &&
-        condition.principalIds.includes(context.principalId)
-      );
+      return context.principalId !== null && condition.principalIds.includes(context.principalId);
     case "tenant_attribute_equals": {
       const v = readAttribute(context.tenantAttributes, condition.attributePath);
       return v === condition.expectedValue;
@@ -222,17 +232,11 @@ export const evaluateTargetingCondition = (
       return (condition.allowedValues as readonly (string | number)[]).includes(v);
     }
     case "principal_attribute_equals": {
-      const v = readAttribute(
-        context.principalAttributes,
-        condition.attributePath,
-      );
+      const v = readAttribute(context.principalAttributes, condition.attributePath);
       return v === condition.expectedValue;
     }
     case "principal_attribute_in": {
-      const v = readAttribute(
-        context.principalAttributes,
-        condition.attributePath,
-      );
+      const v = readAttribute(context.principalAttributes, condition.attributePath);
       if (typeof v !== "string" && typeof v !== "number") return false;
       return (condition.allowedValues as readonly (string | number)[]).includes(v);
     }
@@ -245,28 +249,20 @@ export const evaluateTargetingCondition = (
             : context.sessionId;
       if (bucketingValue === null) return false;
       const bucket = computeStableBucket(bucketingValue, condition.salt);
-      return (
-        bucket >= condition.minBucketInclusive &&
-        bucket < condition.maxBucketExclusive
-      );
+      return bucket >= condition.minBucketInclusive && bucket < condition.maxBucketExclusive;
     }
     case "segment_match": {
       if (segmentResolver === undefined) return false;
       const segment = segmentResolver(condition.segmentId);
       if (segment === null) return false;
-      return segment.rules.some((r) =>
-        evaluateTargetingCondition(r, context, segmentResolver),
-      );
+      return segment.rules.some((r) => evaluateTargetingCondition(r, context, segmentResolver));
     }
     case "custom_predicate":
       return false;
   }
 };
 
-export const computeStableBucket = (
-  bucketingValue: string,
-  salt: string,
-): number => {
+export const computeStableBucket = (bucketingValue: string, salt: string): number => {
   const combined = `${salt}|${bucketingValue}`;
   let hash = 2_166_136_261;
   for (let i = 0; i < combined.length; i++) {
@@ -276,7 +272,5 @@ export const computeStableBucket = (
   return hash % 10_000;
 };
 
-export const sortRulesByPriority = (
-  rules: readonly TargetingRule[],
-): readonly TargetingRule[] =>
+export const sortRulesByPriority = (rules: readonly TargetingRule[]): readonly TargetingRule[] =>
   [...rules].sort((a, b) => a.priority - b.priority);

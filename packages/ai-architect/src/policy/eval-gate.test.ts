@@ -99,8 +99,8 @@ describe("evaluateGate", () => {
 
 describe("EvalGateConfigSchema", () => {
   it("rejects empty safetyCriticalCases", () => {
-    expect(() =>
-      EvalGateConfigSchema.parse({ safetyCriticalCases: [] }),
-    ).toThrow(/at least one safety-critical case/);
+    expect(() => EvalGateConfigSchema.parse({ safetyCriticalCases: [] })).toThrow(
+      /at least one safety-critical case/,
+    );
   });
 });

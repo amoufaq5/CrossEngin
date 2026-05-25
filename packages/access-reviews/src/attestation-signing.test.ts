@@ -44,9 +44,9 @@ describe("canonicalAttestationBytes", () => {
 
   it("prefixes the attestation domain tag", () => {
     const bytes = canonicalAttestationBytes(fixtureInput());
-    expect(new TextDecoder().decode(bytes).startsWith("crossengin.access-review.attestation.v1\n")).toBe(
-      true,
-    );
+    expect(
+      new TextDecoder().decode(bytes).startsWith("crossengin.access-review.attestation.v1\n"),
+    ).toBe(true);
   });
 
   it("changes when subject changes", () => {
@@ -64,9 +64,7 @@ describe("computeAttestationSha256", () => {
   });
 
   it("is deterministic", () => {
-    expect(computeAttestationSha256(fixtureInput())).toBe(
-      computeAttestationSha256(fixtureInput()),
-    );
+    expect(computeAttestationSha256(fixtureInput())).toBe(computeAttestationSha256(fixtureInput()));
   });
 });
 

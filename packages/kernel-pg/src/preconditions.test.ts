@@ -154,10 +154,7 @@ describe("listInstalledExtensions", () => {
       {
         match: (sql) => sql.includes("pg_extension"),
         result: {
-          rows: [
-            { extname: "pg_uuidv7" },
-            { extname: "plpgsql" },
-          ],
+          rows: [{ extname: "pg_uuidv7" }, { extname: "plpgsql" }],
           rowCount: 2,
         },
       },

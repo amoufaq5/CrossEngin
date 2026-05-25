@@ -21,9 +21,7 @@ describe("constants", () => {
 
 describe("parseAcceptHeader", () => {
   it("parses simple list with q values", () => {
-    const entries = parseAcceptHeader(
-      "application/json;q=0.9, application/xml;q=0.5",
-    );
+    const entries = parseAcceptHeader("application/json;q=0.9, application/xml;q=0.5");
     expect(entries[0]?.mediaType).toBe("application/json");
     expect(entries[0]?.quality).toBe(0.9);
     expect(entries[1]?.quality).toBe(0.5);
@@ -40,9 +38,7 @@ describe("parseAcceptHeader", () => {
   });
 
   it("parses parameters", () => {
-    const entries = parseAcceptHeader(
-      "application/vnd.cross+json; version=v2; charset=utf-8",
-    );
+    const entries = parseAcceptHeader("application/vnd.cross+json; version=v2; charset=utf-8");
     expect(entries[0]?.parameters.version).toBe("v2");
     expect(entries[0]?.parameters.charset).toBe("utf-8");
   });
@@ -50,9 +46,7 @@ describe("parseAcceptHeader", () => {
 
 describe("matchesMediaType", () => {
   it("matches exact", () => {
-    expect(
-      matchesMediaType("application/json", "application/json"),
-    ).toBe(true);
+    expect(matchesMediaType("application/json", "application/json")).toBe(true);
   });
   it("matches */* wildcard", () => {
     expect(matchesMediaType("*/*", "application/json")).toBe(true);

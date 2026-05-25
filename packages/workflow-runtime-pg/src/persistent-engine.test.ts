@@ -20,9 +20,30 @@ function fixtureDefinition(): WorkflowDefinition {
     description: "",
     status: "published",
     states: [
-      { name: "draft", kind: "initial", label: "D", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "awaiting", kind: "waiting", label: "W", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "approved", kind: "terminal_success", label: "A", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "draft",
+        kind: "initial",
+        label: "D",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "awaiting",
+        kind: "waiting",
+        label: "W",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "approved",
+        kind: "terminal_success",
+        label: "A",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
     ],
     transitions: [
       {
@@ -159,9 +180,7 @@ describe("buildPersistentEngine", () => {
       c.sql.includes("INSERT INTO meta.workflow_instances"),
     );
     expect(instanceInserts.length).toBeGreaterThan(0);
-    const eventInserts = capture.filter((c) =>
-      c.sql.includes("INSERT INTO meta.workflow_events"),
-    );
+    const eventInserts = capture.filter((c) => c.sql.includes("INSERT INTO meta.workflow_events"));
     expect(eventInserts.length).toBeGreaterThan(0);
   });
 
@@ -213,9 +232,7 @@ describe("buildPersistentEngine", () => {
       correlationKey: "po-x",
       tenantId: TENANT,
     });
-    const updates = capture.filter((c) =>
-      c.sql.includes("UPDATE meta.workflow_instances"),
-    );
+    const updates = capture.filter((c) => c.sql.includes("UPDATE meta.workflow_instances"));
     expect(updates.length).toBeGreaterThan(0);
   });
 
@@ -235,9 +252,7 @@ describe("buildPersistentEngine", () => {
       tenantId: TENANT,
       correlationKey: "po-traces",
     });
-    const traceInserts = capture.filter((c) =>
-      c.sql.includes("INSERT INTO meta.workflow_traces"),
-    );
+    const traceInserts = capture.filter((c) => c.sql.includes("INSERT INTO meta.workflow_traces"));
     expect(traceInserts.length).toBeGreaterThan(0);
     const kinds = traceInserts.map((c) => c.params?.[3]);
     expect(kinds).toContain("instance_started");
@@ -258,9 +273,7 @@ describe("buildPersistentEngine", () => {
       tenantId: TENANT,
       correlationKey: "po-no-traces",
     });
-    const traceInserts = capture.filter((c) =>
-      c.sql.includes("INSERT INTO meta.workflow_traces"),
-    );
+    const traceInserts = capture.filter((c) => c.sql.includes("INSERT INTO meta.workflow_traces"));
     expect(traceInserts.length).toBe(0);
   });
 

@@ -2,15 +2,14 @@ import type { PipelineExecution, StageResult } from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  GatewayReplayer,
-  verifyPipelineExecutionShape,
-} from "./replayer.js";
+import { GatewayReplayer, verifyPipelineExecutionShape } from "./replayer.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000010";
 
-function stage(opts: Partial<StageResult> & { stage: StageResult["stage"]; outcome: StageResult["outcome"] }): StageResult {
+function stage(
+  opts: Partial<StageResult> & { stage: StageResult["stage"]; outcome: StageResult["outcome"] },
+): StageResult {
   return {
     stage: opts.stage,
     outcome: opts.outcome,
@@ -67,7 +66,10 @@ interface MockState {
 function buildMock(state: MockState): PgConnection {
   return {
     query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
-      if (sql.includes("FROM meta.gateway_pipeline_executions") && sql.includes("WHERE request_id")) {
+      if (
+        sql.includes("FROM meta.gateway_pipeline_executions") &&
+        sql.includes("WHERE request_id")
+      ) {
         const id = params?.[0] as string;
         const ex = state.executions.get(id);
         if (ex === undefined) return { rows: [], rowCount: 0 };
@@ -264,9 +266,7 @@ describe("verifyPipelineExecutionShape", () => {
     const issues = verifyPipelineExecutionShape(
       fixtureExecution({
         totalDurationMs: 5,
-        stages: [
-          stage({ stage: "receive", outcome: "pass", durationMs: 10 }),
-        ],
+        stages: [stage({ stage: "receive", outcome: "pass", durationMs: 10 })],
       }),
       { durationToleranceMs: 50 },
     );
@@ -295,10 +295,16 @@ describe("GatewayReplayer.getExecution", () => {
     state.executions.set("req_test00000001", fixtureExecution());
     const conn = buildMock(state);
     // Override to simulate libpq returning bigints as strings
-    const original = conn.query as (sql: string, params?: readonly unknown[]) => Promise<PgQueryResult>;
+    const original = conn.query as (
+      sql: string,
+      params?: readonly unknown[],
+    ) => Promise<PgQueryResult>;
     conn.query = (async (sql: string, params?: readonly unknown[]) => {
       const result = await original(sql, params);
-      if (sql.includes("FROM meta.gateway_pipeline_executions") && sql.includes("WHERE request_id")) {
+      if (
+        sql.includes("FROM meta.gateway_pipeline_executions") &&
+        sql.includes("WHERE request_id")
+      ) {
         return {
           rows: result.rows.map((r) => ({ ...r, bytes_in: "100", bytes_out: "200" })),
           rowCount: result.rowCount,
@@ -332,10 +338,13 @@ describe("GatewayReplayer.verifyExecution", () => {
 
   it("flags rate_limit_decision_not_found when decision id is missing from rate_limit_decisions", async () => {
     const state = emptyState();
-    state.executions.set("req_with_rl", fixtureExecution({
-      requestId: "req_with_rl",
-      rateLimitDecisionId: "rld_orphan0001",
-    }));
+    state.executions.set(
+      "req_with_rl",
+      fixtureExecution({
+        requestId: "req_with_rl",
+        rateLimitDecisionId: "rld_orphan0001",
+      }),
+    );
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const report = await replayer.verifyExecution("req_with_rl");
     expect(report.drifted).toBe(true);
@@ -345,10 +354,13 @@ describe("GatewayReplayer.verifyExecution", () => {
   it("does not flag rate_limit_decision_not_found when the decision exists", async () => {
     const state = emptyState();
     state.decisionIds.add("rld_exists00001");
-    state.executions.set("req_with_rl", fixtureExecution({
-      requestId: "req_with_rl",
-      rateLimitDecisionId: "rld_exists00001",
-    }));
+    state.executions.set(
+      "req_with_rl",
+      fixtureExecution({
+        requestId: "req_with_rl",
+        rateLimitDecisionId: "rld_exists00001",
+      }),
+    );
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const report = await replayer.verifyExecution("req_with_rl");
     expect(report.issues.some((i) => i.code === "rate_limit_decision_not_found")).toBe(false);
@@ -408,9 +420,22 @@ describe("GatewayReplayer.summarize", () => {
 
   it("counts outcomes correctly", async () => {
     const state = emptyState();
-    state.executions.set("req_a", fixtureExecution({ requestId: "req_a", finalOutcome: "pass", totalDurationMs: 10 }));
-    state.executions.set("req_b", fixtureExecution({ requestId: "req_b", finalOutcome: "deny", totalDurationMs: 5 }));
-    state.executions.set("req_c", fixtureExecution({ requestId: "req_c", finalOutcome: "short_circuit_replay", totalDurationMs: 2 }));
+    state.executions.set(
+      "req_a",
+      fixtureExecution({ requestId: "req_a", finalOutcome: "pass", totalDurationMs: 10 }),
+    );
+    state.executions.set(
+      "req_b",
+      fixtureExecution({ requestId: "req_b", finalOutcome: "deny", totalDurationMs: 5 }),
+    );
+    state.executions.set(
+      "req_c",
+      fixtureExecution({
+        requestId: "req_c",
+        finalOutcome: "short_circuit_replay",
+        totalDurationMs: 2,
+      }),
+    );
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const summary = await replayer.summarize();
     expect(summary.totalExecutions).toBe(3);
@@ -423,10 +448,13 @@ describe("GatewayReplayer.summarize", () => {
   it("computes p50 + p95 latency", async () => {
     const state = emptyState();
     for (let i = 0; i < 20; i++) {
-      state.executions.set(`req_${i.toString()}`, fixtureExecution({
-        requestId: `req_${i.toString().padStart(8, "0")}`,
-        totalDurationMs: i * 10,
-      }));
+      state.executions.set(
+        `req_${i.toString()}`,
+        fixtureExecution({
+          requestId: `req_${i.toString().padStart(8, "0")}`,
+          totalDurationMs: i * 10,
+        }),
+      );
     }
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const summary = await replayer.summarize();

@@ -3,13 +3,7 @@ import { z } from "zod";
 export const LIKELIHOODS = ["very_low", "low", "medium", "high", "very_high"] as const;
 export type Likelihood = (typeof LIKELIHOODS)[number];
 
-export const IMPACTS = [
-  "negligible",
-  "minor",
-  "moderate",
-  "severe",
-  "catastrophic",
-] as const;
+export const IMPACTS = ["negligible", "minor", "moderate", "severe", "catastrophic"] as const;
 export type Impact = (typeof IMPACTS)[number];
 
 export const LIKELIHOOD_ORDER: Readonly<Record<Likelihood, number>> = Object.freeze({
@@ -40,21 +34,19 @@ export const ThreatEntrySchema = z.object({
 });
 export type ThreatEntry = z.infer<typeof ThreatEntrySchema>;
 
-export const ThreatModelSchema = z
-  .array(ThreatEntrySchema)
-  .superRefine((entries, ctx) => {
-    const seen = new Set<string>();
-    entries.forEach((e, i) => {
-      if (seen.has(e.id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate threat id '${e.id}'`,
-        });
-      }
-      seen.add(e.id);
-    });
+export const ThreatModelSchema = z.array(ThreatEntrySchema).superRefine((entries, ctx) => {
+  const seen = new Set<string>();
+  entries.forEach((e, i) => {
+    if (seen.has(e.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate threat id '${e.id}'`,
+      });
+    }
+    seen.add(e.id);
   });
+});
 export type ThreatModel = z.infer<typeof ThreatModelSchema>;
 
 export function riskScore(entry: ThreatEntry): number {

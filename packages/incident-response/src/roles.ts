@@ -53,10 +53,7 @@ export const RoleAssignmentSchema = z
           message: "handedOffAt requires handedOffReason",
         });
       }
-      if (
-        v.handedOffToUserId !== null &&
-        v.handedOffToUserId === v.userId
-      ) {
+      if (v.handedOffToUserId !== null && v.handedOffToUserId === v.userId) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["handedOffToUserId"],
@@ -76,33 +73,29 @@ export const RoleAssignmentSchema = z
   });
 export type RoleAssignment = z.infer<typeof RoleAssignmentSchema>;
 
-export const RoleAssignmentSetSchema = z
-  .array(RoleAssignmentSchema)
-  .superRefine((entries, ctx) => {
-    const activePerRole = new Map<IncidentRole, number>();
-    entries.forEach((e, i) => {
-      if (e.handedOffAt === null) {
-        const count = (activePerRole.get(e.role) ?? 0) + 1;
-        activePerRole.set(e.role, count);
-        if (count > 1) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "role"],
-            message: `role '${e.role}' has more than one active assignment`,
-          });
-        }
+export const RoleAssignmentSetSchema = z.array(RoleAssignmentSchema).superRefine((entries, ctx) => {
+  const activePerRole = new Map<IncidentRole, number>();
+  entries.forEach((e, i) => {
+    if (e.handedOffAt === null) {
+      const count = (activePerRole.get(e.role) ?? 0) + 1;
+      activePerRole.set(e.role, count);
+      if (count > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i, "role"],
+          message: `role '${e.role}' has more than one active assignment`,
+        });
       }
-    });
+    }
   });
+});
 export type RoleAssignmentSet = z.infer<typeof RoleAssignmentSetSchema>;
 
 export function activeAssignmentFor(
   assignments: readonly RoleAssignment[],
   role: IncidentRole,
 ): RoleAssignment | null {
-  return (
-    assignments.find((a) => a.role === role && a.handedOffAt === null) ?? null
-  );
+  return assignments.find((a) => a.role === role && a.handedOffAt === null) ?? null;
 }
 
 export function rolesMissingRequired(

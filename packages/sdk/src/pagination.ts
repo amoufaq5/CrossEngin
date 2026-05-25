@@ -24,12 +24,7 @@ export type CursorPayload = z.infer<typeof CursorPayloadSchema>;
 export const PaginationRequestSchema = z
   .object({
     cursor: z.string().regex(CURSOR_REGEX).optional(),
-    limit: z
-      .number()
-      .int()
-      .min(MIN_PAGE_LIMIT)
-      .max(MAX_PAGE_LIMIT)
-      .default(DEFAULT_PAGE_LIMIT),
+    limit: z.number().int().min(MIN_PAGE_LIMIT).max(MAX_PAGE_LIMIT).default(DEFAULT_PAGE_LIMIT),
     sortField: z.string().min(1).optional(),
     sortDirection: SortDirectionSchema.optional(),
   })
@@ -38,8 +33,7 @@ export const PaginationRequestSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["cursor"],
-        message:
-          "cannot provide both cursor and sortField/sortDirection (cursor encodes the sort)",
+        message: "cannot provide both cursor and sortField/sortDirection (cursor encodes the sort)",
       });
     }
   });
@@ -78,8 +72,7 @@ export const PaginationResponseMetaSchema = z
   });
 export type PaginationResponseMeta = z.infer<typeof PaginationResponseMetaSchema>;
 
-const BASE64URL_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let out = "";

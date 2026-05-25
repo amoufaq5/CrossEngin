@@ -11,9 +11,7 @@ import {
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
-function fixtureCompletionRequest(
-  overrides: Partial<CompletionRequest> = {},
-): CompletionRequest {
+function fixtureCompletionRequest(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
   return {
     task: "executor",
     tenantId: TENANT,
@@ -66,7 +64,7 @@ describe("buildOpenAIChatRequest", () => {
             content: "I'll search.",
             toolUses: [{ id: "call_1", name: "search", input: { q: "openai" } }],
           },
-          { role: "tool", content: "{\"hits\":1}", toolCallId: "call_1" },
+          { role: "tool", content: '{"hits":1}', toolCallId: "call_1" },
         ],
       }),
       { defaultModel: "gpt-4o-mini" },
@@ -286,9 +284,7 @@ describe("buildOpenAIChatRequest — image attachments (M2.X)", () => {
           {
             role: "user",
             content: "what is this?",
-            attachments: [
-              { kind: "image", format: "png", bytes: "iVBORw0KGgo..." },
-            ],
+            attachments: [{ kind: "image", format: "png", bytes: "iVBORw0KGgo..." }],
           },
         ],
         tenantId: "t",
@@ -511,9 +507,7 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
           { role: "user", content: "search the docs" },
           {
             role: "assistant",
-            content: [
-              { type: "tool_use", id: "tu_1", name: "search", input: {} },
-            ],
+            content: [{ type: "tool_use", id: "tu_1", name: "search", input: {} }],
           },
           {
             role: "user",
@@ -606,9 +600,7 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
           messages: [
             {
               role: "user",
-              content: [
-                { type: "document", format: "pdf", bytes: "PDF_BYTES" },
-              ],
+              content: [{ type: "document", format: "pdf", bytes: "PDF_BYTES" }],
             },
           ],
           tenantId: "ten-1",
@@ -646,9 +638,7 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
           messages: [
             {
               role: "user",
-              content: [
-                { type: "document_url", url: "https://example.com/spec.pdf" },
-              ],
+              content: [{ type: "document_url", url: "https://example.com/spec.pdf" }],
             },
           ],
           tenantId: "ten-1",
@@ -667,9 +657,7 @@ describe("buildOpenAIChatRequest — kernel content blocks (M2.X.5)", () => {
           { role: "user", content: "do both" },
           {
             role: "assistant",
-            content: [
-              { type: "tool_use", id: "tu_a", name: "search", input: { q: "x" } },
-            ],
+            content: [{ type: "tool_use", id: "tu_a", name: "search", input: { q: "x" } }],
             toolUses: [{ id: "tu_b", name: "fetch", input: { url: "y" } }],
           },
         ],
@@ -700,9 +688,7 @@ describe("buildOpenAIChatRequest — LlmMessage.name threading (M2.X.10)", () =>
   }
 
   it("threads name through system messages", () => {
-    const built = build([
-      { role: "system", content: "you are X", name: "moderator" },
-    ]);
+    const built = build([{ role: "system", content: "you are X", name: "moderator" }]);
     expect(built.messages[0]).toEqual({
       role: "system",
       content: "you are X",
@@ -735,9 +721,7 @@ describe("buildOpenAIChatRequest — LlmMessage.name threading (M2.X.10)", () =>
   });
 
   it("threads name through assistant messages (text-only)", () => {
-    const built = build([
-      { role: "assistant", content: "hello back", name: "claude-v1" },
-    ]);
+    const built = build([{ role: "assistant", content: "hello back", name: "claude-v1" }]);
     expect(built.messages[0]).toEqual({
       role: "assistant",
       content: "hello back",
@@ -757,9 +741,7 @@ describe("buildOpenAIChatRequest — LlmMessage.name threading (M2.X.10)", () =>
     expect(built.messages[0]).toMatchObject({
       role: "assistant",
       name: "agent-7",
-      tool_calls: [
-        expect.objectContaining({ id: "tu_1" }),
-      ],
+      tool_calls: [expect.objectContaining({ id: "tu_1" })],
     });
   });
 

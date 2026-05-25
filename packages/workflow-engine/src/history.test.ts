@@ -218,10 +218,7 @@ describe("isHistoryDense", () => {
   });
   it("returns false for gap", () => {
     expect(
-      isHistoryDense([
-        baseEvent,
-        { ...baseEvent, id: "wfe_gap000001", sequenceNumber: 5 },
-      ]),
+      isHistoryDense([baseEvent, { ...baseEvent, id: "wfe_gap000001", sequenceNumber: 5 }]),
     ).toBe(false);
   });
   it("returns true for empty", () => {

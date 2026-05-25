@@ -5,9 +5,7 @@ export interface PermissionDiscriminator {
   readonly kind: string;
 }
 
-export function isPermissionErrorKind(
-  value: string,
-): value is PermissionErrorKind {
+export function isPermissionErrorKind(value: string): value is PermissionErrorKind {
   return (PERMISSION_ERROR_KINDS as readonly string[]).includes(value);
 }
 

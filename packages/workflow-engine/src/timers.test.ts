@@ -194,11 +194,7 @@ describe("fireTimer", () => {
 
 describe("cancelTimer", () => {
   it("transitions scheduled → cancelled", () => {
-    const r = cancelTimer(
-      baseTimer,
-      "user_cancelled_request",
-      new Date("2026-05-16T15:00:00Z"),
-    );
+    const r = cancelTimer(baseTimer, "user_cancelled_request", new Date("2026-05-16T15:00:00Z"));
     expect(r.status).toBe("cancelled");
     expect(r.cancelledReason).toBe("user_cancelled_request");
   });

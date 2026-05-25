@@ -94,24 +94,19 @@ describe("buildJwksProvider", () => {
   });
 
   it("rejects key entries with missing kid", () => {
-    expect(() =>
-      buildJwksProvider({ keys: [{ publicKeyBase64: "x" }] }, "test"),
-    ).toThrow(JwksLoadError);
+    expect(() => buildJwksProvider({ keys: [{ publicKeyBase64: "x" }] }, "test")).toThrow(
+      JwksLoadError,
+    );
   });
 
   it("rejects key entries with empty kid", () => {
-    expect(() =>
-      buildJwksProvider(
-        { keys: [{ kid: "", publicKeyBase64: "x" }] },
-        "test",
-      ),
-    ).toThrow(JwksLoadError);
+    expect(() => buildJwksProvider({ keys: [{ kid: "", publicKeyBase64: "x" }] }, "test")).toThrow(
+      JwksLoadError,
+    );
   });
 
   it("rejects key entries with missing publicKeyBase64 + no RFC 7517 alternative", () => {
-    expect(() => buildJwksProvider({ keys: [{ kid: "k1" }] }, "test")).toThrow(
-      JwksLoadError,
-    );
+    expect(() => buildJwksProvider({ keys: [{ kid: "k1" }] }, "test")).toThrow(JwksLoadError);
   });
 });
 
@@ -159,9 +154,9 @@ describe("normalizeJwksEntry — RFC 7517 OKP/Ed25519 translation", () => {
   });
 
   it("rejects OKP/Ed25519 entries missing the 'x' field", () => {
-    expect(() =>
-      normalizeJwksEntry({ kid: "k1", kty: "OKP", crv: "Ed25519" }, 0, "test"),
-    ).toThrow(/no 'x' base64url field/);
+    expect(() => normalizeJwksEntry({ kid: "k1", kty: "OKP", crv: "Ed25519" }, 0, "test")).toThrow(
+      /no 'x' base64url field/,
+    );
   });
 
   it("rejects unsupported key types (RSA / EC)", () => {
@@ -371,9 +366,7 @@ describe("loadJwksFromFile", () => {
   });
 
   it("throws JwksLoadError when the file is missing", async () => {
-    await expect(loadJwksFromFile("/nonexistent/jwks.json")).rejects.toThrow(
-      JwksLoadError,
-    );
+    await expect(loadJwksFromFile("/nonexistent/jwks.json")).rejects.toThrow(JwksLoadError);
   });
 
   it("throws JwksLoadError when the file is not valid JSON", async () => {

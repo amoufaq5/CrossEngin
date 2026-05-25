@@ -7,14 +7,8 @@ import {
   ReviewerAssignmentSchema,
 } from "./campaigns.js";
 
-export const TEMPLATE_LIFECYCLE_STATUSES = [
-  "draft",
-  "published",
-  "deprecated",
-  "retired",
-] as const;
-export type TemplateLifecycleStatus =
-  (typeof TEMPLATE_LIFECYCLE_STATUSES)[number];
+export const TEMPLATE_LIFECYCLE_STATUSES = ["draft", "published", "deprecated", "retired"] as const;
+export type TemplateLifecycleStatus = (typeof TEMPLATE_LIFECYCLE_STATUSES)[number];
 
 export const TEMPLATE_TRANSITIONS: Readonly<
   Record<TemplateLifecycleStatus, readonly TemplateLifecycleStatus[]>
@@ -34,7 +28,10 @@ export const AccessReviewTemplateSchema = z
   .object({
     id: z.string().regex(/^art_[a-z0-9]{8,32}$/),
     tenantId: z.string().uuid().nullable(),
-    templateKey: z.string().regex(/^[a-z][a-z0-9_.-]*$/).max(120),
+    templateKey: z
+      .string()
+      .regex(/^[a-z][a-z0-9_.-]*$/)
+      .max(120),
     label: z.string().min(1).max(200),
     description: z.string().max(2000),
     version: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/),
@@ -46,12 +43,7 @@ export const AccessReviewTemplateSchema = z
     defaultAutoRevokePolicy: z.enum(AUTO_REVOKE_POLICIES),
     defaultDeadlineDaysFromStart: z.number().int().min(1).max(180),
     defaultGracePeriodHours: z.number().int().min(0).max(720),
-    defaultRemediationDaysFromCompletion: z
-      .number()
-      .int()
-      .min(0)
-      .max(180)
-      .nullable(),
+    defaultRemediationDaysFromCompletion: z.number().int().min(0).max(180).nullable(),
     documentationUrl: z.string().url().nullable(),
     publishedAt: z.string().datetime({ offset: true }).nullable(),
     publishedBy: z.string().uuid().nullable(),
@@ -84,10 +76,7 @@ export const AccessReviewTemplateSchema = z
         message: "deprecated template requires deprecatedAt",
       });
     }
-    if (
-      t.framework === "sox_quarterly" as never &&
-      t.defaultFrequency !== "sox_quarterly"
-    ) {
+    if (t.framework === ("sox_quarterly" as never) && t.defaultFrequency !== "sox_quarterly") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["defaultFrequency"],
@@ -113,8 +102,7 @@ export const AccessReviewTemplateSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["defaultFrequency"],
-        message:
-          "HIPAA Security Rule framework requires semi_annual or annual workforce reviews",
+        message: "HIPAA Security Rule framework requires semi_annual or annual workforce reviews",
       });
     }
   });
@@ -130,12 +118,7 @@ export interface BuiltinTemplateSeed {
     | "pci_dss_v4"
     | "gdpr_article_32"
     | "cfr_21_part_11";
-  readonly defaultFrequency:
-    | "monthly"
-    | "quarterly"
-    | "semi_annual"
-    | "annual"
-    | "sox_quarterly";
+  readonly defaultFrequency: "monthly" | "quarterly" | "semi_annual" | "annual" | "sox_quarterly";
   readonly defaultDeadlineDaysFromStart: number;
 }
 
@@ -191,21 +174,15 @@ export const BUILTIN_TEMPLATE_SEEDS: readonly BuiltinTemplateSeed[] = [
   },
 ] as const;
 
-export const findBuiltinSeed = (
-  templateKey: string,
-): BuiltinTemplateSeed | null =>
+export const findBuiltinSeed = (templateKey: string): BuiltinTemplateSeed | null =>
   BUILTIN_TEMPLATE_SEEDS.find((s) => s.templateKey === templateKey) ?? null;
 
-export const isTemplateUsable = (
-  template: AccessReviewTemplate,
-  now: Date,
-): boolean => {
+export const isTemplateUsable = (template: AccessReviewTemplate, now: Date): boolean => {
   if (template.status === "retired") return false;
   if (template.status === "draft") return false;
   if (template.status === "deprecated") {
     if (template.deprecatedAt === null) return true;
-    const elapsedDays =
-      (now.getTime() - Date.parse(template.deprecatedAt)) / 86_400_000;
+    const elapsedDays = (now.getTime() - Date.parse(template.deprecatedAt)) / 86_400_000;
     return elapsedDays < 180;
   }
   return true;

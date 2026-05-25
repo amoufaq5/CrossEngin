@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { CHANNEL_CAPABILITIES, NOTIFICATION_CHANNELS, type NotificationChannel } from "./channels.js";
+import {
+  CHANNEL_CAPABILITIES,
+  NOTIFICATION_CHANNELS,
+  type NotificationChannel,
+} from "./channels.js";
 
 export const CONTENT_CATEGORIES = [
   "transactional",
@@ -15,9 +19,7 @@ export const NON_SUPPRESSIBLE_CATEGORIES: ReadonlySet<ContentCategory> = new Set
   "transactional",
 ]);
 
-export const REQUIRES_EXPLICIT_OPT_IN: ReadonlySet<ContentCategory> = new Set([
-  "marketing",
-]);
+export const REQUIRES_EXPLICIT_OPT_IN: ReadonlySet<ContentCategory> = new Set(["marketing"]);
 
 export const TEMPLATE_STATUSES = [
   "draft",
@@ -28,9 +30,7 @@ export const TEMPLATE_STATUSES = [
 ] as const;
 export type TemplateStatus = (typeof TEMPLATE_STATUSES)[number];
 
-export const TEMPLATE_TRANSITIONS: Readonly<
-  Record<TemplateStatus, readonly TemplateStatus[]>
-> = {
+export const TEMPLATE_TRANSITIONS: Readonly<Record<TemplateStatus, readonly TemplateStatus[]>> = {
   draft: ["in_review", "retired"],
   in_review: ["draft", "approved", "retired"],
   approved: ["deprecated", "retired"],
@@ -38,19 +38,10 @@ export const TEMPLATE_TRANSITIONS: Readonly<
   retired: [],
 };
 
-export const canTransitionTemplate = (
-  from: TemplateStatus,
-  to: TemplateStatus,
-): boolean => TEMPLATE_TRANSITIONS[from].includes(to);
+export const canTransitionTemplate = (from: TemplateStatus, to: TemplateStatus): boolean =>
+  TEMPLATE_TRANSITIONS[from].includes(to);
 
-export const VARIABLE_TYPES = [
-  "string",
-  "number",
-  "boolean",
-  "date",
-  "url",
-  "currency",
-] as const;
+export const VARIABLE_TYPES = ["string", "number", "boolean", "date", "url", "currency"] as const;
 export type VariableType = (typeof VARIABLE_TYPES)[number];
 
 export const TemplateVariableSchema = z.object({
@@ -97,7 +88,10 @@ const InAppContentSchema = z.object({
 
 const WebhookContentSchema = z.object({
   channel: z.literal("webhook"),
-  eventName: z.string().regex(/^[a-z][a-z0-9_.-]*$/).max(80),
+  eventName: z
+    .string()
+    .regex(/^[a-z][a-z0-9_.-]*$/)
+    .max(80),
   payloadJsonTemplate: z.string().min(1).max(65_536),
   signatureAlgorithm: z.literal("hmac-sha256"),
 });
@@ -243,9 +237,7 @@ const matchesVariableType = (value: unknown, type: VariableType): boolean => {
     case "boolean":
       return typeof value === "boolean";
     case "date":
-      return (
-        typeof value === "string" && !Number.isNaN(Date.parse(value))
-      );
+      return typeof value === "string" && !Number.isNaN(Date.parse(value));
     case "url":
       if (typeof value !== "string") return false;
       return z.string().url().safeParse(value).success;
@@ -266,7 +258,7 @@ export const channelSupportsCategory = (
   category: ContentCategory,
 ): boolean => {
   if (category === "marketing" && channel === "voice_call") return false;
-  if (category === "security_alert" && channel === "marketing_only_channel" as never)
+  if (category === "security_alert" && channel === ("marketing_only_channel" as never))
     return false;
   return true;
 };

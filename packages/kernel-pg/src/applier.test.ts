@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { PgConnection, PgQueryResult } from "./connection.js";
-import {
-  ADVISORY_LOCK_KEY,
-  MigrationApplier,
-  formatApplyReport,
-} from "./applier.js";
+import { ADVISORY_LOCK_KEY, MigrationApplier, formatApplyReport } from "./applier.js";
 
 interface FakeDbState {
   readonly extensions: Set<string>;
@@ -57,7 +53,10 @@ function fakeConnection(state: FakeDbState): PgConnection {
       const rows = [...state.extensions].sort().map((extname) => ({ extname }));
       return { rows: rows as unknown as readonly T[], rowCount: rows.length };
     }
-    if (sql.startsWith("CREATE SCHEMA IF NOT EXISTS") || sql.includes("CREATE TABLE IF NOT EXISTS")) {
+    if (
+      sql.startsWith("CREATE SCHEMA IF NOT EXISTS") ||
+      sql.includes("CREATE TABLE IF NOT EXISTS")
+    ) {
       state.executedStatements.push(sql);
       return { rows: [] as readonly T[], rowCount: 0 };
     }
@@ -94,8 +93,10 @@ function fakeConnection(state: FakeDbState): PgConnection {
   }
 
   const conn: PgConnection = {
-    query: vi.fn(async <T,>(sql: string, params?: readonly unknown[]) => runQuery<T>(sql, params)) as PgConnection["query"],
-    transaction: vi.fn(async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+    query: vi.fn(async <T>(sql: string, params?: readonly unknown[]) =>
+      runQuery<T>(sql, params),
+    ) as PgConnection["query"],
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
       runQuery<unknown>("BEGIN");
       try {
         const result = await fn(conn);
@@ -106,7 +107,7 @@ function fakeConnection(state: FakeDbState): PgConnection {
         throw err;
       }
     }) as PgConnection["transaction"],
-    withAdvisoryLock: vi.fn(async <T,>(key: bigint, fn: () => Promise<T>): Promise<T> => {
+    withAdvisoryLock: vi.fn(async <T>(key: bigint, fn: () => Promise<T>): Promise<T> => {
       state.lockAcquisitions.push({ key });
       return fn();
     }) as PgConnection["withAdvisoryLock"],
@@ -247,7 +248,12 @@ describe("formatApplyReport", () => {
       skipped: 3,
       failed: 0,
       durationMs: 250,
-      preconditions: { ok: true, problems: [], serverVersionNum: 150_004, extensions: ["pg_uuidv7"] },
+      preconditions: {
+        ok: true,
+        problems: [],
+        serverVersionNum: 150_004,
+        extensions: ["pg_uuidv7"],
+      },
       statements: [],
       haltedAt: null,
     });
@@ -292,7 +298,12 @@ describe("formatApplyReport", () => {
       skipped: 0,
       failed: 1,
       durationMs: 50,
-      preconditions: { ok: true, problems: [], serverVersionNum: 150_004, extensions: ["pg_uuidv7"] },
+      preconditions: {
+        ok: true,
+        problems: [],
+        serverVersionNum: 150_004,
+        extensions: ["pg_uuidv7"],
+      },
       statements: [
         {
           statementHash: "a".repeat(64),

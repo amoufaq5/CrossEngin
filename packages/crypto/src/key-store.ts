@@ -1,8 +1,4 @@
-import {
-  type KeyAlgorithm,
-  type KeyPurpose,
-  isPurposeAllowed,
-} from "./algorithms.js";
+import { type KeyAlgorithm, type KeyPurpose, isPurposeAllowed } from "./algorithms.js";
 import { generateHmacKey, hmacSha256Hex } from "./hmac.js";
 import {
   type KeyHandle,
@@ -46,9 +42,21 @@ export interface KeyStore {
   createKey(input: CreateKeyInput): Promise<KeyRecord>;
   getRecord(handle: KeyHandle): Promise<KeyRecord>;
   getPublicMaterial(handle: KeyHandle): Promise<string>;
-  signWith(handle: KeyHandle, tenantId: string | null, message: Uint8Array | string): Promise<string>;
-  hmacWith(handle: KeyHandle, tenantId: string | null, message: Uint8Array | string): Promise<string>;
-  verifyWith(handle: KeyHandle, signatureBase64: string, message: Uint8Array | string): Promise<boolean>;
+  signWith(
+    handle: KeyHandle,
+    tenantId: string | null,
+    message: Uint8Array | string,
+  ): Promise<string>;
+  hmacWith(
+    handle: KeyHandle,
+    tenantId: string | null,
+    message: Uint8Array | string,
+  ): Promise<string>;
+  verifyWith(
+    handle: KeyHandle,
+    signatureBase64: string,
+    message: Uint8Array | string,
+  ): Promise<boolean>;
   rotateKey(handle: KeyHandle): Promise<KeyRecord>;
   destroyKey(handle: KeyHandle): Promise<void>;
   listKeys(filter?: ListKeysFilter): Promise<readonly KeyRecord[]>;
@@ -69,9 +77,7 @@ export class InMemoryKeyStore implements KeyStore {
 
   async createKey(input: CreateKeyInput): Promise<KeyRecord> {
     if (!isPurposeAllowed(input.algorithm, input.purpose)) {
-      throw new Error(
-        `purpose ${input.purpose} is not allowed for algorithm ${input.algorithm}`,
-      );
+      throw new Error(`purpose ${input.purpose} is not allowed for algorithm ${input.algorithm}`);
     }
     const handle: KeyHandle = {
       id: generateKeyId(input.algorithm),

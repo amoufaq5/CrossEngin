@@ -40,15 +40,13 @@ describe("ReplicationEdgeSchema", () => {
   });
 
   it("rejects same source and target", () => {
-    expect(() =>
-      ReplicationEdgeSchema.parse({ ...base, target: "eu-central" }),
-    ).toThrow(/different regions/);
+    expect(() => ReplicationEdgeSchema.parse({ ...base, target: "eu-central" })).toThrow(
+      /different regions/,
+    );
   });
 
   it("rejects kind='none' edges", () => {
-    expect(() =>
-      ReplicationEdgeSchema.parse({ ...base, kind: "none" }),
-    ).toThrow(/remove the edge/);
+    expect(() => ReplicationEdgeSchema.parse({ ...base, kind: "none" })).toThrow(/remove the edge/);
   });
 
   it("rejects sync replication without standby_sync target role", () => {
@@ -138,9 +136,9 @@ describe("ReplicationLagRecordSchema", () => {
   });
 
   it("rejects broken status without lastErrorMessage", () => {
-    expect(() =>
-      ReplicationLagRecordSchema.parse({ ...base, status: "broken" }),
-    ).toThrow(/lastErrorMessage/);
+    expect(() => ReplicationLagRecordSchema.parse({ ...base, status: "broken" })).toThrow(
+      /lastErrorMessage/,
+    );
   });
 });
 

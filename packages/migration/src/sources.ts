@@ -32,12 +32,7 @@ export const AUTH_KINDS = [
 export type AuthKind = (typeof AUTH_KINDS)[number];
 export const AuthKindSchema = z.enum(AUTH_KINDS);
 
-export const SOURCE_SCHEDULES = [
-  "one_shot",
-  "interval",
-  "cron",
-  "webhook_driven",
-] as const;
+export const SOURCE_SCHEDULES = ["one_shot", "interval", "cron", "webhook_driven"] as const;
 export type SourceSchedule = (typeof SOURCE_SCHEDULES)[number];
 
 const STRUCTURED_KINDS: ReadonlySet<SourceKind> = new Set([
@@ -76,7 +71,10 @@ export const ImportSourceSpecSchema = z
     auth: AuthCredentialRefSchema,
     schedule: z.enum(SOURCE_SCHEDULES).default("one_shot"),
     intervalSeconds: z.number().int().positive().optional(),
-    cron: z.string().regex(/^(\S+\s+){4}\S+$/).optional(),
+    cron: z
+      .string()
+      .regex(/^(\S+\s+){4}\S+$/)
+      .optional(),
     sampleSize: z.number().int().min(1).max(10_000).default(100),
     sourceSchemaUrl: z.string().url().optional(),
     primaryEntity: z.string().min(1).optional(),
@@ -116,10 +114,7 @@ export const ImportSourceSpecSchema = z
         message: `source kind '${v.kind}' requires primaryEntity (e.g., 'Account', 'incident', 'Patient')`,
       });
     }
-    if (
-      (v.kind === "salesforce" || v.kind === "servicenow") &&
-      v.auth.kind === "none"
-    ) {
+    if ((v.kind === "salesforce" || v.kind === "servicenow") && v.auth.kind === "none") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["auth", "kind"],
@@ -142,10 +137,7 @@ export function isStructuredSource(kind: SourceKind): boolean {
 
 export function requiresAuth(kind: SourceKind): boolean {
   return (
-    kind === "salesforce" ||
-    kind === "servicenow" ||
-    kind === "http_api" ||
-    kind === "fhir_r4"
+    kind === "salesforce" || kind === "servicenow" || kind === "http_api" || kind === "fhir_r4"
   );
 }
 

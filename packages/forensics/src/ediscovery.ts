@@ -30,10 +30,7 @@ export const EDISCOVERY_TRANSITIONS: Readonly<
   withdrawn: [],
 });
 
-export function canTransitionEDiscovery(
-  from: EDiscoveryStatus,
-  to: EDiscoveryStatus,
-): boolean {
+export function canTransitionEDiscovery(from: EDiscoveryStatus, to: EDiscoveryStatus): boolean {
   return EDISCOVERY_TRANSITIONS[from].includes(to);
 }
 
@@ -66,8 +63,7 @@ export const SearchScopeSchema = z
         message: "dateRangeEnd must be after dateRangeStart",
       });
     }
-    const allKeywords =
-      v.keywordsAllOf.length + v.keywordsAnyOf.length + v.keywordsNoneOf.length;
+    const allKeywords = v.keywordsAllOf.length + v.keywordsAnyOf.length + v.keywordsNoneOf.length;
     if (allKeywords === 0 && v.custodianUserIds.length === 0 && v.tenantIds.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -109,9 +105,7 @@ export const EDiscoveryRequestSchema = z
     deadlineAt: Iso8601,
   })
   .superRefine((v, ctx) => {
-    if (
-      new Date(v.deadlineAt).getTime() <= new Date(v.requestedAt).getTime()
-    ) {
+    if (new Date(v.deadlineAt).getTime() <= new Date(v.requestedAt).getTime()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["deadlineAt"],
@@ -187,8 +181,7 @@ export const EDiscoveryRequestSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["legalCounselId"],
-        message:
-          "requestingParty cannot also be legalCounselId (separation of party and counsel)",
+        message: "requestingParty cannot also be legalCounselId (separation of party and counsel)",
       });
     }
     const holds = new Set<string>();
@@ -205,10 +198,7 @@ export const EDiscoveryRequestSchema = z
   });
 export type EDiscoveryRequest = z.infer<typeof EDiscoveryRequestSchema>;
 
-export function isPastDeadline(
-  request: EDiscoveryRequest,
-  now: Date = new Date(),
-): boolean {
+export function isPastDeadline(request: EDiscoveryRequest, now: Date = new Date()): boolean {
   if (request.status === "complete" || request.status === "withdrawn") return false;
   return now.getTime() > new Date(request.deadlineAt).getTime();
 }
@@ -221,18 +211,9 @@ export function productionRatio(request: EDiscoveryRequest): number | null {
   ) {
     return null;
   }
-  return (
-    Math.round(
-      (request.producedDocumentCount / request.estimatedDocumentCount) * 100,
-    ) / 100
-  );
+  return Math.round((request.producedDocumentCount / request.estimatedDocumentCount) * 100) / 100;
 }
 
-export function daysUntilDeadline(
-  request: EDiscoveryRequest,
-  now: Date = new Date(),
-): number {
-  return Math.floor(
-    (new Date(request.deadlineAt).getTime() - now.getTime()) / 1000 / 86_400,
-  );
+export function daysUntilDeadline(request: EDiscoveryRequest, now: Date = new Date()): number {
+  return Math.floor((new Date(request.deadlineAt).getTime() - now.getTime()) / 1000 / 86_400);
 }

@@ -86,9 +86,9 @@ describe("BackfillJobSchema", () => {
   });
 
   it("rejects completed with rowsFailed > 0", () => {
-    expect(() =>
-      BackfillJobSchema.parse({ ...base, rowsFailed: 5 }),
-    ).toThrow(/use 'completed_with_errors'/);
+    expect(() => BackfillJobSchema.parse({ ...base, rowsFailed: 5 })).toThrow(
+      /use 'completed_with_errors'/,
+    );
   });
 
   it("rejects completed_with_errors with rowsFailed=0", () => {
@@ -223,9 +223,7 @@ describe("helpers", () => {
   });
 
   it("backfillProgressPercent returns null without estimate", () => {
-    expect(
-      backfillProgressPercent({ ...job, totalRowsEstimate: undefined }),
-    ).toBeNull();
+    expect(backfillProgressPercent({ ...job, totalRowsEstimate: undefined })).toBeNull();
   });
 
   it("isTerminal returns true for completed states", () => {

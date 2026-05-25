@@ -81,7 +81,5 @@ export function emitCspHeader(policy: CspPolicy): string {
 }
 
 export function cspHeaderName(policy: CspPolicy): string {
-  return policy.reportOnly
-    ? "Content-Security-Policy-Report-Only"
-    : "Content-Security-Policy";
+  return policy.reportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy";
 }

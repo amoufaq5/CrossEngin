@@ -1,22 +1,11 @@
 import { z } from "zod";
-import {
-  AlgorithmParamsSchema,
-  RATE_LIMIT_ALGORITHMS,
-} from "./algorithms.js";
+import { AlgorithmParamsSchema, RATE_LIMIT_ALGORITHMS } from "./algorithms.js";
 import { ScopeSpecSchema } from "./scopes.js";
 
-export const POLICY_STATUSES = [
-  "draft",
-  "active",
-  "paused",
-  "deprecated",
-  "retired",
-] as const;
+export const POLICY_STATUSES = ["draft", "active", "paused", "deprecated", "retired"] as const;
 export type PolicyStatus = (typeof POLICY_STATUSES)[number];
 
-export const POLICY_TRANSITIONS: Readonly<
-  Record<PolicyStatus, readonly PolicyStatus[]>
-> = {
+export const POLICY_TRANSITIONS: Readonly<Record<PolicyStatus, readonly PolicyStatus[]>> = {
   draft: ["active", "retired"],
   active: ["paused", "deprecated", "retired"],
   paused: ["active", "deprecated", "retired"],
@@ -24,10 +13,8 @@ export const POLICY_TRANSITIONS: Readonly<
   retired: [],
 };
 
-export const canTransitionPolicy = (
-  from: PolicyStatus,
-  to: PolicyStatus,
-): boolean => POLICY_TRANSITIONS[from].includes(to);
+export const canTransitionPolicy = (from: PolicyStatus, to: PolicyStatus): boolean =>
+  POLICY_TRANSITIONS[from].includes(to);
 
 export const OVERAGE_HANDLING = [
   "hard_block",
@@ -62,17 +49,12 @@ export const RateLimitPolicySchema = z
     scope: ScopeSpecSchema,
     overageHandling: z.enum(OVERAGE_HANDLING),
     priorityOverride: z.enum(PRIORITY_OVERRIDES).default("none"),
-    softThrottleDelayMsPerOverage: z
+    softThrottleDelayMsPerOverage: z.number().int().min(0).max(60_000).default(0),
+    queueMaxWaitMs: z.number().int().min(0).max(300_000).default(0),
+    responseCode: z
       .number()
       .int()
-      .min(0)
-      .max(60_000)
-      .default(0),
-    queueMaxWaitMs: z.number().int().min(0).max(300_000).default(0),
-    responseCode: z.number().int().refine(
-      (n) => n === 429 || n === 503,
-      "responseCode must be 429 or 503",
-    ),
+      .refine((n) => n === 429 || n === 503, "responseCode must be 429 or 503"),
     includeRetryAfterHeader: z.boolean().default(true),
     includeRateLimitHeaders: z.boolean().default(true),
     problemTypeUri: z.string().url().nullable(),
@@ -98,23 +80,18 @@ export const RateLimitPolicySchema = z
         message: `algorithmParams.kind ${p.algorithmParams.kind} does not match policy.algorithm ${p.algorithm}`,
       });
     }
-    if (
-      p.overageHandling === "soft_throttle_delay" &&
-      p.softThrottleDelayMsPerOverage === 0
-    ) {
+    if (p.overageHandling === "soft_throttle_delay" && p.softThrottleDelayMsPerOverage === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["softThrottleDelayMsPerOverage"],
-        message:
-          "soft_throttle_delay overage handling requires softThrottleDelayMsPerOverage > 0",
+        message: "soft_throttle_delay overage handling requires softThrottleDelayMsPerOverage > 0",
       });
     }
     if (p.overageHandling === "queue_and_serve" && p.queueMaxWaitMs === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["queueMaxWaitMs"],
-        message:
-          "queue_and_serve overage handling requires queueMaxWaitMs > 0",
+        message: "queue_and_serve overage handling requires queueMaxWaitMs > 0",
       });
     }
     if (p.status === "active") {
@@ -129,8 +106,7 @@ export const RateLimitPolicySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["activatedBy"],
-          message:
-            "four-eyes: activatedBy must differ from createdBy",
+          message: "four-eyes: activatedBy must differ from createdBy",
         });
       }
     }
@@ -154,26 +130,16 @@ export const RateLimitPolicySchema = z
   });
 export type RateLimitPolicy = z.infer<typeof RateLimitPolicySchema>;
 
-export const isPolicyActive = (policy: RateLimitPolicy): boolean =>
-  policy.status === "active";
+export const isPolicyActive = (policy: RateLimitPolicy): boolean => policy.status === "active";
 
-export const isRouteSubjectToPolicy = (
-  policy: RateLimitPolicy,
-  route: string,
-): boolean => {
+export const isRouteSubjectToPolicy = (policy: RateLimitPolicy, route: string): boolean => {
   if (policy.excludedRoutes.includes(route)) return false;
   if (policy.enabledRoutes.length === 0) return true;
   return policy.enabledRoutes.includes(route);
 };
 
-export const isPrincipalExempt = (
-  policy: RateLimitPolicy,
-  principalId: string | null,
-): boolean =>
+export const isPrincipalExempt = (policy: RateLimitPolicy, principalId: string | null): boolean =>
   principalId !== null && policy.exemptPrincipalIds.includes(principalId);
 
-export const isApiKeyExempt = (
-  policy: RateLimitPolicy,
-  apiKeyPrefix: string | null,
-): boolean =>
+export const isApiKeyExempt = (policy: RateLimitPolicy, apiKeyPrefix: string | null): boolean =>
   apiKeyPrefix !== null && policy.exemptApiKeyPrefixes.includes(apiKeyPrefix);

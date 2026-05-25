@@ -118,9 +118,7 @@ describe("computeCost", () => {
   });
 
   it("returns 0 for zero tokens", () => {
-    expect(
-      computeCost({ inputPerMillionTokens: 1, outputPerMillionTokens: 5 }, 0, 0),
-    ).toBe(0);
+    expect(computeCost({ inputPerMillionTokens: 1, outputPerMillionTokens: 5 }, 0, 0)).toBe(0);
   });
 });
 

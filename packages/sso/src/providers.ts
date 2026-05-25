@@ -17,18 +17,10 @@ export const IDP_VENDORS = [
 ] as const;
 export type IdpVendor = (typeof IDP_VENDORS)[number];
 
-export const PROVIDER_STATUSES = [
-  "draft",
-  "testing",
-  "active",
-  "suspended",
-  "archived",
-] as const;
+export const PROVIDER_STATUSES = ["draft", "testing", "active", "suspended", "archived"] as const;
 export type ProviderStatus = (typeof PROVIDER_STATUSES)[number];
 
-export const PROVIDER_TRANSITIONS: Readonly<
-  Record<ProviderStatus, readonly ProviderStatus[]>
-> = {
+export const PROVIDER_TRANSITIONS: Readonly<Record<ProviderStatus, readonly ProviderStatus[]>> = {
   draft: ["testing", "archived"],
   testing: ["draft", "active", "archived"],
   active: ["suspended", "archived"],
@@ -36,10 +28,8 @@ export const PROVIDER_TRANSITIONS: Readonly<
   archived: [],
 };
 
-export const canTransitionProvider = (
-  from: ProviderStatus,
-  to: ProviderStatus,
-): boolean => PROVIDER_TRANSITIONS[from].includes(to);
+export const canTransitionProvider = (from: ProviderStatus, to: ProviderStatus): boolean =>
+  PROVIDER_TRANSITIONS[from].includes(to);
 
 export const TEST_OUTCOMES = [
   "untested",
@@ -98,7 +88,10 @@ export const OidcProviderConfigSchema = z.object({
   jwksUri: z.string().url(),
   endSessionEndpoint: z.string().url().optional(),
   clientId: z.string().min(1),
-  clientSecretSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  clientSecretSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
   isPublicClient: z.boolean().default(false),
   scopes: z.array(z.string().min(1)).min(1),
   responseTypes: z.array(z.string()).min(1),
@@ -124,11 +117,7 @@ export type SsoProviderConfig = z.infer<typeof SsoProviderConfigSchema>;
 export const SsoProviderSchema = SsoProviderBaseSchema.extend({
   config: SsoProviderConfigSchema,
 }).superRefine((p, ctx) => {
-  if (
-    p.config.protocol === "oidc" &&
-    p.config.isPublicClient &&
-    p.config.pkceMethod !== "S256"
-  ) {
+  if (p.config.protocol === "oidc" && p.config.isPublicClient && p.config.pkceMethod !== "S256") {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["config", "pkceMethod"],
@@ -146,10 +135,7 @@ export const SsoProviderSchema = SsoProviderBaseSchema.extend({
       message: "confidential OIDC client requires clientSecretSha256",
     });
   }
-  if (
-    p.status === "active" &&
-    !p.enabled
-  ) {
+  if (p.status === "active" && !p.enabled) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["enabled"],
@@ -159,14 +145,9 @@ export const SsoProviderSchema = SsoProviderBaseSchema.extend({
 });
 export type SsoProvider = z.infer<typeof SsoProviderSchema>;
 
-export const isTenantScopedProvider = (p: SsoProvider): boolean =>
-  p.tenantId !== null;
+export const isTenantScopedProvider = (p: SsoProvider): boolean => p.tenantId !== null;
 
-export const requiresMandatoryRetest = (
-  p: SsoProvider,
-  now: Date,
-  thresholdDays = 90,
-): boolean => {
+export const requiresMandatoryRetest = (p: SsoProvider, now: Date, thresholdDays = 90): boolean => {
   if (p.lastTestedAt === null || p.lastTestedAt === undefined) return true;
   const last = Date.parse(p.lastTestedAt);
   const elapsed = now.getTime() - last;

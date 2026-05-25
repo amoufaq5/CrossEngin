@@ -21,11 +21,7 @@ describe("constants", () => {
   });
 
   it("ONBOARDING_PATHS has 3 entries", () => {
-    expect(ONBOARDING_PATHS).toEqual([
-      "bring_my_data",
-      "vertical_template",
-      "blank_workspace",
-    ]);
+    expect(ONBOARDING_PATHS).toEqual(["bring_my_data", "vertical_template", "blank_workspace"]);
   });
 
   it("STAGE_ORDER is monotonic", () => {

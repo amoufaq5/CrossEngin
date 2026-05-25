@@ -76,7 +76,12 @@ export class PipelineRecorder {
   hasTerminating(): boolean {
     const last = this.lastStage();
     if (last === null) return false;
-    return last.outcome === "deny" || last.outcome === "redirect" || last.outcome === "short_circuit_replay" || last.outcome === "error";
+    return (
+      last.outcome === "deny" ||
+      last.outcome === "redirect" ||
+      last.outcome === "short_circuit_replay" ||
+      last.outcome === "error"
+    );
   }
 
   build(input: {
@@ -128,5 +133,10 @@ export function pipelineStageIndex(stage: PipelineStage): number {
 }
 
 export function isTerminatingStageOutcome(outcome: StageOutcome): boolean {
-  return outcome === "deny" || outcome === "redirect" || outcome === "short_circuit_replay" || outcome === "error";
+  return (
+    outcome === "deny" ||
+    outcome === "redirect" ||
+    outcome === "short_circuit_replay" ||
+    outcome === "error"
+  );
 }

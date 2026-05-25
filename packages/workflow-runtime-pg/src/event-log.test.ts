@@ -32,7 +32,10 @@ function fixtureEvent(o: Partial<WorkflowEvent> = {}): WorkflowEvent {
 }
 
 function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
+  handler: (
+    sql: string,
+    params: readonly unknown[] | undefined,
+  ) => PgQueryResult<Record<string, unknown>>,
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
   return {
@@ -93,7 +96,12 @@ describe("PostgresEventLog.appendBatch", () => {
     const { log, capture } = buildEventLog();
     await log.appendBatch([
       fixtureEvent({ id: "wfe_e1", sequenceNumber: 0 }),
-      fixtureEvent({ id: "wfe_e2", sequenceNumber: 1, kind: "state_transitioned", newState: "approved" }),
+      fixtureEvent({
+        id: "wfe_e2",
+        sequenceNumber: 1,
+        kind: "state_transitioned",
+        newState: "approved",
+      }),
     ]);
     const inserts = capture.filter((c) => c.sql.includes("INSERT INTO meta.workflow_events"));
     expect(inserts).toHaveLength(2);

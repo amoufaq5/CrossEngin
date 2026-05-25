@@ -1,8 +1,4 @@
-import type {
-  ActivityKind,
-  WorkflowDefinition,
-  WorkflowEvent,
-} from "@crossengin/workflow-engine";
+import type { ActivityKind, WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
 
 const SIDE_EFFECT_KINDS: ReadonlySet<ActivityKind> = new Set([
   "http_call",

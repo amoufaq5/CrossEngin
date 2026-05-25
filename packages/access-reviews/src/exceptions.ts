@@ -10,21 +10,18 @@ export const EXCEPTION_STATUSES = [
 ] as const;
 export type ExceptionStatus = (typeof EXCEPTION_STATUSES)[number];
 
-export const EXCEPTION_TRANSITIONS: Readonly<
-  Record<ExceptionStatus, readonly ExceptionStatus[]>
-> = {
-  requested: ["approved", "rejected"],
-  approved: ["expired", "revoked_early", "superseded"],
-  rejected: [],
-  expired: [],
-  revoked_early: [],
-  superseded: [],
-};
+export const EXCEPTION_TRANSITIONS: Readonly<Record<ExceptionStatus, readonly ExceptionStatus[]>> =
+  {
+    requested: ["approved", "rejected"],
+    approved: ["expired", "revoked_early", "superseded"],
+    rejected: [],
+    expired: [],
+    revoked_early: [],
+    superseded: [],
+  };
 
-export const canTransitionException = (
-  from: ExceptionStatus,
-  to: ExceptionStatus,
-): boolean => EXCEPTION_TRANSITIONS[from].includes(to);
+export const canTransitionException = (from: ExceptionStatus, to: ExceptionStatus): boolean =>
+  EXCEPTION_TRANSITIONS[from].includes(to);
 
 export const EXCEPTION_REASONS = [
   "emergency_break_glass",
@@ -43,9 +40,7 @@ export const RESTRICTED_EXCEPTION_REASONS: ReadonlySet<ExceptionReason> = new Se
   "regulatory_exemption",
 ]);
 
-export const MAX_EXCEPTION_DURATION_DAYS: Readonly<
-  Record<ExceptionReason, number>
-> = {
+export const MAX_EXCEPTION_DURATION_DAYS: Readonly<Record<ExceptionReason, number>> = {
   emergency_break_glass: 7,
   regulatory_exemption: 365,
   system_account_required: 365,
@@ -86,9 +81,7 @@ export const AccessReviewExceptionSchema = z
     lastReattestedAt: z.string().datetime({ offset: true }).nullable(),
   })
   .superRefine((e, ctx) => {
-    if (
-      Date.parse(e.requestedExpiresAt) <= Date.parse(e.requestedAt)
-    ) {
+    if (Date.parse(e.requestedExpiresAt) <= Date.parse(e.requestedAt)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["requestedExpiresAt"],
@@ -96,8 +89,7 @@ export const AccessReviewExceptionSchema = z
       });
     }
     const maxDays = MAX_EXCEPTION_DURATION_DAYS[e.reason];
-    const requestedDurationMs =
-      Date.parse(e.requestedExpiresAt) - Date.parse(e.requestedAt);
+    const requestedDurationMs = Date.parse(e.requestedExpiresAt) - Date.parse(e.requestedAt);
     if (requestedDurationMs > maxDays * 86_400_000) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -109,8 +101,7 @@ export const AccessReviewExceptionSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["approvedByUserId"],
-        message:
-          "four-eyes: approver must differ from requester",
+        message: "four-eyes: approver must differ from requester",
       });
     }
     if (e.status === "approved") {
@@ -130,11 +121,7 @@ export const AccessReviewExceptionSchema = z
       }
     }
     if (e.status === "rejected") {
-      if (
-        e.rejectedAt === null ||
-        e.rejectedByUserId === null ||
-        e.rejectedReason === null
-      ) {
+      if (e.rejectedAt === null || e.rejectedByUserId === null || e.rejectedReason === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["rejectedReason"],
@@ -151,7 +138,8 @@ export const AccessReviewExceptionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["revokedEarlyReason"],
-          message: "revoked_early exception requires revokedEarlyAt + revokedEarlyByUserId + revokedEarlyReason",
+          message:
+            "revoked_early exception requires revokedEarlyAt + revokedEarlyByUserId + revokedEarlyReason",
         });
       }
     }
@@ -174,17 +162,13 @@ export const AccessReviewExceptionSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["requiresQuarterlyReattestation"],
-        message:
-          "emergency_break_glass exception requires quarterly re-attestation",
+        message: "emergency_break_glass exception requires quarterly re-attestation",
       });
     }
   });
 export type AccessReviewException = z.infer<typeof AccessReviewExceptionSchema>;
 
-export const isExceptionExpired = (
-  exception: AccessReviewException,
-  now: Date,
-): boolean => {
+export const isExceptionExpired = (exception: AccessReviewException, now: Date): boolean => {
   if (exception.status !== "approved") return false;
   if (exception.grantedExpiresAt === null) return false;
   return now.getTime() >= Date.parse(exception.grantedExpiresAt);

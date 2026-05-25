@@ -16,8 +16,7 @@ export type BedrockBatchJobStatus = (typeof BEDROCK_BATCH_JOB_STATUSES)[number];
 
 export function isBedrockBatchJobStatus(value: unknown): value is BedrockBatchJobStatus {
   return (
-    typeof value === "string" &&
-    (BEDROCK_BATCH_JOB_STATUSES as readonly string[]).includes(value)
+    typeof value === "string" && (BEDROCK_BATCH_JOB_STATUSES as readonly string[]).includes(value)
   );
 }
 
@@ -82,9 +81,7 @@ export const BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN =
   /^(?:arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:model-invocation-job\/[a-z0-9]{12}|[a-z0-9]{12})$/;
 
 export function isBedrockBatchJobIdentifier(value: unknown): value is string {
-  return (
-    typeof value === "string" && BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN.test(value)
-  );
+  return typeof value === "string" && BEDROCK_BATCH_JOB_IDENTIFIER_PATTERN.test(value);
 }
 
 export interface BedrockListBatchesOptions {
@@ -98,9 +95,7 @@ export interface BedrockListBatchesOptions {
   readonly sortOrder?: BedrockBatchSortOrder;
 }
 
-export function buildBatchListQuery(
-  options: BedrockListBatchesOptions,
-): Record<string, string> {
+export function buildBatchListQuery(options: BedrockListBatchesOptions): Record<string, string> {
   const out: Record<string, string> = {};
   if (options.statusEquals !== undefined) {
     if (!isBedrockBatchJobStatus(options.statusEquals)) {
@@ -131,10 +126,7 @@ export function buildBatchListQuery(
   }
   if (options.nameContains !== undefined) {
     const len = options.nameContains.length;
-    if (
-      len < BEDROCK_BATCH_NAME_CONTAINS_MIN_LEN ||
-      len > BEDROCK_BATCH_NAME_CONTAINS_MAX_LEN
-    ) {
+    if (len < BEDROCK_BATCH_NAME_CONTAINS_MIN_LEN || len > BEDROCK_BATCH_NAME_CONTAINS_MAX_LEN) {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `listBatches: nameContains length must be in [${BEDROCK_BATCH_NAME_CONTAINS_MIN_LEN.toString()}, ${BEDROCK_BATCH_NAME_CONTAINS_MAX_LEN.toString()}], got ${len.toString()}`,
@@ -174,9 +166,7 @@ export function buildBatchListQuery(
     out["sortBy"] = options.sortBy;
   }
   if (options.sortOrder !== undefined) {
-    if (
-      !(BEDROCK_BATCH_SORT_ORDER_VALUES as readonly string[]).includes(options.sortOrder)
-    ) {
+    if (!(BEDROCK_BATCH_SORT_ORDER_VALUES as readonly string[]).includes(options.sortOrder)) {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `listBatches: invalid sortOrder '${String(options.sortOrder)}'`,
@@ -212,7 +202,9 @@ export function parseBatchListResponse(raw: unknown): BedrockBatchJobListRespons
     }
   }
   const nextToken = obj.nextToken;
-  const out: { -readonly [K in keyof BedrockBatchJobListResponse]: BedrockBatchJobListResponse[K] } = {
+  const out: {
+    -readonly [K in keyof BedrockBatchJobListResponse]: BedrockBatchJobListResponse[K];
+  } = {
     invocationJobSummaries: parsed,
   };
   if (typeof nextToken === "string" && nextToken.length > 0) {
@@ -227,15 +219,12 @@ export function parseBatchJobDetail(raw: unknown): BedrockBatchJobDetail {
 
 export const BEDROCK_BATCH_JOB_NAME_PATTERN = /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
 export const BEDROCK_BATCH_JOB_NAME_MAX_LEN = 63;
-export const BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_PATTERN =
-  /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_PATTERN = /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
 export const BEDROCK_BATCH_CLIENT_REQUEST_TOKEN_MAX_LEN = 256;
-export const BEDROCK_BATCH_ROLE_ARN_PATTERN =
-  /^arn:aws(?:-[^:]+)?:iam::[0-9]{12}:role\/.+$/;
+export const BEDROCK_BATCH_ROLE_ARN_PATTERN = /^arn:aws(?:-[^:]+)?:iam::[0-9]{12}:role\/.+$/;
 export const BEDROCK_BATCH_S3_URI_PATTERN = /^s3:\/\/[a-z0-9.\-_]{1,255}\/.*$/;
 export const BEDROCK_BATCH_S3_INPUT_FORMAT_VALUES = ["JSONL"] as const;
-export type BedrockBatchS3InputFormat =
-  (typeof BEDROCK_BATCH_S3_INPUT_FORMAT_VALUES)[number];
+export type BedrockBatchS3InputFormat = (typeof BEDROCK_BATCH_S3_INPUT_FORMAT_VALUES)[number];
 export const BEDROCK_BATCH_TIMEOUT_HOURS_MIN = 24;
 export const BEDROCK_BATCH_TIMEOUT_HOURS_MAX = 168;
 export const BEDROCK_BATCH_MODEL_ID_MAX_LEN = 2048;
@@ -516,8 +505,7 @@ function parseOutputDataConfig(raw: unknown): BedrockBatchS3OutputDataConfig {
   if (inner === null || typeof inner !== "object") {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "listBatches: outputDataConfig.s3OutputDataConfig is missing or not an object",
+      message: "listBatches: outputDataConfig.s3OutputDataConfig is missing or not an object",
     });
   }
   const i = inner as Record<string, unknown>;
@@ -546,10 +534,7 @@ function parseVpcConfig(raw: object): BedrockBatchVpcConfig {
       message: "listBatches: vpcConfig.subnetIds is not a string[]",
     });
   }
-  if (
-    !Array.isArray(securityGroupIds) ||
-    !securityGroupIds.every((s) => typeof s === "string")
-  ) {
+  if (!Array.isArray(securityGroupIds) || !securityGroupIds.every((s) => typeof s === "string")) {
     throw new BedrockError({
       kind: "api_error",
       message: "listBatches: vpcConfig.securityGroupIds is not a string[]",

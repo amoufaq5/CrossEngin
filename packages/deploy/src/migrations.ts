@@ -4,12 +4,7 @@ const MIGRATION_ID_REGEX = /^\d{4}_[a-z][a-z0-9_]*$/;
 const SHA256_REGEX = /^[0-9a-f]{64}$/;
 const Iso8601 = z.string().datetime({ offset: true });
 
-export const MIGRATION_STATUSES = [
-  "pending",
-  "applied",
-  "failed",
-  "rolled_forward",
-] as const;
+export const MIGRATION_STATUSES = ["pending", "applied", "failed", "rolled_forward"] as const;
 export type MigrationStatus = (typeof MIGRATION_STATUSES)[number];
 
 export const MIGRATION_KINDS = [
@@ -27,10 +22,7 @@ export const MIGRATION_KINDS = [
 ] as const;
 export type MigrationKind = (typeof MIGRATION_KINDS)[number];
 
-const DESTRUCTIVE_KINDS: ReadonlySet<MigrationKind> = new Set([
-  "schema_rename",
-  "constraint_drop",
-]);
+const DESTRUCTIVE_KINDS: ReadonlySet<MigrationKind> = new Set(["schema_rename", "constraint_drop"]);
 
 export const MigrationDeclarationSchema = z
   .object({
@@ -65,7 +57,12 @@ export const MigrationDeclarationSchema = z
           "destructive migrations must declare forwardCompatibleWith for both prior + new app versions (≥ 2 entries)",
       });
     }
-    if (v.locksTables.length > 0 && !v.requiresMaintenanceWindow && v.estimatedDurationSeconds !== undefined && v.estimatedDurationSeconds > 5) {
+    if (
+      v.locksTables.length > 0 &&
+      !v.requiresMaintenanceWindow &&
+      v.estimatedDurationSeconds !== undefined &&
+      v.estimatedDurationSeconds > 5
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["requiresMaintenanceWindow"],
@@ -130,7 +127,8 @@ export const MigrationApplicationRecordSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["compensatingMigrationId"],
-        message: "rolled_forward migrations must reference the compensating migration that corrected them",
+        message:
+          "rolled_forward migrations must reference the compensating migration that corrected them",
       });
     }
   });

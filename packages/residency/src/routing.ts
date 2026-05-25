@@ -38,11 +38,7 @@ export function isLlmProviderAllowed(
   };
 }
 
-export function assertSameRegion(
-  expected: Region,
-  actual: Region,
-  context: string,
-): void {
+export function assertSameRegion(expected: Region, actual: Region, context: string): void {
   if (expected !== actual) {
     throw new Error(
       `cross-region access denied in ${context}: expected '${expected}', got '${actual}'`,
@@ -50,11 +46,7 @@ export function assertSameRegion(
   }
 }
 
-export function assertSameBroadRegion(
-  a: Region,
-  b: Region,
-  context: string,
-): void {
+export function assertSameBroadRegion(a: Region, b: Region, context: string): void {
   if (broadRegionOf(a) !== broadRegionOf(b)) {
     throw new Error(
       `cross-broad-region access denied in ${context}: '${a}' and '${b}' are in different broad regions`,

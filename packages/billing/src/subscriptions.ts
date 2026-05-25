@@ -86,10 +86,7 @@ export const SubscriptionSchema = z
   });
 export type Subscription = z.infer<typeof SubscriptionSchema>;
 
-export function daysIntoCurrentPeriod(
-  subscription: Subscription,
-  now: Date = new Date(),
-): number {
+export function daysIntoCurrentPeriod(subscription: Subscription, now: Date = new Date()): number {
   const start = new Date(subscription.currentPeriodStart).getTime();
   if (now.getTime() < start) return 0;
   return Math.floor((now.getTime() - start) / 86_400_000);
@@ -101,10 +98,7 @@ export function daysInCurrentPeriod(subscription: Subscription): number {
   return Math.max(1, Math.round((end - start) / 86_400_000));
 }
 
-export function isWithinTrial(
-  subscription: Subscription,
-  now: Date = new Date(),
-): boolean {
+export function isWithinTrial(subscription: Subscription, now: Date = new Date()): boolean {
   if (subscription.trialEnd === null) return false;
   return now.getTime() < new Date(subscription.trialEnd).getTime();
 }

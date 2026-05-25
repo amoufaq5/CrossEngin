@@ -149,9 +149,7 @@ export const ScimPatchOperationSchema = z
 export type ScimPatchOperation = z.infer<typeof ScimPatchOperationSchema>;
 
 export const ScimPatchRequestSchema = z.object({
-  schemas: z
-    .array(z.literal("urn:ietf:params:scim:api:messages:2.0:PatchOp"))
-    .length(1),
+  schemas: z.array(z.literal("urn:ietf:params:scim:api:messages:2.0:PatchOp")).length(1),
   Operations: z.array(ScimPatchOperationSchema).min(1).max(100),
 });
 export type ScimPatchRequest = z.infer<typeof ScimPatchRequestSchema>;
@@ -166,14 +164,9 @@ export const ScimBulkOperationSchema = z.object({
 
 export const ScimBulkRequestSchema = z
   .object({
-    schemas: z
-      .array(z.literal("urn:ietf:params:scim:api:messages:2.0:BulkRequest"))
-      .length(1),
+    schemas: z.array(z.literal("urn:ietf:params:scim:api:messages:2.0:BulkRequest")).length(1),
     failOnErrors: z.number().int().min(0).optional(),
-    Operations: z
-      .array(ScimBulkOperationSchema)
-      .min(1)
-      .max(SCIM_BULK_MAX_OPERATIONS),
+    Operations: z.array(ScimBulkOperationSchema).min(1).max(SCIM_BULK_MAX_OPERATIONS),
   })
   .superRefine((r, ctx) => {
     const postOps = r.Operations.filter((o) => o.method === "POST");
@@ -210,9 +203,7 @@ export interface ParsedScimFilterClause {
   readonly value: string | null;
 }
 
-export const parseScimFilter = (
-  filter: string,
-): ParsedScimFilterClause | null => {
+export const parseScimFilter = (filter: string): ParsedScimFilterClause | null => {
   const trimmed = filter.trim();
   const match = FILTER_TOKEN_RE.exec(trimmed);
   if (!match) return null;
@@ -232,8 +223,7 @@ export const parseScimFilter = (
   return { attribute, operator, value: unquoted };
 };
 
-export const normalizeUserName = (userName: string): string =>
-  userName.trim().toLowerCase();
+export const normalizeUserName = (userName: string): string => userName.trim().toLowerCase();
 
 export const isValidPatchPath = (path: string): boolean => {
   if (path.length === 0) return false;

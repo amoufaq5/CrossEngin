@@ -19,45 +19,35 @@ export const ENCOUNTER_LIFECYCLE_WORKFLOW: Workflow = {
       from: "scheduled",
       to: "checked_in",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Encounter.transition.check_in" },
-      ],
+      guards: [{ kind: "permission", permission: "Encounter.transition.check_in" }],
     },
     {
       name: "start",
       from: "checked_in",
       to: "in_progress",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Encounter.transition.start" },
-      ],
+      guards: [{ kind: "permission", permission: "Encounter.transition.start" }],
     },
     {
       name: "complete",
       from: "in_progress",
       to: "completed",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Encounter.transition.complete" },
-      ],
+      guards: [{ kind: "permission", permission: "Encounter.transition.complete" }],
     },
     {
       name: "cancel",
       from: ["scheduled", "checked_in"],
       to: "cancelled",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Encounter.transition.cancel" },
-      ],
+      guards: [{ kind: "permission", permission: "Encounter.transition.cancel" }],
     },
     {
       name: "mark_no_show",
       from: ["scheduled", "checked_in"],
       to: "no_show",
       trigger: { kind: "automatic" },
-      guards: [
-        { kind: "permission", permission: "Encounter.transition.mark_no_show" },
-      ],
+      guards: [{ kind: "permission", permission: "Encounter.transition.mark_no_show" }],
     },
   ],
   slas: [
@@ -101,18 +91,14 @@ export const OBSERVATION_LIFECYCLE_WORKFLOW: Workflow = {
       from: "preliminary",
       to: "final",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Observation.transition.finalize" },
-      ],
+      guards: [{ kind: "permission", permission: "Observation.transition.finalize" }],
     },
     {
       name: "amend",
       from: ["final", "amended"],
       to: "amended",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Observation.transition.amend" },
-      ],
+      guards: [{ kind: "permission", permission: "Observation.transition.amend" }],
     },
     {
       name: "mark_in_error",

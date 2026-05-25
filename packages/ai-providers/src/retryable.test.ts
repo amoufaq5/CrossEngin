@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  RETRYABLE_ERROR_KINDS,
-  isRetryableError,
-  isRetryableErrorKind,
-} from "./retryable.js";
+import { RETRYABLE_ERROR_KINDS, isRetryableError, isRetryableErrorKind } from "./retryable.js";
 
 describe("RETRYABLE_ERROR_KINDS", () => {
   it("includes the five kinds shared by all three providers", () => {

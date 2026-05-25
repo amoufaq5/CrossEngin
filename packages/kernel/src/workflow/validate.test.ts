@@ -3,9 +3,7 @@ import { WorkflowValidationError } from "./errors.js";
 import type { EntityLifecycleWorkflow } from "./types.js";
 import { validateWorkflow } from "./validate.js";
 
-function makeWorkflow(
-  overrides: Partial<EntityLifecycleWorkflow> = {},
-): EntityLifecycleWorkflow {
+function makeWorkflow(overrides: Partial<EntityLifecycleWorkflow> = {}): EntityLifecycleWorkflow {
   return {
     kind: "entityLifecycle",
     entity: "Prescription",
@@ -61,11 +59,7 @@ describe("validateWorkflow — entityLifecycle acceptance", () => {
 describe("validateWorkflow — state errors", () => {
   it("throws on duplicate state names", () => {
     const w = makeWorkflow({
-      states: [
-        { name: "pending" },
-        { name: "pending" },
-        { name: "done", category: "terminal" },
-      ],
+      states: [{ name: "pending" }, { name: "pending" }, { name: "done", category: "terminal" }],
     });
     expect(() => validateWorkflow("lifecycle", w)).toThrow(/duplicate state name/);
   });
@@ -125,10 +119,7 @@ describe("validateWorkflow — transition errors", () => {
 
   it("throws when a transition originates from a terminal state", () => {
     const w = makeWorkflow({
-      states: [
-        { name: "pending" },
-        { name: "done", category: "terminal" },
-      ],
+      states: [{ name: "pending" }, { name: "done", category: "terminal" }],
       transitions: [
         { name: "complete", from: "pending", to: "done" },
         { name: "revive", from: "done", to: "pending" },

@@ -95,15 +95,15 @@ describe("IdempotencyRecordSchema", () => {
   });
 
   it("rejects completed without completedAt", () => {
-    expect(() =>
-      IdempotencyRecordSchema.parse({ ...base, completedAt: null }),
-    ).toThrow(/completedAt/);
+    expect(() => IdempotencyRecordSchema.parse({ ...base, completedAt: null })).toThrow(
+      /completedAt/,
+    );
   });
 
   it("rejects completed without responseBodyHash", () => {
-    expect(() =>
-      IdempotencyRecordSchema.parse({ ...base, responseBodyHash: null }),
-    ).toThrow(/responseBodyHash/);
+    expect(() => IdempotencyRecordSchema.parse({ ...base, responseBodyHash: null })).toThrow(
+      /responseBodyHash/,
+    );
   });
 
   it("accepts in-progress with all response fields null", () => {
@@ -271,7 +271,13 @@ describe("resolveIdempotency", () => {
 
   it("returns 'in_progress' when prior is still running", () => {
     const r = resolveIdempotency({
-      existing: { ...stored, inProgress: true, responseStatus: null, responseBodyHash: null, completedAt: null },
+      existing: {
+        ...stored,
+        inProgress: true,
+        responseStatus: null,
+        responseBodyHash: null,
+        completedAt: null,
+      },
       candidate: { method: "POST", path: "/v1/tenants", requestHash: SHA },
       now,
     });

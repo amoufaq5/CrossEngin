@@ -1,10 +1,7 @@
 import type { CompletionChunk } from "@crossengin/ai-providers";
 
 import type { OpenAIChatModel } from "./pricing.js";
-import {
-  normalizeResponsesUsage,
-  type OpenAIResponsesUsage,
-} from "./responses-api.js";
+import { normalizeResponsesUsage, type OpenAIResponsesUsage } from "./responses-api.js";
 
 export interface ResponsesSseEvent {
   readonly event: string;
@@ -126,15 +123,18 @@ function* dispatchEvent(
     if (response === null || typeof response !== "object" || Array.isArray(response)) return;
     const r = response as Record<string, unknown>;
     const usage = r["usage"];
-    if (usage !== null && usage !== undefined && typeof usage === "object" && !Array.isArray(usage)) {
+    if (
+      usage !== null &&
+      usage !== undefined &&
+      typeof usage === "object" &&
+      !Array.isArray(usage)
+    ) {
       state.usage = usage as OpenAIResponsesUsage;
     }
   }
 }
 
-function* finalChunks(
-  state: ResponsesStreamState,
-): Generator<CompletionChunk, void, void> {
+function* finalChunks(state: ResponsesStreamState): Generator<CompletionChunk, void, void> {
   // Close any tool calls that didn't get an explicit done event.
   for (const buf of state.tools.values()) {
     if (buf.started) {

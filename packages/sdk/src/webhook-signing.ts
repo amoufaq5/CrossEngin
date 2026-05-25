@@ -52,9 +52,7 @@ export async function signWebhookDeliveryWithStore(input: {
   readonly timestampSeconds: number;
 }): Promise<SignedWebhookDelivery> {
   if (input.handle.algorithm !== "hmac-sha256") {
-    throw new Error(
-      `webhook signing requires an hmac-sha256 key, got ${input.handle.algorithm}`,
-    );
+    throw new Error(`webhook signing requires an hmac-sha256 key, got ${input.handle.algorithm}`);
   }
   if (input.handle.purpose !== "webhook_signing") {
     throw new Error(
@@ -111,8 +109,7 @@ export function isParsedSignatureFresh(
 export function extractSignatureFromHeaders(
   headers: Readonly<Record<string, string | undefined>>,
 ): { readonly timestampSeconds: number; readonly sha256: string } | null {
-  const value =
-    headers[SIGNATURE_HEADER_NAME] ?? headers[SIGNATURE_HEADER_NAME.toLowerCase()];
+  const value = headers[SIGNATURE_HEADER_NAME] ?? headers[SIGNATURE_HEADER_NAME.toLowerCase()];
   if (value === undefined) return null;
   return parseSignatureHeader(value);
 }

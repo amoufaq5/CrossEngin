@@ -118,10 +118,7 @@ export function isLicenseValid(term: LicenseTerm, now: Date = new Date()): boole
   return new Date(term.expiresAt).getTime() > now.getTime();
 }
 
-export function daysUntilLicenseExpiry(
-  term: LicenseTerm,
-  now: Date = new Date(),
-): number {
+export function daysUntilLicenseExpiry(term: LicenseTerm, now: Date = new Date()): number {
   const ms = new Date(term.expiresAt).getTime() - now.getTime();
   return Math.floor(ms / 86_400_000);
 }

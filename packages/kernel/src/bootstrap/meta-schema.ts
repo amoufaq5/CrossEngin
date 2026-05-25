@@ -14,8 +14,7 @@ const USER_FK: ColumnReference = {
   onDelete: "RESTRICT",
 };
 
-const TENANT_ISOLATION_USING =
-  "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+const TENANT_ISOLATION_USING = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
 
 export const META_TENANTS: TableDefinition = {
   schema: "meta",
@@ -499,8 +498,7 @@ export const META_JOB_RUNS: TableDefinition = {
       name: "job_kind",
       type: "TEXT",
       notNull: true,
-      check:
-        "job_kind IN ('event', 'scheduled', 'delayed', 'userInvoked', 'workflow', 'cdc')",
+      check: "job_kind IN ('event', 'scheduled', 'delayed', 'userInvoked', 'workflow', 'cdc')",
     },
     { name: "run_id", type: "UUID", notNull: true },
     { name: "trigger", type: "JSONB", notNull: true },
@@ -540,9 +538,7 @@ export const META_JOB_RUNS: TableDefinition = {
     { name: "error", type: "JSONB" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "job_runs_run_id_key", columns: ["tenant_id", "run_id"] },
-  ],
+  uniqueConstraints: [{ name: "job_runs_run_id_key", columns: ["tenant_id", "run_id"] }],
   indexes: [
     { name: "idx_job_runs_tenant_started_at", columns: ["tenant_id", "started_at"] },
     { name: "idx_job_runs_job_id", columns: ["tenant_id", "job_id"] },
@@ -550,9 +546,7 @@ export const META_JOB_RUNS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "job_runs_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "job_runs_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -569,8 +563,7 @@ export const META_DEAD_LETTER_JOBS: TableDefinition = {
       name: "reason",
       type: "TEXT",
       notNull: true,
-      check:
-        "reason IN ('max-retries-exceeded', 'permanent-error', 'cancelled', 'timeout')",
+      check: "reason IN ('max-retries-exceeded', 'permanent-error', 'cancelled', 'timeout')",
     },
     {
       name: "attempt_count",
@@ -589,9 +582,7 @@ export const META_DEAD_LETTER_JOBS: TableDefinition = {
     { name: "reprocessed_at", type: "TIMESTAMPTZ" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "dead_letter_jobs_run_id_key", columns: ["tenant_id", "run_id"] },
-  ],
+  uniqueConstraints: [{ name: "dead_letter_jobs_run_id_key", columns: ["tenant_id", "run_id"] }],
   indexes: [
     {
       name: "idx_dead_letter_jobs_tenant_dead_lettered_at",
@@ -601,9 +592,7 @@ export const META_DEAD_LETTER_JOBS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "dead_letter_jobs_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "dead_letter_jobs_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -637,9 +626,7 @@ export const META_JOB_COSTS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "job_costs_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "job_costs_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -696,9 +683,7 @@ export const META_FILES: TableDefinition = {
     { name: "metadata", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "files_storage_key", columns: ["tenant_id", "storage_key"] },
-  ],
+  uniqueConstraints: [{ name: "files_storage_key", columns: ["tenant_id", "storage_key"] }],
   indexes: [
     { name: "idx_files_tenant_uploaded_at", columns: ["tenant_id", "uploaded_at"] },
     { name: "idx_files_status", columns: ["tenant_id", "status"] },
@@ -785,9 +770,7 @@ export const META_TENANT_STORAGE_USAGE: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "tenant_storage_usage_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "tenant_storage_usage_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -812,8 +795,7 @@ export const META_REPORT_RUNS: TableDefinition = {
       name: "trigger",
       type: "TEXT",
       notNull: true,
-      check:
-        "trigger IN ('user_invoked', 'scheduled', 'dashboard_refresh', 'ai_architect', 'api')",
+      check: "trigger IN ('user_invoked', 'scheduled', 'dashboard_refresh', 'ai_architect', 'api')",
     },
     { name: "invoked_by", type: "UUID", references: USER_FK },
     {
@@ -828,9 +810,7 @@ export const META_REPORT_RUNS: TableDefinition = {
     { name: "error", type: "JSONB" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "report_runs_run_id_key", columns: ["tenant_id", "run_id"] },
-  ],
+  uniqueConstraints: [{ name: "report_runs_run_id_key", columns: ["tenant_id", "run_id"] }],
   indexes: [
     { name: "idx_report_runs_tenant_started", columns: ["tenant_id", "started_at"] },
     { name: "idx_report_runs_report_id", columns: ["tenant_id", "report_id"] },
@@ -880,9 +860,7 @@ export const META_SCHEDULED_EXPORTS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "scheduled_exports_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "scheduled_exports_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -930,8 +908,7 @@ export const META_PLANS: TableDefinition = {
       name: "family",
       type: "TEXT",
       notNull: true,
-      check:
-        "family IN ('operate', 'govern', 'heal', 'educate', 'serve', 'build', 'partner')",
+      check: "family IN ('operate', 'govern', 'heal', 'educate', 'serve', 'build', 'partner')",
     },
     {
       name: "tier",
@@ -982,7 +959,12 @@ export const META_SUBSCRIPTIONS: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "plan_id", type: "TEXT", notNull: true, references: { schema: "meta", table: "plans", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "plan_id",
+      type: "TEXT",
+      notNull: true,
+      references: { schema: "meta", table: "plans", column: "id", onDelete: "RESTRICT" },
+    },
     {
       name: "status",
       type: "TEXT",
@@ -1002,9 +984,7 @@ export const META_SUBSCRIPTIONS: TableDefinition = {
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "subscriptions_stripe_id_key", columns: ["stripe_subscription_id"] },
-  ],
+  uniqueConstraints: [{ name: "subscriptions_stripe_id_key", columns: ["stripe_subscription_id"] }],
   indexes: [
     { name: "idx_subscriptions_tenant_status", columns: ["tenant_id", "status"] },
     { name: "idx_subscriptions_plan_id", columns: ["plan_id"] },
@@ -1028,8 +1008,7 @@ export const META_INVOICES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'open', 'paid', 'uncollectible', 'void', 'refunded')",
+      check: "status IN ('draft', 'open', 'paid', 'uncollectible', 'void', 'refunded')",
     },
     { name: "currency", type: "CHAR(3)", notNull: true },
     { name: "subtotal_cents", type: "INTEGER", notNull: true },
@@ -1126,9 +1105,7 @@ export const META_TENANT_CREDITS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "tenant_credits_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "tenant_credits_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -1160,8 +1137,7 @@ export const META_TENANT_AI_SETTINGS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       default: "'always_human'",
-      check:
-        "schema_change_approval_tier IN ('tiered', 'always_human', 'agent_can_do_anything')",
+      check: "schema_change_approval_tier IN ('tiered', 'always_human', 'agent_can_do_anything')",
     },
     {
       name: "per_session_token_ceiling",
@@ -1200,14 +1176,10 @@ export const META_TENANT_AI_SETTINGS: TableDefinition = {
     { name: "updated_by", type: "UUID", notNull: true, references: USER_FK },
   ],
   primaryKey: ["tenant_id"],
-  indexes: [
-    { name: "idx_tenant_ai_settings_updated_by", columns: ["updated_by"] },
-  ],
+  indexes: [{ name: "idx_tenant_ai_settings_updated_by", columns: ["updated_by"] }],
   rls: {
     enabled: true,
-    policies: [
-      { name: "tenant_ai_settings_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "tenant_ai_settings_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -1240,9 +1212,7 @@ export const META_BILLING_EVENTS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "billing_events_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "billing_events_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -1327,8 +1297,7 @@ export const META_DEPLOYMENTS: TableDefinition = {
       name: "strategy",
       type: "TEXT",
       notNull: true,
-      check:
-        "strategy IN ('rolling', 'blue_green', 'canary', 'recreate')",
+      check: "strategy IN ('rolling', 'blue_green', 'canary', 'recreate')",
     },
     {
       name: "version",
@@ -1394,8 +1363,7 @@ export const META_BACKUP_RECORDS: TableDefinition = {
       name: "kind",
       type: "TEXT",
       notNull: true,
-      check:
-        "kind IN ('full', 'incremental', 'wal_archive', 'logical_dump', 'object_snapshot')",
+      check: "kind IN ('full', 'incremental', 'wal_archive', 'logical_dump', 'object_snapshot')",
     },
     { name: "started_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -1408,8 +1376,7 @@ export const META_BACKUP_RECORDS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('scheduled', 'running', 'succeeded', 'failed', 'verified', 'expired')",
+      check: "status IN ('scheduled', 'running', 'succeeded', 'failed', 'verified', 'expired')",
     },
     { name: "size_bytes", type: "BIGINT", check: "size_bytes IS NULL OR size_bytes >= 0" },
     { name: "sha256", type: "CHAR(64)", check: "sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$'" },
@@ -1479,8 +1446,7 @@ export const META_FAILOVER_RECORDS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('queued', 'in_progress', 'succeeded', 'failed', 'aborted', 'reverted')",
+      check: "status IN ('queued', 'in_progress', 'succeeded', 'failed', 'aborted', 'reverted')",
     },
     { name: "started_at", type: "TIMESTAMPTZ" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -1540,8 +1506,7 @@ export const META_DR_DRILLS: TableDefinition = {
       name: "outcome",
       type: "TEXT",
       notNull: true,
-      check:
-        "outcome IN ('passed', 'passed_with_findings', 'failed', 'aborted', 'not_executed')",
+      check: "outcome IN ('passed', 'passed_with_findings', 'failed', 'aborted', 'not_executed')",
     },
     {
       name: "measured_rpo_seconds",
@@ -1592,8 +1557,7 @@ export const META_AUTOSCALING_EVENTS: TableDefinition = {
       name: "decision",
       type: "TEXT",
       notNull: true,
-      check:
-        "decision IN ('scale_up', 'scale_down', 'hold', 'throttled')",
+      check: "decision IN ('scale_up', 'scale_down', 'hold', 'throttled')",
     },
     {
       name: "reason",
@@ -1712,9 +1676,7 @@ export const META_API_KEYS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "api_keys_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "api_keys_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -1774,9 +1736,7 @@ export const META_WEBHOOK_ENDPOINTS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "webhook_endpoints_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "webhook_endpoints_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -1805,8 +1765,7 @@ export const META_WEBHOOK_DELIVERIES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('pending', 'delivering', 'delivered', 'retrying', 'failed', 'dropped')",
+      check: "status IN ('pending', 'delivering', 'delivered', 'retrying', 'failed', 'dropped')",
     },
     {
       name: "attempt",
@@ -1826,8 +1785,7 @@ export const META_WEBHOOK_DELIVERIES: TableDefinition = {
     {
       name: "response_body_sha256",
       type: "CHAR(64)",
-      check:
-        "response_body_sha256 IS NULL OR response_body_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "response_body_sha256 IS NULL OR response_body_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "delivered_at", type: "TIMESTAMPTZ" },
     { name: "failed_at", type: "TIMESTAMPTZ" },
@@ -1852,9 +1810,7 @@ export const META_WEBHOOK_DELIVERIES: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "webhook_deliveries_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "webhook_deliveries_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -1882,8 +1838,7 @@ export const META_IDEMPOTENCY_RECORDS: TableDefinition = {
     {
       name: "response_body_sha256",
       type: "CHAR(64)",
-      check:
-        "response_body_sha256 IS NULL OR response_body_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "response_body_sha256 IS NULL OR response_body_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
@@ -1891,9 +1846,7 @@ export const META_IDEMPOTENCY_RECORDS: TableDefinition = {
     { name: "in_progress", type: "BOOLEAN", notNull: true, default: "true" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "idempotency_records_tenant_key", columns: ["tenant_id", "key"] },
-  ],
+  uniqueConstraints: [{ name: "idempotency_records_tenant_key", columns: ["tenant_id", "key"] }],
   indexes: [
     { name: "idx_idempotency_expires", columns: ["expires_at"] },
     {
@@ -1903,9 +1856,7 @@ export const META_IDEMPOTENCY_RECORDS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "idempotency_records_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "idempotency_records_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2029,16 +1980,13 @@ export const META_PACK_VERSIONS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       default: "'pending'",
-      check:
-        "security_review_status IN ('pending', 'in_progress', 'passed', 'failed', 'exempt')",
+      check: "security_review_status IN ('pending', 'in_progress', 'passed', 'failed', 'exempt')",
     },
     { name: "security_reviewed_at", type: "TIMESTAMPTZ" },
     { name: "security_reviewer", type: "UUID", references: USER_FK },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "pack_versions_pack_version_key", columns: ["pack_id", "version"] },
-  ],
+  uniqueConstraints: [{ name: "pack_versions_pack_version_key", columns: ["pack_id", "version"] }],
   indexes: [
     { name: "idx_pack_versions_pack_status", columns: ["pack_id", "status"] },
     { name: "idx_pack_versions_channel", columns: ["channel"] },
@@ -2074,8 +2022,7 @@ export const META_PACK_INSTALLATIONS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       default: "'manual'",
-      check:
-        "update_policy IN ('manual', 'patch_auto', 'minor_auto', 'track_latest')",
+      check: "update_policy IN ('manual', 'patch_auto', 'minor_auto', 'track_latest')",
     },
     { name: "config", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
     { name: "permission_grants", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
@@ -2103,9 +2050,7 @@ export const META_PACK_INSTALLATIONS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "pack_installations_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "pack_installations_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2157,9 +2102,7 @@ export const META_PACK_REVIEWS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "pack_reviews_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "pack_reviews_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2190,8 +2133,7 @@ export const META_IMPORT_SOURCES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       default: "'one_shot'",
-      check:
-        "schedule IN ('one_shot', 'interval', 'cron', 'webhook_driven')",
+      check: "schedule IN ('one_shot', 'interval', 'cron', 'webhook_driven')",
     },
     { name: "interval_seconds", type: "INTEGER" },
     { name: "cron", type: "TEXT" },
@@ -2226,9 +2168,7 @@ export const META_IMPORT_SOURCES: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "import_sources_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "import_sources_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2345,9 +2285,7 @@ export const META_BACKFILL_JOBS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "backfill_jobs_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "backfill_jobs_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2377,8 +2315,7 @@ export const META_BACKFILL_LEDGER: TableDefinition = {
       name: "outcome",
       type: "TEXT",
       notNull: true,
-      check:
-        "outcome IN ('inserted', 'updated', 'skipped', 'failed', 'merged')",
+      check: "outcome IN ('inserted', 'updated', 'skipped', 'failed', 'merged')",
     },
     { name: "outcome_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "error_message", type: "TEXT" },
@@ -2403,9 +2340,7 @@ export const META_BACKFILL_LEDGER: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "backfill_ledger_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "backfill_ledger_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2438,9 +2373,7 @@ export const META_ONBOARDING_RUNS: TableDefinition = {
     { name: "source_import_id", type: "UUID" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "onboarding_runs_one_active_per_tenant", columns: ["tenant_id"] },
-  ],
+  uniqueConstraints: [{ name: "onboarding_runs_one_active_per_tenant", columns: ["tenant_id"] }],
   indexes: [
     { name: "idx_onboarding_runs_current_stage", columns: ["current_stage"] },
     { name: "idx_onboarding_runs_started", columns: ["started_at"] },
@@ -2448,9 +2381,7 @@ export const META_ONBOARDING_RUNS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "onboarding_runs_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "onboarding_runs_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2507,9 +2438,7 @@ export const META_ML_CONSENT: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "ml_consent_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "ml_consent_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -2577,8 +2506,7 @@ export const META_ML_DATASETS: TableDefinition = {
     {
       name: "frozen_sha256",
       type: "CHAR(64)",
-      check:
-        "frozen_sha256 IS NULL OR frozen_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "frozen_sha256 IS NULL OR frozen_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "deprecated_at", type: "TIMESTAMPTZ" },
     { name: "deprecated_reason", type: "TEXT" },
@@ -2673,8 +2601,7 @@ export const META_ML_TRAINING_RUNS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'cancelled')",
+      check: "status IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'cancelled')",
     },
     { name: "base_model_id", type: "TEXT", notNull: true },
     {
@@ -2853,8 +2780,7 @@ export const META_ML_EVALUATIONS: TableDefinition = {
       name: "trigger",
       type: "TEXT",
       notNull: true,
-      check:
-        "trigger IN ('manual', 'ci_pipeline', 'training_completed', 'scheduled_regression')",
+      check: "trigger IN ('manual', 'ci_pipeline', 'training_completed', 'scheduled_regression')",
     },
   ],
   primaryKey: ["id"],
@@ -2927,9 +2853,7 @@ export const META_ML_MODELS: TableDefinition = {
     { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
-    { name: "ml_models_family_version_key", columns: ["family", "version"] },
-  ],
+  uniqueConstraints: [{ name: "ml_models_family_version_key", columns: ["family", "version"] }],
   indexes: [
     { name: "idx_ml_models_family_status", columns: ["family", "status"] },
     { name: "idx_ml_models_status", columns: ["status"] },
@@ -3028,7 +2952,8 @@ export const META_COST_ATTRIBUTION: TableDefinition = {
     policies: [
       {
         name: "cost_attribution_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
       },
     ],
   },
@@ -3096,7 +3021,8 @@ export const META_COST_BUDGETS: TableDefinition = {
     policies: [
       {
         name: "cost_budgets_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
       },
     ],
   },
@@ -3172,8 +3098,7 @@ export const META_TENANT_UNIT_ECONOMICS: TableDefinition = {
       name: "health",
       type: "TEXT",
       notNull: true,
-      check:
-        "health IN ('healthy', 'watch', 'thin', 'negative', 'loss_leader_approved')",
+      check: "health IN ('healthy', 'watch', 'thin', 'negative', 'loss_leader_approved')",
     },
     { name: "loss_leader_approved_by", type: "UUID", references: USER_FK },
     { name: "loss_leader_approved_reason", type: "TEXT" },
@@ -3246,8 +3171,7 @@ export const META_CHARGEBACK_STATEMENTS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'pending_approval', 'approved', 'posted', 'voided')",
+      check: "status IN ('draft', 'pending_approval', 'approved', 'posted', 'voided')",
     },
     { name: "voided_reason", type: "TEXT" },
   ],
@@ -3668,8 +3592,7 @@ export const META_INCIDENT_RUNBOOK_EXECUTIONS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('queued', 'running', 'paused', 'succeeded', 'failed', 'aborted')",
+      check: "status IN ('queued', 'running', 'paused', 'succeeded', 'failed', 'aborted')",
     },
     { name: "started_at", type: "TIMESTAMPTZ" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -3765,8 +3688,7 @@ export const META_INCIDENT_POSTMORTEMS: TableDefinition = {
     {
       name: "storage_sha256",
       type: "CHAR(64)",
-      check:
-        "storage_sha256 IS NULL OR storage_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "storage_sha256 IS NULL OR storage_sha256 ~ '^[0-9a-f]{64}$'",
     },
   ],
   primaryKey: ["id"],
@@ -3926,8 +3848,7 @@ export const META_FORENSIC_EVIDENCE: TableDefinition = {
     {
       name: "content_redacted_sha256",
       type: "CHAR(64)",
-      check:
-        "content_redacted_sha256 IS NULL OR content_redacted_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "content_redacted_sha256 IS NULL OR content_redacted_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "related_incident_id", type: "TEXT" },
     { name: "related_tenant_id", type: "UUID" },
@@ -4042,8 +3963,7 @@ export const META_LEGAL_HOLDS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'active', 'suspended', 'released', 'expired')",
+      check: "status IN ('draft', 'active', 'suspended', 'released', 'expired')",
     },
     { name: "title", type: "TEXT", notNull: true },
     { name: "description", type: "TEXT", notNull: true },
@@ -4182,7 +4102,12 @@ export const META_AA_TOPOLOGY: TableDefinition = {
   name: "aa_topology",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "topology_id", type: "TEXT", notNull: true, unique: { constraintName: "aa_topology_topology_id_key" } },
+    {
+      name: "topology_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "aa_topology_topology_id_key" },
+    },
     {
       name: "kind",
       type: "TEXT",
@@ -4239,8 +4164,7 @@ export const META_AA_CONFLICTS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('detected', 'auto_resolving', 'awaiting_review', 'resolved', 'escalated')",
+      check: "status IN ('detected', 'auto_resolving', 'awaiting_review', 'resolved', 'escalated')",
     },
     { name: "detected_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "conflicting_writes", type: "JSONB", notNull: true },
@@ -4308,8 +4232,7 @@ export const META_AA_SPLIT_BRAIN_EVENTS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('detected', 'isolating', 'healing', 'healed', 'permanent_partition')",
+      check: "status IN ('detected', 'isolating', 'healing', 'healed', 'permanent_partition')",
     },
     { name: "detected_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "detected_by", type: "TEXT", notNull: true },
@@ -4354,7 +4277,12 @@ export const META_SDK_CLIENT_RELEASES: TableDefinition = {
   name: "sdk_client_releases",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "release_id", type: "TEXT", notNull: true, unique: { constraintName: "sdk_client_releases_release_id_key" } },
+    {
+      name: "release_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "sdk_client_releases_release_id_key" },
+    },
     {
       name: "language",
       type: "TEXT",
@@ -4543,14 +4471,12 @@ export const META_SSO_PROVIDERS: TableDefinition = {
     {
       name: "signing_certificate_sha256",
       type: "CHAR(64)",
-      check:
-        "signing_certificate_sha256 IS NULL OR signing_certificate_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "signing_certificate_sha256 IS NULL OR signing_certificate_sha256 ~ '^[0-9a-f]{64}$'",
     },
     {
       name: "client_secret_sha256",
       type: "CHAR(64)",
-      check:
-        "client_secret_sha256 IS NULL OR client_secret_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "client_secret_sha256 IS NULL OR client_secret_sha256 ~ '^[0-9a-f]{64}$'",
     },
     {
       name: "allow_weak_signatures",
@@ -4597,7 +4523,12 @@ export const META_SSO_LOGINS: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "provider_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" },
+    },
     { name: "request_id", type: "TEXT", notNull: true },
     { name: "initiated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -4659,9 +4590,7 @@ export const META_SSO_LOGINS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "sso_logins_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "sso_logins_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -4679,21 +4608,24 @@ export const META_SSO_SESSIONS: TableDefinition = {
     },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
     { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
-    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "provider_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" },
+    },
     { name: "federated_subject_id", type: "TEXT", notNull: true },
     {
       name: "binding",
       type: "TEXT",
       notNull: true,
-      check:
-        "binding IN ('cookie', 'jwt_bearer', 'opaque_token', 'ldap_kerberos')",
+      check: "binding IN ('cookie', 'jwt_bearer', 'opaque_token', 'ldap_kerberos')",
     },
     { name: "idp_session_index", type: "TEXT" },
     {
       name: "idp_refresh_token_sha256",
       type: "CHAR(64)",
-      check:
-        "idp_refresh_token_sha256 IS NULL OR idp_refresh_token_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "idp_refresh_token_sha256 IS NULL OR idp_refresh_token_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "last_activity_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
@@ -4727,9 +4659,7 @@ export const META_SSO_SESSIONS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "sso_sessions_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "sso_sessions_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -4739,7 +4669,12 @@ export const META_SCIM_CLIENTS: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "provider_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" },
+    },
     {
       name: "client_id",
       type: "TEXT",
@@ -4778,9 +4713,7 @@ export const META_SCIM_CLIENTS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "scim_clients_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "scim_clients_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -4790,22 +4723,30 @@ export const META_SCIM_PROVISIONING: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "scim_client_id", type: "UUID", notNull: true, references: { schema: "meta", table: "scim_clients", column: "id", onDelete: "RESTRICT" } },
-    { name: "provider_id", type: "UUID", notNull: true, references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" } },
+    {
+      name: "scim_client_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "scim_clients", column: "id", onDelete: "RESTRICT" },
+    },
+    {
+      name: "provider_id",
+      type: "UUID",
+      notNull: true,
+      references: { schema: "meta", table: "sso_providers", column: "id", onDelete: "RESTRICT" },
+    },
     { name: "request_id", type: "TEXT", notNull: true },
     {
       name: "resource_type",
       type: "TEXT",
       notNull: true,
-      check:
-        "resource_type IN ('User', 'Group', 'EnterpriseUser', 'Role', 'Entitlement')",
+      check: "resource_type IN ('User', 'Group', 'EnterpriseUser', 'Role', 'Entitlement')",
     },
     {
       name: "operation",
       type: "TEXT",
       notNull: true,
-      check:
-        "operation IN ('create', 'replace', 'patch', 'delete', 'get', 'list', 'search')",
+      check: "operation IN ('create', 'replace', 'patch', 'delete', 'get', 'list', 'search')",
     },
     { name: "target_resource_id", type: "TEXT" },
     { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
@@ -4896,8 +4837,7 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
       name: "channel",
       type: "TEXT",
       notNull: true,
-      check:
-        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+      check: "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
     },
     {
       name: "category",
@@ -4910,8 +4850,7 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'in_review', 'approved', 'deprecated', 'retired')",
+      check: "status IN ('draft', 'in_review', 'approved', 'deprecated', 'retired')",
     },
     { name: "content", type: "JSONB", notNull: true },
     { name: "variables", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
@@ -4975,8 +4914,7 @@ export const META_NOTIFICATION_PREFERENCES: TableDefinition = {
       name: "channel",
       type: "TEXT",
       notNull: true,
-      check:
-        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+      check: "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
     },
     { name: "opted_in", type: "BOOLEAN", notNull: true },
     {
@@ -5040,8 +4978,7 @@ export const META_NOTIFICATION_SUPPRESSIONS: TableDefinition = {
       name: "channel",
       type: "TEXT",
       notNull: true,
-      check:
-        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+      check: "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
     },
     { name: "recipient_address", type: "TEXT", notNull: true },
     {
@@ -5121,8 +5058,7 @@ export const META_NOTIFICATION_DISPATCHES: TableDefinition = {
       name: "channel",
       type: "TEXT",
       notNull: true,
-      check:
-        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+      check: "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
     },
     {
       name: "category",
@@ -5135,8 +5071,7 @@ export const META_NOTIFICATION_DISPATCHES: TableDefinition = {
       name: "priority",
       type: "TEXT",
       notNull: true,
-      check:
-        "priority IN ('critical', 'high', 'normal', 'low', 'background')",
+      check: "priority IN ('critical', 'high', 'normal', 'low', 'background')",
     },
     { name: "audience", type: "JSONB", notNull: true },
     {
@@ -5260,8 +5195,7 @@ export const META_NOTIFICATION_DELIVERIES: TableDefinition = {
       name: "channel",
       type: "TEXT",
       notNull: true,
-      check:
-        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+      check: "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
     },
     { name: "provider", type: "TEXT", notNull: true },
     {
@@ -5369,22 +5303,19 @@ export const META_NOTIFICATION_DIGESTS: TableDefinition = {
       name: "channel",
       type: "TEXT",
       notNull: true,
-      check:
-        "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
+      check: "channel IN ('email', 'sms', 'push_mobile', 'in_app', 'webhook', 'voice_call')",
     },
     {
       name: "frequency",
       type: "TEXT",
       notNull: true,
-      check:
-        "frequency IN ('every_15_minutes', 'hourly', 'daily', 'weekly')",
+      check: "frequency IN ('every_15_minutes', 'hourly', 'daily', 'weekly')",
     },
     {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('open', 'queued_for_assembly', 'assembled', 'dispatched', 'expired')",
+      check: "status IN ('open', 'queued_for_assembly', 'assembled', 'dispatched', 'expired')",
     },
     { name: "opened_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "scheduled_dispatch_at", type: "TIMESTAMPTZ", notNull: true },
@@ -5467,8 +5398,7 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'published', 'deprecated', 'retired')",
+      check: "status IN ('draft', 'published', 'deprecated', 'retired')",
     },
     {
       name: "framework",
@@ -6217,8 +6147,7 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'in_review', 'published', 'deprecated', 'retired')",
+      check: "status IN ('draft', 'in_review', 'published', 'deprecated', 'retired')",
     },
     { name: "states", type: "JSONB", notNull: true },
     { name: "transitions", type: "JSONB", notNull: true },
@@ -6253,8 +6182,7 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
     {
       name: "source_manifest_sha256",
       type: "CHAR(64)",
-      check:
-        "source_manifest_sha256 IS NULL OR source_manifest_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "source_manifest_sha256 IS NULL OR source_manifest_sha256 ~ '^[0-9a-f]{64}$'",
     },
   ],
   primaryKey: ["id"],
@@ -6500,8 +6428,7 @@ export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
     {
       name: "compensation_activity_key",
       type: "TEXT",
-      check:
-        "compensation_activity_key IS NULL OR compensation_activity_key ~ '^[a-z][a-z0-9_]*$'",
+      check: "compensation_activity_key IS NULL OR compensation_activity_key ~ '^[a-z][a-z0-9_]*$'",
     },
     { name: "compensates_activity_id", type: "TEXT" },
     { name: "child_workflow_instance_id", type: "TEXT" },
@@ -6586,15 +6513,13 @@ export const META_WORKFLOW_SIGNALS: TableDefinition = {
       name: "delivery_guarantee",
       type: "TEXT",
       notNull: true,
-      check:
-        "delivery_guarantee IN ('at_most_once', 'at_least_once', 'exactly_once_idempotent')",
+      check: "delivery_guarantee IN ('at_most_once', 'at_least_once', 'exactly_once_idempotent')",
     },
     { name: "idempotency_key", type: "TEXT" },
     {
       name: "payload_sha256",
       type: "CHAR(64)",
-      check:
-        "payload_sha256 IS NULL OR payload_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "payload_sha256 IS NULL OR payload_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "payload_storage_uri", type: "TEXT" },
     {
@@ -6610,8 +6535,7 @@ export const META_WORKFLOW_SIGNALS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('received', 'matched_to_instance', 'consumed', 'expired', 'rejected')",
+      check: "status IN ('received', 'matched_to_instance', 'consumed', 'expired', 'rejected')",
     },
     { name: "received_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "matched_at", type: "TIMESTAMPTZ" },
@@ -6697,15 +6621,13 @@ export const META_WORKFLOW_TIMERS: TableDefinition = {
       name: "kind",
       type: "TEXT",
       notNull: true,
-      check:
-        "kind IN ('absolute_at', 'relative_after', 'cron_schedule', 'business_hours')",
+      check: "kind IN ('absolute_at', 'relative_after', 'cron_schedule', 'business_hours')",
     },
     {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('scheduled', 'fired', 'cancelled', 'expired_before_fire')",
+      check: "status IN ('scheduled', 'fired', 'cancelled', 'expired_before_fire')",
     },
     { name: "scheduled_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "fire_at", type: "TIMESTAMPTZ", notNull: true },
@@ -6714,8 +6636,7 @@ export const META_WORKFLOW_TIMERS: TableDefinition = {
     {
       name: "relative_seconds",
       type: "INTEGER",
-      check:
-        "relative_seconds IS NULL OR relative_seconds BETWEEN 1 AND 31536000",
+      check: "relative_seconds IS NULL OR relative_seconds BETWEEN 1 AND 31536000",
     },
     { name: "fired_at", type: "TIMESTAMPTZ" },
     { name: "cancelled_at", type: "TIMESTAMPTZ" },
@@ -6806,8 +6727,7 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
     {
       name: "variable_name",
       type: "TEXT",
-      check:
-        "variable_name IS NULL OR variable_name ~ '^[a-z][a-z0-9_]*$'",
+      check: "variable_name IS NULL OR variable_name ~ '^[a-z][a-z0-9_]*$'",
     },
     { name: "payload", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
     { name: "correlation_id", type: "TEXT" },
@@ -6945,8 +6865,7 @@ export const META_LINEAGE_NODES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('active', 'frozen', 'archived', 'purged', 'tombstoned')",
+      check: "status IN ('active', 'frozen', 'archived', 'purged', 'tombstoned')",
     },
     {
       name: "classification",
@@ -6973,16 +6892,14 @@ export const META_LINEAGE_NODES: TableDefinition = {
     {
       name: "content_sha256",
       type: "CHAR(64)",
-      check:
-        "content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "storage_uri", type: "TEXT" },
     { name: "external_ref", type: "JSONB" },
     {
       name: "source_package",
       type: "TEXT",
-      check:
-        "source_package IS NULL OR source_package ~ '^@crossengin/[a-z][a-z0-9-]*$'",
+      check: "source_package IS NULL OR source_package ~ '^@crossengin/[a-z][a-z0-9-]*$'",
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "created_by_user_id", type: "UUID", references: USER_FK },
@@ -6991,8 +6908,7 @@ export const META_LINEAGE_NODES: TableDefinition = {
     {
       name: "frozen_sha256",
       type: "CHAR(64)",
-      check:
-        "frozen_sha256 IS NULL OR frozen_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "frozen_sha256 IS NULL OR frozen_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "purged_at", type: "TIMESTAMPTZ" },
     { name: "tombstoned_at", type: "TIMESTAMPTZ" },
@@ -7000,8 +6916,7 @@ export const META_LINEAGE_NODES: TableDefinition = {
     {
       name: "minimum_k_anonymity",
       type: "INTEGER",
-      check:
-        "minimum_k_anonymity IS NULL OR minimum_k_anonymity BETWEEN 1 AND 10000",
+      check: "minimum_k_anonymity IS NULL OR minimum_k_anonymity BETWEEN 1 AND 10000",
     },
   ],
   primaryKey: ["id"],
@@ -7176,8 +7091,7 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
     {
       name: "actor_package",
       type: "TEXT",
-      check:
-        "actor_package IS NULL OR actor_package ~ '^@crossengin/[a-z][a-z0-9-]*$'",
+      check: "actor_package IS NULL OR actor_package ~ '^@crossengin/[a-z][a-z0-9-]*$'",
     },
     { name: "input_node_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "output_node_ids", type: "JSONB", notNull: true },
@@ -7190,8 +7104,7 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
     {
       name: "operation_code_sha256",
       type: "CHAR(64)",
-      check:
-        "operation_code_sha256 IS NULL OR operation_code_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "operation_code_sha256 IS NULL OR operation_code_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "related_workflow_instance_id", type: "TEXT" },
     { name: "related_activity_id", type: "TEXT" },
@@ -7200,8 +7113,7 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
       name: "outcome",
       type: "TEXT",
       notNull: true,
-      check:
-        "outcome IN ('succeeded', 'partial_succeeded', 'failed', 'rolled_back')",
+      check: "outcome IN ('succeeded', 'partial_succeeded', 'failed', 'rolled_back')",
     },
     {
       name: "duration_ms",
@@ -7492,8 +7404,7 @@ export const META_SUBJECT_ACCESS_REQUESTS: TableDefinition = {
     {
       name: "bundle_sha256",
       type: "CHAR(64)",
-      check:
-        "bundle_sha256 IS NULL OR bundle_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "bundle_sha256 IS NULL OR bundle_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "bundle_storage_uri", type: "TEXT" },
     {
@@ -7574,8 +7485,7 @@ export const META_RATE_LIMIT_POLICIES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('draft', 'active', 'paused', 'deprecated', 'retired')",
+      check: "status IN ('draft', 'active', 'paused', 'deprecated', 'retired')",
     },
     {
       name: "algorithm",
@@ -7689,15 +7599,13 @@ export const META_QUOTA_DEFINITIONS: TableDefinition = {
       name: "quota_class",
       type: "TEXT",
       notNull: true,
-      check:
-        "quota_class IN ('free_tier', 'starter', 'pro', 'enterprise', 'internal', 'custom')",
+      check: "quota_class IN ('free_tier', 'starter', 'pro', 'enterprise', 'internal', 'custom')",
     },
     {
       name: "period",
       type: "TEXT",
       notNull: true,
-      check:
-        "period IN ('minute', 'hour', 'day', 'week', 'month', 'billing_period', 'lifetime')",
+      check: "period IN ('minute', 'hour', 'day', 'week', 'month', 'billing_period', 'lifetime')",
     },
     { name: "hard_limit", type: "BIGINT", notNull: true, check: "hard_limit >= 0" },
     {
@@ -7709,8 +7617,7 @@ export const META_QUOTA_DEFINITIONS: TableDefinition = {
     {
       name: "overage_unit_price_cents",
       type: "BIGINT",
-      check:
-        "overage_unit_price_cents IS NULL OR overage_unit_price_cents >= 0",
+      check: "overage_unit_price_cents IS NULL OR overage_unit_price_cents >= 0",
     },
     {
       name: "applies_after_plan_switch_seconds",
@@ -7775,8 +7682,7 @@ export const META_QUOTA_USAGE: TableDefinition = {
       name: "period",
       type: "TEXT",
       notNull: true,
-      check:
-        "period IN ('minute', 'hour', 'day', 'week', 'month', 'billing_period', 'lifetime')",
+      check: "period IN ('minute', 'hour', 'day', 'week', 'month', 'billing_period', 'lifetime')",
     },
     { name: "period_start_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "period_end_at", type: "TIMESTAMPTZ" },
@@ -7822,9 +7728,7 @@ export const META_QUOTA_USAGE: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "quota_usage_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "quota_usage_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -7866,8 +7770,7 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
     {
       name: "api_key_prefix",
       type: "TEXT",
-      check:
-        "api_key_prefix IS NULL OR api_key_prefix ~ '^ce_(live|test)_[A-Za-z0-9]{8}$'",
+      check: "api_key_prefix IS NULL OR api_key_prefix ~ '^ce_(live|test)_[A-Za-z0-9]{8}$'",
     },
     { name: "route", type: "TEXT" },
     { name: "decided_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
@@ -8176,8 +8079,7 @@ export const META_GATEWAY_ROUTES: TableDefinition = {
     {
       name: "rate_limit_policy_id",
       type: "TEXT",
-      check:
-        "rate_limit_policy_id IS NULL OR rate_limit_policy_id ~ '^rlp_[a-z0-9]{8,40}$'",
+      check: "rate_limit_policy_id IS NULL OR rate_limit_policy_id ~ '^rlp_[a-z0-9]{8,40}$'",
     },
     {
       name: "idempotency_required",
@@ -8188,22 +8090,19 @@ export const META_GATEWAY_ROUTES: TableDefinition = {
     {
       name: "request_schema_sha256",
       type: "CHAR(64)",
-      check:
-        "request_schema_sha256 IS NULL OR request_schema_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "request_schema_sha256 IS NULL OR request_schema_sha256 ~ '^[0-9a-f]{64}$'",
     },
     {
       name: "response_schema_sha256",
       type: "CHAR(64)",
-      check:
-        "response_schema_sha256 IS NULL OR response_schema_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "response_schema_sha256 IS NULL OR response_schema_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
     {
       name: "source_pack",
       type: "TEXT",
-      check:
-        "source_pack IS NULL OR source_pack ~ '^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)*$'",
+      check: "source_pack IS NULL OR source_pack ~ '^[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)*$'",
     },
   ],
   primaryKey: ["id"],
@@ -8274,20 +8173,17 @@ export const META_GATEWAY_IDEMPOTENCY_RECORDS: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('in_progress', 'completed_success', 'completed_error', 'expired')",
+      check: "status IN ('in_progress', 'completed_success', 'completed_error', 'expired')",
     },
     {
       name: "response_status",
       type: "INTEGER",
-      check:
-        "response_status IS NULL OR response_status BETWEEN 100 AND 599",
+      check: "response_status IS NULL OR response_status BETWEEN 100 AND 599",
     },
     {
       name: "response_sha256",
       type: "CHAR(64)",
-      check:
-        "response_sha256 IS NULL OR response_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "response_sha256 IS NULL OR response_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "response_storage_uri", type: "TEXT" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -8390,8 +8286,7 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
     {
       name: "resolved_api_version",
       type: "TEXT",
-      check:
-        "resolved_api_version IS NULL OR resolved_api_version ~ '^v[0-9]+$'",
+      check: "resolved_api_version IS NULL OR resolved_api_version ~ '^v[0-9]+$'",
     },
     { name: "correlation_id", type: "TEXT" },
     { name: "rate_limit_decision_id", type: "TEXT" },
@@ -8482,8 +8377,7 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
     {
       name: "served_variant_key",
       type: "TEXT",
-      check:
-        "served_variant_key IS NULL OR served_variant_key ~ '^[a-z][a-z0-9_]*$'",
+      check: "served_variant_key IS NULL OR served_variant_key ~ '^[a-z][a-z0-9_]*$'",
     },
     { name: "served_value_json", type: "TEXT" },
     { name: "is_exclusion", type: "BOOLEAN", notNull: true, default: "false" },
@@ -8548,8 +8442,7 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
       name: "status",
       type: "TEXT",
       notNull: true,
-      check:
-        "status IN ('armed', 'triggered_active', 'released', 'expired')",
+      check: "status IN ('armed', 'triggered_active', 'released', 'expired')",
     },
     {
       name: "trigger_kind",
@@ -8642,15 +8535,13 @@ export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
     {
       name: "flag_version",
       type: "TEXT",
-      check:
-        "flag_version IS NULL OR flag_version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+      check: "flag_version IS NULL OR flag_version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
     },
     {
       name: "environment",
       type: "TEXT",
       notNull: true,
-      check:
-        "environment IN ('preview', 'staging', 'production', 'sandbox')",
+      check: "environment IN ('preview', 'staging', 'production', 'sandbox')",
     },
     { name: "principal_id", type: "UUID", references: USER_FK },
     { name: "session_id", type: "TEXT" },
@@ -8676,8 +8567,7 @@ export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
     {
       name: "bucketing_value_sha256",
       type: "CHAR(64)",
-      check:
-        "bucketing_value_sha256 IS NULL OR bucketing_value_sha256 ~ '^[0-9a-f]{64}$'",
+      check: "bucketing_value_sha256 IS NULL OR bucketing_value_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "request_id", type: "TEXT" },
     { name: "correlation_id", type: "TEXT" },
@@ -8769,8 +8659,7 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
       name: "outcome",
       type: "TEXT",
       notNull: true,
-      check:
-        "outcome IN ('succeeded', 'rolled_back', 'blocked_by_policy', 'blocked_by_four_eyes')",
+      check: "outcome IN ('succeeded', 'rolled_back', 'blocked_by_policy', 'blocked_by_four_eyes')",
     },
     {
       name: "required_four_eyes",
@@ -8831,8 +8720,7 @@ export const META_CRYPTO_KEYS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       unique: { constraintName: "crypto_keys_key_id_key" },
-      check:
-        "key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
+      check: "key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
     },
     { name: "tenant_id", type: "UUID", references: TENANT_FK },
     {
@@ -8916,8 +8804,7 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
     {
       name: "key_id",
       type: "TEXT",
-      check:
-        "key_id IS NULL OR key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
+      check: "key_id IS NULL OR key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
     },
     {
       name: "algorithm",
@@ -9032,9 +8919,7 @@ export const META_ARCHITECT_SESSIONS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "architect_sessions_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "architect_sessions_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -9095,14 +8980,15 @@ export const META_ARCHITECT_MESSAGES: TableDefinition = {
   ],
   primaryKey: ["id"],
   indexes: [
-    { name: "idx_architect_messages_session", columns: ["session_id", "turn_index", "message_index"] },
+    {
+      name: "idx_architect_messages_session",
+      columns: ["session_id", "turn_index", "message_index"],
+    },
     { name: "idx_architect_messages_tenant_created", columns: ["tenant_id", "created_at"] },
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "architect_messages_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "architect_messages_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -9210,9 +9096,7 @@ export const META_ARCHITECT_PROPOSALS: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "architect_proposals_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "architect_proposals_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -9233,9 +9117,7 @@ export const META_LLM_COST_WINDOWS: TableDefinition = {
   primaryKey: ["tenant_id"],
   rls: {
     enabled: true,
-    policies: [
-      { name: "llm_cost_windows_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "llm_cost_windows_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 
@@ -9355,8 +9237,7 @@ export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
     {
       name: "opt_out_reason",
       type: "TEXT",
-      check:
-        "opt_out_reason IS NULL OR (char_length(opt_out_reason) BETWEEN 1 AND 256)",
+      check: "opt_out_reason IS NULL OR (char_length(opt_out_reason) BETWEEN 1 AND 256)",
     },
     { name: "opt_out_until", type: "TIMESTAMPTZ" },
     { name: "last_pruned_at", type: "TIMESTAMPTZ" },
@@ -9385,8 +9266,7 @@ export const META_TENANT_RETENTION_OPT_OUT_HISTORY: TableDefinition = {
       name: "event_kind",
       type: "TEXT",
       notNull: true,
-      check:
-        "event_kind IN ('opt_out_set', 'opt_out_cleared', 'retention_set', 'policy_deleted')",
+      check: "event_kind IN ('opt_out_set', 'opt_out_cleared', 'retention_set', 'policy_deleted')",
     },
     { name: "actor_id", type: "UUID" },
     {
@@ -9478,9 +9358,7 @@ export const META_LLM_CALL_TRACES: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [
-      { name: "llm_call_traces_tenant_isolation", using: TENANT_ISOLATION_USING },
-    ],
+    policies: [{ name: "llm_call_traces_tenant_isolation", using: TENANT_ISOLATION_USING }],
   },
 };
 

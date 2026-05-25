@@ -8,7 +8,10 @@ export interface OutgoingResponse {
 }
 
 export interface RequestAdapter<P> {
-  toIncomingRequest(platformRequest: P, opts: IncomingRequestBuildOptions): Promise<IncomingRequest>;
+  toIncomingRequest(
+    platformRequest: P,
+    opts: IncomingRequestBuildOptions,
+  ): Promise<IncomingRequest>;
 }
 
 export interface ResponseAdapter<P, R> {
@@ -32,7 +35,9 @@ function normalizeHeaderName(name: string): string {
   return name.toLowerCase();
 }
 
-function normalizeHeaders(input: Record<string, string | string[] | undefined>): Record<string, string> {
+function normalizeHeaders(
+  input: Record<string, string | string[] | undefined>,
+): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [rawName, rawValue] of Object.entries(input)) {
     if (rawValue === undefined) continue;
@@ -82,14 +87,17 @@ export function buildIncomingRequest(input: BuildIncomingRequestInput): Incoming
     headers["x-forwarded-proto"] === "https" || headers["x-forwarded-proto"] === "http"
       ? (headers["x-forwarded-proto"] as IncomingRequest["scheme"])
       : null;
-  const forwardedHost = typeof headers["x-forwarded-host"] === "string" ? headers["x-forwarded-host"] : null;
+  const forwardedHost =
+    typeof headers["x-forwarded-host"] === "string" ? headers["x-forwarded-host"] : null;
   const traceparent =
     typeof headers["traceparent"] === "string" &&
     /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(headers["traceparent"])
       ? headers["traceparent"]
       : null;
   const correlationId =
-    typeof headers["x-correlation-id"] === "string" ? headers["x-correlation-id"].slice(0, 200) : null;
+    typeof headers["x-correlation-id"] === "string"
+      ? headers["x-correlation-id"].slice(0, 200)
+      : null;
   const tenantHint =
     typeof headers["x-tenant-id"] === "string" ? headers["x-tenant-id"].slice(0, 200) : null;
   const query: Record<string, string | string[]> = {};
@@ -142,6 +150,9 @@ export function outgoingResponseFromJson(input: {
   return { status: input.status, headers, bodyBytes: bytes };
 }
 
-export function emptyOutgoingResponse(status: number, headers: Record<string, string> = {}): OutgoingResponse {
+export function emptyOutgoingResponse(
+  status: number,
+  headers: Record<string, string> = {},
+): OutgoingResponse {
   return { status, headers: { ...headers, "content-length": "0" }, bodyBytes: null };
 }

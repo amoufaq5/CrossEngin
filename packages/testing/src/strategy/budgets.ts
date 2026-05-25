@@ -18,16 +18,7 @@ export const DEFAULT_FRONTEND_BUDGET: FrontendBudget = FrontendBudgetSchema.pars
 
 export const RendererBudgetSchema = z
   .object({
-    renderer: z.enum([
-      "list",
-      "record",
-      "form",
-      "kanban",
-      "calendar",
-      "map",
-      "dashboard",
-      "pivot",
-    ]),
+    renderer: z.enum(["list", "record", "form", "kanban", "calendar", "map", "dashboard", "pivot"]),
     representativeRows: z.number().int().nonnegative(),
     targetRenderMs: z.number().int().positive(),
   })
@@ -79,9 +70,7 @@ export interface FrontendBudgetCheckOutcome {
   readonly violations: readonly string[];
 }
 
-export function checkFrontendBudget(
-  input: FrontendBudgetCheckInput,
-): FrontendBudgetCheckOutcome {
+export function checkFrontendBudget(input: FrontendBudgetCheckInput): FrontendBudgetCheckOutcome {
   const violations: string[] = [];
   const tolerance = 1 + input.budget.regressionTolerancePercent / 100;
 
@@ -95,7 +84,9 @@ export function checkFrontendBudget(
     violations.push(`LCP ${input.measured.lcpMs}ms exceeds budget ${input.budget.lcpMs}ms`);
   }
   if (input.measured.cls > input.budget.cls * tolerance) {
-    violations.push(`CLS ${input.measured.cls.toFixed(3)} exceeds budget ${input.budget.cls.toFixed(3)}`);
+    violations.push(
+      `CLS ${input.measured.cls.toFixed(3)} exceeds budget ${input.budget.cls.toFixed(3)}`,
+    );
   }
   if (input.measured.tbtMs > input.budget.tbtMs * tolerance) {
     violations.push(`TBT ${input.measured.tbtMs}ms exceeds budget ${input.budget.tbtMs}ms`);

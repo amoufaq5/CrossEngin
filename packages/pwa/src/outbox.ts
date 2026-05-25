@@ -13,15 +13,14 @@ export const OUTBOX_STATUSES = [
 ] as const;
 export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
 
-export const OUTBOX_ENTRY_TRANSITIONS: Readonly<
-  Record<OutboxStatus, readonly OutboxStatus[]>
-> = Object.freeze({
-  pending: ["in_flight", "abandoned"],
-  in_flight: ["succeeded", "pending", "permanent_failure"],
-  succeeded: [],
-  permanent_failure: [],
-  abandoned: [],
-});
+export const OUTBOX_ENTRY_TRANSITIONS: Readonly<Record<OutboxStatus, readonly OutboxStatus[]>> =
+  Object.freeze({
+    pending: ["in_flight", "abandoned"],
+    in_flight: ["succeeded", "pending", "permanent_failure"],
+    succeeded: [],
+    permanent_failure: [],
+    abandoned: [],
+  });
 
 export function canTransitionOutbox(from: OutboxStatus, to: OutboxStatus): boolean {
   return OUTBOX_ENTRY_TRANSITIONS[from].includes(to);
@@ -61,11 +60,16 @@ export const OutboxEntrySchema = z
         message: "in_flight entries must declare lastAttemptAt",
       });
     }
-    if (v.status === "succeeded" && v.canonicalEntityId === undefined && v.optimisticEntityId !== undefined) {
+    if (
+      v.status === "succeeded" &&
+      v.canonicalEntityId === undefined &&
+      v.optimisticEntityId !== undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["canonicalEntityId"],
-        message: "succeeded entries with optimisticEntityId should record canonicalEntityId for reconciliation",
+        message:
+          "succeeded entries with optimisticEntityId should record canonicalEntityId for reconciliation",
       });
     }
   });
@@ -110,10 +114,7 @@ export interface ClassifyResult {
   readonly reason: string;
 }
 
-export function classifyResponse(
-  entry: OutboxEntry,
-  statusCode: number,
-): ClassifyResult {
+export function classifyResponse(entry: OutboxEntry, statusCode: number): ClassifyResult {
   if (statusCode >= 200 && statusCode < 300) {
     return { nextStatus: "succeeded", reason: `HTTP ${statusCode}` };
   }

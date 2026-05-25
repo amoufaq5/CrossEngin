@@ -13,11 +13,7 @@ export const LOGIN_OUTCOMES = [
 ] as const;
 export type LoginOutcome = (typeof LOGIN_OUTCOMES)[number];
 
-export const LOGIN_INITIATIONS = [
-  "sp_initiated",
-  "idp_initiated",
-  "scim_invoked",
-] as const;
+export const LOGIN_INITIATIONS = ["sp_initiated", "idp_initiated", "scim_invoked"] as const;
 export type LoginInitiation = (typeof LOGIN_INITIATIONS)[number];
 
 export const MFA_FACTORS = [
@@ -29,10 +25,7 @@ export const MFA_FACTORS = [
 ] as const;
 export type MfaFactor = (typeof MFA_FACTORS)[number];
 
-export const WEAK_MFA_FACTORS: ReadonlySet<MfaFactor> = new Set([
-  "sms",
-  "security_question",
-]);
+export const WEAK_MFA_FACTORS: ReadonlySet<MfaFactor> = new Set(["sms", "security_question"]);
 
 export const FAILURE_CATEGORIES = [
   "network",
@@ -44,9 +37,7 @@ export const FAILURE_CATEGORIES = [
 ] as const;
 export type FailureCategory = (typeof FAILURE_CATEGORIES)[number];
 
-export const FAILURE_BY_OUTCOME: Readonly<
-  Record<LoginOutcome, FailureCategory | null>
-> = {
+export const FAILURE_BY_OUTCOME: Readonly<Record<LoginOutcome, FailureCategory | null>> = {
   success: null,
   mfa_required: null,
   mfa_failed: "mfa",
@@ -57,12 +48,10 @@ export const FAILURE_BY_OUTCOME: Readonly<
   denied_by_policy: "policy",
 };
 
-export const classifyFailure = (
-  outcome: LoginOutcome,
-): FailureCategory | null => FAILURE_BY_OUTCOME[outcome];
+export const classifyFailure = (outcome: LoginOutcome): FailureCategory | null =>
+  FAILURE_BY_OUTCOME[outcome];
 
-export const isWeakMfaFactor = (factor: MfaFactor): boolean =>
-  WEAK_MFA_FACTORS.has(factor);
+export const isWeakMfaFactor = (factor: MfaFactor): boolean => WEAK_MFA_FACTORS.has(factor);
 
 export const LoginRecordSchema = z
   .object({
@@ -85,7 +74,10 @@ export const LoginRecordSchema = z
     ipAddress: z.string().min(1).max(45),
     userAgent: z.string().max(512),
     asNumber: z.number().int().min(0).max(4_294_967_295).nullable(),
-    geoCountry: z.string().regex(/^[A-Z]{2}$/).nullable(),
+    geoCountry: z
+      .string()
+      .regex(/^[A-Z]{2}$/)
+      .nullable(),
   })
   .superRefine((r, ctx) => {
     if (r.outcome === "success" && r.principalId === null) {
@@ -212,10 +204,7 @@ export interface LoginAggregateStats {
   readonly p99LatencyMs: number;
 }
 
-const computePercentile = (
-  sortedValues: readonly number[],
-  percentile: number,
-): number => {
+const computePercentile = (sortedValues: readonly number[], percentile: number): number => {
   if (sortedValues.length === 0) return 0;
   const idx = Math.min(
     sortedValues.length - 1,
@@ -224,9 +213,7 @@ const computePercentile = (
   return sortedValues[idx] ?? 0;
 };
 
-export const aggregateLogins = (
-  records: readonly LoginRecord[],
-): LoginAggregateStats => {
+export const aggregateLogins = (records: readonly LoginRecord[]): LoginAggregateStats => {
   if (records.length === 0) {
     return {
       totalLogins: 0,

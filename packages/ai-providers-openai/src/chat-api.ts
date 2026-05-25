@@ -132,10 +132,7 @@ function translateMessage(m: LlmMessage): OpenAIChatMessage[] {
 function translateUserMessage(m: LlmMessage): OpenAIChatMessage[] {
   const attachments = m.attachments ?? [];
   const nameField = m.name !== undefined ? { name: m.name } : {};
-  if (
-    attachments.length === 0 &&
-    typeof m.content === "string"
-  ) {
+  if (attachments.length === 0 && typeof m.content === "string") {
     return [{ role: "user", content: m.content, ...nameField }];
   }
   const out: OpenAIChatMessage[] = [];
@@ -238,10 +235,7 @@ function translateTool(tool: LlmTool): OpenAIToolDeclaration {
   };
 }
 
-export function normalizeChatUsage(
-  model: OpenAIChatModel,
-  usage: OpenAIChatUsage,
-): Usage {
+export function normalizeChatUsage(model: OpenAIChatModel, usage: OpenAIChatUsage): Usage {
   const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
   const cost = computeChatUsageCost(model, {
     inputTokens: usage.prompt_tokens,

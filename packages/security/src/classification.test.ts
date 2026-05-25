@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  EntityClassificationSchema,
-  fieldClassMap,
-  resolveFieldClass,
-} from "./classification.js";
+import { EntityClassificationSchema, fieldClassMap, resolveFieldClass } from "./classification.js";
 
 describe("EntityClassificationSchema", () => {
   it("parses a classification with explicit field overrides", () => {

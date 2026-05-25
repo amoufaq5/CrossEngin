@@ -101,12 +101,7 @@ export interface AnthropicResponse {
   readonly role: "assistant";
   readonly model: string;
   readonly content: readonly AnthropicContentBlock[];
-  readonly stop_reason:
-    | "end_turn"
-    | "max_tokens"
-    | "stop_sequence"
-    | "tool_use"
-    | "refusal";
+  readonly stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | "refusal";
   readonly usage: AnthropicUsage;
 }
 
@@ -215,10 +210,7 @@ function buildTool(tool: LlmTool): AnthropicTool {
   };
 }
 
-function appendKernelBlocks(
-  out: AnthropicContentBlock[],
-  content: LlmContent,
-): void {
+function appendKernelBlocks(out: AnthropicContentBlock[], content: LlmContent): void {
   if (typeof content === "string") {
     if (content.length > 0) out.push({ type: "text", text: content });
     return;
@@ -288,11 +280,7 @@ function translateKernelBlockShape(block: LlmContentBlock): AnthropicContentBloc
       );
     }
     const mediaType =
-      block.format === "txt"
-        ? "text/plain"
-        : block.format === "md"
-          ? "text/markdown"
-          : "text/csv";
+      block.format === "txt" ? "text/plain" : block.format === "md" ? "text/markdown" : "text/csv";
     return {
       type: "document",
       source: {

@@ -63,9 +63,9 @@ describe("DeploymentRecordSchema", () => {
   });
 
   it("rejects succeeded without completedAt", () => {
-    expect(() =>
-      DeploymentRecordSchema.parse({ ...base, completedAt: null }),
-    ).toThrow(/completedAt/);
+    expect(() => DeploymentRecordSchema.parse({ ...base, completedAt: null })).toThrow(
+      /completedAt/,
+    );
   });
 
   it("rejects rolled_back without rolledBackToDeploymentId", () => {
@@ -141,9 +141,9 @@ describe("ReleaseSchema", () => {
   });
 
   it("rejects breakingChanges on 0.x stable", () => {
-    expect(() =>
-      ReleaseSchema.parse({ ...base, version: "0.9.0", breakingChanges: true }),
-    ).toThrow(/0\.x/);
+    expect(() => ReleaseSchema.parse({ ...base, version: "0.9.0", breakingChanges: true })).toThrow(
+      /0\.x/,
+    );
   });
 
   it("accepts breakingChanges on 1.x stable", () => {

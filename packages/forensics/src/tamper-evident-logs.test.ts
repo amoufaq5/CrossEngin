@@ -70,7 +70,12 @@ describe("ChainedLogEntrySchema", () => {
 });
 
 describe("ChainedLogSchema", () => {
-  const entry = (seq: number, prior: string, hash: string, recordedAt: string): ChainedLogEntry => ({
+  const entry = (
+    seq: number,
+    prior: string,
+    hash: string,
+    recordedAt: string,
+  ): ChainedLogEntry => ({
     sequenceNumber: seq,
     kind: "audit_event",
     recordedAt,
@@ -112,9 +117,7 @@ describe("ChainedLogSchema", () => {
 
   it("rejects entryHash == priorEntryHash", () => {
     expect(() =>
-      ChainedLogSchema.parse([
-        entry(0, GENESIS_HASH, GENESIS_HASH, "2026-05-14T10:00:00Z"),
-      ]),
+      ChainedLogSchema.parse([entry(0, GENESIS_HASH, GENESIS_HASH, "2026-05-14T10:00:00Z")]),
     ).toThrow(/must differ from priorEntryHash/);
   });
 
@@ -158,19 +161,13 @@ describe("helpers", () => {
   });
 
   it("verifyChainIntegrity passes for valid chain", () => {
-    const result = verifyChainIntegrity([
-      entry(0, GENESIS_HASH, HASH_A),
-      entry(1, HASH_A, HASH_B),
-    ]);
+    const result = verifyChainIntegrity([entry(0, GENESIS_HASH, HASH_A), entry(1, HASH_A, HASH_B)]);
     expect(result.valid).toBe(true);
     expect(result.brokenAt).toBeNull();
   });
 
   it("verifyChainIntegrity detects break", () => {
-    const result = verifyChainIntegrity([
-      entry(0, GENESIS_HASH, HASH_A),
-      entry(1, HASH_C, HASH_B),
-    ]);
+    const result = verifyChainIntegrity([entry(0, GENESIS_HASH, HASH_A), entry(1, HASH_C, HASH_B)]);
     expect(result.valid).toBe(false);
     expect(result.brokenAt).toBe(1);
     expect(result.reason).toBe("hash chain broken");
@@ -186,11 +183,6 @@ describe("helpers", () => {
 
   it("nextSequenceNumber returns chain length", () => {
     expect(nextSequenceNumber([])).toBe(0);
-    expect(
-      nextSequenceNumber([
-        entry(0, GENESIS_HASH, HASH_A),
-        entry(1, HASH_A, HASH_B),
-      ]),
-    ).toBe(2);
+    expect(nextSequenceNumber([entry(0, GENESIS_HASH, HASH_A), entry(1, HASH_A, HASH_B)])).toBe(2);
   });
 });

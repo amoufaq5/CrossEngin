@@ -20,9 +20,7 @@ describe("OVERDUE_INVOICE_REMINDER_JOB", () => {
 
   it("is idempotent and alert-and-dead-letters on failure", () => {
     expect(OVERDUE_INVOICE_REMINDER_JOB.idempotent).toBe(true);
-    expect(OVERDUE_INVOICE_REMINDER_JOB.onFailure.strategy).toBe(
-      "alert-and-dead-letter",
-    );
+    expect(OVERDUE_INVOICE_REMINDER_JOB.onFailure.strategy).toBe("alert-and-dead-letter");
   });
 });
 
@@ -34,15 +32,11 @@ describe("PAYMENT_RECEIVED_HANDLER_JOB", () => {
   it("is event-triggered on billing.payment_received", () => {
     expect(PAYMENT_RECEIVED_HANDLER_JOB.trigger.kind).toBe("event");
     if (PAYMENT_RECEIVED_HANDLER_JOB.trigger.kind !== "event") return;
-    expect(PAYMENT_RECEIVED_HANDLER_JOB.trigger.eventName).toBe(
-      "billing.payment_received",
-    );
+    expect(PAYMENT_RECEIVED_HANDLER_JOB.trigger.eventName).toBe("billing.payment_received");
   });
 
   it("is classified as commercial_sensitive (input) → internal (output)", () => {
-    expect(PAYMENT_RECEIVED_HANDLER_JOB.inputDataClass).toBe(
-      "commercial_sensitive",
-    );
+    expect(PAYMENT_RECEIVED_HANDLER_JOB.inputDataClass).toBe("commercial_sensitive");
     expect(PAYMENT_RECEIVED_HANDLER_JOB.outputDataClass).toBe("internal");
   });
 });

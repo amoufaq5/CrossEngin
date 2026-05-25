@@ -62,9 +62,7 @@ describe("WorkflowSchema — entityLifecycle", () => {
       stateField: "status",
       states: [{ name: "x", category: "terminal" as const }],
       initialState: "x",
-      transitions: [
-        { name: "t", from: "x", to: "x", trigger: { kind: "magicWand" } },
-      ],
+      transitions: [{ name: "t", from: "x", to: "x", trigger: { kind: "magicWand" } }],
     };
     expect(() => WorkflowSchema.parse(w)).toThrow();
   });

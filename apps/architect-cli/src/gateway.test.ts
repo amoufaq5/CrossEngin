@@ -12,10 +12,7 @@ import { parseArgs } from "./cli.js";
 import type { IoStreams } from "./format.js";
 import { buildDefaultGatewayHandlers } from "./gateway-handlers.js";
 import type { FetchLike } from "./gateway-jwks.js";
-import {
-  runGateway,
-  type GatewayContext,
-} from "./gateway.js";
+import { runGateway, type GatewayContext } from "./gateway.js";
 import type {
   RequestLogEntry,
   RunningGatewayServer,
@@ -63,9 +60,7 @@ function fakeServerFactory(): {
 } {
   const capture: { value: FakeServerHandle | null } = { value: null };
   const closeCalls = { count: 0 };
-  const factory: typeof import("./gateway-server.js").startGatewayServer = async (
-    options,
-  ) => {
+  const factory: typeof import("./gateway-server.js").startGatewayServer = async (options) => {
     const server: RunningGatewayServer = {
       host: options.host ?? "127.0.0.1",
       port: options.port === 0 ? 12345 : options.port,
@@ -188,14 +183,7 @@ describe("runGateway start (in-memory + runtime override)", () => {
       serverFactory: factory,
       waitForShutdown: () => Promise.resolve(),
     };
-    const command = parseGatewayArgs(
-      "start",
-      "--in-memory",
-      "--port",
-      "0",
-      "--format",
-      "json",
-    );
+    const command = parseGatewayArgs("start", "--in-memory", "--port", "0", "--format", "json");
     const code = await runGateway(command, ctx);
     expect(code).toBe(0);
     expect(captured).not.toBeNull();
@@ -337,8 +325,7 @@ describe("runGateway start (in-memory + runtime override)", () => {
     const fetchImpl: FetchLike = async () => ({
       ok: true,
       status: 200,
-      text: async () =>
-        JSON.stringify({ keys: [{ kid: "k1", publicKeyBase64: "AAAA" }] }),
+      text: async () => JSON.stringify({ keys: [{ kid: "k1", publicKeyBase64: "AAAA" }] }),
     });
     const factory: typeof import("./gateway-server.js").startGatewayServer = async () => ({
       host: "127.0.0.1",

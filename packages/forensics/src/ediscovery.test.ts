@@ -135,15 +135,15 @@ describe("EDiscoveryRequestSchema", () => {
   });
 
   it("rejects complete without productionSha256", () => {
-    expect(() =>
-      EDiscoveryRequestSchema.parse({ ...base, productionSha256: null }),
-    ).toThrow(/productionSha256/);
+    expect(() => EDiscoveryRequestSchema.parse({ ...base, productionSha256: null })).toThrow(
+      /productionSha256/,
+    );
   });
 
   it("rejects complete without deliveredAt", () => {
-    expect(() =>
-      EDiscoveryRequestSchema.parse({ ...base, deliveredAt: null }),
-    ).toThrow(/deliveredAt/);
+    expect(() => EDiscoveryRequestSchema.parse({ ...base, deliveredAt: null })).toThrow(
+      /deliveredAt/,
+    );
   });
 
   it("rejects requestingParty == legalCounselId", () => {
@@ -228,9 +228,7 @@ describe("helpers", () => {
   });
 
   it("productionRatio returns null without estimate", () => {
-    expect(
-      productionRatio({ ...base, estimatedDocumentCount: undefined }),
-    ).toBeNull();
+    expect(productionRatio({ ...base, estimatedDocumentCount: undefined })).toBeNull();
   });
 
   it("daysUntilDeadline counts down", () => {

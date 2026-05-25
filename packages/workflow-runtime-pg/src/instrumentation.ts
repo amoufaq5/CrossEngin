@@ -4,10 +4,7 @@ import type {
   WorkflowInstrumentationEvent,
 } from "@crossengin/workflow-runtime";
 
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 
 const SCHEMA = "meta";
 const TABLE = "workflow_traces";
@@ -25,17 +22,14 @@ export class PostgresWorkflowInstrumentation implements WorkflowInstrumentation 
 
   constructor(opts: PostgresWorkflowInstrumentationOptions) {
     this.conn = opts.conn;
-    this.instanceResolver =
-      opts.instanceResolver ?? new WorkflowInstanceIdResolver(opts.conn);
+    this.instanceResolver = opts.instanceResolver ?? new WorkflowInstanceIdResolver(opts.conn);
     this.definitionResolver =
       opts.definitionResolver ?? new WorkflowDefinitionIdResolver(opts.conn);
   }
 
   async onEvent(event: WorkflowInstrumentationEvent): Promise<void> {
     const instanceUuid =
-      event.instanceId === null
-        ? null
-        : await this.instanceResolver.resolve(event.instanceId);
+      event.instanceId === null ? null : await this.instanceResolver.resolve(event.instanceId);
     const definitionUuid =
       event.definitionId === null
         ? null

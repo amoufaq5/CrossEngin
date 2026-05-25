@@ -31,10 +31,7 @@ export const MODEL_TRANSITIONS: Readonly<
   retired: [],
 });
 
-export function canTransitionModel(
-  from: ModelLifecycleStatus,
-  to: ModelLifecycleStatus,
-): boolean {
+export function canTransitionModel(from: ModelLifecycleStatus, to: ModelLifecycleStatus): boolean {
   return MODEL_TRANSITIONS[from].includes(to);
 }
 
@@ -130,8 +127,7 @@ export const ModelRegistryEntrySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["blockingEvalRunIds"],
-          message:
-            "production models must reference at least one passing blocking eval run",
+          message: "production models must reference at least one passing blocking eval run",
         });
       }
     }
@@ -200,61 +196,48 @@ export const ModelRegistryEntrySchema = z
   });
 export type ModelRegistryEntry = z.infer<typeof ModelRegistryEntrySchema>;
 
-export const ModelRegistrySchema = z
-  .array(ModelRegistryEntrySchema)
-  .superRefine((entries, ctx) => {
-    const ids = new Set<string>();
-    entries.forEach((e, i) => {
-      if (ids.has(e.id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate model id '${e.id}'`,
-        });
-      }
-      ids.add(e.id);
-    });
-    const productionPerFamily = new Map<string, number>();
-    for (const e of entries) {
-      if (e.status === "production") {
-        productionPerFamily.set(e.family, (productionPerFamily.get(e.family) ?? 0) + 1);
-      }
+export const ModelRegistrySchema = z.array(ModelRegistryEntrySchema).superRefine((entries, ctx) => {
+  const ids = new Set<string>();
+  entries.forEach((e, i) => {
+    if (ids.has(e.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate model id '${e.id}'`,
+      });
     }
-    for (const [family, count] of productionPerFamily) {
-      if (count > 1) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [],
-          message: `family '${family}' has ${count.toString()} production models; only one is allowed at a time`,
-        });
-      }
-    }
+    ids.add(e.id);
   });
+  const productionPerFamily = new Map<string, number>();
+  for (const e of entries) {
+    if (e.status === "production") {
+      productionPerFamily.set(e.family, (productionPerFamily.get(e.family) ?? 0) + 1);
+    }
+  }
+  for (const [family, count] of productionPerFamily) {
+    if (count > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: `family '${family}' has ${count.toString()} production models; only one is allowed at a time`,
+      });
+    }
+  }
+});
 export type ModelRegistry = z.infer<typeof ModelRegistrySchema>;
 
 export function currentProductionModel(
   registry: ModelRegistry,
   family: ModelFamily,
 ): ModelRegistryEntry | null {
-  return (
-    registry.find(
-      (e) => e.family === family && e.status === "production",
-    ) ?? null
-  );
+  return registry.find((e) => e.family === family && e.status === "production") ?? null;
 }
 
 export function isModelServable(entry: ModelRegistryEntry): boolean {
-  return (
-    entry.status === "production" ||
-    entry.status === "canary" ||
-    entry.status === "shadow"
-  );
+  return entry.status === "production" || entry.status === "canary" || entry.status === "shadow";
 }
 
-export function canaryAggregate(
-  registry: ModelRegistry,
-  family: ModelFamily,
-): number {
+export function canaryAggregate(registry: ModelRegistry, family: ModelFamily): number {
   return registry
     .filter((e) => e.family === family && e.status === "canary")
     .reduce((acc, e) => acc + (e.canaryTrafficPercent ?? 0), 0);

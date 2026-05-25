@@ -51,15 +51,15 @@ describe("AuthHelperConfigSchema", () => {
   });
 
   it("rejects requireHttps=false (security baseline)", () => {
-    expect(() =>
-      AuthHelperConfigSchema.parse({ ...base, requireHttps: false }),
-    ).toThrow(/requireHttps must be true/);
+    expect(() => AuthHelperConfigSchema.parse({ ...base, requireHttps: false })).toThrow(
+      /requireHttps must be true/,
+    );
   });
 
   it("rejects redactCredentialsInLogs=false (security baseline)", () => {
-    expect(() =>
-      AuthHelperConfigSchema.parse({ ...base, redactCredentialsInLogs: false }),
-    ).toThrow(/redactCredentialsInLogs must be true/);
+    expect(() => AuthHelperConfigSchema.parse({ ...base, redactCredentialsInLogs: false })).toThrow(
+      /redactCredentialsInLogs must be true/,
+    );
   });
 
   it("rejects oauth2_refresh_token with in_memory storage", () => {

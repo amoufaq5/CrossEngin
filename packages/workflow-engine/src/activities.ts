@@ -40,9 +40,7 @@ export const ACTIVITY_STATUSES = [
 ] as const;
 export type ActivityStatus = (typeof ACTIVITY_STATUSES)[number];
 
-export const ACTIVITY_TRANSITIONS: Readonly<
-  Record<ActivityStatus, readonly ActivityStatus[]>
-> = {
+export const ACTIVITY_TRANSITIONS: Readonly<Record<ActivityStatus, readonly ActivityStatus[]>> = {
   pending: ["scheduled", "cancelled"],
   scheduled: ["running", "cancelled"],
   running: ["succeeded", "failed", "cancelled", "timed_out"],
@@ -53,10 +51,8 @@ export const ACTIVITY_TRANSITIONS: Readonly<
   timed_out: ["compensated"],
 };
 
-export const canTransitionActivity = (
-  from: ActivityStatus,
-  to: ActivityStatus,
-): boolean => ACTIVITY_TRANSITIONS[from].includes(to);
+export const canTransitionActivity = (from: ActivityStatus, to: ActivityStatus): boolean =>
+  ACTIVITY_TRANSITIONS[from].includes(to);
 
 export const RETRY_STRATEGIES = [
   "exponential_backoff",
@@ -108,7 +104,10 @@ export const WorkflowActivitySchema = z
     id: z.string().regex(/^wfa_[a-z0-9]{8,40}$/),
     instanceId: z.string().regex(/^wfi_[a-z0-9]{8,40}$/),
     tenantId: z.string().uuid(),
-    definitionActivityKey: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+    definitionActivityKey: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(80),
     kind: z.enum(ACTIVITY_KINDS),
     label: z.string().min(1).max(200),
     status: z.enum(ACTIVITY_STATUSES),
@@ -120,8 +119,14 @@ export const WorkflowActivitySchema = z
     completedAt: z.string().datetime({ offset: true }).nullable(),
     timeoutSeconds: z.number().int().min(1).max(86_400),
     timeoutAt: z.string().datetime({ offset: true }),
-    inputSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-    outputSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    inputSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    outputSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     errorCode: z.string().max(80).nullable(),
     errorMessage: z.string().max(2000).nullable(),
     nextRetryAt: z.string().datetime({ offset: true }).nullable(),
@@ -167,16 +172,11 @@ export const WorkflowActivitySchema = z
       }
     }
     if (a.status === "failed") {
-      if (
-        a.completedAt === null ||
-        a.errorCode === null ||
-        a.errorMessage === null
-      ) {
+      if (a.completedAt === null || a.errorCode === null || a.errorMessage === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["errorCode"],
-          message:
-            "failed activity requires completedAt + errorCode + errorMessage",
+          message: "failed activity requires completedAt + errorCode + errorMessage",
         });
       }
     }
@@ -194,8 +194,7 @@ export const WorkflowActivitySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["completedByUserId"],
-          message:
-            "succeeded manual_task activity requires completedByUserId",
+          message: "succeeded manual_task activity requires completedByUserId",
         });
       }
     }
@@ -294,10 +293,7 @@ export const decideActivityRetry = (input: {
       reason: "max_attempts_exhausted",
     };
   }
-  if (
-    a.errorCode !== null &&
-    a.retryPolicy.nonRetryableErrorCodes.includes(a.errorCode)
-  ) {
+  if (a.errorCode !== null && a.retryPolicy.nonRetryableErrorCodes.includes(a.errorCode)) {
     return {
       shouldRetry: false,
       nextRetryAt: null,
@@ -324,17 +320,13 @@ export const decideActivityRetry = (input: {
       delaySec = a.retryPolicy.initialDelaySeconds * a.attemptNumber;
       break;
     case "exponential_backoff":
-      delaySec =
-        a.retryPolicy.initialDelaySeconds *
-        Math.pow(2, a.attemptNumber - 1);
+      delaySec = a.retryPolicy.initialDelaySeconds * Math.pow(2, a.attemptNumber - 1);
       break;
   }
   const cappedDelaySec = Math.min(delaySec, a.retryPolicy.maxDelaySeconds);
   return {
     shouldRetry: true,
-    nextRetryAt: new Date(
-      input.now.getTime() + cappedDelaySec * 1000,
-    ).toISOString(),
+    nextRetryAt: new Date(input.now.getTime() + cappedDelaySec * 1000).toISOString(),
     reason: `retry_in_${cappedDelaySec}s`,
   };
 };
@@ -345,10 +337,7 @@ export const isIdempotentActivity = (a: WorkflowActivity): boolean =>
 export const isSideEffectActivity = (a: WorkflowActivity): boolean =>
   SIDE_EFFECT_ACTIVITY_KINDS.has(a.kind);
 
-export const isActivityTimedOut = (
-  activity: WorkflowActivity,
-  now: Date,
-): boolean => {
+export const isActivityTimedOut = (activity: WorkflowActivity, now: Date): boolean => {
   if (
     activity.status === "succeeded" ||
     activity.status === "failed" ||

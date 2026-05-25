@@ -33,14 +33,20 @@ describe("BedrockError", () => {
   });
 
   it("isRetryable returns false for permanent kinds", () => {
-    expect(new BedrockError({ kind: "authentication_error", message: "" }).isRetryable()).toBe(false);
-    expect(new BedrockError({ kind: "invalid_request_error", message: "" }).isRetryable()).toBe(false);
+    expect(new BedrockError({ kind: "authentication_error", message: "" }).isRetryable()).toBe(
+      false,
+    );
+    expect(new BedrockError({ kind: "invalid_request_error", message: "" }).isRetryable()).toBe(
+      false,
+    );
     expect(new BedrockError({ kind: "not_found_error", message: "" }).isRetryable()).toBe(false);
     expect(new BedrockError({ kind: "permission_error", message: "" }).isRetryable()).toBe(false);
   });
 
   it("isRetryable returns false for guardrail_intervened + content_filtered (M2.9.8)", () => {
-    expect(new BedrockError({ kind: "guardrail_intervened", message: "" }).isRetryable()).toBe(false);
+    expect(new BedrockError({ kind: "guardrail_intervened", message: "" }).isRetryable()).toBe(
+      false,
+    );
     expect(new BedrockError({ kind: "content_filtered", message: "" }).isRetryable()).toBe(false);
   });
 });
@@ -64,12 +70,12 @@ describe("BedrockError x kernel isRetryableError (M2.X.7)", () => {
 
   it("kernel isRetryableError returns false for moderation + auth kinds", async () => {
     const { isRetryableError } = await import("@crossengin/ai-providers");
-    expect(
-      isRetryableError(new BedrockError({ kind: "guardrail_intervened", message: "" })),
-    ).toBe(false);
-    expect(
-      isRetryableError(new BedrockError({ kind: "authentication_error", message: "" })),
-    ).toBe(false);
+    expect(isRetryableError(new BedrockError({ kind: "guardrail_intervened", message: "" }))).toBe(
+      false,
+    );
+    expect(isRetryableError(new BedrockError({ kind: "authentication_error", message: "" }))).toBe(
+      false,
+    );
   });
 });
 
@@ -83,9 +89,9 @@ describe("BedrockError x kernel isInputTooLargeError (M2.X.9)", () => {
 
   it("kernel isInputTooLargeError returns false for other kinds", async () => {
     const { isInputTooLargeError } = await import("@crossengin/ai-providers");
-    expect(
-      isInputTooLargeError(new BedrockError({ kind: "rate_limit_error", message: "" })),
-    ).toBe(false);
+    expect(isInputTooLargeError(new BedrockError({ kind: "rate_limit_error", message: "" }))).toBe(
+      false,
+    );
     expect(
       isInputTooLargeError(new BedrockError({ kind: "invalid_request_error", message: "" })),
     ).toBe(false);
@@ -238,8 +244,6 @@ describe("BedrockError — conflict_error (M2.X.12)", () => {
   });
 
   it("isRetryable returns false for conflict_error", () => {
-    expect(
-      new BedrockError({ kind: "conflict_error", message: "" }).isRetryable(),
-    ).toBe(false);
+    expect(new BedrockError({ kind: "conflict_error", message: "" }).isRetryable()).toBe(false);
   });
 });

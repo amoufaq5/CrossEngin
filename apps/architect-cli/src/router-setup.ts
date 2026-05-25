@@ -37,24 +37,15 @@ export const DEFAULT_TASK_POLICIES: TaskPolicyMap = {
   },
   executor: {
     primary: "anthropic/claude-sonnet-4-6",
-    fallback: [
-      "openai/gpt-4o-mini",
-      "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
-    ],
+    fallback: ["openai/gpt-4o-mini", "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"],
   },
   summarizer: {
     primary: "openai/gpt-4o-mini",
-    fallback: [
-      "anthropic/claude-haiku-4-5",
-      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
-    ],
+    fallback: ["anthropic/claude-haiku-4-5", "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0"],
   },
   "diff-narrator": {
     primary: "anthropic/claude-haiku-4-5",
-    fallback: [
-      "openai/gpt-4o-mini",
-      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
-    ],
+    fallback: ["openai/gpt-4o-mini", "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0"],
   },
   embedding: {
     primary: "openai/text-embedding-3-small",
@@ -62,17 +53,11 @@ export const DEFAULT_TASK_POLICIES: TaskPolicyMap = {
   },
   rerank: {
     primary: "anthropic/claude-haiku-4-5",
-    fallback: [
-      "openai/gpt-4o-mini",
-      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
-    ],
+    fallback: ["openai/gpt-4o-mini", "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0"],
   },
   classifier: {
     primary: "openai/gpt-4o-mini",
-    fallback: [
-      "anthropic/claude-haiku-4-5",
-      "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
-    ],
+    fallback: ["anthropic/claude-haiku-4-5", "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0"],
   },
 };
 
@@ -136,9 +121,7 @@ export function buildChatCompleter(input: BuildProviderInput): BuildProviderOutp
       new BedrockProvider({
         accessKeyId: awsAccessKey,
         secretAccessKey: awsSecretKey,
-        ...(sessionToken !== undefined && sessionToken.length > 0
-          ? { sessionToken }
-          : {}),
+        ...(sessionToken !== undefined && sessionToken.length > 0 ? { sessionToken } : {}),
         ...(region !== undefined && region.length > 0 ? { region } : {}),
         defaultModel: resolveBedrockDefault(input.forceModel),
       }),
@@ -168,16 +151,31 @@ export function buildChatCompleter(input: BuildProviderInput): BuildProviderOutp
   };
 }
 
-function resolveAnthropicDefault(forceModel: string | undefined): "claude-sonnet-4-6" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-sonnet-4-5" | "claude-haiku-4-5" {
+function resolveAnthropicDefault(
+  forceModel: string | undefined,
+):
+  | "claude-sonnet-4-6"
+  | "claude-opus-4-7"
+  | "claude-opus-4-6"
+  | "claude-sonnet-4-5"
+  | "claude-haiku-4-5" {
   if (forceModel !== undefined && isAnthropicModel(forceModel)) {
     return forceModel;
   }
   return "claude-sonnet-4-6";
 }
 
-function resolveOpenAIChatDefault(forceModel: string | undefined): "gpt-4o" | "gpt-4o-mini" | "gpt-4-turbo" | "o1" | "o1-mini" {
+function resolveOpenAIChatDefault(
+  forceModel: string | undefined,
+): "gpt-4o" | "gpt-4o-mini" | "gpt-4-turbo" | "o1" | "o1-mini" {
   if (forceModel !== undefined && isOpenAIModel(forceModel)) {
-    if (forceModel === "gpt-4o" || forceModel === "gpt-4o-mini" || forceModel === "gpt-4-turbo" || forceModel === "o1" || forceModel === "o1-mini") {
+    if (
+      forceModel === "gpt-4o" ||
+      forceModel === "gpt-4o-mini" ||
+      forceModel === "gpt-4-turbo" ||
+      forceModel === "o1" ||
+      forceModel === "o1-mini"
+    ) {
       return forceModel;
     }
   }

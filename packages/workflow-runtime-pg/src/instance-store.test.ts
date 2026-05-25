@@ -2,10 +2,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { ProjectedInstance } from "@crossengin/workflow-runtime";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 import { PostgresInstanceStore } from "./instance-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -49,7 +46,10 @@ function fixtureProjection(overrides: Partial<ProjectedInstance> = {}): Projecte
 }
 
 function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
+  handler: (
+    sql: string,
+    params: readonly unknown[] | undefined,
+  ) => PgQueryResult<Record<string, unknown>>,
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
   return {
@@ -90,10 +90,7 @@ describe("PostgresInstanceStore.create", () => {
 
   it("serializes variables + awaiting arrays as JSON", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const conn = mockConnection(
-      () => ({ rows: [{ id: INSTANCE_UUID }], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [{ id: INSTANCE_UUID }], rowCount: 1 }), capture);
     const instanceResolver = new WorkflowInstanceIdResolver(conn);
     const definitionResolver = new WorkflowDefinitionIdResolver(conn);
     definitionResolver.register("wfd_def00001", DEF_UUID);
@@ -114,10 +111,7 @@ describe("PostgresInstanceStore.create", () => {
 
   it("threads relatedEntity when supplied", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const conn = mockConnection(
-      () => ({ rows: [{ id: INSTANCE_UUID }], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [{ id: INSTANCE_UUID }], rowCount: 1 }), capture);
     const instanceResolver = new WorkflowInstanceIdResolver(conn);
     const definitionResolver = new WorkflowDefinitionIdResolver(conn);
     definitionResolver.register("wfd_def00001", DEF_UUID);

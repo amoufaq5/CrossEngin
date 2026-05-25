@@ -34,15 +34,13 @@ describe("OutboxEntrySchema", () => {
   });
 
   it("rejects GET (outbox is for mutations only)", () => {
-    expect(() =>
-      OutboxEntrySchema.parse({ ...baseEntry, method: "GET" }),
-    ).toThrow(/mutating/);
+    expect(() => OutboxEntrySchema.parse({ ...baseEntry, method: "GET" })).toThrow(/mutating/);
   });
 
   it("requires lastAttemptAt when status is in_flight", () => {
-    expect(() =>
-      OutboxEntrySchema.parse({ ...baseEntry, status: "in_flight" }),
-    ).toThrow(/lastAttemptAt/);
+    expect(() => OutboxEntrySchema.parse({ ...baseEntry, status: "in_flight" })).toThrow(
+      /lastAttemptAt/,
+    );
   });
 });
 
@@ -132,7 +130,10 @@ describe("nextRetryDelayMs", () => {
     const policy = DEFAULT_RETRY_POLICY;
     for (let i = 0; i < 20; i++) {
       const d = nextRetryDelayMs(3, policy);
-      const cap = Math.min(policy.initialDelayMs * Math.pow(policy.multiplier, 3), policy.maxDelayMs);
+      const cap = Math.min(
+        policy.initialDelayMs * Math.pow(policy.multiplier, 3),
+        policy.maxDelayMs,
+      );
       expect(d).toBeGreaterThanOrEqual(Math.floor(cap * 0.5));
       expect(d).toBeLessThanOrEqual(Math.ceil(cap));
     }

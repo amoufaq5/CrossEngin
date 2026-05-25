@@ -12,12 +12,15 @@ export const SUBJECT_IDENTIFIER_KINDS = [
   "ip_address",
   "pseudonymous_id",
 ] as const;
-export type SubjectIdentifierKind =
-  (typeof SUBJECT_IDENTIFIER_KINDS)[number];
+export type SubjectIdentifierKind = (typeof SUBJECT_IDENTIFIER_KINDS)[number];
 
-export const STRONG_SUBJECT_IDENTIFIERS: ReadonlySet<SubjectIdentifierKind> = new Set(
-  ["email_address", "user_id", "patient_mrn", "national_id", "tax_id"],
-);
+export const STRONG_SUBJECT_IDENTIFIERS: ReadonlySet<SubjectIdentifierKind> = new Set([
+  "email_address",
+  "user_id",
+  "patient_mrn",
+  "national_id",
+  "tax_id",
+]);
 
 export const SUBJECT_ACCESS_STATUSES = [
   "submitted",
@@ -55,8 +58,7 @@ export const SUBJECT_ACCESS_LEGAL_BASES = [
   "uae_data_protection_law",
   "custom_contract_obligation",
 ] as const;
-export type SubjectAccessLegalBasis =
-  (typeof SUBJECT_ACCESS_LEGAL_BASES)[number];
+export type SubjectAccessLegalBasis = (typeof SUBJECT_ACCESS_LEGAL_BASES)[number];
 
 export const DELIVERY_FORMATS = [
   "json",
@@ -67,9 +69,7 @@ export const DELIVERY_FORMATS = [
 ] as const;
 export type DeliveryFormat = (typeof DELIVERY_FORMATS)[number];
 
-export const SUBJECT_DEADLINE_DAYS: Readonly<
-  Record<SubjectAccessLegalBasis, number>
-> = {
+export const SUBJECT_DEADLINE_DAYS: Readonly<Record<SubjectAccessLegalBasis, number>> = {
   gdpr_article_15: 30,
   ccpa_right_to_know: 45,
   lgpd_article_18: 15,
@@ -114,8 +114,7 @@ export const DataSubjectSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["verifiedAt"],
-          message:
-            "verified subject requires verifiedAt + verificationMethod",
+          message: "verified subject requires verifiedAt + verificationMethod",
         });
       }
     }
@@ -150,13 +149,9 @@ export const SubjectNodeOccurrenceSchema = z.object({
   lastObservedAt: z.string().datetime({ offset: true }),
   occurrenceCount: z.number().int().min(1),
   columnsContaining: z.array(z.string().max(120)).default([]),
-  derivedThroughEdgeIds: z
-    .array(z.string().regex(/^lne_[a-z0-9]{8,40}$/))
-    .default([]),
+  derivedThroughEdgeIds: z.array(z.string().regex(/^lne_[a-z0-9]{8,40}$/)).default([]),
 });
-export type SubjectNodeOccurrence = z.infer<
-  typeof SubjectNodeOccurrenceSchema
->;
+export type SubjectNodeOccurrence = z.infer<typeof SubjectNodeOccurrenceSchema>;
 
 export const SubjectAccessRequestSchema = z
   .object({
@@ -180,7 +175,10 @@ export const SubjectAccessRequestSchema = z
     nodeCount: z.number().int().min(0),
     edgeCount: z.number().int().min(0),
     bytesProduced: z.number().int().min(0).nullable(),
-    bundleSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    bundleSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     bundleStorageUri: z.string().min(1).max(500).nullable(),
     bundleEncryptionKeyFingerprint: z
       .string()
@@ -193,8 +191,7 @@ export const SubjectAccessRequestSchema = z
   })
   .superRefine((r, ctx) => {
     const expectedDeadlineDays = SUBJECT_DEADLINE_DAYS[r.legalBasis];
-    const expectedDeadlineMs =
-      Date.parse(r.submittedAt) + expectedDeadlineDays * 86_400_000;
+    const expectedDeadlineMs = Date.parse(r.submittedAt) + expectedDeadlineDays * 86_400_000;
     if (Date.parse(r.deadlineAt) > expectedDeadlineMs) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -251,27 +248,17 @@ export const SubjectAccessRequestSchema = z
   });
 export type SubjectAccessRequest = z.infer<typeof SubjectAccessRequestSchema>;
 
-export const isRequestOverdue = (
-  request: SubjectAccessRequest,
-  now: Date,
-): boolean => {
-  if (
-    request.status === "complete" ||
-    request.status === "rejected"
-  ) {
+export const isRequestOverdue = (request: SubjectAccessRequest, now: Date): boolean => {
+  if (request.status === "complete" || request.status === "rejected") {
     return false;
   }
   return now.getTime() > Date.parse(request.deadlineAt);
 };
 
-export const computeDeadline = (
-  submittedAt: Date,
-  legalBasis: SubjectAccessLegalBasis,
-): string => {
+export const computeDeadline = (submittedAt: Date, legalBasis: SubjectAccessLegalBasis): string => {
   const days = SUBJECT_DEADLINE_DAYS[legalBasis];
   return new Date(submittedAt.getTime() + days * 86_400_000).toISOString();
 };
 
-export const isStrongIdentifier = (
-  kind: SubjectIdentifierKind,
-): boolean => STRONG_SUBJECT_IDENTIFIERS.has(kind);
+export const isStrongIdentifier = (kind: SubjectIdentifierKind): boolean =>
+  STRONG_SUBJECT_IDENTIFIERS.has(kind);

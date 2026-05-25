@@ -18,9 +18,7 @@ describe("ManifestSchema — minimum manifest", () => {
   });
 
   it("rejects a future manifestVersion", () => {
-    expect(() =>
-      ManifestSchema.parse({ manifestVersion: "2.0", meta: validMeta }),
-    ).toThrow();
+    expect(() => ManifestSchema.parse({ manifestVersion: "2.0", meta: validMeta })).toThrow();
   });
 });
 
@@ -103,9 +101,7 @@ describe("ManifestSchema — entities / traits / relations", () => {
       traits: [
         {
           name: "geocoded",
-          fields: [
-            { name: "lat", type: { kind: "decimal" as const, precision: 10, scale: 6 } },
-          ],
+          fields: [{ name: "lat", type: { kind: "decimal" as const, precision: 10, scale: 6 } }],
         },
       ],
       relations: [
@@ -194,9 +190,7 @@ describe("ManifestSchema — entities / traits / relations", () => {
           kind: "outbound.http" as const,
           auth: { kind: "bearer" as const, token: { vault: "stripe.secretKey" } },
           endpoint: "https://api.stripe.com/v1",
-          operations: [
-            { name: "createCustomer", method: "POST" as const, path: "/customers" },
-          ],
+          operations: [{ name: "createCustomer", method: "POST" as const, path: "/customers" }],
         },
         stripeWebhook: {
           kind: "inbound.webhook" as const,

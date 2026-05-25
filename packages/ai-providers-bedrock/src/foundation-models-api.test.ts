@@ -69,9 +69,9 @@ describe("buildFoundationModelListQuery (M2.X.5.aa.z.30)", () => {
   });
 
   it("threads byCustomizationType through", () => {
-    expect(
-      buildFoundationModelListQuery({ byCustomizationType: "FINE_TUNING" }),
-    ).toEqual({ byCustomizationType: "FINE_TUNING" });
+    expect(buildFoundationModelListQuery({ byCustomizationType: "FINE_TUNING" })).toEqual({
+      byCustomizationType: "FINE_TUNING",
+    });
   });
 
   it("rejects unknown byCustomizationType", () => {
@@ -83,21 +83,21 @@ describe("buildFoundationModelListQuery (M2.X.5.aa.z.30)", () => {
   });
 
   it("threads byInferenceType through", () => {
-    expect(
-      buildFoundationModelListQuery({ byInferenceType: "PROVISIONED" }),
-    ).toEqual({ byInferenceType: "PROVISIONED" });
+    expect(buildFoundationModelListQuery({ byInferenceType: "PROVISIONED" })).toEqual({
+      byInferenceType: "PROVISIONED",
+    });
   });
 
   it("rejects unknown byInferenceType", () => {
-    expect(() =>
-      buildFoundationModelListQuery({ byInferenceType: "BATCH" as never }),
-    ).toThrow(/invalid byInferenceType/);
+    expect(() => buildFoundationModelListQuery({ byInferenceType: "BATCH" as never })).toThrow(
+      /invalid byInferenceType/,
+    );
   });
 
   it("threads byOutputModality through", () => {
-    expect(
-      buildFoundationModelListQuery({ byOutputModality: "EMBEDDING" }),
-    ).toEqual({ byOutputModality: "EMBEDDING" });
+    expect(buildFoundationModelListQuery({ byOutputModality: "EMBEDDING" })).toEqual({
+      byOutputModality: "EMBEDDING",
+    });
   });
 
   it("rejects unknown byOutputModality", () => {
@@ -115,9 +115,7 @@ describe("buildFoundationModelListQuery (M2.X.5.aa.z.30)", () => {
   });
 
   it("rejects blank byProvider", () => {
-    expect(() => buildFoundationModelListQuery({ byProvider: "" })).toThrow(
-      /byProvider length/,
-    );
+    expect(() => buildFoundationModelListQuery({ byProvider: "" })).toThrow(/byProvider length/);
   });
 
   it(`rejects byProvider > ${BEDROCK_FOUNDATION_MODEL_PROVIDER_MAX_LEN.toString()} chars`, () => {
@@ -146,9 +144,7 @@ describe("buildFoundationModelListQuery (M2.X.5.aa.z.30)", () => {
 });
 
 describe("parseFoundationModelSummary (M2.X.5.aa.z.30)", () => {
-  function sample(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sample(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
       modelArn:
@@ -179,23 +175,17 @@ describe("parseFoundationModelSummary (M2.X.5.aa.z.30)", () => {
   });
 
   it("omits responseStreamingSupported when not present", () => {
-    const s = parseFoundationModelSummary(
-      sample({ responseStreamingSupported: undefined }),
-    );
+    const s = parseFoundationModelSummary(sample({ responseStreamingSupported: undefined }));
     expect("responseStreamingSupported" in s).toBe(false);
   });
 
   it("omits customizationsSupported when not present", () => {
-    const s = parseFoundationModelSummary(
-      sample({ customizationsSupported: undefined }),
-    );
+    const s = parseFoundationModelSummary(sample({ customizationsSupported: undefined }));
     expect("customizationsSupported" in s).toBe(false);
   });
 
   it("omits inferenceTypesSupported when not present", () => {
-    const s = parseFoundationModelSummary(
-      sample({ inferenceTypesSupported: undefined }),
-    );
+    const s = parseFoundationModelSummary(sample({ inferenceTypesSupported: undefined }));
     expect("inferenceTypesSupported" in s).toBe(false);
   });
 
@@ -205,63 +195,55 @@ describe("parseFoundationModelSummary (M2.X.5.aa.z.30)", () => {
   });
 
   it("rejects missing required string field", () => {
-    expect(() =>
-      parseFoundationModelSummary(sample({ modelArn: undefined })),
-    ).toThrow(/missing required string field 'modelArn'/);
+    expect(() => parseFoundationModelSummary(sample({ modelArn: undefined }))).toThrow(
+      /missing required string field 'modelArn'/,
+    );
   });
 
   it("rejects unknown modality in inputModalities", () => {
-    expect(() =>
-      parseFoundationModelSummary(sample({ inputModalities: ["VIDEO"] })),
-    ).toThrow(/unknown modality 'VIDEO' in inputModalities/);
+    expect(() => parseFoundationModelSummary(sample({ inputModalities: ["VIDEO"] }))).toThrow(
+      /unknown modality 'VIDEO' in inputModalities/,
+    );
   });
 
   it("rejects unknown modality in outputModalities", () => {
-    expect(() =>
-      parseFoundationModelSummary(sample({ outputModalities: ["AUDIO"] })),
-    ).toThrow(/unknown modality 'AUDIO' in outputModalities/);
+    expect(() => parseFoundationModelSummary(sample({ outputModalities: ["AUDIO"] }))).toThrow(
+      /unknown modality 'AUDIO' in outputModalities/,
+    );
   });
 
   it("rejects non-array inputModalities", () => {
-    expect(() =>
-      parseFoundationModelSummary(sample({ inputModalities: "TEXT" })),
-    ).toThrow(/inputModalities is not an array/);
+    expect(() => parseFoundationModelSummary(sample({ inputModalities: "TEXT" }))).toThrow(
+      /inputModalities is not an array/,
+    );
   });
 
   it("rejects unknown customization", () => {
     expect(() =>
-      parseFoundationModelSummary(
-        sample({ customizationsSupported: ["RLHF"] }),
-      ),
+      parseFoundationModelSummary(sample({ customizationsSupported: ["RLHF"] })),
     ).toThrow(/unknown customization 'RLHF'/);
   });
 
   it("rejects unknown inferenceType", () => {
     expect(() =>
-      parseFoundationModelSummary(
-        sample({ inferenceTypesSupported: ["BATCH"] }),
-      ),
+      parseFoundationModelSummary(sample({ inferenceTypesSupported: ["BATCH"] })),
     ).toThrow(/unknown inferenceType 'BATCH'/);
   });
 
   it("rejects non-object modelLifecycle", () => {
-    expect(() =>
-      parseFoundationModelSummary(sample({ modelLifecycle: "ACTIVE" })),
-    ).toThrow(/modelLifecycle is not an object/);
+    expect(() => parseFoundationModelSummary(sample({ modelLifecycle: "ACTIVE" }))).toThrow(
+      /modelLifecycle is not an object/,
+    );
   });
 
   it("rejects unknown lifecycle status", () => {
     expect(() =>
-      parseFoundationModelSummary(
-        sample({ modelLifecycle: { status: "DEPRECATED" } }),
-      ),
+      parseFoundationModelSummary(sample({ modelLifecycle: { status: "DEPRECATED" } })),
     ).toThrow(/unknown lifecycle status 'DEPRECATED'/);
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseFoundationModelSummary(null)).toThrow(
-      /summary is not an object/,
-    );
+    expect(() => parseFoundationModelSummary(null)).toThrow(/summary is not an object/);
   });
 });
 
@@ -270,8 +252,7 @@ describe("parseFoundationModelDetail (M2.X.5.aa.z.30)", () => {
     const d = parseFoundationModelDetail({
       modelDetails: {
         modelId: "x",
-        modelArn:
-          "arn:aws:bedrock:us-east-1::foundation-model/x",
+        modelArn: "arn:aws:bedrock:us-east-1::foundation-model/x",
         modelName: "X",
         providerName: "X",
         inputModalities: ["TEXT"],
@@ -295,9 +276,7 @@ describe("parseFoundationModelDetail (M2.X.5.aa.z.30)", () => {
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseFoundationModelDetail(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseFoundationModelDetail(null)).toThrow(/not a JSON object/);
   });
 });
 
@@ -334,14 +313,12 @@ describe("parseFoundationModelListResponse (M2.X.5.aa.z.30)", () => {
   });
 
   it("rejects non-array modelSummaries", () => {
-    expect(() =>
-      parseFoundationModelListResponse({ modelSummaries: "nope" }),
-    ).toThrow(/modelSummaries is not an array/);
+    expect(() => parseFoundationModelListResponse({ modelSummaries: "nope" })).toThrow(
+      /modelSummaries is not an array/,
+    );
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseFoundationModelListResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseFoundationModelListResponse(null)).toThrow(/not a JSON object/);
   });
 });

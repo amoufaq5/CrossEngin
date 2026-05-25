@@ -41,7 +41,12 @@ export const ConsistencyPolicySchema = z
   .object({
     operationKind: OperationKindSchema,
     level: ConsistencyLevelSchema,
-    boundedStalenessMs: z.number().int().min(MIN_BOUNDED_STALENESS_MS).max(MAX_BOUNDED_STALENESS_MS).optional(),
+    boundedStalenessMs: z
+      .number()
+      .int()
+      .min(MIN_BOUNDED_STALENESS_MS)
+      .max(MAX_BOUNDED_STALENESS_MS)
+      .optional(),
     requiresQuorum: z.boolean().default(false),
     quorumSize: z.number().int().min(2).optional(),
     overrideAllowed: z.boolean().default(false),
@@ -86,14 +91,16 @@ export const ConsistencyPolicySchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["level"],
-        message: "write operations cannot use level='eventual' (eventual is a read concept; use monotonic_writes or stricter)",
+        message:
+          "write operations cannot use level='eventual' (eventual is a read concept; use monotonic_writes or stricter)",
       });
     }
     if (v.operationKind === "read_modify_write" && v.level === "monotonic_read") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["level"],
-        message: "read_modify_write requires at least read_your_writes (monotonic_read is insufficient)",
+        message:
+          "read_modify_write requires at least read_your_writes (monotonic_read is insufficient)",
       });
     }
   });
@@ -116,17 +123,11 @@ export const ConsistencyPolicySetSchema = z
   });
 export type ConsistencyPolicySet = z.infer<typeof ConsistencyPolicySetSchema>;
 
-export function compareLevel(
-  a: ConsistencyLevel,
-  b: ConsistencyLevel,
-): number {
+export function compareLevel(a: ConsistencyLevel, b: ConsistencyLevel): number {
   return CONSISTENCY_RANK[a] - CONSISTENCY_RANK[b];
 }
 
-export function isStrongerOrEqual(
-  required: ConsistencyLevel,
-  provided: ConsistencyLevel,
-): boolean {
+export function isStrongerOrEqual(required: ConsistencyLevel, provided: ConsistencyLevel): boolean {
   return CONSISTENCY_RANK[provided] >= CONSISTENCY_RANK[required];
 }
 

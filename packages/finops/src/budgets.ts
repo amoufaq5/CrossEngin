@@ -5,22 +5,11 @@ import { CurrencyCodeSchema } from "./attribution.js";
 const Iso8601 = z.string().datetime({ offset: true });
 const BUDGET_ID_REGEX = /^[a-z][a-z0-9-]*$/;
 
-export const BUDGET_PERIODS = [
-  "daily",
-  "weekly",
-  "monthly",
-  "quarterly",
-  "annual",
-] as const;
+export const BUDGET_PERIODS = ["daily", "weekly", "monthly", "quarterly", "annual"] as const;
 export type BudgetPeriod = (typeof BUDGET_PERIODS)[number];
 export const BudgetPeriodSchema = z.enum(BUDGET_PERIODS);
 
-export const BUDGET_ACTIONS = [
-  "alert_only",
-  "throttle",
-  "block_new_usage",
-  "page_oncall",
-] as const;
+export const BUDGET_ACTIONS = ["alert_only", "throttle", "block_new_usage", "page_oncall"] as const;
 export type BudgetAction = (typeof BUDGET_ACTIONS)[number];
 export const BudgetActionSchema = z.enum(BUDGET_ACTIONS);
 
@@ -28,15 +17,10 @@ export const BudgetThresholdSchema = z
   .object({
     percentOfBudget: z.number().int().min(1).max(200),
     action: BudgetActionSchema,
-    notifyChannels: z
-      .array(z.enum(["email", "slack", "pagerduty", "webhook"]))
-      .min(1),
+    notifyChannels: z.array(z.enum(["email", "slack", "pagerduty", "webhook"])).min(1),
   })
   .superRefine((v, ctx) => {
-    if (
-      (v.action === "block_new_usage" || v.action === "throttle") &&
-      v.percentOfBudget < 80
-    ) {
+    if ((v.action === "block_new_usage" || v.action === "throttle") && v.percentOfBudget < 80) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["percentOfBudget"],
@@ -151,10 +135,7 @@ export const BudgetBreachRecordSchema = z
         message: "resolvedAt requires resolvedReason",
       });
     }
-    if (
-      v.triggeredAction === "page_oncall" &&
-      !v.notifiedChannels.includes("pagerduty")
-    ) {
+    if (v.triggeredAction === "page_oncall" && !v.notifiedChannels.includes("pagerduty")) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["notifiedChannels"],
@@ -164,10 +145,7 @@ export const BudgetBreachRecordSchema = z
   });
 export type BudgetBreachRecord = z.infer<typeof BudgetBreachRecordSchema>;
 
-export function currentSpendPercent(
-  budget: CostBudget,
-  actualSpendCents: number,
-): number {
+export function currentSpendPercent(budget: CostBudget, actualSpendCents: number): number {
   if (budget.amountCents === 0) return 0;
   return Math.floor((actualSpendCents * 100) / budget.amountCents);
 }
@@ -182,9 +160,7 @@ export function thresholdsCrossed(
     .sort((a, b) => a.percentOfBudget - b.percentOfBudget);
 }
 
-export function highestSeverityAction(
-  thresholds: readonly BudgetThreshold[],
-): BudgetAction | null {
+export function highestSeverityAction(thresholds: readonly BudgetThreshold[]): BudgetAction | null {
   const ranking: Readonly<Record<BudgetAction, number>> = {
     alert_only: 0,
     throttle: 1,

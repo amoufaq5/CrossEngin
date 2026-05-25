@@ -10,11 +10,7 @@ import {
 import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
 import { describe, expect, it } from "vitest";
 
-import {
-  ERP_PAYMENTS_PACK_SLUG,
-  ERP_PAYMENTS_PACK_VERSION,
-  buildErpPaymentsPack,
-} from "./pack.js";
+import { ERP_PAYMENTS_PACK_SLUG, ERP_PAYMENTS_PACK_VERSION, buildErpPaymentsPack } from "./pack.js";
 
 function makeRegistry(): ManifestRegistry {
   const map: Record<string, Manifest> = {
@@ -70,9 +66,7 @@ describe("buildErpPaymentsPack — full kernel cross-validation (resolved)", () 
     const m = await buildResolvedPayments();
     const result = tryValidateManifest(m);
     if (!result.ok) {
-      throw new Error(
-        `tryValidateManifest failed: ${JSON.stringify(result.errors)}`,
-      );
+      throw new Error(`tryValidateManifest failed: ${JSON.stringify(result.errors)}`);
     }
     expect(result.ok).toBe(true);
   });
@@ -84,26 +78,18 @@ describe("buildErpPaymentsPack — full kernel cross-validation (resolved)", () 
   });
 
   it("differs from the core pack hash (extends adds entities)", async () => {
-    expect(manifestHash(await buildResolvedPayments())).not.toBe(
-      manifestHash(buildErpCorePack()),
-    );
+    expect(manifestHash(await buildResolvedPayments())).not.toBe(manifestHash(buildErpCorePack()));
   });
 
   it("self-diff returns no changes", async () => {
-    const diff = computeManifestDiff(
-      await buildResolvedPayments(),
-      await buildResolvedPayments(),
-    );
+    const diff = computeManifestDiff(await buildResolvedPayments(), await buildResolvedPayments());
     expect(diff.addedEntities).toHaveLength(0);
     expect(diff.removedEntities).toHaveLength(0);
     expect(diff.modifiedEntities).toHaveLength(0);
   });
 
   it("diff from core to resolved payments adds exactly Payment", async () => {
-    const diff = computeManifestDiff(
-      buildErpCorePack(),
-      await buildResolvedPayments(),
-    );
+    const diff = computeManifestDiff(buildErpCorePack(), await buildResolvedPayments());
     expect(diff.addedEntities.map((e) => e.name)).toEqual(["Payment"]);
     expect(diff.removedEntities).toHaveLength(0);
   });

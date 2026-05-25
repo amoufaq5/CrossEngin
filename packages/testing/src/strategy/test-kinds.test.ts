@@ -43,15 +43,13 @@ describe("TestSpecSchema", () => {
   });
 
   it("rejects non-@crossengin packages", () => {
-    expect(() =>
-      TestSpecSchema.parse({ ...baseSpec, package: "@third-party/x" }),
-    ).toThrow();
+    expect(() => TestSpecSchema.parse({ ...baseSpec, package: "@third-party/x" })).toThrow();
   });
 
   it("rejects quarantined tests without reason", () => {
-    expect(() =>
-      TestSpecSchema.parse({ ...baseSpec, quarantined: true }),
-    ).toThrow(/must declare quarantineReason/);
+    expect(() => TestSpecSchema.parse({ ...baseSpec, quarantined: true })).toThrow(
+      /must declare quarantineReason/,
+    );
   });
 
   it("rejects quarantineReason on an active test", () => {

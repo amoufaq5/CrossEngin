@@ -12,9 +12,11 @@ export interface AppendMessageInput {
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly content: string;
   readonly toolCallId: string | null;
-  readonly toolUses:
-    | ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: unknown }>
-    | null;
+  readonly toolUses: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly input: unknown;
+  }> | null;
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
   readonly cachedInputTokens: number | null;

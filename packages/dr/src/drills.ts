@@ -72,9 +72,7 @@ export const DrillRecordSchema = z
       }
     }
     if (
-      (v.kind === "failover_test" ||
-        v.kind === "full_regional" ||
-        v.kind === "restore_test") &&
+      (v.kind === "failover_test" || v.kind === "full_regional" || v.kind === "restore_test") &&
       (v.outcome === "passed" || v.outcome === "passed_with_findings")
     ) {
       if (v.measuredRpoSeconds === null) {
@@ -131,10 +129,7 @@ export function isDrillPassing(record: DrillRecord): boolean {
   return record.outcome === "passed" || record.outcome === "passed_with_findings";
 }
 
-export function isOverdue(
-  record: DrillRecord,
-  now: Date = new Date(),
-): boolean {
+export function isOverdue(record: DrillRecord, now: Date = new Date()): boolean {
   return now.getTime() >= new Date(record.nextDrillDueAt).getTime();
 }
 
@@ -168,10 +163,7 @@ export function exceededRtoInDrill(record: DrillRecord, spec: DrTierSpec): boole
   return record.measuredRtoSeconds !== null && record.measuredRtoSeconds > spec.maxRtoSeconds;
 }
 
-export function drillCadenceMet(
-  record: DrillRecord,
-  spec: DrTierSpec,
-): boolean {
+export function drillCadenceMet(record: DrillRecord, spec: DrTierSpec): boolean {
   if (record.executedAt === null) return false;
   const executedTime = new Date(record.executedAt).getTime();
   const nextDueTime = new Date(record.nextDrillDueAt).getTime();

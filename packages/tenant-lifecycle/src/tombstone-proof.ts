@@ -99,9 +99,9 @@ export function verifyTombstoneHashes(record: TombstoneRecord): {
   return { contentManifestOk, proofOk };
 }
 
-export function populateTombstoneHashes<T extends Omit<TombstoneRecord, "contentManifestSha256" | "proofSha256">>(
-  input: T,
-): T & { readonly contentManifestSha256: string; readonly proofSha256: string } {
+export function populateTombstoneHashes<
+  T extends Omit<TombstoneRecord, "contentManifestSha256" | "proofSha256">,
+>(input: T): T & { readonly contentManifestSha256: string; readonly proofSha256: string } {
   const contentManifestSha256 = computeContentManifestSha256(input.scope);
   const proofSha256 = computeProofSha256({
     id: input.id,

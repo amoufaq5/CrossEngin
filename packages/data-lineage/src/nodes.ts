@@ -28,9 +28,7 @@ export const DATA_CLASSIFICATIONS = [
 ] as const;
 export type DataClassification = (typeof DATA_CLASSIFICATIONS)[number];
 
-export const CLASSIFICATION_SENSITIVITY: Readonly<
-  Record<DataClassification, number>
-> = {
+export const CLASSIFICATION_SENSITIVITY: Readonly<Record<DataClassification, number>> = {
   public: 0,
   internal: 1,
   confidential: 2,
@@ -39,9 +37,11 @@ export const CLASSIFICATION_SENSITIVITY: Readonly<
   phi_protected: 5,
 };
 
-export const REGULATED_CLASSIFICATIONS: ReadonlySet<DataClassification> = new Set(
-  ["pii_personal", "phi_protected", "regulated_financial"],
-);
+export const REGULATED_CLASSIFICATIONS: ReadonlySet<DataClassification> = new Set([
+  "pii_personal",
+  "phi_protected",
+  "regulated_financial",
+]);
 
 export const NODE_LIFECYCLE_STATUSES = [
   "active",
@@ -62,10 +62,8 @@ export const NODE_LIFECYCLE_TRANSITIONS: Readonly<
   tombstoned: [],
 };
 
-export const canTransitionNode = (
-  from: NodeLifecycleStatus,
-  to: NodeLifecycleStatus,
-): boolean => NODE_LIFECYCLE_TRANSITIONS[from].includes(to);
+export const canTransitionNode = (from: NodeLifecycleStatus, to: NodeLifecycleStatus): boolean =>
+  NODE_LIFECYCLE_TRANSITIONS[from].includes(to);
 
 export const LineageNodeSchema = z
   .object({
@@ -79,18 +77,32 @@ export const LineageNodeSchema = z
     rowCount: z.number().int().min(0).nullable(),
     columnCount: z.number().int().min(0).max(10_000).nullable(),
     sizeBytes: z.number().int().min(0).nullable(),
-    contentSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    contentSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     storageUri: z.string().min(1).max(500).nullable(),
-    externalRef: z.object({
-      kind: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
-      id: z.string().min(1).max(200),
-    }).nullable(),
-    sourcePackage: z.string().regex(/^@crossengin\/[a-z][a-z0-9-]*$/).nullable(),
+    externalRef: z
+      .object({
+        kind: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]*$/)
+          .max(80),
+        id: z.string().min(1).max(200),
+      })
+      .nullable(),
+    sourcePackage: z
+      .string()
+      .regex(/^@crossengin\/[a-z][a-z0-9-]*$/)
+      .nullable(),
     createdAt: z.string().datetime({ offset: true }),
     createdByUserId: z.string().uuid().nullable(),
     createdBySystem: z.string().min(1).max(120).nullable(),
     frozenAt: z.string().datetime({ offset: true }).nullable(),
-    frozenSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    frozenSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     purgedAt: z.string().datetime({ offset: true }).nullable(),
     tombstonedAt: z.string().datetime({ offset: true }).nullable(),
     retentionUntil: z.string().datetime({ offset: true }).nullable(),
@@ -131,14 +143,10 @@ export const LineageNodeSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["minimumKAnonymity"],
-        message:
-          "aggregation_result requires minimumKAnonymity (k-anonymity floor)",
+        message: "aggregation_result requires minimumKAnonymity (k-anonymity floor)",
       });
     }
-    if (
-      n.kind === "redacted_view" &&
-      n.classification === "pii_personal"
-    ) {
+    if (n.kind === "redacted_view" && n.classification === "pii_personal") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["classification"],
@@ -146,10 +154,7 @@ export const LineageNodeSchema = z
           "redacted_view classification must downgrade from pii_personal (use internal/public)",
       });
     }
-    if (
-      n.kind === "tenant_export" &&
-      n.tenantId === null
-    ) {
+    if (n.kind === "tenant_export" && n.tenantId === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["tenantId"],
@@ -162,10 +167,8 @@ export type LineageNode = z.infer<typeof LineageNodeSchema>;
 export const isRegulatedNode = (node: LineageNode): boolean =>
   REGULATED_CLASSIFICATIONS.has(node.classification);
 
-export const isHigherSensitivity = (
-  a: DataClassification,
-  b: DataClassification,
-): boolean => CLASSIFICATION_SENSITIVITY[a] > CLASSIFICATION_SENSITIVITY[b];
+export const isHigherSensitivity = (a: DataClassification, b: DataClassification): boolean =>
+  CLASSIFICATION_SENSITIVITY[a] > CLASSIFICATION_SENSITIVITY[b];
 
 export const maxSensitivityOf = (
   classifications: readonly DataClassification[],
@@ -178,10 +181,7 @@ export const maxSensitivityOf = (
   return max;
 };
 
-export const isWithinRetention = (
-  node: LineageNode,
-  now: Date,
-): boolean => {
+export const isWithinRetention = (node: LineageNode, now: Date): boolean => {
   if (node.retentionUntil === null) return true;
   return now.getTime() < Date.parse(node.retentionUntil);
 };

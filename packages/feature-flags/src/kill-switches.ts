@@ -10,15 +10,9 @@ export const KILL_SWITCH_TRIGGER_KINDS = [
   "compliance_directive",
   "automated_metric_breach",
 ] as const;
-export type KillSwitchTriggerKind =
-  (typeof KILL_SWITCH_TRIGGER_KINDS)[number];
+export type KillSwitchTriggerKind = (typeof KILL_SWITCH_TRIGGER_KINDS)[number];
 
-export const KILL_SWITCH_STATUSES = [
-  "armed",
-  "triggered_active",
-  "released",
-  "expired",
-] as const;
+export const KILL_SWITCH_STATUSES = ["armed", "triggered_active", "released", "expired"] as const;
 export type KillSwitchStatus = (typeof KILL_SWITCH_STATUSES)[number];
 
 export const KILL_SWITCH_TRANSITIONS: Readonly<
@@ -30,14 +24,13 @@ export const KILL_SWITCH_TRANSITIONS: Readonly<
   expired: [],
 };
 
-export const canTransitionKillSwitch = (
-  from: KillSwitchStatus,
-  to: KillSwitchStatus,
-): boolean => KILL_SWITCH_TRANSITIONS[from].includes(to);
+export const canTransitionKillSwitch = (from: KillSwitchStatus, to: KillSwitchStatus): boolean =>
+  KILL_SWITCH_TRANSITIONS[from].includes(to);
 
-export const REQUIRES_INCIDENT_LINK: ReadonlySet<KillSwitchTriggerKind> = new Set(
-  ["incident_response", "security_event"],
-);
+export const REQUIRES_INCIDENT_LINK: ReadonlySet<KillSwitchTriggerKind> = new Set([
+  "incident_response",
+  "security_event",
+]);
 
 export const REQUIRES_FOUR_EYES: ReadonlySet<KillSwitchTriggerKind> = new Set([
   "manual_admin",
@@ -77,10 +70,7 @@ export const KillSwitchSchema = z
         message: "overriddenValueJson must be valid JSON",
       });
     }
-    if (
-      REQUIRES_INCIDENT_LINK.has(k.triggerKind) &&
-      k.relatedIncidentId === null
-    ) {
+    if (REQUIRES_INCIDENT_LINK.has(k.triggerKind) && k.relatedIncidentId === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["relatedIncidentId"],
@@ -105,20 +95,14 @@ export const KillSwitchSchema = z
           message: `${k.triggerKind} trigger requires four-eyes (coTriggeredByUserId + coTriggeredAt)`,
         });
       }
-      if (
-        k.coTriggeredByUserId !== null &&
-        k.coTriggeredByUserId === k.triggeredByUserId
-      ) {
+      if (k.coTriggeredByUserId !== null && k.coTriggeredByUserId === k.triggeredByUserId) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["coTriggeredByUserId"],
           message: "co-trigger must differ from primary trigger user",
         });
       }
-      if (
-        k.coTriggeredByUserId !== null &&
-        k.coTriggeredByUserId === k.armedByUserId
-      ) {
+      if (k.coTriggeredByUserId !== null && k.coTriggeredByUserId === k.armedByUserId) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["coTriggeredByUserId"],
@@ -127,11 +111,7 @@ export const KillSwitchSchema = z
       }
     }
     if (k.status === "released") {
-      if (
-        k.releasedAt === null ||
-        k.releasedByUserId === null ||
-        k.releasedReason === null
-      ) {
+      if (k.releasedAt === null || k.releasedByUserId === null || k.releasedReason === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["releasedReason"],
@@ -146,10 +126,7 @@ export const KillSwitchSchema = z
         message: "expired status requires expiredAt",
       });
     }
-    if (
-      k.expiresAt !== null &&
-      Date.parse(k.expiresAt) <= Date.parse(k.armedAt)
-    ) {
+    if (k.expiresAt !== null && Date.parse(k.expiresAt) <= Date.parse(k.armedAt)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["expiresAt"],
@@ -159,10 +136,7 @@ export const KillSwitchSchema = z
   });
 export type KillSwitch = z.infer<typeof KillSwitchSchema>;
 
-export const isKillSwitchActive = (
-  killSwitch: KillSwitch,
-  now: Date,
-): boolean => {
+export const isKillSwitchActive = (killSwitch: KillSwitch, now: Date): boolean => {
   if (killSwitch.status !== "triggered_active") return false;
   if (killSwitch.expiresAt !== null) {
     if (now.getTime() >= Date.parse(killSwitch.expiresAt)) return false;
@@ -182,6 +156,5 @@ export const findActiveKillSwitch = (
   return null;
 };
 
-export const requiresFourEyes = (
-  triggerKind: KillSwitchTriggerKind,
-): boolean => REQUIRES_FOUR_EYES.has(triggerKind);
+export const requiresFourEyes = (triggerKind: KillSwitchTriggerKind): boolean =>
+  REQUIRES_FOUR_EYES.has(triggerKind);

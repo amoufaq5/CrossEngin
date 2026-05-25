@@ -1,8 +1,7 @@
 import { BedrockError } from "./errors.js";
 
 export const BEDROCK_GUARDRAIL_TRACE_MODES = ["enabled", "disabled"] as const;
-export type BedrockGuardrailTraceMode =
-  (typeof BEDROCK_GUARDRAIL_TRACE_MODES)[number];
+export type BedrockGuardrailTraceMode = (typeof BEDROCK_GUARDRAIL_TRACE_MODES)[number];
 
 export const BEDROCK_GUARDRAIL_INTERVENTION_STOP_REASONS = [
   "guardrail_intervened",
@@ -31,14 +30,10 @@ export function isBedrockGuardrailVersion(value: string): boolean {
 export function isBedrockGuardrailInterventionStopReason(
   value: string,
 ): value is BedrockGuardrailInterventionStopReason {
-  return (BEDROCK_GUARDRAIL_INTERVENTION_STOP_REASONS as readonly string[]).includes(
-    value,
-  );
+  return (BEDROCK_GUARDRAIL_INTERVENTION_STOP_REASONS as readonly string[]).includes(value);
 }
 
-export function buildBedrockGuardrailConfig(
-  input: BedrockGuardrailConfig,
-): BedrockGuardrailConfig {
+export function buildBedrockGuardrailConfig(input: BedrockGuardrailConfig): BedrockGuardrailConfig {
   if (!isBedrockGuardrailIdentifier(input.guardrailIdentifier)) {
     throw new Error(
       `buildBedrockGuardrailConfig: invalid guardrailIdentifier '${input.guardrailIdentifier}' — expected lowercase alphanumeric, 6-16 chars`,
@@ -50,9 +45,7 @@ export function buildBedrockGuardrailConfig(
     );
   }
   if (input.trace !== undefined) {
-    if (
-      !(BEDROCK_GUARDRAIL_TRACE_MODES as readonly string[]).includes(input.trace)
-    ) {
+    if (!(BEDROCK_GUARDRAIL_TRACE_MODES as readonly string[]).includes(input.trace)) {
       throw new Error(
         `buildBedrockGuardrailConfig: invalid trace '${input.trace}' — expected 'enabled' or 'disabled'`,
       );
@@ -75,9 +68,7 @@ export interface BedrockGuardrailAssessment {
 
 export interface BedrockGuardrailTrace {
   readonly inputAssessment?: Readonly<Record<string, BedrockGuardrailAssessment>>;
-  readonly outputAssessments?: Readonly<
-    Record<string, readonly BedrockGuardrailAssessment[]>
-  >;
+  readonly outputAssessments?: Readonly<Record<string, readonly BedrockGuardrailAssessment[]>>;
   readonly modelOutput?: readonly string[];
 }
 
@@ -92,9 +83,7 @@ export class BedrockGuardrailViolationError extends BedrockError {
   }) {
     super({
       kind: input.stopReason,
-      message:
-        input.message ??
-        `Bedrock guardrail intervened (stopReason: ${input.stopReason})`,
+      message: input.message ?? `Bedrock guardrail intervened (stopReason: ${input.stopReason})`,
     });
     this.name = "BedrockGuardrailViolationError";
     this.stopReason = input.stopReason;

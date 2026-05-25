@@ -110,8 +110,7 @@ export const EvalSetSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["blocksProductionPromotion"],
-        message:
-          "permission_decision eval sets must blocksProductionPromotion=true",
+        message: "permission_decision eval sets must blocksProductionPromotion=true",
       });
     }
     if (v.retiredAt !== null && v.retiredReason === undefined) {
@@ -144,10 +143,7 @@ export function regressionGuards(set: EvalSet): readonly EvalExample[] {
   return set.examples.filter((e) => e.isGoldenRegressionGuard);
 }
 
-export function exampleCountByTag(
-  set: EvalSet,
-  tag: string,
-): number {
+export function exampleCountByTag(set: EvalSet, tag: string): number {
   return set.examples.filter((e) => e.tags.includes(tag)).length;
 }
 

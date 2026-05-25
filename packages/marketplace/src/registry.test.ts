@@ -81,9 +81,9 @@ describe("PackVersionRecordSchema", () => {
   });
 
   it("rejects published without publishedAt", () => {
-    expect(() =>
-      PackVersionRecordSchema.parse({ ...base, publishedAt: null }),
-    ).toThrow(/publishedAt/);
+    expect(() => PackVersionRecordSchema.parse({ ...base, publishedAt: null })).toThrow(
+      /publishedAt/,
+    );
   });
 
   it("rejects published on stable channel without passed/exempt review", () => {
@@ -184,23 +184,18 @@ describe("PackVersionListSchema", () => {
   });
 
   it("accepts distinct versions for one pack", () => {
-    expect(() =>
-      PackVersionListSchema.parse([v("1.0.0"), v("1.1.0")]),
-    ).not.toThrow();
+    expect(() => PackVersionListSchema.parse([v("1.0.0"), v("1.1.0")])).not.toThrow();
   });
 
   it("rejects duplicate versions", () => {
-    expect(() =>
-      PackVersionListSchema.parse([v("1.0.0"), v("1.0.0")]),
-    ).toThrow(/duplicate version/);
+    expect(() => PackVersionListSchema.parse([v("1.0.0"), v("1.0.0")])).toThrow(
+      /duplicate version/,
+    );
   });
 
   it("rejects mixed pack ids", () => {
     expect(() =>
-      PackVersionListSchema.parse([
-        v("1.0.0"),
-        { ...v("1.1.0"), packId: "com.crossengin.y" },
-      ]),
+      PackVersionListSchema.parse([v("1.0.0"), { ...v("1.1.0"), packId: "com.crossengin.y" }]),
     ).toThrow(/mixed ids/);
   });
 });
@@ -231,9 +226,7 @@ describe("latestPublishedVersion", () => {
   });
 
   it("returns the highest semver", () => {
-    expect(
-      latestPublishedVersion([v("1.0.0"), v("2.0.0"), v("1.5.0")])?.version,
-    ).toBe("2.0.0");
+    expect(latestPublishedVersion([v("1.0.0"), v("2.0.0"), v("1.5.0")])?.version).toBe("2.0.0");
   });
 
   it("filters by channel", () => {

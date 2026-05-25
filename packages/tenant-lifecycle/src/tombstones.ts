@@ -63,11 +63,7 @@ export const TombstoneRecordSchema = z
     anchors: z.array(TombstoneAnchorSchema).min(1),
     retainedReason: z.string().min(1).optional(),
     retainedDataReference: z.string().min(1).optional(),
-    invalidationOfPriorTombstoneId: z
-      .string()
-      .regex(TOMBSTONE_ID_REGEX)
-      .nullable()
-      .default(null),
+    invalidationOfPriorTombstoneId: z.string().regex(TOMBSTONE_ID_REGEX).nullable().default(null),
   })
   .superRefine((v, ctx) => {
     if (v.executedBy === v.approvedBy) {
@@ -77,10 +73,7 @@ export const TombstoneRecordSchema = z
         message: "executedBy and approvedBy must differ (four-eyes principle)",
       });
     }
-    if (
-      v.kind === "data_subject_erasure" &&
-      v.relatedDeletionRequestId === undefined
-    ) {
+    if (v.kind === "data_subject_erasure" && v.relatedDeletionRequestId === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["relatedDeletionRequestId"],
@@ -144,13 +137,8 @@ export const TombstoneRecordSchema = z
   });
 export type TombstoneRecord = z.infer<typeof TombstoneRecordSchema>;
 
-export function tombstoneAge(
-  record: TombstoneRecord,
-  now: Date = new Date(),
-): number {
-  return Math.floor(
-    (now.getTime() - new Date(record.deletedAt).getTime()) / 1000 / 86_400,
-  );
+export function tombstoneAge(record: TombstoneRecord, now: Date = new Date()): number {
+  return Math.floor((now.getTime() - new Date(record.deletedAt).getTime()) / 1000 / 86_400);
 }
 
 export function tombstonesByKind(
@@ -172,8 +160,6 @@ export function tombstoneChainFor(
 export function isCryptographicallyAnchored(record: TombstoneRecord): boolean {
   return record.anchors.some(
     (a) =>
-      a.kind === "trillian_log" ||
-      a.kind === "blockchain_anchor" ||
-      a.kind === "rfc3161_timestamp",
+      a.kind === "trillian_log" || a.kind === "blockchain_anchor" || a.kind === "rfc3161_timestamp",
   );
 }

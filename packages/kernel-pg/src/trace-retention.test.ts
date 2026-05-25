@@ -110,18 +110,15 @@ describe("PostgresTraceRetention.listPolicies", () => {
 describe("PostgresTraceRetention.prune", () => {
   it("issues DELETE against meta.workflow_traces using occurred_at column", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 30 })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 7 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 30 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 7 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn, clock: () => 100_000_000_000 });
     const results = await r.prune();
     expect(results).toHaveLength(1);
@@ -134,18 +131,15 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("uses recorded_at for llm_latency_samples (not occurred_at)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("llm_latency_samples")],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("llm_latency_samples")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
     const deleteSql = capture.find((c) => c.sql.includes("DELETE"))?.sql ?? "";
@@ -156,15 +150,12 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("uses occurred_at for llm_call_traces", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("llm_call_traces")], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("llm_call_traces")], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
     const deleteSql = capture.find((c) => c.sql.includes("DELETE"))?.sql ?? "";
@@ -174,18 +165,15 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("threads the cutoff timestamp computed from clock - retentionDays", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 7 })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 7 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const NOW = 1_000_000_000_000;
     const r = new PostgresTraceRetention({ conn, clock: () => NOW });
     const results = await r.prune();
@@ -199,15 +187,12 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("updates last_pruned_at on the policy row after a successful prune", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("workflow_traces")], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("workflow_traces")], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
     const updateCall = capture.find((c) => c.sql.includes("UPDATE"));
@@ -218,18 +203,15 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("skips disabled policies and reports status=skipped_disabled", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { enabled: false })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { enabled: false })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.prune();
     expect(results[0]?.status).toBe("skipped_disabled");
@@ -241,18 +223,15 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("skips unknown table names defensively (DB CHECK constraint catches first)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("unknown_table_name")],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("unknown_table_name")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.prune();
     expect(results[0]?.status).toBe("skipped_unknown_table");
@@ -264,26 +243,23 @@ describe("PostgresTraceRetention.prune", () => {
   it("handles multiple policies in a single prune run", async () => {
     const capture: Capture[] = [];
     let deleteCount = 0;
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [
-              policyRow("workflow_traces"),
-              policyRow("llm_call_traces"),
-              policyRow("llm_latency_samples"),
-            ],
-            rowCount: 3,
-          };
-        }
-        if (sql.startsWith("DELETE")) {
-          deleteCount += 1;
-          return { rows: [], rowCount: deleteCount };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            policyRow("workflow_traces"),
+            policyRow("llm_call_traces"),
+            policyRow("llm_latency_samples"),
+          ],
+          rowCount: 3,
+        };
+      }
+      if (sql.startsWith("DELETE")) {
+        deleteCount += 1;
+        return { rows: [], rowCount: deleteCount };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.prune();
     expect(results).toHaveLength(3);
@@ -307,18 +283,15 @@ describe("PostgresTraceRetention.prune", () => {
 
   it("uses default Date.now clock when clock option omitted", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 1 })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 1 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const before = Date.now() - 86_400 * 1_000 - 1000;
     await r.prune();
@@ -354,21 +327,18 @@ describe("PostgresTraceRetention — safety properties", () => {
 describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
   it("issues SELECT COUNT(*) against meta.workflow_traces using occurred_at column", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 30 })],
-            rowCount: 1,
-          };
-        }
-        if (sql.startsWith("SELECT") && sql.includes("COUNT(*)")) {
-          return { rows: [{ count: "42" }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 30 })],
+          rowCount: 1,
+        };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("COUNT(*)")) {
+        return { rows: [{ count: "42" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn, clock: () => 100_000_000_000 });
     const results = await r.previewPrune();
     expect(results).toHaveLength(1);
@@ -381,15 +351,12 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("uses recorded_at for llm_latency_samples in COUNT query", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("llm_latency_samples")], rowCount: 1 };
-        }
-        return { rows: [{ count: "100" }], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("llm_latency_samples")], rowCount: 1 };
+      }
+      return { rows: [{ count: "100" }], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.previewPrune();
     const countSql = capture.find((c) => c.sql.includes("COUNT(*)"))?.sql ?? "";
@@ -400,15 +367,12 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("uses occurred_at for llm_call_traces in COUNT query", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("llm_call_traces")], rowCount: 1 };
-        }
-        return { rows: [{ count: "5" }], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("llm_call_traces")], rowCount: 1 };
+      }
+      return { rows: [{ count: "5" }], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.previewPrune();
     const countSql = capture.find((c) => c.sql.includes("COUNT(*)"))?.sql ?? "";
@@ -418,21 +382,18 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("threads the cutoff timestamp computed from clock - retentionDays", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("COUNT(*)")) {
-          return { rows: [{ count: "10" }], rowCount: 1 };
-        }
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 7 })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("COUNT(*)")) {
+        return { rows: [{ count: "10" }], rowCount: 1 };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 7 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const NOW = 1_000_000_000_000;
     const r = new PostgresTraceRetention({ conn, clock: () => NOW });
     const results = await r.previewPrune();
@@ -445,15 +406,12 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("does NOT issue any DELETE statement (read-only)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("workflow_traces")], rowCount: 1 };
-        }
-        return { rows: [{ count: "42" }], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("workflow_traces")], rowCount: 1 };
+      }
+      return { rows: [{ count: "42" }], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.previewPrune();
     const deletes = capture.filter((c) => c.sql.includes("DELETE"));
@@ -462,15 +420,12 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("does NOT update last_pruned_at (read-only)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("workflow_traces")], rowCount: 1 };
-        }
-        return { rows: [{ count: "42" }], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("workflow_traces")], rowCount: 1 };
+      }
+      return { rows: [{ count: "42" }], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.previewPrune();
     const updates = capture.filter((c) => c.sql.includes("UPDATE"));
@@ -479,18 +434,15 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("skips disabled policies with status=skipped_disabled and wouldDeleteCount=0", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { enabled: false })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { enabled: false })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
     expect(results[0]?.status).toBe("skipped_disabled");
@@ -502,15 +454,12 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
 
   it("skips unknown table names defensively (DB CHECK constraint catches first)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("unknown_future_table")], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("unknown_future_table")], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
     expect(results[0]?.status).toBe("skipped_unknown_table");
@@ -522,27 +471,24 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
   it("handles multiple policies in a single preview run", async () => {
     const capture: Capture[] = [];
     let nextCount = 5;
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [
-              policyRow("workflow_traces"),
-              policyRow("llm_call_traces"),
-              policyRow("llm_latency_samples"),
-            ],
-            rowCount: 3,
-          };
-        }
-        if (sql.includes("COUNT(*)")) {
-          const count = nextCount;
-          nextCount += 10;
-          return { rows: [{ count: count.toString() }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            policyRow("workflow_traces"),
+            policyRow("llm_call_traces"),
+            policyRow("llm_latency_samples"),
+          ],
+          rowCount: 3,
+        };
+      }
+      if (sql.includes("COUNT(*)")) {
+        const count = nextCount;
+        nextCount += 10;
+        return { rows: [{ count: count.toString() }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
     expect(results).toHaveLength(3);
@@ -595,28 +541,22 @@ describe("PostgresTraceRetention.previewPrune (M6.7.zz.dry-run)", () => {
     const NOW = 1_000_000_000_000;
     const policies = [policyRow("workflow_traces", { retention_days: 30 })];
     const captureP: Capture[] = [];
-    const connPreview = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: policies, rowCount: 1 };
-        }
-        if (sql.includes("FROM meta.tenant_retention_policies")) {
-          return { rows: [], rowCount: 0 };
-        }
-        return { rows: [{ count: "0" }], rowCount: 1 };
-      },
-      captureP,
-    );
-    const captureR: Capture[] = [];
-    const connRun = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: policies, rowCount: 1 };
-        }
+    const connPreview = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: policies, rowCount: 1 };
+      }
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
         return { rows: [], rowCount: 0 };
-      },
-      captureR,
-    );
+      }
+      return { rows: [{ count: "0" }], rowCount: 1 };
+    }, captureP);
+    const captureR: Capture[] = [];
+    const connRun = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: policies, rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, captureR);
     const previewResults = await new PostgresTraceRetention({
       conn: connPreview,
       clock: () => NOW,
@@ -701,23 +641,15 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("prune issues per-tenant DELETE with tenant_id = $1 AND time_column < cutoff", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return {
-            rows: [
-              tenantPolicyRow(TENANT_A, "workflow_traces", { retention_days: 7 }),
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 5 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces", { retention_days: 7 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 5 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn, clock: () => 1_000_000_000_000 });
     const results = await r.prune();
     const tenantResult = results.find((x) => x.tenantId === TENANT_A);
@@ -734,75 +666,52 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("platform-default DELETE excludes tenants with enabled per-tenant policies (NOT IN subquery)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 30 })],
-            rowCount: 1,
-          };
-        }
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return { rows: [], rowCount: 0 };
-        }
-        return { rows: [], rowCount: 5 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 30 })],
+          rowCount: 1,
+        };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 5 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
-    const platformDelete = capture.find(
-      (c) => c.sql.startsWith("DELETE FROM meta.workflow_traces"),
+    const platformDelete = capture.find((c) =>
+      c.sql.startsWith("DELETE FROM meta.workflow_traces"),
     );
-    expect(platformDelete?.sql).toContain(
-      "tenant_id NOT IN",
-    );
+    expect(platformDelete?.sql).toContain("tenant_id NOT IN");
     expect(platformDelete?.sql).toContain("FROM meta.tenant_retention_policies");
     expect(platformDelete?.sql).toContain("enabled = true");
   });
 
   it("updates last_pruned_at on the tenant_retention_policies row after a successful per-tenant prune", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return {
-            rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
-    const updateCall = capture.find((c) =>
-      c.sql.includes("UPDATE meta.tenant_retention_policies"),
-    );
+    const updateCall = capture.find((c) => c.sql.includes("UPDATE meta.tenant_retention_policies"));
     expect(updateCall?.sql).toContain("SET last_pruned_at = now()");
-    expect(updateCall?.sql).toContain(
-      "WHERE tenant_id = $1 AND table_name = $2",
-    );
+    expect(updateCall?.sql).toContain("WHERE tenant_id = $1 AND table_name = $2");
     expect(updateCall?.params).toEqual([TENANT_A, "workflow_traces"]);
   });
 
   it("skips disabled tenant policies with status=skipped_disabled", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
-          rows: [
-            tenantPolicyRow(TENANT_A, "workflow_traces", { enabled: false }),
-          ],
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces", { enabled: false })],
           rowCount: 1,
         };
       }
@@ -817,10 +726,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("skips tenant policies for tables without tenant_id (defensive — CHECK constraint catches first)", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         // Hypothetical bad row that bypassed the CHECK constraint.
         return {
           rows: [tenantPolicyRow(TENANT_A, "llm_latency_samples")],
@@ -837,31 +743,25 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("previewPrune reports per-tenant + platform-default counts independently", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("COUNT(*)")) {
-          // per-tenant COUNT returns 3; platform COUNT returns 7
-          if (sql.includes("tenant_id = $1")) {
-            return { rows: [{ count: "3" }], rowCount: 1 };
-          }
-          return { rows: [{ count: "7" }], rowCount: 1 };
+    const conn = mockConnection((sql) => {
+      if (sql.includes("COUNT(*)")) {
+        // per-tenant COUNT returns 3; platform COUNT returns 7
+        if (sql.includes("tenant_id = $1")) {
+          return { rows: [{ count: "3" }], rowCount: 1 };
         }
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return { rows: [policyRow("workflow_traces")], rowCount: 1 };
-        }
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return {
-            rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+        return { rows: [{ count: "7" }], rowCount: 1 };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return { rows: [policyRow("workflow_traces")], rowCount: 1 };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
     const tenantResult = results.find((x) => x.tenantId === TENANT_A);
@@ -873,10 +773,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("multiple tenants on the same table each get their own prune result", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
           rows: [
             tenantPolicyRow(TENANT_A, "workflow_traces", { retention_days: 7 }),
@@ -900,37 +797,27 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
   it("tablesWithTenantId exposes the prunable tables that can have per-tenant policies", () => {
     const tables = PostgresTraceRetention.tablesWithTenantId();
     expect(new Set(tables)).toEqual(
-      new Set([
-        "workflow_traces",
-        "llm_call_traces",
-        "tenant_retention_opt_out_history",
-      ]),
+      new Set(["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"]),
     );
     expect(tables).not.toContain("llm_latency_samples");
   });
 
   it("prune skips opt-out tenants with status='skipped_opt_out' and issues NO DELETE for that tenant", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return {
-            rows: [
-              tenantPolicyRow(TENANT_A, "workflow_traces", {
-                enabled: false,
-                opt_out: true,
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.prune();
     const tenantResult = results.find((x) => x.tenantId === TENANT_A);
@@ -938,18 +825,14 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     expect(tenantResult?.deletedCount).toBe(0);
     const tenantDelete = capture.find(
       (c) =>
-        c.sql.startsWith("DELETE FROM meta.workflow_traces") &&
-        c.sql.includes("tenant_id = $1"),
+        c.sql.startsWith("DELETE FROM meta.workflow_traces") && c.sql.includes("tenant_id = $1"),
     );
     expect(tenantDelete).toBeUndefined();
   });
 
   it("opt-out tenant takes precedence over enabled — opt_out=true wins even when enabled looks active", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
           rows: [
             tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -970,21 +853,15 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("platform-default DELETE excludes opt-out tenants too via the NOT IN subquery", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.retention_policies")
-        ) {
-          return {
-            rows: [policyRow("workflow_traces")],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
     const platformDelete = capture.find((c) =>
@@ -997,29 +874,23 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("previewPrune reports opt-out tenants with status='skipped_opt_out' wouldDeleteCount=0 and issues NO COUNT for that tenant", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return {
-            rows: [
-              tenantPolicyRow(TENANT_A, "workflow_traces", {
-                enabled: false,
-                opt_out: true,
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
-        if (sql.includes("COUNT(*)")) {
-          return { rows: [{ count: "999" }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("COUNT(*)")) {
+        return { rows: [{ count: "999" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
     const tenantResult = results.find((x) => x.tenantId === TENANT_A);
@@ -1036,30 +907,22 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("previewPrune platform-default COUNT excludes opt-out tenants via NOT IN subquery", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.retention_policies")
-        ) {
-          return {
-            rows: [policyRow("workflow_traces")],
-            rowCount: 1,
-          };
-        }
-        if (sql.includes("COUNT(*)")) {
-          return { rows: [{ count: "0" }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces")],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("COUNT(*)")) {
+        return { rows: [{ count: "0" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.previewPrune();
     const platformCount = capture.find(
-      (c) =>
-        c.sql.includes("COUNT(*)") &&
-        c.sql.includes("FROM meta.workflow_traces"),
+      (c) => c.sql.includes("COUNT(*)") && c.sql.includes("FROM meta.workflow_traces"),
     );
     expect(platformCount?.sql).toContain("enabled = true");
     expect(platformCount?.sql).toContain("opt_out = true");
@@ -1068,10 +931,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("disabled-and-not-opt-out tenant falls back to platform default (M6.7.zz.tenant baseline preserved)", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
           rows: [
             tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1092,10 +952,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("listTenantPolicies SELECT includes opt_out_reason column", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listTenantPolicies();
     expect(capture[0]?.sql).toContain("opt_out_reason");
@@ -1119,10 +976,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("prune threads optOutReason into the skipped_opt_out result", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
           rows: [
             tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1145,10 +999,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("prune threads NULL optOutReason when opt-out has no reason set", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
           rows: [
             tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1171,10 +1022,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
   it("previewPrune threads optOutReason into the skipped_opt_out result", async () => {
     const conn = mockConnection((sql) => {
-      if (
-        sql.startsWith("SELECT") &&
-        sql.includes("FROM meta.tenant_retention_policies")
-      ) {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
         return {
           rows: [
             tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1202,10 +1050,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
     it("opt_out with null opt_out_until is treated as indefinite (skipped_opt_out)", async () => {
       const conn = mockConnection((sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
           return {
             rows: [
               tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1227,10 +1072,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
     it("opt_out with future opt_out_until is active (skipped_opt_out)", async () => {
       const conn = mockConnection((sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
           return {
             rows: [
               tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1253,28 +1095,22 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
     it("opt_out with past opt_out_until is expired (skipped_opt_out_expired) and issues NO DELETE for that tenant", async () => {
       const capture: Capture[] = [];
-      const conn = mockConnection(
-        (sql) => {
-          if (
-            sql.startsWith("SELECT") &&
-            sql.includes("FROM meta.tenant_retention_policies")
-          ) {
-            return {
-              rows: [
-                tenantPolicyRow(TENANT_A, "workflow_traces", {
-                  opt_out: true,
-                  enabled: false,
-                  opt_out_until: PAST_ISO,
-                  opt_out_reason: "legal_hold:case#42",
-                }),
-              ],
-              rowCount: 1,
-            };
-          }
-          return { rows: [], rowCount: 0 };
-        },
-        capture,
-      );
+      const conn = mockConnection((sql) => {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+          return {
+            rows: [
+              tenantPolicyRow(TENANT_A, "workflow_traces", {
+                opt_out: true,
+                enabled: false,
+                opt_out_until: PAST_ISO,
+                opt_out_reason: "legal_hold:case#42",
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      }, capture);
       const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
       const results = await r.prune();
       const tenantResult = results.find((x) => x.tenantId === TENANT_A);
@@ -1283,8 +1119,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
       expect(tenantResult?.optOutReason).toBe("legal_hold:case#42");
       const tenantDelete = capture.find(
         (c) =>
-          c.sql.startsWith("DELETE FROM meta.workflow_traces") &&
-          c.sql.includes("tenant_id = $1"),
+          c.sql.startsWith("DELETE FROM meta.workflow_traces") && c.sql.includes("tenant_id = $1"),
       );
       expect(tenantDelete).toBeUndefined();
     });
@@ -1292,10 +1127,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
     it("opt_out_until exactly at clock now is treated as expired (boundary case)", async () => {
       const NOW_ISO = "2026-05-20T12:00:00.000Z";
       const conn = mockConnection((sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
           return {
             rows: [
               tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1317,10 +1149,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
     it("previewPrune surfaces skipped_opt_out_expired for expired opt-outs", async () => {
       const conn = mockConnection((sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
+        if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
           return {
             rows: [
               tenantPolicyRow(TENANT_A, "workflow_traces", {
@@ -1343,10 +1172,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
 
     it("listTenantPolicies SELECT includes opt_out_until column", async () => {
       const capture: Capture[] = [];
-      const conn = mockConnection(
-        () => ({ rows: [], rowCount: 0 }),
-        capture,
-      );
+      const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
       const r = new PostgresTraceRetention({ conn });
       await r.listTenantPolicies();
       expect(capture[0]?.sql).toContain("opt_out_until");
@@ -1538,15 +1364,10 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
 
   it("queries tenant_retention_policies with the (tenant_id, table_name) PK lookup", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetention(TENANT_A, "workflow_traces");
-    const tenantCall = capture.find((c) =>
-      c.sql.includes("FROM meta.tenant_retention_policies"),
-    );
+    const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
     expect(tenantCall?.params).toEqual([TENANT_A, "workflow_traces"]);
     expect(tenantCall?.sql).toContain("tenant_id = $1");
     expect(tenantCall?.sql).toContain("table_name = $2");
@@ -1554,18 +1375,15 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
 
   it("skips the platform query when an enabled per-tenant policy exists (single round-trip happy path)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_policies")) {
-          return {
-            rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces")],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetention(TENANT_A, "workflow_traces");
     const platformCall = capture.find(
@@ -1578,23 +1396,18 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
 
   it("issues both queries when per-tenant policy is disabled (two round-trips for the fallback)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_policies")) {
-          return {
-            rows: [tenantPolicyRow(TENANT_A, "workflow_traces", { enabled: false })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [tenantPolicyRow(TENANT_A, "workflow_traces", { enabled: false })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetention(TENANT_A, "workflow_traces");
-    const tenantCall = capture.find((c) =>
-      c.sql.includes("FROM meta.tenant_retention_policies"),
-    );
+    const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
     const platformCall = capture.find(
       (c) =>
         c.sql.includes("FROM meta.retention_policies") &&
@@ -1657,29 +1470,26 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
 
   it("opt_out takes precedence over platform policy — no platform fallback when opt_out=true", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_policies")) {
-          return {
-            rows: [
-              tenantPolicyRow(TENANT_A, "workflow_traces", {
-                enabled: false,
-                opt_out: true,
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
-        if (sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [policyRow("workflow_traces", { retention_days: 90 })],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            tenantPolicyRow(TENANT_A, "workflow_traces", {
+              enabled: false,
+              opt_out: true,
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [policyRow("workflow_traces", { retention_days: 90 })],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const result = await r.effectiveRetention(TENANT_A, "workflow_traces");
     expect(result.source).toBe("tenant_opt_out");
@@ -1772,15 +1582,10 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
 
   it("effectiveRetention SELECT includes opt_out_reason column", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetention(TENANT_A, "workflow_traces");
-    const tenantCall = capture.find((c) =>
-      c.sql.includes("FROM meta.tenant_retention_policies"),
-    );
+    const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
     expect(tenantCall?.sql).toContain("opt_out_reason");
   });
 
@@ -1915,29 +1720,18 @@ describe("PostgresTraceRetention.effectiveRetention (M6.7.zz.tenant.dashboard)",
         conn: mockConnection(handler),
         clock: () => afterExpiry,
       });
-      const resultBefore = await rBefore.effectiveRetention(
-        TENANT_A,
-        "workflow_traces",
-      );
-      const resultAfter = await rAfter.effectiveRetention(
-        TENANT_A,
-        "workflow_traces",
-      );
+      const resultBefore = await rBefore.effectiveRetention(TENANT_A, "workflow_traces");
+      const resultAfter = await rAfter.effectiveRetention(TENANT_A, "workflow_traces");
       expect(resultBefore.source).toBe("tenant_opt_out");
       expect(resultAfter.source).toBe("none");
     });
 
     it("effectiveRetention SELECT includes opt_out_until column", async () => {
       const capture: Capture[] = [];
-      const conn = mockConnection(
-        () => ({ rows: [], rowCount: 0 }),
-        capture,
-      );
+      const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
       const r = new PostgresTraceRetention({ conn });
       await r.effectiveRetention(TENANT_A, "workflow_traces");
-      const tenantCall = capture.find((c) =>
-        c.sql.includes("FROM meta.tenant_retention_policies"),
-      );
+      const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
       expect(tenantCall?.sql).toContain("opt_out_until");
     });
   });
@@ -1947,8 +1741,7 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
   const TENANT_A = "00000000-0000-4000-8000-00000000000A";
   const TENANT_B = "00000000-0000-4000-8000-00000000000B";
   const NOW_MS = Date.parse("2026-05-20T12:00:00.000Z");
-  const isoPlusDays = (d: number) =>
-    new Date(NOW_MS + d * 86_400 * 1_000).toISOString();
+  const isoPlusDays = (d: number) => new Date(NOW_MS + d * 86_400 * 1_000).toISOString();
 
   function row(
     tenantId: string,
@@ -1983,26 +1776,17 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
 
   it("SQL excludes already-expired when includeExpired=false (default)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
     await r.expiringOptOuts({ withinDays: 30 });
     expect(capture[0]?.sql).toContain("opt_out_until > to_timestamp($2");
     expect(capture[0]?.sql).toContain("opt_out_until <= to_timestamp($1");
-    expect(capture[0]?.params).toEqual([
-      NOW_MS + 30 * 86_400 * 1_000,
-      NOW_MS,
-    ]);
+    expect(capture[0]?.params).toEqual([NOW_MS + 30 * 86_400 * 1_000, NOW_MS]);
   });
 
   it("SQL includes already-expired when includeExpired=true", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
     await r.expiringOptOuts({ withinDays: 30, includeExpired: true });
     expect(capture[0]?.sql).toContain("opt_out_until <= to_timestamp($1");
@@ -2025,10 +1809,7 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
 
   it("SQL filters opt_out = true and opt_out_until IS NOT NULL", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
     await r.expiringOptOuts({ withinDays: 30 });
     expect(capture[0]?.sql).toContain("opt_out = true");
@@ -2037,10 +1818,7 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
 
   it("SQL orders results by opt_out_until ASC (soonest first)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
     await r.expiringOptOuts({ withinDays: 30 });
     expect(capture[0]?.sql).toContain("ORDER BY opt_out_until ASC");
@@ -2048,10 +1826,7 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
 
   it("withinDays=0 + includeExpired=false returns empty window (nothing in the strict (now, now] range)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
     const results = await r.expiringOptOuts({ withinDays: 0 });
     expect(results).toEqual([]);
@@ -2079,25 +1854,21 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
   it("withinDays < 0 throws", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(r.expiringOptOuts({ withinDays: -1 })).rejects.toThrow(
-      /withinDays/,
-    );
+    await expect(r.expiringOptOuts({ withinDays: -1 })).rejects.toThrow(/withinDays/);
   });
 
   it("withinDays = Infinity throws", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.expiringOptOuts({ withinDays: Number.POSITIVE_INFINITY }),
-    ).rejects.toThrow(/withinDays/);
+    await expect(r.expiringOptOuts({ withinDays: Number.POSITIVE_INFINITY })).rejects.toThrow(
+      /withinDays/,
+    );
   });
 
   it("withinDays = NaN throws", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.expiringOptOuts({ withinDays: Number.NaN }),
-    ).rejects.toThrow(/withinDays/);
+    await expect(r.expiringOptOuts({ withinDays: Number.NaN })).rejects.toThrow(/withinDays/);
   });
 
   it("empty result returns empty array", async () => {
@@ -2109,9 +1880,7 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
 
   it("threads optOutReason from row to result", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        row(TENANT_A, "workflow_traces", isoPlusDays(7), "vip_contract:xyz"),
-      ],
+      rows: [row(TENANT_A, "workflow_traces", isoPlusDays(7), "vip_contract:xyz")],
       rowCount: 1,
     }));
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
@@ -2141,12 +1910,8 @@ describe("PostgresTraceRetention.expiringOptOuts (M6.7.zz.tenant.opt-out.alerts)
     const r = new PostgresTraceRetention({ conn, clock: () => NOW_MS });
     const results = await r.expiringOptOuts({ withinDays: 30 });
     const urgent = results.filter((x) => x.daysUntilExpiry < 1);
-    const week = results.filter(
-      (x) => x.daysUntilExpiry >= 1 && x.daysUntilExpiry < 7,
-    );
-    const month = results.filter(
-      (x) => x.daysUntilExpiry >= 7 && x.daysUntilExpiry < 30,
-    );
+    const week = results.filter((x) => x.daysUntilExpiry >= 1 && x.daysUntilExpiry < 7);
+    const month = results.filter((x) => x.daysUntilExpiry >= 7 && x.daysUntilExpiry < 30);
     expect(urgent).toHaveLength(1);
     expect(week).toHaveLength(1);
     expect(month).toHaveLength(1);
@@ -2181,18 +1946,13 @@ describe("PostgresTraceRetention.setTenantOptOut (M6.7.zz.tenant.opt-out.cli.mut
 
   it("INSERTs with INSERT ... ON CONFLICT DO UPDATE and sets opt_out=true + enabled=false", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantOptOut({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).toContain(
-      "INSERT INTO meta.tenant_retention_policies",
-    );
+    expect(capture[0]?.sql).toContain("INSERT INTO meta.tenant_retention_policies");
     expect(capture[0]?.sql).toContain("ON CONFLICT (tenant_id, table_name)");
     expect(capture[0]?.sql).toContain("enabled = false");
     expect(capture[0]?.sql).toContain("opt_out = true");
@@ -2234,10 +1994,7 @@ describe("PostgresTraceRetention.setTenantOptOut (M6.7.zz.tenant.opt-out.cli.mut
 
   it("defaults retentionDays to 365 when not provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantOptOut({
       tenantId: TENANT_A,
@@ -2248,10 +2005,7 @@ describe("PostgresTraceRetention.setTenantOptOut (M6.7.zz.tenant.opt-out.cli.mut
 
   it("defaults optOutReason + optOutUntil to NULL when not provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantOptOut({
       tenantId: TENANT_A,
@@ -2287,10 +2041,7 @@ describe("PostgresTraceRetention.setTenantOptOut (M6.7.zz.tenant.opt-out.cli.mut
 
   it("ON CONFLICT DO UPDATE preserves retention_days (excluded from SET clause)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantOptOut({
       tenantId: TENANT_A,
@@ -2304,10 +2055,7 @@ describe("PostgresTraceRetention.setTenantOptOut (M6.7.zz.tenant.opt-out.cli.mut
 
   it("ON CONFLICT DO UPDATE uses EXCLUDED.opt_out_reason + EXCLUDED.opt_out_until", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantOptOut({
       tenantId: TENANT_A,
@@ -2381,10 +2129,7 @@ describe("PostgresTraceRetention.clearTenantOptOut (M6.7.zz.tenant.opt-out.cli.m
 
   it("UPDATEs opt_out=false + opt_out_until=NULL via UPDATE statement", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.clearTenantOptOut({
       tenantId: TENANT_A,
@@ -2397,10 +2142,7 @@ describe("PostgresTraceRetention.clearTenantOptOut (M6.7.zz.tenant.opt-out.cli.m
 
   it("preserves opt_out_reason on lift-off (per ADR-0161 historical context)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.clearTenantOptOut({
       tenantId: TENANT_A,
@@ -2438,10 +2180,7 @@ describe("PostgresTraceRetention.clearTenantOptOut (M6.7.zz.tenant.opt-out.cli.m
 
   it("WHERE clause filters opt_out = true (only opt-out rows are cleared)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.clearTenantOptOut({
       tenantId: TENANT_A,
@@ -2452,21 +2191,13 @@ describe("PostgresTraceRetention.clearTenantOptOut (M6.7.zz.tenant.opt-out.cli.m
 
   it("threads tenantId + tableName as WHERE clause params", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.clearTenantOptOut({
       tenantId: TENANT_A,
       tableName: "llm_call_traces",
     });
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      "llm_call_traces",
-      null,
-      "{}",
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, "llm_call_traces", null, "{}"]);
   });
 });
 
@@ -2498,19 +2229,14 @@ describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-se
 
   it("INSERTs with ON CONFLICT DO UPDATE setting opt_out=false", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantRetention({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
       retentionDays: 30,
     });
-    expect(capture[0]?.sql).toContain(
-      "INSERT INTO meta.tenant_retention_policies",
-    );
+    expect(capture[0]?.sql).toContain("INSERT INTO meta.tenant_retention_policies");
     expect(capture[0]?.sql).toContain("ON CONFLICT (tenant_id, table_name)");
     expect(capture[0]?.sql).toContain("opt_out = false");
   });
@@ -2531,22 +2257,12 @@ describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-se
       retentionDays: 90,
       enabled: false,
     });
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      "workflow_traces",
-      90,
-      false,
-      null,
-      "{}",
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, "workflow_traces", 90, false, null, "{}"]);
   });
 
   it("defaults enabled to true when not provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantRetention({
       tenantId: TENANT_A,
@@ -2575,10 +2291,7 @@ describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-se
 
   it("ON CONFLICT clears opt_out_until (to NULL) on UPDATE", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantRetention({
       tenantId: TENANT_A,
@@ -2592,10 +2305,7 @@ describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-se
 
   it("ON CONFLICT DO UPDATE PRESERVES opt_out_reason (omitted from SET clause)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantRetention({
       tenantId: TENANT_A,
@@ -2609,19 +2319,14 @@ describe("PostgresTraceRetention.setTenantRetention (M6.7.zz.tenant.retention-se
 
   it("ON CONFLICT updates retention_days + enabled to EXCLUDED.* values", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [returnedRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [returnedRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.setTenantRetention({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
       retentionDays: 30,
     });
-    expect(capture[0]?.sql).toContain(
-      "retention_days = EXCLUDED.retention_days",
-    );
+    expect(capture[0]?.sql).toContain("retention_days = EXCLUDED.retention_days");
     expect(capture[0]?.sql).toContain("enabled = EXCLUDED.enabled");
   });
 
@@ -2667,39 +2372,26 @@ describe("PostgresTraceRetention.deleteTenantPolicy (M6.7.zz.tenant.retention-de
 
   it("issues DELETE WHERE tenant_id = $1 AND table_name = $2", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.deleteTenantPolicy({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
     });
-    expect(capture[0]?.sql).toContain(
-      "DELETE FROM meta.tenant_retention_policies",
-    );
+    expect(capture[0]?.sql).toContain("DELETE FROM meta.tenant_retention_policies");
     expect(capture[0]?.sql).toContain("tenant_id = $1");
     expect(capture[0]?.sql).toContain("table_name = $2");
   });
 
   it("threads tenantId + tableName + actorId + attributes as params", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [{ deleted: "1" }], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [{ deleted: "1" }], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.deleteTenantPolicy({
       tenantId: TENANT_A,
       tableName: "llm_call_traces",
     });
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      "llm_call_traces",
-      null,
-      "{}",
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, "llm_call_traces", null, "{}"]);
   });
 
   it("returns true when a row was deleted (count > 0)", async () => {
@@ -2730,10 +2422,7 @@ describe("PostgresTraceRetention.deleteTenantPolicy (M6.7.zz.tenant.retention-de
 
   it("does NOT filter on opt_out column in the DELETE WHERE clause", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [{ deleted: "1" }], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [{ deleted: "1" }], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.deleteTenantPolicy({
       tenantId: TENANT_A,
@@ -2778,9 +2467,7 @@ describe("PostgresTraceRetention history-write CTE (M6.7.zz.tenant.opt-out.histo
       tableName: "workflow_traces",
     });
     const sql = capture[0]?.sql ?? "";
-    expect(sql).toContain(
-      "INSERT INTO meta.tenant_retention_opt_out_history",
-    );
+    expect(sql).toContain("INSERT INTO meta.tenant_retention_opt_out_history");
     expect(sql).toContain("'opt_out_set'");
   });
 
@@ -2810,9 +2497,7 @@ describe("PostgresTraceRetention history-write CTE (M6.7.zz.tenant.opt-out.histo
       tableName: "workflow_traces",
     });
     const sql = capture[0]?.sql ?? "";
-    expect(sql).toContain(
-      "INSERT INTO meta.tenant_retention_opt_out_history",
-    );
+    expect(sql).toContain("INSERT INTO meta.tenant_retention_opt_out_history");
     expect(sql).toContain("'opt_out_cleared'");
   });
 
@@ -2843,27 +2528,20 @@ describe("PostgresTraceRetention history-write CTE (M6.7.zz.tenant.opt-out.histo
       retentionDays: 30,
     });
     const sql = capture[0]?.sql ?? "";
-    expect(sql).toContain(
-      "INSERT INTO meta.tenant_retention_opt_out_history",
-    );
+    expect(sql).toContain("INSERT INTO meta.tenant_retention_opt_out_history");
     expect(sql).toContain("'retention_set'");
   });
 
   it("deleteTenantPolicy SQL writes a history row with event_kind='policy_deleted'", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [{ deleted: "1" }], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [{ deleted: "1" }], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.deleteTenantPolicy({
       tenantId: TENANT_A,
       tableName: "workflow_traces",
     });
     const sql = capture[0]?.sql ?? "";
-    expect(sql).toContain(
-      "INSERT INTO meta.tenant_retention_opt_out_history",
-    );
+    expect(sql).toContain("INSERT INTO meta.tenant_retention_opt_out_history");
     expect(sql).toContain("'policy_deleted'");
   });
 
@@ -2923,9 +2601,7 @@ describe("PostgresTraceRetention history-write CTE (M6.7.zz.tenant.opt-out.histo
       attributes: { source: "cli", correlationId: "req_abc" },
     });
     const last = capture[0]?.params?.[6];
-    expect(last).toBe(
-      JSON.stringify({ source: "cli", correlationId: "req_abc" }),
-    );
+    expect(last).toBe(JSON.stringify({ source: "cli", correlationId: "req_abc" }));
   });
 
   it("setTenantOptOut captures prev_state via existing CTE", async () => {
@@ -2960,10 +2636,7 @@ describe("PostgresTraceRetention history-write CTE (M6.7.zz.tenant.opt-out.histo
 
   it("deleteTenantPolicy captures prev_state from RETURNING d.*", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [{ deleted: "1" }], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [{ deleted: "1" }], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.deleteTenantPolicy({
       tenantId: TENANT_A,
@@ -3046,10 +2719,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("filters by tenantId when provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ tenantId: TENANT_A });
     expect(capture[0]?.sql).toContain("tenant_id = $1");
@@ -3058,10 +2728,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("filters by tableName when provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ tableName: "workflow_traces" });
     expect(capture[0]?.sql).toContain("table_name = $1");
@@ -3070,10 +2737,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("filters by single eventKind when provided (multi-value array)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ eventKinds: ["opt_out_set"] });
     expect(capture[0]?.sql).toContain("event_kind IN ($1)");
@@ -3082,10 +2746,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("filters by multiple eventKinds with IN clause when provided (OR-semantic)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({
       eventKinds: ["opt_out_set", "opt_out_cleared"],
@@ -3097,10 +2758,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("omits the event_kind WHERE clause when eventKinds is empty array", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ eventKinds: [] });
     expect(capture[0]?.sql).not.toContain("event_kind IN");
@@ -3108,10 +2766,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("omits the event_kind WHERE clause when eventKinds not set (backward compat)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({});
     expect(capture[0]?.sql).not.toContain("event_kind IN");
@@ -3119,10 +2774,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("excludes by single eventKindsNot when provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ eventKindsNot: ["policy_deleted"] });
     expect(capture[0]?.sql).toContain("event_kind NOT IN ($1)");
@@ -3131,10 +2783,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("excludes by multiple eventKindsNot with NOT IN clause (OR-semantic)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({
       eventKindsNot: ["policy_deleted", "retention_set"],
@@ -3146,10 +2795,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("omits NOT IN clause when eventKindsNot empty array", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ eventKindsNot: [] });
     expect(capture[0]?.sql).not.toContain("NOT IN");
@@ -3157,10 +2803,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("composes eventKinds + eventKindsNot independently (both clauses fire)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({
       eventKinds: ["opt_out_set", "opt_out_cleared"],
@@ -3172,10 +2815,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("filters by since + until time range when provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({
       since: "2026-05-01T00:00:00.000Z",
@@ -3187,10 +2827,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("ORDER BY occurred_at DESC + LIMIT applied", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ limit: 50 });
     const sql = capture[0]?.sql ?? "";
@@ -3201,10 +2838,7 @@ describe("PostgresTraceRetention.listOptOutHistory (M6.7.zz.tenant.opt-out.histo
 
   it("default limit is 100 when not provided", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory();
     expect(capture[0]?.params).toEqual([100]);
@@ -3292,42 +2926,32 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
   it("throws when history id is not found", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.restoreTenantPolicy({ historyId: HISTORY_ID }),
-    ).rejects.toThrow(/not found/);
+    await expect(r.restoreTenantPolicy({ historyId: HISTORY_ID })).rejects.toThrow(/not found/);
   });
 
   it("looks up source history row by id (first query)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return { rows: [historyRow()], rowCount: 1 };
-        }
-        return { rows: [{ deleted: "0" }], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
+        return { rows: [historyRow()], rowCount: 1 };
+      }
+      return { rows: [{ deleted: "0" }], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.restoreTenantPolicy({ historyId: HISTORY_ID });
-    expect(capture[0]?.sql).toContain(
-      "FROM meta.tenant_retention_opt_out_history",
-    );
+    expect(capture[0]?.sql).toContain("FROM meta.tenant_retention_opt_out_history");
     expect(capture[0]?.sql).toContain("WHERE id = $1");
     expect(capture[0]?.params).toEqual([HISTORY_ID]);
   });
 
   it("prev_state=null restores via DELETE (kind='deleted')", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return { rows: [historyRow({ prev_state: null })], rowCount: 1 };
-        }
-        return { rows: [{ deleted: "1" }], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
+        return { rows: [historyRow({ prev_state: null })], rowCount: 1 };
+      }
+      return { rows: [{ deleted: "1" }], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const result = await r.restoreTenantPolicy({ historyId: HISTORY_ID });
     expect(result).toEqual({
@@ -3336,47 +2960,42 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
       tableName: "workflow_traces",
     });
     // Second query should be the DELETE-with-history CTE
-    expect(capture[1]?.sql).toContain(
-      "DELETE FROM meta.tenant_retention_policies",
-    );
+    expect(capture[1]?.sql).toContain("DELETE FROM meta.tenant_retention_policies");
     expect(capture[1]?.sql).toContain("'policy_deleted'");
   });
 
   it("prev_state with opt_out=true restores via setTenantOptOut", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return {
-            rows: [
-              historyRow({
-                prev_state: {
-                  retention_days: 90,
-                  enabled: false,
-                  opt_out: true,
-                  opt_out_reason: "legal_hold:case#42",
-                  opt_out_until: "2027-01-01T00:00:00.000Z",
-                },
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
         return {
           rows: [
-            mutationReturnedRow({
-              retention_days: 90,
-              enabled: false,
-              opt_out: true,
-              opt_out_reason: "legal_hold:case#42",
-              opt_out_until: "2027-01-01T00:00:00.000Z",
+            historyRow({
+              prev_state: {
+                retention_days: 90,
+                enabled: false,
+                opt_out: true,
+                opt_out_reason: "legal_hold:case#42",
+                opt_out_until: "2027-01-01T00:00:00.000Z",
+              },
             }),
           ],
           rowCount: 1,
         };
-      },
-      capture,
-    );
+      }
+      return {
+        rows: [
+          mutationReturnedRow({
+            retention_days: 90,
+            enabled: false,
+            opt_out: true,
+            opt_out_reason: "legal_hold:case#42",
+            opt_out_until: "2027-01-01T00:00:00.000Z",
+          }),
+        ],
+        rowCount: 1,
+      };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const result = await r.restoreTenantPolicy({ historyId: HISTORY_ID });
     expect(result.kind).toBe("restored");
@@ -3390,33 +3009,28 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
 
   it("prev_state with opt_out=false restores via setTenantRetention", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return {
-            rows: [
-              historyRow({
-                prev_state: {
-                  retention_days: 30,
-                  enabled: true,
-                  opt_out: false,
-                  opt_out_reason: null,
-                  opt_out_until: null,
-                },
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
         return {
           rows: [
-            mutationReturnedRow({ retention_days: 30, enabled: true }),
+            historyRow({
+              prev_state: {
+                retention_days: 30,
+                enabled: true,
+                opt_out: false,
+                opt_out_reason: null,
+                opt_out_until: null,
+              },
+            }),
           ],
           rowCount: 1,
         };
-      },
-      capture,
-    );
+      }
+      return {
+        rows: [mutationReturnedRow({ retention_days: 30, enabled: true })],
+        rowCount: 1,
+      };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const result = await r.restoreTenantPolicy({ historyId: HISTORY_ID });
     expect(result.kind).toBe("restored");
@@ -3430,22 +3044,19 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
 
   it("adds 'restored_from' to attributes for downstream audit", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return {
-            rows: [
-              historyRow({
-                prev_state: { retention_days: 30, enabled: true, opt_out: false },
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [mutationReturnedRow()], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
+        return {
+          rows: [
+            historyRow({
+              prev_state: { retention_days: 30, enabled: true, opt_out: false },
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [mutationReturnedRow()], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.restoreTenantPolicy({ historyId: HISTORY_ID });
     const attributesParam = capture[1]?.params?.[5];
@@ -3454,22 +3065,19 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
 
   it("merges caller-provided attributes with restored_from", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return {
-            rows: [
-              historyRow({
-                prev_state: { retention_days: 30, enabled: true, opt_out: false },
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [mutationReturnedRow()], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
+        return {
+          rows: [
+            historyRow({
+              prev_state: { retention_days: 30, enabled: true, opt_out: false },
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [mutationReturnedRow()], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.restoreTenantPolicy({
       historyId: HISTORY_ID,
@@ -3486,22 +3094,19 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
   it("threads actorId to the underlying mutation method", async () => {
     const ACTOR = "11111111-1111-4111-8111-111111111111";
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
-          return {
-            rows: [
-              historyRow({
-                prev_state: { retention_days: 30, enabled: true, opt_out: false },
-              }),
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [mutationReturnedRow()], rowCount: 1 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.tenant_retention_opt_out_history")) {
+        return {
+          rows: [
+            historyRow({
+              prev_state: { retention_days: 30, enabled: true, opt_out: false },
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [mutationReturnedRow()], rowCount: 1 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.restoreTenantPolicy({ historyId: HISTORY_ID, actorId: ACTOR });
     expect(capture[1]?.params?.[4]).toBe(ACTOR);
@@ -3522,9 +3127,9 @@ describe("PostgresTraceRetention.restoreTenantPolicy (M6.7.zz.tenant.opt-out.cli
       return { rows: [mutationReturnedRow()], rowCount: 1 };
     });
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.restoreTenantPolicy({ historyId: HISTORY_ID }),
-    ).rejects.toThrow(/retention_days/);
+    await expect(r.restoreTenantPolicy({ historyId: HISTORY_ID })).rejects.toThrow(
+      /retention_days/,
+    );
   });
 
   it("kind='deleted' result carries tenantId + tableName from source history row", async () => {
@@ -3558,25 +3163,22 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
 
   it("prune issues DELETE against meta.tenant_retention_opt_out_history using occurred_at column", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [
-              {
-                table_name: "tenant_retention_opt_out_history",
-                retention_days: 90,
-                enabled: true,
-                last_pruned_at: null,
-              },
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "tenant_retention_opt_out_history",
+              retention_days: 90,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn, clock: () => 1_700_000_000_000 });
     await r.prune();
     const delCall = capture.find((c) =>
@@ -3587,25 +3189,22 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
 
   it("platform-default DELETE on history table uses tenant_id NOT IN subquery (hasTenantId=true)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [
-              {
-                table_name: "tenant_retention_opt_out_history",
-                retention_days: 30,
-                enabled: true,
-                last_pruned_at: null,
-              },
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "tenant_retention_opt_out_history",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     await r.prune();
     const delCall = capture.find((c) =>
@@ -3616,45 +3215,36 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
 
   it("per-tenant retention applies to history table (hasTenantId=true)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (
-          sql.startsWith("SELECT") &&
-          sql.includes("FROM meta.tenant_retention_policies")
-        ) {
-          return {
-            rows: [
-              {
-                tenant_id: TENANT_A,
-                table_name: "tenant_retention_opt_out_history",
-                retention_days: 365,
-                enabled: true,
-                opt_out: false,
-                opt_out_reason: null,
-                opt_out_until: null,
-                last_pruned_at: null,
-              },
-            ],
-            rowCount: 1,
-          };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "tenant_retention_opt_out_history",
+              retention_days: 365,
+              enabled: true,
+              opt_out: false,
+              opt_out_reason: null,
+              opt_out_until: null,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.prune();
     const tenantResult = results.find(
-      (x) =>
-        x.tenantId === TENANT_A &&
-        x.tableName === "tenant_retention_opt_out_history",
+      (x) => x.tenantId === TENANT_A && x.tableName === "tenant_retention_opt_out_history",
     );
     expect(tenantResult?.status).toBe("pruned");
     const tenantDelete = capture.find(
       (c) =>
-        c.sql.startsWith(
-          "DELETE FROM meta.tenant_retention_opt_out_history",
-        ) && c.sql.includes("tenant_id = $1"),
+        c.sql.startsWith("DELETE FROM meta.tenant_retention_opt_out_history") &&
+        c.sql.includes("tenant_id = $1"),
     );
     expect(tenantDelete).toBeDefined();
     expect(tenantDelete?.params?.[0]).toBe(TENANT_A);
@@ -3678,10 +3268,7 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
       return { rows: [], rowCount: 0 };
     });
     const r = new PostgresTraceRetention({ conn });
-    const result = await r.effectiveRetention(
-      TENANT_A,
-      "tenant_retention_opt_out_history",
-    );
+    const result = await r.effectiveRetention(TENANT_A, "tenant_retention_opt_out_history");
     expect(result.source).toBe("platform");
     if (result.source === "platform") {
       expect(result.retentionDays).toBe(365);
@@ -3690,33 +3277,28 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
 
   it("previewPrune renders count for history table", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      (sql) => {
-        if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
-          return {
-            rows: [
-              {
-                table_name: "tenant_retention_opt_out_history",
-                retention_days: 30,
-                enabled: true,
-                last_pruned_at: null,
-              },
-            ],
-            rowCount: 1,
-          };
-        }
-        if (sql.includes("COUNT(*)") && sql.includes("tenant_retention_opt_out_history")) {
-          return { rows: [{ count: "42" }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      },
-      capture,
-    );
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "tenant_retention_opt_out_history",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("COUNT(*)") && sql.includes("tenant_retention_opt_out_history")) {
+        return { rows: [{ count: "42" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
     const r = new PostgresTraceRetention({ conn });
     const results = await r.previewPrune();
-    const result = results.find(
-      (x) => x.tableName === "tenant_retention_opt_out_history",
-    );
+    const result = results.find((x) => x.tableName === "tenant_retention_opt_out_history");
     expect(result?.status).toBe("previewed");
     expect(result?.wouldDeleteCount).toBe(42);
   });
@@ -3752,9 +3334,9 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
   it("throws when neither id exists", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
-    ).rejects.toThrow(/not found.*40000000-0000-4000-8000-000000000001.*40000000-0000-4000-8000-000000000002/);
+    await expect(r.diffHistoryEntries({ idA: ID_A, idB: ID_B })).rejects.toThrow(
+      /not found.*40000000-0000-4000-8000-000000000001.*40000000-0000-4000-8000-000000000002/,
+    );
   });
 
   it("throws when only one id is missing", async () => {
@@ -3763,9 +3345,9 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
       rowCount: 1,
     }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
-    ).rejects.toThrow(/not found.*40000000-0000-4000-8000-000000000002/);
+    await expect(r.diffHistoryEntries({ idA: ID_A, idB: ID_B })).rejects.toThrow(
+      /not found.*40000000-0000-4000-8000-000000000002/,
+    );
   });
 
   it("throws when events on different tenants", async () => {
@@ -3777,9 +3359,9 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
-    ).rejects.toThrow(/different tenants/);
+    await expect(r.diffHistoryEntries({ idA: ID_A, idB: ID_B })).rejects.toThrow(
+      /different tenants/,
+    );
   });
 
   it("throws when events on different tables", async () => {
@@ -3791,23 +3373,20 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
-    ).rejects.toThrow(/different tables/);
+    await expect(r.diffHistoryEntries({ idA: ID_A, idB: ID_B })).rejects.toThrow(
+      /different tables/,
+    );
   });
 
   it("throws when event_kind is unknown", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        historyRow({ id: ID_A, event_kind: "bogus_kind" }),
-        historyRow({ id: ID_B }),
-      ],
+      rows: [historyRow({ id: ID_A, event_kind: "bogus_kind" }), historyRow({ id: ID_B })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.diffHistoryEntries({ idA: ID_A, idB: ID_B }),
-    ).rejects.toThrow(/unknown event_kind/);
+    await expect(r.diffHistoryEntries({ idA: ID_A, idB: ID_B })).rejects.toThrow(
+      /unknown event_kind/,
+    );
   });
 
   it("returns metadata + fieldDiffs for two events on the same (tenant, table)", async () => {
@@ -3916,9 +3495,7 @@ describe("PostgresTraceRetention.diffHistoryEntries (M6.7.zz.tenant.opt-out.cli.
     );
     const r = new PostgresTraceRetention({ conn });
     await r.diffHistoryEntries({ idA: ID_A, idB: ID_B });
-    expect(capture[0]?.sql).toContain(
-      "FROM meta.tenant_retention_opt_out_history",
-    );
+    expect(capture[0]?.sql).toContain("FROM meta.tenant_retention_opt_out_history");
     expect(capture[0]?.sql).toContain("WHERE h.id IN ($1, $2)");
     expect(capture[0]?.params).toEqual([ID_A, ID_B]);
   });
@@ -4149,10 +3726,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("accepts when both events have the expected actor_id (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4167,10 +3741,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("throws when event A's actor doesn't match expected (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_BOB }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_BOB }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4187,10 +3758,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("throws when event B's actor doesn't match expected (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4207,10 +3775,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("throws naming both sides when neither matches expected (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_BOB }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_BOB }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4227,10 +3792,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("renders <system> for null actor_id in mismatch message (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4247,10 +3809,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("accepts when both events have any of N expected actors (multi)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4265,10 +3824,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("throws when A doesn't match any of N actors with multi-value error format", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4285,10 +3841,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("throws naming both when both events fail the actor tuple (multi)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4305,10 +3858,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("omits the check when actorIds not set (backward compat)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4322,10 +3872,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id expectation check
 
   it("treats empty actorIds array as filter-not-set", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4413,9 +3960,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --with-actor-names (M6.7.zz.
     );
     const r = new PostgresTraceRetention({ conn });
     await r.diffHistoryEntries({ idA: ID_A, idB: ID_B, joinActor: true });
-    expect(capture[0]?.sql).toContain(
-      "LEFT JOIN meta.users u ON u.id = h.actor_id",
-    );
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
     expect(capture[0]?.sql).toContain("u.display_name AS actor_display_name");
     expect(capture[0]?.sql).toContain("u.email AS actor_email");
   });
@@ -4523,10 +4068,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --with-actor-names (M6.7.zz.
 
   it("always populates actorIdA + actorIdB even without joinActor (from actor_id column)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4594,10 +4136,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("accepts when neither event has the excluded actor_id (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4612,10 +4151,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("accepts when both events have null actor_id (system) and excluded is a UUID", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4629,10 +4165,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("throws when event A matches the excluded actor (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4649,10 +4182,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("throws when event B matches the excluded actor (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_CAROL })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4669,10 +4199,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("throws naming both when both events match the excluded actor (single)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_CAROL })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4689,10 +4216,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("accepts when neither event has any of N excluded actors (multi)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4707,10 +4231,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("throws when A matches one of N excluded actors with multi-value error format", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4727,10 +4248,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("throws naming both when both events match different actors in exclusion list (multi)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_DAVE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_DAVE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4747,10 +4265,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("omits the check when actorIdsNot not set (backward compat)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4760,10 +4275,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("treats empty actorIdsNot array as filter-not-set", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4777,10 +4289,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("composes with --actor-id expectation check (both pass when distinct)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4795,10 +4304,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
 
   it("contradictory --actor-id + --actor-id-not surfaces actorId check first", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_BOB }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_BOB }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -4809,9 +4315,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --actor-id-not exclusion che
         actorIds: [ACTOR_ALICE],
         actorIdsNot: [ACTOR_BOB],
       }),
-    ).rejects.toThrow(
-      `expected both events to have actor_id in ['${ACTOR_ALICE}']`,
-    );
+    ).rejects.toThrow(`expected both events to have actor_id in ['${ACTOR_ALICE}']`);
   });
 });
 
@@ -5040,9 +4544,7 @@ describe("PostgresTraceRetention.diffHistoryEntries --kind-not exclusion check (
         eventKinds: ["opt_out_set"],
         eventKindsNot: ["policy_deleted"],
       }),
-    ).rejects.toThrow(
-      "expected both events to have event_kind in ['opt_out_set']",
-    );
+    ).rejects.toThrow("expected both events to have event_kind in ['opt_out_set']");
   });
 
   it("composes with --actor-id-not (both checks fire independently)", async () => {
@@ -5094,10 +4596,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("system_only: accepts when both events are system-authored (null actor_id)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5112,10 +4611,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("system_only: throws when A has actor_id with explicit error naming side A", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5132,10 +4628,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("system_only: throws when B has actor_id with explicit error naming side B", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5152,10 +4645,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("system_only: throws naming both sides when neither is system-authored", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5165,17 +4655,12 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
         idB: ID_B,
         actorPresence: "system_only",
       }),
-    ).rejects.toThrow(
-      "expected both events to be system-authored (actor_id IS NULL)",
-    );
+    ).rejects.toThrow("expected both events to be system-authored (actor_id IS NULL)");
   });
 
   it("no_system: accepts when both events have non-null actor_id", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5190,10 +4675,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("no_system: throws when A is system-authored with explicit '<system>' error", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5210,10 +4692,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("no_system: throws when B is system-authored", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5230,10 +4709,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("no_system: throws naming both when both events are system-authored", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5250,10 +4726,7 @@ describe("PostgresTraceRetention.diffHistoryEntries actorPresence expectation ch
 
   it("omits the check when actorPresence not set (backward compat)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5500,10 +4973,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-a (single): accepts when A has expected actor", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5518,10 +4988,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-a (single): throws when A has wrong actor with multi-value list error format", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_BOB }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_BOB }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5538,10 +5005,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-a: throws with <system> rendering when A is system-authored (null actor_id)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5551,17 +5015,12 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
         idB: ID_B,
         actorIdsA: [ACTOR_ALICE],
       }),
-    ).rejects.toThrow(
-      `expected event A to have actor_id in ['${ACTOR_ALICE}'] but A is <system>`,
-    );
+    ).rejects.toThrow(`expected event A to have actor_id in ['${ACTOR_ALICE}'] but A is <system>`);
   });
 
   it("--actor-id-a (multi): accepts when A has any of N expected actors", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_CAROL })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5575,10 +5034,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-a (multi): throws with multi-value list when A doesn't match any of N actors", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5595,10 +5051,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-b (single): throws when B has wrong actor", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_CAROL })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5615,10 +5068,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-b (multi): accepts when B has any of N expected actors", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5632,10 +5082,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-not-a (single): accepts when A is not the excluded actor", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5649,10 +5096,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-not-a (single): throws when A matches the excluded actor with multi-value list format", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_BOB }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_BOB }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5662,17 +5106,12 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
         idB: ID_B,
         actorIdsNotA: [ACTOR_BOB],
       }),
-    ).rejects.toThrow(
-      `expected event A to have actor_id NOT in ['${ACTOR_BOB}'] but A matches`,
-    );
+    ).rejects.toThrow(`expected event A to have actor_id NOT in ['${ACTOR_BOB}'] but A matches`);
   });
 
   it("--actor-id-not-a (multi): throws when A matches one of N excluded actors with multi-value error format", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_CAROL }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_CAROL }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5689,10 +5128,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
 
   it("--actor-id-not-b (single): throws when B matches the excluded actor", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5702,17 +5138,12 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
         idB: ID_B,
         actorIdsNotB: [ACTOR_BOB],
       }),
-    ).rejects.toThrow(
-      `expected event B to have actor_id NOT in ['${ACTOR_BOB}'] but B matches`,
-    );
+    ).rejects.toThrow(`expected event B to have actor_id NOT in ['${ACTOR_BOB}'] but B matches`);
   });
 
   it("--actor-id-not-b (multi): accepts when B doesn't match any of N excluded actors", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_CAROL }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_CAROL })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5767,9 +5198,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side expectation checks 
         eventKinds: ["opt_out_set"],
         eventKindsA: ["retention_set"],
       }),
-    ).rejects.toThrow(
-      "expected both events to have event_kind in ['opt_out_set']",
-    );
+    ).rejects.toThrow("expected both events to have event_kind in ['opt_out_set']");
   });
 
   it("treats empty per-side arrays as filter-not-set across all 6 fields", async () => {
@@ -5838,10 +5267,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("--system-only-a: accepts when A has null actor_id (regardless of B)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5856,10 +5282,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("--system-only-a: throws when A has UUID with actual UUID in error", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5876,10 +5299,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("--no-system-a: accepts when A has UUID actor (regardless of B)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5894,10 +5314,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("--no-system-a: throws with <system> rendering when A is null actor_id", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5914,10 +5331,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("--system-only-b: throws when B has UUID (B side independent of A)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5934,10 +5348,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("--no-system-b: throws with <system> rendering when B is null actor_id", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5954,10 +5365,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("canonical asymmetric pattern: --system-only-a + --no-system-b accepts when A=null, B=UUID", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5973,10 +5381,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("composition: global --system-only fires BEFORE per-side --no-system-a (global error first)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: null }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: null })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -5987,17 +5392,12 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
         actorPresence: "system_only",
         actorPresenceA: "no_system",
       }),
-    ).rejects.toThrow(
-      "expected both events to be system-authored (actor_id IS NULL)",
-    );
+    ).rejects.toThrow("expected both events to be system-authored (actor_id IS NULL)");
   });
 
   it("omits per-side actor-presence checks when fields not set (backward compat)", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: null }),
-        rawEntry(ID_B, { actor_id: ACTOR_ALICE }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: null }), rawEntry(ID_B, { actor_id: ACTOR_ALICE })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -6008,10 +5408,7 @@ describe("PostgresTraceRetention.diffHistoryEntries per-side actorPresence expec
 
   it("per-side A fires BEFORE per-side B in check order", async () => {
     const conn = mockConnection(() => ({
-      rows: [
-        rawEntry(ID_A, { actor_id: ACTOR_ALICE }),
-        rawEntry(ID_B, { actor_id: ACTOR_BOB }),
-      ],
+      rows: [rawEntry(ID_A, { actor_id: ACTOR_ALICE }), rawEntry(ID_B, { actor_id: ACTOR_BOB })],
       rowCount: 2,
     }));
     const r = new PostgresTraceRetention({ conn });
@@ -6064,9 +5461,7 @@ describe("PostgresTraceRetention.diffHistoryTimeline (M6.7.zz.tenant.opt-out.cli
       tableName: "workflow_traces",
     });
     expect(capture).toHaveLength(1);
-    expect(capture[0]?.sql).toContain(
-      "(h.tenant_id = $1 OR h.tenant_id = $2)",
-    );
+    expect(capture[0]?.sql).toContain("(h.tenant_id = $1 OR h.tenant_id = $2)");
     expect(capture[0]?.sql).toContain("h.table_name = $3");
     expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 100]);
   });
@@ -6430,13 +5825,7 @@ describe("PostgresTraceRetention.diffHistoryTimelineNway (M6.7.zz.tenant.opt-out
     expect(capture).toHaveLength(1);
     expect(capture[0]?.sql).toContain("h.tenant_id IN ($1, $2, $3)");
     expect(capture[0]?.sql).toContain("h.table_name = $4");
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      TENANT_C,
-      "workflow_traces",
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, TENANT_C, "workflow_traces", 100]);
   });
 
   it("tags each entry with tenantLabel A/B/C from input order", async () => {
@@ -6817,13 +6206,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id filter (M6.7.zz.tenant
       actorIds: [ACTOR_A],
     });
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      ACTOR_A,
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", ACTOR_A, 100]);
   });
 
   it("pair-wise: builds h.actor_id IN ($N1, $N2, ...) for multi-actor OR filter", async () => {
@@ -7023,16 +6406,8 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       tableName: "workflow_traces",
       actorIdsNot: [ACTOR_A],
     });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4))",
-    );
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      ACTOR_A,
-      100,
-    ]);
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($4))");
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", ACTOR_A, 100]);
   });
 
   it("pair-wise: multi-excluded actors adds NOT IN with multiple placeholders", async () => {
@@ -7045,9 +6420,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       tableName: "workflow_traces",
       actorIdsNot: [ACTOR_A, ACTOR_B],
     });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4, $5))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($4, $5))");
     expect(capture[0]?.params).toEqual([
       TENANT_A,
       TENANT_B,
@@ -7092,9 +6465,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       tableName: "workflow_traces",
       actorIdsNot: [ACTOR_A],
     });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($5))");
   });
 
   it("N-way: multi-excluded actors with multiple placeholders", async () => {
@@ -7106,9 +6477,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       tableName: "workflow_traces",
       actorIdsNot: [ACTOR_A, ACTOR_B],
     });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4, $5))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($4, $5))");
   });
 
   it("cross-table: single excluded actor positioned after table IN list", async () => {
@@ -7120,9 +6489,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
       actorIdsNot: [ACTOR_A],
     });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($5))");
   });
 
   it("pair-wise: composes with actorIds (positive + negative both clauses present)", async () => {
@@ -7137,9 +6504,7 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       actorIdsNot: [ACTOR_B],
     });
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($5))");
   });
 
   it("pair-wise: composes with joinActor + eventKinds + actorIdsNot", async () => {
@@ -7154,12 +6519,8 @@ describe("PostgresTraceRetention diff-timeline --actor-id-not filter (M6.7.zz.te
       eventKinds: ["opt_out_set"],
       joinActor: true,
     });
-    expect(capture[0]?.sql).toContain(
-      "LEFT JOIN meta.users u ON u.id = h.actor_id",
-    );
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($4))",
-    );
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($4))");
     expect(capture[0]?.sql).toContain("h.event_kind IN ($5)");
   });
 });
@@ -7181,12 +6542,7 @@ describe("PostgresTraceRetention diff-timeline actorPresence filter (M6.7.zz.ten
     });
     expect(capture[0]?.sql).toContain("h.actor_id IS NULL");
     expect(capture[0]?.sql).not.toContain("h.actor_id IS NOT NULL");
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 100]);
   });
 
   it("pair-wise: adds h.actor_id IS NOT NULL WHERE clause when actorPresence='no_system'", async () => {
@@ -7200,12 +6556,7 @@ describe("PostgresTraceRetention diff-timeline actorPresence filter (M6.7.zz.ten
       actorPresence: "no_system",
     });
     expect(capture[0]?.sql).toContain("h.actor_id IS NOT NULL");
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 100]);
   });
 
   it("pair-wise: omits actor-presence WHERE clause when actorPresence not set", async () => {
@@ -7232,13 +6583,7 @@ describe("PostgresTraceRetention diff-timeline actorPresence filter (M6.7.zz.ten
     });
     expect(capture[0]?.sql).toContain("h.tenant_id IN ($1, $2, $3)");
     expect(capture[0]?.sql).toContain("h.actor_id IS NULL");
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      TENANT_C,
-      "workflow_traces",
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, TENANT_C, "workflow_traces", 100]);
   });
 
   it("N-way: adds h.actor_id IS NOT NULL when actorPresence='no_system'", async () => {
@@ -7296,9 +6641,7 @@ describe("PostgresTraceRetention diff-timeline actorPresence filter (M6.7.zz.ten
     });
     expect(capture[0]?.sql).toContain("LEFT JOIN meta.users");
     expect(capture[0]?.sql).toContain("h.actor_id IN ($4)");
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($5))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($5))");
     expect(capture[0]?.sql).toContain("h.actor_id IS NOT NULL");
     expect(capture[0]?.sql).toContain("h.event_kind IN ($6)");
   });
@@ -7313,12 +6656,7 @@ describe("PostgresTraceRetention diff-timeline actorPresence filter (M6.7.zz.ten
       tableName: "workflow_traces",
       actorPresence: "system_only",
     });
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", 100]);
     expect(capture[0]?.sql).toContain("LIMIT $4");
   });
 });
@@ -7339,13 +6677,7 @@ describe("PostgresTraceRetention diff-timeline --kind filter (M6.7.zz.tenant.opt
       eventKinds: ["opt_out_set"],
     });
     expect(capture[0]?.sql).toContain("h.event_kind IN ($4)");
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      "opt_out_set",
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", "opt_out_set", 100]);
   });
 
   it("pair-wise: builds h.event_kind IN ($N1, $N2, ...) for multi-kind OR filter", async () => {
@@ -7635,13 +6967,7 @@ describe("PostgresTraceRetention diff-timeline --after-id cursor pagination (M6.
     expect(capture[0]?.sql).toContain(
       "SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $4",
     );
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      AFTER_ID,
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", AFTER_ID, 100]);
   });
 
   it("pair-wise: same $N param reused for both subquery lookup and tiebreaker", async () => {
@@ -7788,13 +7114,7 @@ describe("PostgresTraceRetention diff-timeline --before-id reverse cursor (M6.7.
     expect(capture[0]?.sql).toContain(
       "SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $4",
     );
-    expect(capture[0]?.params).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-      BEFORE_ID,
-      100,
-    ]);
+    expect(capture[0]?.params).toEqual([TENANT_A, TENANT_B, "workflow_traces", BEFORE_ID, 100]);
   });
 
   it("pair-wise: same $N param reused for both subquery lookup and tiebreaker", async () => {
@@ -7930,23 +7250,19 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
 
   it("--after-id threads as $N param into compound cursor subquery", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ afterId: AFTER_ID });
     expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) <");
-    expect(capture[0]?.sql).toContain("SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $1");
+    expect(capture[0]?.sql).toContain(
+      "SELECT occurred_at FROM meta.tenant_retention_opt_out_history WHERE id = $1",
+    );
     expect(capture[0]?.params).toEqual([AFTER_ID, 100]);
   });
 
   it("compound cursor handles ties via id DESC tiebreaker in ORDER BY", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({});
     expect(capture[0]?.sql).toContain("ORDER BY h.occurred_at DESC, h.id DESC");
@@ -7954,10 +7270,7 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
 
   it("combines --after-id with other filters via WHERE AND", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({
       tenantId: TENANT_A,
@@ -7981,10 +7294,7 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
 
   it("compound cursor uses the same $N param for both occurred_at lookup and tiebreaker", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ afterId: AFTER_ID });
     const sql = capture[0]?.sql ?? "";
@@ -7995,10 +7305,7 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
 
   it("combines --after-id + tenantId + eventKind + since + until + limit correctly", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({
       tenantId: TENANT_A,
@@ -8022,10 +7329,7 @@ describe("PostgresTraceRetention.listOptOutHistory cursor pagination (M6.7.zz.te
 
   it("backward compat: omitting --after-id produces identical query shape as before", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ limit: 10 });
     expect(capture[0]?.sql).not.toContain("(h.occurred_at, h.id) <");
@@ -8039,10 +7343,7 @@ describe("PostgresTraceRetention.listOptOutHistory --before-id reverse cursor (M
 
   it("--before-id threads as $N param into compound cursor with > operator (reverse direction on DESC ordering)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ beforeId: BEFORE_ID });
     expect(capture[0]?.sql).toContain("(h.occurred_at, h.id) >");
@@ -8199,9 +7500,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIds filter (M6.7.zz.tena
       actorIdsNot: [ACTOR_C],
     });
     expect(capture[0]?.sql).toContain("h.actor_id IN ($1, $2)");
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($3))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($3))");
     expect(capture[0]?.params).toEqual([ACTOR_A, ACTOR_B, ACTOR_C, 100]);
   });
 
@@ -8292,9 +7591,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ actorIdsNot: [ACTOR_A] });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($1))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($1))");
     expect(capture[0]?.params).toEqual([ACTOR_A, 100]);
   });
 
@@ -8303,9 +7600,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ actorIdsNot: [ACTOR_A, ACTOR_B] });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($1, $2))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($1, $2))");
     expect(capture[0]?.params).toEqual([ACTOR_A, ACTOR_B, 100]);
   });
 
@@ -8343,9 +7638,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
       actorIdsNot: [ACTOR_A, ACTOR_B],
     });
     expect(capture[0]?.sql).toContain("h.tenant_id = $1");
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($2, $3))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($2, $3))");
     expect(capture[0]?.params).toEqual([TENANT_A, ACTOR_A, ACTOR_B, 100]);
   });
 
@@ -8358,9 +7651,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
       actorIdsNot: [ACTOR_B],
     });
     expect(capture[0]?.sql).toContain("h.actor_id IN ($1)");
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($2))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($2))");
     expect(capture[0]?.params).toEqual([ACTOR_A, ACTOR_B, 100]);
   });
 
@@ -8372,12 +7663,8 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
       actorIdsNot: [ACTOR_A, ACTOR_B],
       joinActor: true,
     });
-    expect(capture[0]?.sql).toContain(
-      "LEFT JOIN meta.users u ON u.id = h.actor_id",
-    );
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($1, $2))",
-    );
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($1, $2))");
   });
 
   it("composes with all filter dimensions (multi-actor exclusion)", async () => {
@@ -8435,9 +7722,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorIdsNot filter (M6.7.zz.t
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.listOptOutHistory({ actorIdsNot: [ACTOR_A, ACTOR_A] });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($1, $2))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($1, $2))");
     expect(capture[0]?.params).toEqual([ACTOR_A, ACTOR_A, 100]);
   });
 });
@@ -8511,9 +7796,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorPresence filter (M6.7.zz
       actorIdsNot: [ACTOR_A],
       actorPresence: "no_system",
     });
-    expect(capture[0]?.sql).toContain(
-      "(h.actor_id IS NULL OR h.actor_id NOT IN ($1))",
-    );
+    expect(capture[0]?.sql).toContain("(h.actor_id IS NULL OR h.actor_id NOT IN ($1))");
     expect(capture[0]?.sql).toContain("h.actor_id IS NOT NULL");
     expect(capture[0]?.params).toEqual([ACTOR_A, 100]);
   });
@@ -8526,9 +7809,7 @@ describe("PostgresTraceRetention.listOptOutHistory actorPresence filter (M6.7.zz
       actorPresence: "system_only",
       joinActor: true,
     });
-    expect(capture[0]?.sql).toContain(
-      "LEFT JOIN meta.users u ON u.id = h.actor_id",
-    );
+    expect(capture[0]?.sql).toContain("LEFT JOIN meta.users u ON u.id = h.actor_id");
     expect(capture[0]?.sql).toContain("h.actor_id IS NULL");
   });
 
@@ -8754,10 +8035,7 @@ describe("PostgresTraceRetention.listOptOutHistory joinActor (M6.7.zz.tenant.opt
 
 describe("computeFieldDiffs", () => {
   it("returns sorted alphabetical diffs", () => {
-    const diffs = computeFieldDiffs(
-      { z: 1, a: 1, m: 1 },
-      { z: 2, a: 2, m: 2 },
-    );
+    const diffs = computeFieldDiffs({ z: 1, a: 1, m: 1 }, { z: 2, a: 2, m: 2 });
     expect(diffs.map((d) => d.field)).toEqual(["a", "m", "z"]);
   });
 
@@ -8775,20 +8053,12 @@ describe("computeFieldDiffs", () => {
   });
 
   it("compares values via JSON.stringify for deep equality", () => {
-    const diffs = computeFieldDiffs(
-      { nested: { x: 1 } },
-      { nested: { x: 2 } },
-    );
-    expect(diffs).toEqual([
-      { field: "nested", valueA: { x: 1 }, valueB: { x: 2 } },
-    ]);
+    const diffs = computeFieldDiffs({ nested: { x: 1 } }, { nested: { x: 2 } });
+    expect(diffs).toEqual([{ field: "nested", valueA: { x: 1 }, valueB: { x: 2 } }]);
   });
 
   it("treats deep-equal objects as no diff", () => {
-    const diffs = computeFieldDiffs(
-      { nested: { x: 1, y: 2 } },
-      { nested: { x: 1, y: 2 } },
-    );
+    const diffs = computeFieldDiffs({ nested: { x: 1, y: 2 } }, { nested: { x: 1, y: 2 } });
     expect(diffs).toEqual([]);
   });
 });
@@ -8815,17 +8085,14 @@ describe("PostgresTraceRetention.previewRestoreTenantPolicy (M6.7.zz.tenant.opt-
   it("throws when history id is not found", async () => {
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.previewRestoreTenantPolicy({ historyId: HISTORY_ID }),
-    ).rejects.toThrow(/not found/);
+    await expect(r.previewRestoreTenantPolicy({ historyId: HISTORY_ID })).rejects.toThrow(
+      /not found/,
+    );
   });
 
   it("does NOT issue any mutation queries (read-only)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [historyRow()], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [historyRow()], rowCount: 1 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.previewRestoreTenantPolicy({ historyId: HISTORY_ID });
     // Only the SELECT against the history table should be issued
@@ -8961,9 +8228,9 @@ describe("PostgresTraceRetention.previewRestoreTenantPolicy (M6.7.zz.tenant.opt-
       rowCount: 1,
     }));
     const r = new PostgresTraceRetention({ conn });
-    await expect(
-      r.previewRestoreTenantPolicy({ historyId: HISTORY_ID }),
-    ).rejects.toThrow(/retention_days/);
+    await expect(r.previewRestoreTenantPolicy({ historyId: HISTORY_ID })).rejects.toThrow(
+      /retention_days/,
+    );
   });
 
   it("kind discriminates which mutation method would run", async () => {
@@ -9015,10 +8282,7 @@ describe("PostgresTraceRetention.effectiveRetentionBatch (M6.7.zz.tenant.batch)"
 
   it("issues exactly 2 queries (tenant + platform) when pairs are present", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetentionBatch({
       pairs: [
@@ -9031,10 +8295,7 @@ describe("PostgresTraceRetention.effectiveRetentionBatch (M6.7.zz.tenant.batch)"
 
   it("tenant query uses (tenant_id, table_name) IN tuple list", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetentionBatch({
       pairs: [
@@ -9042,24 +8303,14 @@ describe("PostgresTraceRetention.effectiveRetentionBatch (M6.7.zz.tenant.batch)"
         { tenantId: TENANT_B, tableName: "llm_call_traces" },
       ],
     });
-    const tenantCall = capture.find((c) =>
-      c.sql.includes("FROM meta.tenant_retention_policies"),
-    );
+    const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
     expect(tenantCall?.sql).toContain("(tenant_id, table_name) IN");
-    expect(tenantCall?.params).toEqual([
-      TENANT_A,
-      "workflow_traces",
-      TENANT_B,
-      "llm_call_traces",
-    ]);
+    expect(tenantCall?.params).toEqual([TENANT_A, "workflow_traces", TENANT_B, "llm_call_traces"]);
   });
 
   it("platform query uses table_name IN list (unique tables only)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.effectiveRetentionBatch({
       pairs: [
@@ -9289,23 +8540,15 @@ describe("PostgresTraceRetention.effectiveRetentionBatch (M6.7.zz.tenant.batch)"
         { tenantId: TENANT_B, tableName: "workflow_traces" }, // none (no platform for workflow_traces, no tenant policy for B)
       ],
     });
-    expect(
-      result.get(effectiveRetentionKey(TENANT_A, "workflow_traces"))?.source,
-    ).toBe("tenant");
-    expect(
-      result.get(effectiveRetentionKey(TENANT_B, "llm_call_traces"))?.source,
-    ).toBe("platform");
-    expect(
-      result.get(effectiveRetentionKey(TENANT_B, "workflow_traces"))?.source,
-    ).toBe("none");
+    expect(result.get(effectiveRetentionKey(TENANT_A, "workflow_traces"))?.source).toBe("tenant");
+    expect(result.get(effectiveRetentionKey(TENANT_B, "llm_call_traces"))?.source).toBe("platform");
+    expect(result.get(effectiveRetentionKey(TENANT_B, "workflow_traces"))?.source).toBe("none");
   });
 
   it("uses Promise.all for parallel adapter calls (single round-trip wall time)", async () => {
     const callOrder: string[] = [];
     const conn = mockConnection((sql) => {
-      callOrder.push(
-        sql.includes("tenant_retention_policies") ? "tenant" : "platform",
-      );
+      callOrder.push(sql.includes("tenant_retention_policies") ? "tenant" : "platform");
       return { rows: [], rowCount: 0 };
     });
     const r = new PostgresTraceRetention({ conn });
@@ -9317,9 +8560,7 @@ describe("PostgresTraceRetention.effectiveRetentionBatch (M6.7.zz.tenant.batch)"
   });
 
   it("key format is `${tenantId}:${tableName}` (exported helper)", () => {
-    expect(effectiveRetentionKey(TENANT_A, "workflow_traces")).toBe(
-      `${TENANT_A}:workflow_traces`,
-    );
+    expect(effectiveRetentionKey(TENANT_A, "workflow_traces")).toBe(`${TENANT_A}:workflow_traces`);
   });
 });
 
@@ -9368,10 +8609,7 @@ describe("PostgresTraceRetention.diffTenantPolicies (M6.7.zz.tenant.opt-out.cli.
 
   it("uses effectiveRetentionBatch internally — issues exactly 2 queries", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.diffTenantPolicies({
       tenantIdA: TENANT_A,
@@ -9526,10 +8764,7 @@ describe("PostgresTraceRetention.diffTenantPolicies (M6.7.zz.tenant.opt-out.cli.
       tenantIdB: TENANT_B,
       tableName: "workflow_traces",
     });
-    if (
-      result.resolutionA.source !== "tenant" ||
-      result.resolutionB.source !== "tenant"
-    ) {
+    if (result.resolutionA.source !== "tenant" || result.resolutionB.source !== "tenant") {
       throw new Error("expected both to resolve to tenant");
     }
     expect(result.resolutionA.retentionDays).toBe(30);
@@ -9540,25 +8775,15 @@ describe("PostgresTraceRetention.diffTenantPolicies (M6.7.zz.tenant.opt-out.cli.
 
   it("uses table_name on both axes (same table for both tenants)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const r = new PostgresTraceRetention({ conn });
     await r.diffTenantPolicies({
       tenantIdA: TENANT_A,
       tenantIdB: TENANT_B,
       tableName: "llm_call_traces",
     });
-    const tenantCall = capture.find((c) =>
-      c.sql.includes("FROM meta.tenant_retention_policies"),
-    );
-    expect(tenantCall?.params).toEqual([
-      TENANT_A,
-      "llm_call_traces",
-      TENANT_B,
-      "llm_call_traces",
-    ]);
+    const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
+    expect(tenantCall?.params).toEqual([TENANT_A, "llm_call_traces", TENANT_B, "llm_call_traces"]);
     const platformCall = capture.find(
       (c) =>
         c.sql.includes("FROM meta.retention_policies") &&
@@ -9812,10 +9037,7 @@ describe("PostgresTraceRetention.diffTenantTables (M6.7.zz.tenant.opt-out.cli.di
       }
       if (sql.includes("FROM meta.retention_policies")) {
         return {
-          rows: [
-            platformRow("workflow_traces"),
-            platformRow("llm_call_traces"),
-          ],
+          rows: [platformRow("workflow_traces"), platformRow("llm_call_traces")],
           rowCount: 2,
         };
       }
@@ -9906,9 +9128,7 @@ describe("PostgresTraceRetention.diffTenantVsPlatform (M6.7.zz.tenant.opt-out.cl
       tableName: "workflow_traces",
     });
     expect(capture).toHaveLength(2);
-    const tenantCall = capture.find((c) =>
-      c.sql.includes("FROM meta.tenant_retention_policies"),
-    );
+    const tenantCall = capture.find((c) => c.sql.includes("FROM meta.tenant_retention_policies"));
     const platformCall = capture.find(
       (c) =>
         c.sql.includes("FROM meta.retention_policies") &&
@@ -10174,11 +9394,7 @@ describe("PostgresTraceRetention.diffTenantTablesNway (M6.7.zz.tenant.opt-out.cl
     const r = new PostgresTraceRetention({ conn });
     await r.diffTenantTablesNway({
       tenantId: TENANT,
-      tableNames: [
-        "workflow_traces",
-        "llm_call_traces",
-        "tenant_retention_opt_out_history",
-      ],
+      tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
     });
     expect(capture).toHaveLength(2);
   });
@@ -10203,11 +9419,7 @@ describe("PostgresTraceRetention.diffTenantTablesNway (M6.7.zz.tenant.opt-out.cl
     const r = new PostgresTraceRetention({ conn });
     const result = await r.diffTenantTablesNway({
       tenantId: TENANT,
-      tableNames: [
-        "workflow_traces",
-        "llm_call_traces",
-        "tenant_retention_opt_out_history",
-      ],
+      tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
     });
     expect(result.tenantId).toBe(TENANT);
     expect(result.tableNames).toEqual([
@@ -10218,9 +9430,7 @@ describe("PostgresTraceRetention.diffTenantTablesNway (M6.7.zz.tenant.opt-out.cl
     expect(result.resolutions).toHaveLength(3);
     expect(result.resolutions[0]!.tableName).toBe("workflow_traces");
     expect(result.resolutions[1]!.tableName).toBe("llm_call_traces");
-    expect(result.resolutions[2]!.tableName).toBe(
-      "tenant_retention_opt_out_history",
-    );
+    expect(result.resolutions[2]!.tableName).toBe("tenant_retention_opt_out_history");
     expect(result.fieldVariations).toEqual([]);
   });
 
@@ -10248,11 +9458,7 @@ describe("PostgresTraceRetention.diffTenantTablesNway (M6.7.zz.tenant.opt-out.cl
     const r = new PostgresTraceRetention({ conn });
     const result = await r.diffTenantTablesNway({
       tenantId: TENANT,
-      tableNames: [
-        "workflow_traces",
-        "llm_call_traces",
-        "tenant_retention_opt_out_history",
-      ],
+      tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
     });
     expect(result.resolutions[0]!.resolution.source).toBe("tenant");
     expect(result.resolutions[1]!.resolution.source).toBe("platform");
@@ -10285,15 +9491,9 @@ describe("PostgresTraceRetention.diffTenantTablesNway (M6.7.zz.tenant.opt-out.cl
     });
     const sourceVar = result.fieldVariations.find((v) => v.field === "source");
     expect(sourceVar).toBeDefined();
-    const tenantGroup = sourceVar!.distinctValues.find(
-      (g) => g.value === "tenant",
-    );
-    const platformGroup = sourceVar!.distinctValues.find(
-      (g) => g.value === "platform",
-    );
-    const noneGroup = sourceVar!.distinctValues.find(
-      (g) => g.value === "none",
-    );
+    const tenantGroup = sourceVar!.distinctValues.find((g) => g.value === "tenant");
+    const platformGroup = sourceVar!.distinctValues.find((g) => g.value === "platform");
+    const noneGroup = sourceVar!.distinctValues.find((g) => g.value === "none");
     expect(tenantGroup?.labels).toEqual(["workflow_traces"]);
     expect(platformGroup?.labels).toEqual(["llm_call_traces"]);
     expect(noneGroup?.labels).toEqual(["llm_latency_samples"]);
@@ -10347,11 +9547,7 @@ describe("PostgresTraceRetention.diffTenantTablesNway (M6.7.zz.tenant.opt-out.cl
     const r = new PostgresTraceRetention({ conn });
     const result = await r.diffTenantTablesNway({
       tenantId: TENANT,
-      tableNames: [
-        "workflow_traces",
-        "workflow_traces",
-        "llm_call_traces",
-      ],
+      tableNames: ["workflow_traces", "workflow_traces", "llm_call_traces"],
     });
     expect(result.resolutions).toHaveLength(3);
     expect(result.resolutions[0]!.tableName).toBe("workflow_traces");
@@ -10513,12 +9709,8 @@ describe("PostgresTraceRetention.diffTenantPoliciesNway (M6.7.zz.tenant.opt-out.
     });
     const sourceVar = result.fieldVariations.find((v) => v.field === "source");
     expect(sourceVar).toBeDefined();
-    const tenantGroup = sourceVar!.distinctValues.find(
-      (g) => g.value === "tenant",
-    );
-    const platformGroup = sourceVar!.distinctValues.find(
-      (g) => g.value === "platform",
-    );
+    const tenantGroup = sourceVar!.distinctValues.find((g) => g.value === "tenant");
+    const platformGroup = sourceVar!.distinctValues.find((g) => g.value === "platform");
     expect(tenantGroup?.labels).toEqual([TENANT_A]);
     expect(platformGroup?.labels).toEqual([TENANT_B, TENANT_C]);
   });
@@ -10607,11 +9799,7 @@ describe("PostgresTraceRetention.diffTenantPoliciesNway (M6.7.zz.tenant.opt-out.
 
 describe("computeFieldVariations", () => {
   it("returns empty array when fewer than 2 entries", () => {
-    expect(
-      computeFieldVariations([
-        { label: "a", normalized: { source: "tenant" } },
-      ]),
-    ).toEqual([]);
+    expect(computeFieldVariations([{ label: "a", normalized: { source: "tenant" } }])).toEqual([]);
   });
 
   it("returns empty array when all entries agree on all fields", () => {
@@ -10641,12 +9829,8 @@ describe("computeFieldVariations", () => {
       { label: "c", normalized: { source: "platform" } },
     ]);
     const sourceVar = result.find((v) => v.field === "source")!;
-    const tenantGroup = sourceVar.distinctValues.find(
-      (g) => g.value === "tenant",
-    );
-    const platformGroup = sourceVar.distinctValues.find(
-      (g) => g.value === "platform",
-    );
+    const tenantGroup = sourceVar.distinctValues.find((g) => g.value === "tenant");
+    const platformGroup = sourceVar.distinctValues.find((g) => g.value === "platform");
     expect(tenantGroup?.labels).toEqual(["a"]);
     expect(platformGroup?.labels).toEqual(["b", "c"]);
   });
@@ -10809,11 +9993,7 @@ describe("PostgresTraceRetention query builders (M6.7.zz.tenant.opt-out.cli.expl
     expect(sql).toContain("(h.tenant_id = $1 OR h.tenant_id = $2)");
     expect(sql).toContain("h.table_name = $3");
     expect(sql).toContain("ORDER BY h.occurred_at ASC, h.id ASC");
-    expect(params.slice(0, 3)).toEqual([
-      TENANT_A,
-      TENANT_B,
-      "workflow_traces",
-    ]);
+    expect(params.slice(0, 3)).toEqual([TENANT_A, TENANT_B, "workflow_traces"]);
   });
 
   it("buildDiffHistoryTimelineNwayQuery returns SQL with h.tenant_id IN (...)", () => {
@@ -10824,12 +10004,7 @@ describe("PostgresTraceRetention query builders (M6.7.zz.tenant.opt-out.cli.expl
     });
     expect(sql).toContain("h.tenant_id IN ($1, $2, $3)");
     expect(sql).toContain("h.table_name = $4");
-    expect(params.slice(0, 4)).toEqual([
-      TENANT_A,
-      TENANT_B,
-      TENANT_C,
-      "workflow_traces",
-    ]);
+    expect(params.slice(0, 4)).toEqual([TENANT_A, TENANT_B, TENANT_C, "workflow_traces"]);
   });
 
   it("buildDiffHistoryTimelineCrossTableQuery returns SQL with table_name IN (...)", () => {
@@ -10840,18 +10015,14 @@ describe("PostgresTraceRetention query builders (M6.7.zz.tenant.opt-out.cli.expl
     });
     expect(sql).toContain("h.tenant_id = $1");
     expect(sql).toContain("h.table_name IN ($2, $3)");
-    expect(params.slice(0, 3)).toEqual([
-      TENANT_A,
-      "workflow_traces",
-      "tenant_opt_outs",
-    ]);
+    expect(params.slice(0, 3)).toEqual([TENANT_A, "workflow_traces", "tenant_opt_outs"]);
   });
 
   it("builders throw on invalid limit (validation lives in builder)", () => {
     const r = makeAdapter();
-    expect(() =>
-      r.buildListOptOutHistoryQuery({ limit: 0 }),
-    ).toThrow(/limit must be an integer >= 1/);
+    expect(() => r.buildListOptOutHistoryQuery({ limit: 0 })).toThrow(
+      /limit must be an integer >= 1/,
+    );
     expect(() =>
       r.buildDiffHistoryTimelineQuery({
         tenantIdA: TENANT_A,
@@ -11014,16 +10185,10 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
       conn: mockConnection(() => ({ rows: [], rowCount: 0 })),
     });
     const { sql } = r.buildSummarizeOptOutHistoryQuery({ groupBy: "day" });
-    expect(sql).toContain(
-      "date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')::text AS key",
-    );
-    expect(sql).toContain(
-      "GROUP BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')",
-    );
+    expect(sql).toContain("date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')::text AS key");
+    expect(sql).toContain("GROUP BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')");
     // temporal dimensions order chronologically (key ASC), NOT count DESC
-    expect(sql).toContain(
-      "ORDER BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC') ASC",
-    );
+    expect(sql).toContain("ORDER BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC') ASC");
     expect(sql).not.toContain("ORDER BY COUNT(*) DESC");
   });
 
@@ -11049,10 +10214,7 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     expect(sql).toContain("h.tenant_id = $1");
     expect(sql).toContain("h.event_kind IN ($2)");
     expect(sql).toContain("date_trunc('day'");
-    expect(params).toEqual([
-      "00000000-0000-4000-8000-00000000000A",
-      "opt_out_set",
-    ]);
+    expect(params).toEqual(["00000000-0000-4000-8000-00000000000A", "opt_out_set"]);
   });
 
   it("categorical grouping retains count DESC ordering (not chronological)", () => {
@@ -11087,9 +10249,7 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
       groupBy: "day",
       thenBy: "kind",
     });
-    expect(sql).toContain(
-      "date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')::text AS key",
-    );
+    expect(sql).toContain("date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')::text AS key");
     expect(sql).toContain("h.event_kind AS sub_key");
     expect(sql).toContain(
       "GROUP BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC'), h.event_kind",
@@ -11177,21 +10337,14 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
       until: "2026-05-07T00:00:00.000Z",
     });
     expect(sql).toContain("generate_series(");
-    expect(sql).toContain(
-      "date_trunc('day', $1::timestamptz AT TIME ZONE 'UTC')",
-    );
-    expect(sql).toContain(
-      "date_trunc('day', $2::timestamptz AT TIME ZONE 'UTC')",
-    );
+    expect(sql).toContain("date_trunc('day', $1::timestamptz AT TIME ZONE 'UTC')");
+    expect(sql).toContain("date_trunc('day', $2::timestamptz AT TIME ZONE 'UTC')");
     expect(sql).toContain("interval '1 day'");
     expect(sql).toContain("LEFT JOIN meta.tenant_retention_opt_out_history h");
     expect(sql).toContain("COUNT(h.id)::bigint AS count");
     expect(sql).toContain("h.occurred_at >= $1");
     expect(sql).toContain("h.occurred_at <= $2");
-    expect(params).toEqual([
-      "2026-05-01T00:00:00.000Z",
-      "2026-05-07T00:00:00.000Z",
-    ]);
+    expect(params).toEqual(["2026-05-01T00:00:00.000Z", "2026-05-07T00:00:00.000Z"]);
   });
 
   it("fillGaps: filters live in the LEFT JOIN ON clause (zero buckets survive)", () => {
@@ -11318,10 +10471,7 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
     });
     expect(sql).toContain("AT TIME ZONE $1");
     expect(sql).toContain("h.tenant_id = $2");
-    expect(params).toEqual([
-      "Europe/London",
-      "00000000-0000-4000-8000-00000000000A",
-    ]);
+    expect(params).toEqual(["Europe/London", "00000000-0000-4000-8000-00000000000A"]);
   });
 
   it("timezone: ignored (no param) for categorical groupBy", () => {
@@ -11515,9 +10665,7 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
       thenBy: "kind",
       topPerGroup: 1,
     });
-    expect(sql).toContain(
-      "PARTITION BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')",
-    );
+    expect(sql).toContain("PARTITION BY date_trunc('day', h.occurred_at AT TIME ZONE 'UTC')");
   });
 
   it("topPerGroup: method returns per-group buckets with subKey", async () => {
@@ -11652,10 +10800,7 @@ describe("PostgresTraceRetention.summarizeOptOutHistory (M6.7.zz.tenant.opt-out.
       capture,
     );
     const r = new PostgresTraceRetention({ conn });
-    const plan = await r.explainAnalyzeQuery(
-      "SELECT * FROM meta.foo WHERE x = $1",
-      ["abc"],
-    );
+    const plan = await r.explainAnalyzeQuery("SELECT * FROM meta.foo WHERE x = $1", ["abc"]);
     expect(capture[0]?.sql).toBe(
       "EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM meta.foo WHERE x = $1",
     );

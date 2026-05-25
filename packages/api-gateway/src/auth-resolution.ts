@@ -55,17 +55,32 @@ export const ParsedAuthCredentialSchema = z
   .object({
     scheme: z.enum(AUTH_SCHEMES),
     presentedAt: z.string().datetime({ offset: true }),
-    tokenSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    tokenSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     apiKeyPrefix: z
       .string()
       .regex(/^ce_(live|test)_[A-Za-z0-9]{8}$/)
       .nullable(),
-    apiKeySecretSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    apiKeySecretSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     basicUsername: z.string().max(200).nullable(),
-    basicPasswordSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-    clientCertSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    basicPasswordSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    clientCertSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     hmacKeyId: z.string().max(120).nullable(),
-    hmacSignatureSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    hmacSignatureSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     hmacSignedAt: z.string().datetime({ offset: true }).nullable(),
     jwtIssuer: z.string().max(500).nullable(),
     jwtAudience: z.array(z.string().max(500)).default([]),
@@ -96,8 +111,7 @@ export const ParsedAuthCredentialSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["basicUsername"],
-          message:
-            "basic auth requires basicUsername + basicPasswordSha256",
+          message: "basic auth requires basicUsername + basicPasswordSha256",
         });
       }
     }
@@ -109,16 +123,11 @@ export const ParsedAuthCredentialSchema = z
       });
     }
     if (c.scheme === "hmac_signature") {
-      if (
-        c.hmacKeyId === null ||
-        c.hmacSignatureSha256 === null ||
-        c.hmacSignedAt === null
-      ) {
+      if (c.hmacKeyId === null || c.hmacSignatureSha256 === null || c.hmacSignedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["hmacSignatureSha256"],
-          message:
-            "hmac_signature requires hmacKeyId + hmacSignatureSha256 + hmacSignedAt",
+          message: "hmac_signature requires hmacKeyId + hmacSignatureSha256 + hmacSignedAt",
         });
       }
     }
@@ -141,9 +150,7 @@ export interface AuthResolutionResult {
   readonly reason: string;
 }
 
-export const resolveAuth = (
-  input: AuthResolutionInput,
-): AuthResolutionResult => {
+export const resolveAuth = (input: AuthResolutionInput): AuthResolutionResult => {
   if (!input.tlsAcceptable) {
     return {
       outcome: "weak_tls_rejected",
@@ -177,10 +184,7 @@ export const resolveAuth = (
         };
       }
     }
-    if (
-      input.expectedIssuer !== null &&
-      input.credential.jwtIssuer !== input.expectedIssuer
-    ) {
+    if (input.expectedIssuer !== null && input.credential.jwtIssuer !== input.expectedIssuer) {
       return { outcome: "issuer_mismatch", reason: "jwt_iss_mismatch" };
     }
     if (
@@ -227,23 +231,16 @@ export interface ResolvedPrincipal {
 export const ResolvedPrincipalSchema = z.object({
   principalId: z.string().uuid(),
   tenantId: z.string().uuid().nullable(),
-  principalKind: z.enum([
-    "user",
-    "service_account",
-    "ai_architect",
-    "system",
-  ]),
+  principalKind: z.enum(["user", "service_account", "ai_architect", "system"]),
   authScheme: z.enum(AUTH_SCHEMES),
   grantedScopes: z.array(z.string().max(200)),
   mfaProofAgeSeconds: z.number().int().min(0).nullable(),
   resolvedAt: z.string().datetime({ offset: true }),
 });
 
-export const isStrongAuthScheme = (scheme: AuthScheme): boolean =>
-  STRONG_AUTH_SCHEMES.has(scheme);
+export const isStrongAuthScheme = (scheme: AuthScheme): boolean => STRONG_AUTH_SCHEMES.has(scheme);
 
 export const schemeRequiresHttps = (scheme: AuthScheme): boolean =>
   SCHEMES_REQUIRING_HTTPS.has(scheme);
 
-export const isAuthSuccess = (outcome: AuthOutcome): boolean =>
-  AUTH_SUCCESS_OUTCOMES.has(outcome);
+export const isAuthSuccess = (outcome: AuthOutcome): boolean => AUTH_SUCCESS_OUTCOMES.has(outcome);

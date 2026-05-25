@@ -207,29 +207,20 @@ describe("isHighRiskPrincipal", () => {
   const now = new Date("2026-05-16T10:00:00Z");
 
   it("flags no-MFA as high risk", () => {
-    expect(
-      isHighRiskPrincipal({ ...basePrincipal, mfaStatus: "none" }, now),
-    ).toBe(true);
+    expect(isHighRiskPrincipal({ ...basePrincipal, mfaStatus: "none" }, now)).toBe(true);
   });
 
   it("flags weak SMS-only MFA as high risk", () => {
-    expect(
-      isHighRiskPrincipal({ ...basePrincipal, mfaStatus: "weak_only_sms" }, now),
-    ).toBe(true);
+    expect(isHighRiskPrincipal({ ...basePrincipal, mfaStatus: "weak_only_sms" }, now)).toBe(true);
   });
 
   it("flags no recent login as high risk", () => {
-    expect(
-      isHighRiskPrincipal({ ...basePrincipal, lastLoginAt: null }, now),
-    ).toBe(true);
+    expect(isHighRiskPrincipal({ ...basePrincipal, lastLoginAt: null }, now)).toBe(true);
   });
 
   it("flags stale login as high risk", () => {
     expect(
-      isHighRiskPrincipal(
-        { ...basePrincipal, lastLoginAt: "2026-01-01T00:00:00.000Z" },
-        now,
-      ),
+      isHighRiskPrincipal({ ...basePrincipal, lastLoginAt: "2026-01-01T00:00:00.000Z" }, now),
     ).toBe(true);
   });
 

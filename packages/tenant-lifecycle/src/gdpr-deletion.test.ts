@@ -98,9 +98,9 @@ describe("GdprDeletionRequestSchema", () => {
   });
 
   it("rejects completed without completionSha256", () => {
-    expect(() =>
-      GdprDeletionRequestSchema.parse({ ...base, completionSha256: null }),
-    ).toThrow(/completionSha256/);
+    expect(() => GdprDeletionRequestSchema.parse({ ...base, completionSha256: null })).toThrow(
+      /completionSha256/,
+    );
   });
 
   it("rejects completion after deadline", () => {
@@ -113,9 +113,9 @@ describe("GdprDeletionRequestSchema", () => {
   });
 
   it("rejects verified without verifiedBy", () => {
-    expect(() =>
-      GdprDeletionRequestSchema.parse({ ...base, verifiedBy: null }),
-    ).toThrow(/verifiedBy/);
+    expect(() => GdprDeletionRequestSchema.parse({ ...base, verifiedBy: null })).toThrow(
+      /verifiedBy/,
+    );
   });
 
   it("rejects rejected without rejectedReason", () => {

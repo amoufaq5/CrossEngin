@@ -156,7 +156,7 @@ describe("ArchitectToolInvocationRecordSchema", () => {
       toolCallId: "tu_1",
       toolName: "validate_manifest",
       input: { manifest_json: "{}" },
-      output: "{\"ok\":true}",
+      output: '{"ok":true}',
       isError: false,
       durationMs: 5,
       startedAt: TS,

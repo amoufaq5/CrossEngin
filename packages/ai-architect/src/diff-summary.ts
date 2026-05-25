@@ -6,9 +6,7 @@ export function diffSummaryFromManifestDiff(diff: ManifestDiff): DiffSummary {
     (e) => `Added entity '${e.name}' (${e.fields.length} field${e.fields.length === 1 ? "" : "s"})`,
   );
 
-  const removed = diff.removedEntities.map(
-    (e) => `Removed entity '${e.name}' (destructive)`,
-  );
+  const removed = diff.removedEntities.map((e) => `Removed entity '${e.name}' (destructive)`);
 
   const modified = diff.modifiedEntities.map(({ entity, diff: ed }) => {
     const parts: string[] = [];
@@ -16,22 +14,16 @@ export function diffSummaryFromManifestDiff(diff: ManifestDiff): DiffSummary {
       parts.push(`+${ed.addedFields.length} field${ed.addedFields.length === 1 ? "" : "s"}`);
     }
     if (ed.removedFields.length > 0) {
-      parts.push(
-        `-${ed.removedFields.length} field${ed.removedFields.length === 1 ? "" : "s"}`,
-      );
+      parts.push(`-${ed.removedFields.length} field${ed.removedFields.length === 1 ? "" : "s"}`);
     }
     if (ed.modifiedFields.length > 0) {
-      parts.push(
-        `~${ed.modifiedFields.length} field${ed.modifiedFields.length === 1 ? "" : "s"}`,
-      );
+      parts.push(`~${ed.modifiedFields.length} field${ed.modifiedFields.length === 1 ? "" : "s"}`);
     }
     if (ed.addedIndexes.length > 0) {
       parts.push(`+${ed.addedIndexes.length} index${ed.addedIndexes.length === 1 ? "" : "es"}`);
     }
     if (ed.removedIndexes.length > 0) {
-      parts.push(
-        `-${ed.removedIndexes.length} index${ed.removedIndexes.length === 1 ? "" : "es"}`,
-      );
+      parts.push(`-${ed.removedIndexes.length} index${ed.removedIndexes.length === 1 ? "" : "es"}`);
     }
     return `Modified entity '${entity.name}'${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
   });

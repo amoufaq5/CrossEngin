@@ -18,8 +18,7 @@ export const IDEMPOTENCY_RECORD_STATUSES = [
   "completed_error",
   "expired",
 ] as const;
-export type IdempotencyRecordStatus =
-  (typeof IDEMPOTENCY_RECORD_STATUSES)[number];
+export type IdempotencyRecordStatus = (typeof IDEMPOTENCY_RECORD_STATUSES)[number];
 
 export const DEFAULT_IDEMPOTENCY_TTL_SECONDS = 86_400;
 
@@ -60,30 +59,20 @@ export const IdempotencyRecordSchema = z
       });
     }
     if (r.status === "completed_success") {
-      if (
-        r.responseStatus === null ||
-        r.responseSha256 === null ||
-        r.completedAt === null
-      ) {
+      if (r.responseStatus === null || r.responseSha256 === null || r.completedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["status"],
-          message:
-            "completed_success requires responseStatus + responseSha256 + completedAt",
+          message: "completed_success requires responseStatus + responseSha256 + completedAt",
         });
       }
     }
     if (r.status === "completed_error") {
-      if (
-        r.errorCode === null ||
-        r.errorMessage === null ||
-        r.completedAt === null
-      ) {
+      if (r.errorCode === null || r.errorMessage === null || r.completedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["status"],
-          message:
-            "completed_error requires errorCode + errorMessage + completedAt",
+          message: "completed_error requires errorCode + errorMessage + completedAt",
         });
       }
     }
@@ -107,9 +96,7 @@ export interface IdempotencyCheckResult {
 
 const NON_IDEMPOTENT_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export const evaluateIdempotency = (
-  input: IdempotencyCheckInput,
-): IdempotencyCheckResult => {
+export const evaluateIdempotency = (input: IdempotencyCheckInput): IdempotencyCheckResult => {
   if (!NON_IDEMPOTENT_METHODS.has(input.method)) {
     return {
       outcome: "replay_not_allowed_for_method",
@@ -146,9 +133,7 @@ export const evaluateIdempotency = (
       replayedRecord: null,
     };
   }
-  if (
-    input.existing.requestHashSha256 !== input.currentRequestHashSha256
-  ) {
+  if (input.existing.requestHashSha256 !== input.currentRequestHashSha256) {
     return {
       outcome: "replay_hit_mismatch",
       reason: "same_key_different_request_body",
@@ -184,11 +169,8 @@ export const computeRequestHashInputs = (input: {
   return parts.join("|");
 };
 
-export const isReplayConflict = (
-  outcome: IdempotencyOutcome,
-): boolean =>
+export const isReplayConflict = (outcome: IdempotencyOutcome): boolean =>
   outcome === "replay_hit_mismatch" || outcome === "replay_in_progress";
 
-export const isReplayServable = (
-  outcome: IdempotencyOutcome,
-): boolean => outcome === "replay_hit_match";
+export const isReplayServable = (outcome: IdempotencyOutcome): boolean =>
+  outcome === "replay_hit_match";

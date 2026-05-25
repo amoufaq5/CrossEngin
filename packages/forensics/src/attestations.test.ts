@@ -158,9 +158,7 @@ describe("AttestationRecordSchema", () => {
   });
 
   it("rejects malformed attestation id", () => {
-    expect(() =>
-      AttestationRecordSchema.parse({ ...base, id: "ATT-1" }),
-    ).toThrow();
+    expect(() => AttestationRecordSchema.parse({ ...base, id: "ATT-1" })).toThrow();
   });
 });
 
@@ -226,8 +224,8 @@ describe("helpers", () => {
       id: "ATT-2026-0003",
       aboutEvidenceIds: ["EV-2026-0099"],
     };
-    expect(
-      attestationsForEvidence([att, revoked, other], "EV-2026-0001").map((a) => a.id),
-    ).toEqual(["ATT-2026-0001"]);
+    expect(attestationsForEvidence([att, revoked, other], "EV-2026-0001").map((a) => a.id)).toEqual(
+      ["ATT-2026-0001"],
+    );
   });
 });

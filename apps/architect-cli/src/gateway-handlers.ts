@@ -1,8 +1,5 @@
 import type { RouteDefinition } from "@crossengin/api-gateway";
-import {
-  HandlerRegistry,
-  type Handler,
-} from "@crossengin/api-gateway-runtime";
+import { HandlerRegistry, type Handler } from "@crossengin/api-gateway-runtime";
 
 export type GatewayMode = "in_memory" | "postgres";
 
@@ -82,9 +79,7 @@ export function buildHealthHandler(input: BuiltinHandlersInput): Handler {
   };
 }
 
-export function buildDefaultGatewayHandlers(
-  input: BuiltinHandlersInput,
-): BuiltinHandlersResult {
+export function buildDefaultGatewayHandlers(input: BuiltinHandlersInput): BuiltinHandlersResult {
   const handlers = new HandlerRegistry()
     .register(PING_ROUTE.operationId, buildPingHandler(input))
     .register(HEALTH_ROUTE.operationId, buildHealthHandler(input));

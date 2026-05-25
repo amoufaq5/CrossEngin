@@ -16,9 +16,7 @@ export interface BuildErpPaymentsPackOptions {
   readonly compliancePacks?: readonly string[];
 }
 
-export function buildErpPaymentsPack(
-  opts: BuildErpPaymentsPackOptions = {},
-): Manifest {
+export function buildErpPaymentsPack(opts: BuildErpPaymentsPackOptions = {}): Manifest {
   return {
     manifestVersion: "1.0",
     meta: {
@@ -29,9 +27,7 @@ export function buildErpPaymentsPack(
         opts.description ??
         "Payment entity + lifecycle workflow on top of operate-erp/core. Bridges payment-provider webhooks (Stripe / Adyen / Braintree) into workflow signals so captured / settled / refunded state transitions ride through the M6 workflow-signal-bridge.",
       extends: [ERP_CORE_PACK_SLUG],
-      ...(opts.compliancePacks !== undefined
-        ? { compliancePacks: [...opts.compliancePacks] }
-        : {}),
+      ...(opts.compliancePacks !== undefined ? { compliancePacks: [...opts.compliancePacks] } : {}),
     },
     entities: [...ERP_PAYMENTS_ENTITIES],
     relations: [...ERP_PAYMENTS_RELATIONS],

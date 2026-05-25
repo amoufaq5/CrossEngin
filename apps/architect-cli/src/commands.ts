@@ -3,10 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { LlmProvider } from "@crossengin/ai-providers";
 import type { CostCeiling } from "@crossengin/ai-router";
 
-import {
-  buildChatCompleter,
-  NoProvidersConfiguredError,
-} from "./router-setup.js";
+import { buildChatCompleter, NoProvidersConfiguredError } from "./router-setup.js";
 import {
   computeManifestDiff,
   manifestHash,
@@ -64,10 +61,7 @@ export interface RunContext {
   readonly transcriptOverride?: Transcript;
 }
 
-export async function runInit(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runInit(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const [outputPath] = command.positional;
   if (outputPath === undefined) {
     printError(ctx.io, "init: missing output path. usage: crossengin init <path>");
@@ -98,10 +92,7 @@ export async function runInit(
   return 0;
 }
 
-export async function runValidate(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runValidate(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const [path] = command.positional;
   if (path === undefined) {
     printError(ctx.io, "validate: missing path. usage: crossengin validate <path>");
@@ -146,10 +137,7 @@ export async function runValidate(
   return 0;
 }
 
-export async function runDiff(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runDiff(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const [oldPath, newPath] = command.positional;
   if (oldPath === undefined || newPath === undefined) {
     printError(ctx.io, "diff: missing path. usage: crossengin diff <old> <new>");
@@ -185,10 +173,7 @@ function countDiff(diff: ReturnType<typeof computeManifestDiff>): DiffCounts {
   };
 }
 
-export async function runHash(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runHash(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const [path] = command.positional;
   if (path === undefined) {
     printError(ctx.io, "hash: missing path. usage: crossengin hash <path>");
@@ -210,10 +195,7 @@ export async function runHash(
   return 0;
 }
 
-export async function runPatch(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runPatch(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const [basePath, patchPath] = command.positional;
   if (basePath === undefined || patchPath === undefined) {
     printError(ctx.io, "patch: missing path. usage: crossengin patch <base> <patch>");
@@ -243,10 +225,7 @@ export async function runPatch(
   return 0;
 }
 
-export async function runChat(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runChat(command: ParsedCommand, ctx: RunContext): Promise<number> {
   if (command.format !== "human" && command.format !== "json") {
     printError(ctx.io, "chat: --format must be 'human' or 'json'");
     return 2;
@@ -269,13 +248,15 @@ export async function runChat(
     try {
       systemPrompt = await readFile(systemFile, "utf8");
     } catch (err) {
-      printError(ctx.io, `chat: failed to read --system-file: ${err instanceof Error ? err.message : String(err)}`);
+      printError(
+        ctx.io,
+        `chat: failed to read --system-file: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return 1;
     }
   }
   const tenantId = getStringFlag(command, "tenant-id") ?? DEFAULT_TENANT_ID;
-  const sessionId =
-    getStringFlag(command, "session-id") ?? `cli-${Date.now().toString(36)}`;
+  const sessionId = getStringFlag(command, "session-id") ?? `cli-${Date.now().toString(36)}`;
   const prompt = getStringFlag(command, "prompt") ?? undefined;
   const oneShot = prompt !== undefined || getBooleanFlag(command, "one-shot");
   const toolsDisabled = getBooleanFlag(command, "no-tools");
@@ -451,11 +432,7 @@ export interface VersionInfo {
   readonly metaTablesCount: number;
 }
 
-export function runVersion(
-  command: ParsedCommand,
-  ctx: RunContext,
-  info: VersionInfo,
-): number {
+export function runVersion(command: ParsedCommand, ctx: RunContext, info: VersionInfo): number {
   if (command.format === "json") {
     printJson(ctx.io, info);
   } else {

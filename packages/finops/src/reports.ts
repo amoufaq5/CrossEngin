@@ -64,9 +64,7 @@ export const AnomalySchema = z
       });
     }
     if (
-      (v.kind === "tenant_spike" ||
-        v.kind === "thin_margin" ||
-        v.kind === "negative_margin") &&
+      (v.kind === "tenant_spike" || v.kind === "thin_margin" || v.kind === "negative_margin") &&
       v.affectedTenantId === undefined
     ) {
       ctx.addIssue({
@@ -95,7 +93,10 @@ export const CostReportSchema = z
     generatedAt: Iso8601,
     generatedBy: z.string().min(1),
     storageUri: z.string().url().optional(),
-    storageSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    storageSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   })
   .superRefine((v, ctx) => {
     if (new Date(v.periodEnd).getTime() <= new Date(v.periodStart).getTime()) {
@@ -157,10 +158,7 @@ export const CostReportSchema = z
 export type CostReport = z.infer<typeof CostReportSchema>;
 
 export function spendDeltaPercent(report: CostReport): number | null {
-  if (
-    report.priorPeriodTotalCents === null ||
-    report.priorPeriodTotalCents === 0
-  ) {
+  if (report.priorPeriodTotalCents === null || report.priorPeriodTotalCents === 0) {
     return null;
   }
   const delta = report.totalCostCents - report.priorPeriodTotalCents;
@@ -172,5 +170,7 @@ export function criticalAnomalies(report: CostReport): readonly Anomaly[] {
 }
 
 export function reportRequiresStorageRef(kind: ReportKind): boolean {
-  return kind === "monthly_close" || kind === "annual_review" || kind === "tenant_invoice_attachment";
+  return (
+    kind === "monthly_close" || kind === "annual_review" || kind === "tenant_invoice_attachment"
+  );
 }

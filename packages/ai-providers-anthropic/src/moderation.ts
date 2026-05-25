@@ -12,9 +12,7 @@ export function isRefusalStopReason(
   return reason === ANTHROPIC_REFUSAL_STOP_REASON;
 }
 
-export function isRefusalResponse(
-  response: Pick<AnthropicResponse, "stop_reason">,
-): boolean {
+export function isRefusalResponse(response: Pick<AnthropicResponse, "stop_reason">): boolean {
   return isRefusalStopReason(response.stop_reason);
 }
 
@@ -24,9 +22,7 @@ export class AnthropicRefusalError extends AnthropicError {
   constructor(input: { readonly message?: string } = {}) {
     super({
       kind: "refusal",
-      message:
-        input.message ??
-        "Anthropic message stopped with stop_reason='refusal'",
+      message: input.message ?? "Anthropic message stopped with stop_reason='refusal'",
     });
     this.name = "AnthropicRefusalError";
     this.stopReason = ANTHROPIC_REFUSAL_STOP_REASON;

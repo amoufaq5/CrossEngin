@@ -9,10 +9,15 @@ const HASH = "a".repeat(64);
 const TS = "2026-05-17T12:00:00.000Z";
 
 function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
+  handler: (
+    sql: string,
+    params: readonly unknown[] | undefined,
+  ) => PgQueryResult<Record<string, unknown>>,
 ): PgConnection {
   return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
+    query: vi.fn(async (sql: string, params?: readonly unknown[]) =>
+      handler(sql, params),
+    ) as PgConnection["query"],
     transaction: vi.fn() as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],

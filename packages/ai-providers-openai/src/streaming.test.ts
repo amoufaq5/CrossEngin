@@ -48,10 +48,7 @@ describe("chunksFromSse — text stream", () => {
   it("yields one text chunk per delta.content", () => {
     const chunks = [...chunksFromSse(TEXT_STREAM, "gpt-4o-mini")];
     const texts = chunks.filter((c) => c.kind === "text");
-    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual([
-      "Hello",
-      " there",
-    ]);
+    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual(["Hello", " there"]);
   });
 
   it("emits a usage_final at the end with cost computed", () => {
@@ -88,9 +85,7 @@ describe("chunksFromSse — tool-call stream", () => {
     const chunks = [...chunksFromSse(TOOL_STREAM, "gpt-4o-mini")];
     const deltas = chunks.filter((c) => c.kind === "tool_call_arg_delta");
     expect(deltas.length).toBeGreaterThanOrEqual(2);
-    const joined = deltas
-      .map((c) => (c.kind === "tool_call_arg_delta" ? c.delta : ""))
-      .join("");
+    const joined = deltas.map((c) => (c.kind === "tool_call_arg_delta" ? c.delta : "")).join("");
     expect(JSON.parse(joined)).toEqual({ q: "openai" });
   });
 

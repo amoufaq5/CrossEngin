@@ -1,9 +1,6 @@
 import { sha256 } from "@crossengin/crypto";
 
-import {
-  type AccessReviewEvidence,
-  sealEvidence as baseSealEvidence,
-} from "./evidence.js";
+import { type AccessReviewEvidence, sealEvidence as baseSealEvidence } from "./evidence.js";
 
 const EVIDENCE_BUNDLE_DOMAIN_TAG = "crossengin.access-review.evidence.bundle.v1\n";
 

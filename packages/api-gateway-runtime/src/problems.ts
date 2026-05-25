@@ -92,7 +92,10 @@ export function forbidden(input: {
   });
 }
 
-export function notFound(input: { readonly reason: string; readonly correlationId?: string }): ProblemEnvelope {
+export function notFound(input: {
+  readonly reason: string;
+  readonly correlationId?: string;
+}): ProblemEnvelope {
   return buildEnvelope({
     key: "not_found",
     status: 404,

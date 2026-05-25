@@ -54,9 +54,9 @@ describe("InvoiceLineItemSchema + InvoiceSchema", () => {
   });
 
   it("requires paidAt + amountRemainingCents=0 for paid invoices", () => {
-    expect(() =>
-      InvoiceSchema.parse({ ...baseInvoice, status: "paid" }),
-    ).toThrow(/paid invoices must declare paidAt/);
+    expect(() => InvoiceSchema.parse({ ...baseInvoice, status: "paid" })).toThrow(
+      /paid invoices must declare paidAt/,
+    );
   });
 
   it("rejects mismatched line-item currency", () => {
@@ -83,9 +83,7 @@ describe("InvoiceLineItemSchema + InvoiceSchema", () => {
   });
 
   it("rejects malformed stripeInvoiceId", () => {
-    expect(() =>
-      InvoiceSchema.parse({ ...baseInvoice, stripeInvoiceId: "not-an-id" }),
-    ).toThrow();
+    expect(() => InvoiceSchema.parse({ ...baseInvoice, stripeInvoiceId: "not-an-id" })).toThrow();
   });
 });
 

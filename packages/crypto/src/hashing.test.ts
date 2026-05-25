@@ -18,15 +18,11 @@ describe("sha256", () => {
   });
 
   it("matches a known fixture for the empty string", () => {
-    expect(sha256("")).toBe(
-      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    );
+    expect(sha256("")).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
   });
 
   it("matches a known fixture for 'abc'", () => {
-    expect(sha256("abc")).toBe(
-      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-    );
+    expect(sha256("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   });
 
   it("is deterministic across calls", () => {
@@ -87,21 +83,17 @@ describe("hashChainStep", () => {
   });
 
   it("rejects non-hex previous hash", () => {
-    expect(() => hashChainStep("XYZ", "a".repeat(64), "sha256")).toThrow(
-      /previousHashHex/,
-    );
+    expect(() => hashChainStep("XYZ", "a".repeat(64), "sha256")).toThrow(/previousHashHex/);
   });
 
   it("rejects non-hex payload hash", () => {
-    expect(() => hashChainStep("a".repeat(64), "XYZ", "sha256")).toThrow(
-      /payloadHashHex/,
-    );
+    expect(() => hashChainStep("a".repeat(64), "XYZ", "sha256")).toThrow(/payloadHashHex/);
   });
 
   it("rejects unsupported algorithm", () => {
-    expect(() =>
-      hashChainStep("a".repeat(64), "a".repeat(64), "md5" as never),
-    ).toThrow(/unsupported/);
+    expect(() => hashChainStep("a".repeat(64), "a".repeat(64), "md5" as never)).toThrow(
+      /unsupported/,
+    );
   });
 });
 

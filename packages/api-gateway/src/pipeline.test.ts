@@ -109,15 +109,15 @@ describe("StageResultSchema", () => {
   });
 
   it("rejects durationMs mismatch", () => {
-    expect(() =>
-      StageResultSchema.parse({ ...stageReceive, durationMs: 999 }),
-    ).toThrow(/does not match/);
+    expect(() => StageResultSchema.parse({ ...stageReceive, durationMs: 999 })).toThrow(
+      /does not match/,
+    );
   });
 
   it("rejects deny without problemTypeUri + responseStatus", () => {
-    expect(() =>
-      StageResultSchema.parse({ ...stageReceive, outcome: "deny" }),
-    ).toThrow(/deny outcome requires/);
+    expect(() => StageResultSchema.parse({ ...stageReceive, outcome: "deny" })).toThrow(
+      /deny outcome requires/,
+    );
   });
 
   it("rejects redirect without 3xx responseStatus", () => {

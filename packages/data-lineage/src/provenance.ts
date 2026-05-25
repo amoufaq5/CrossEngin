@@ -18,8 +18,7 @@ export const PROVENANCE_OPERATION_KINDS = [
   "copy_to_region",
   "tombstone",
 ] as const;
-export type ProvenanceOperationKind =
-  (typeof PROVENANCE_OPERATION_KINDS)[number];
+export type ProvenanceOperationKind = (typeof PROVENANCE_OPERATION_KINDS)[number];
 
 export const PROVENANCE_OUTCOMES = [
   "succeeded",
@@ -71,10 +70,7 @@ export const ProvenanceRecordSchema = z
       .string()
       .regex(/^wfa_[a-z0-9]{8,40}$/)
       .nullable(),
-    relatedJobRunId: z
-      .string()
-      .max(120)
-      .nullable(),
+    relatedJobRunId: z.string().max(120).nullable(),
     outcome: z.enum(PROVENANCE_OUTCOMES),
     durationMs: z.number().int().min(0).max(86_400_000).nullable(),
     rowsRead: z.number().int().min(0).nullable(),
@@ -96,10 +92,7 @@ export const ProvenanceRecordSchema = z
         message: "either actorPrincipalId or actorSystemId must be set",
       });
     }
-    if (
-      p.operationKind === "ingest" &&
-      p.inputNodeIds.length > 0
-    ) {
+    if (p.operationKind === "ingest" && p.inputNodeIds.length > 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["inputNodeIds"],
@@ -135,15 +128,11 @@ export const ProvenanceRecordSchema = z
         });
       }
     }
-    if (
-      REGULATED_OPERATIONS.has(p.operationKind) &&
-      p.operationParametersSha256 === null
-    ) {
+    if (REGULATED_OPERATIONS.has(p.operationKind) && p.operationParametersSha256 === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["operationParametersSha256"],
-        message:
-          "regulated operations require operationParametersSha256 for audit reproducibility",
+        message: "regulated operations require operationParametersSha256 for audit reproducibility",
       });
     }
     const outputSet = new Set(p.outputNodeIds);
@@ -160,23 +149,18 @@ export const ProvenanceRecordSchema = z
   });
 export type ProvenanceRecord = z.infer<typeof ProvenanceRecordSchema>;
 
-export const isProvenanceImmutable = (
-  record: ProvenanceRecord,
-): boolean =>
+export const isProvenanceImmutable = (record: ProvenanceRecord): boolean =>
   record.outcome === "succeeded" || record.outcome === "partial_succeeded";
 
-export const requiresRegulatoryAudit = (
-  record: ProvenanceRecord,
-): boolean => REGULATED_OPERATIONS.has(record.operationKind);
+export const requiresRegulatoryAudit = (record: ProvenanceRecord): boolean =>
+  REGULATED_OPERATIONS.has(record.operationKind);
 
 export interface ProvenanceAggregateStats {
   readonly totalRecords: number;
   readonly succeededCount: number;
   readonly failedCount: number;
   readonly rolledBackCount: number;
-  readonly operationCounts: Readonly<
-    Partial<Record<ProvenanceOperationKind, number>>
-  >;
+  readonly operationCounts: Readonly<Partial<Record<ProvenanceOperationKind, number>>>;
   readonly regulatedOperationCount: number;
   readonly totalRowsRead: number;
   readonly totalRowsWritten: number;
@@ -193,8 +177,7 @@ export const aggregateProvenance = (
   let totalRowsRead = 0;
   let totalRowsWritten = 0;
   for (const r of records) {
-    operationCounts[r.operationKind] =
-      (operationCounts[r.operationKind] ?? 0) + 1;
+    operationCounts[r.operationKind] = (operationCounts[r.operationKind] ?? 0) + 1;
     if (r.outcome === "succeeded" || r.outcome === "partial_succeeded") {
       succeededCount++;
     }

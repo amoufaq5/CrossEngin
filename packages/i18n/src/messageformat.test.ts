@@ -15,9 +15,7 @@ describe("parsePlaceholders", () => {
   });
 
   it("extracts plural placeholders with cases", () => {
-    const phs = parsePlaceholders(
-      "{count, plural, =0 {No items} one {1 item} other {# items}}",
-    );
+    const phs = parsePlaceholders("{count, plural, =0 {No items} one {1 item} other {# items}}");
     expect(phs).toHaveLength(1);
     if (phs[0] !== undefined) {
       expect(phs[0].kind).toBe("plural");
@@ -42,9 +40,7 @@ describe("validateIcuMessage / IcuMessageSchema", () => {
   });
 
   it("accepts an ICU plural with required 'other'", () => {
-    expect(() =>
-      validateIcuMessage("{n, plural, one {1 thing} other {# things}}"),
-    ).not.toThrow();
+    expect(() => validateIcuMessage("{n, plural, one {1 thing} other {# things}}")).not.toThrow();
   });
 
   it("rejects unbalanced braces", () => {
@@ -53,15 +49,13 @@ describe("validateIcuMessage / IcuMessageSchema", () => {
   });
 
   it("rejects plural without 'other'", () => {
-    expect(() =>
-      validateIcuMessage("{n, plural, one {1 thing}}"),
-    ).toThrow(/missing the required 'other'/);
+    expect(() => validateIcuMessage("{n, plural, one {1 thing}}")).toThrow(
+      /missing the required 'other'/,
+    );
   });
 
   it("rejects an unknown format kind", () => {
-    expect(() =>
-      validateIcuMessage("{x, fancy, ...}"),
-    ).toThrow(/unknown ICU format kind/);
+    expect(() => validateIcuMessage("{x, fancy, ...}")).toThrow(/unknown ICU format kind/);
   });
 
   it("IcuMessageSchema rejects through zod", () => {
@@ -89,10 +83,7 @@ describe("checkPlaceholderConsistency", () => {
   });
 
   it("returns empty arrays when placeholders match", () => {
-    const { missing, extra } = checkPlaceholderConsistency(
-      "Hello {name}",
-      "مرحبا {name}",
-    );
+    const { missing, extra } = checkPlaceholderConsistency("Hello {name}", "مرحبا {name}");
     expect(missing).toEqual([]);
     expect(extra).toEqual([]);
   });

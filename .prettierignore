@@ -1,0 +1,11 @@
+**/dist/**
+**/.next/**
+**/node_modules/**
+**/coverage/**
+pnpm-lock.yaml
+# Markdown (ADRs, CLAUDE.md, README) is hand-wrapped; JSON/YAML are
+# hand-maintained config/data. Prettier governs TypeScript/JS source only.
+**/*.md
+**/*.json
+**/*.yaml
+**/*.yml

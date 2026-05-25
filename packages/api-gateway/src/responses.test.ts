@@ -24,9 +24,7 @@ describe("constants", () => {
     expect(SECURITY_HEADER_NAMES).toHaveLength(6);
   });
   it("DEFAULT_SECURITY_HEADERS includes HSTS with 1-year max-age", () => {
-    expect(DEFAULT_SECURITY_HEADERS.strict_transport_security).toContain(
-      "max-age=31536000",
-    );
+    expect(DEFAULT_SECURITY_HEADERS.strict_transport_security).toContain("max-age=31536000");
   });
   it("has 5 CORS modes", () => {
     expect(CORS_MODES).toHaveLength(5);
@@ -109,9 +107,9 @@ describe("CorsPolicySchema", () => {
   });
 
   it("rejects allowlist with empty origins", () => {
-    expect(() =>
-      CorsPolicySchema.parse({ ...base, allowedOrigins: [] }),
-    ).toThrow(/non-empty allowedOrigins/);
+    expect(() => CorsPolicySchema.parse({ ...base, allowedOrigins: [] })).toThrow(
+      /non-empty allowedOrigins/,
+    );
   });
 
   it("rejects wildcard_credentialed without allowCredentials", () => {

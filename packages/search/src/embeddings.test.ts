@@ -45,9 +45,7 @@ describe("VectorIndexConfigSchema", () => {
   });
 
   it("rejects hnsw missing M or efConstruction", () => {
-    expect(() =>
-      VectorIndexConfigSchema.parse({ kind: "hnsw", hnswM: 16 }),
-    ).toThrow();
+    expect(() => VectorIndexConfigSchema.parse({ kind: "hnsw", hnswM: 16 })).toThrow();
   });
 });
 
@@ -127,9 +125,7 @@ describe("chunkText", () => {
   });
 
   it("rejects overlap >= chunk size", () => {
-    expect(() =>
-      chunkText("x".repeat(100), { maxChunkTokens: 10, overlapTokens: 10 }),
-    ).toThrow();
+    expect(() => chunkText("x".repeat(100), { maxChunkTokens: 10, overlapTokens: 10 })).toThrow();
   });
 
   it("DEFAULT_CHUNKING matches ADR-0014 defaults (1024 / 128)", () => {

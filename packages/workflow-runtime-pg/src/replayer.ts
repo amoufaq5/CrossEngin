@@ -10,10 +10,7 @@ import {
 
 import { type ActivityProjection, PostgresActivityStore } from "./activity-store.js";
 import { PostgresEventLog } from "./event-log.js";
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 import { PostgresInstanceStore } from "./instance-store.js";
 import { PostgresSignalStore, type SignalProjection } from "./signal-store.js";
 import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
@@ -171,29 +168,33 @@ export class WorkflowReplayer {
     }
     const activities = projectActivities(events) as readonly ActivityProjection[];
     await this.activityStore.upsertMany(activities);
-    const signals = projectSignals(events).map((s): SignalProjection => ({
-      id: s.id,
-      instanceId: s.instanceId,
-      tenantId: s.tenantId,
-      signalName: s.signalName,
-      correlationKey: s.correlationKey,
-      status: s.status,
-      receivedAt: s.receivedAt,
-      matchedAt: s.matchedAt,
-      consumedAt: s.consumedAt,
-    }));
+    const signals = projectSignals(events).map(
+      (s): SignalProjection => ({
+        id: s.id,
+        instanceId: s.instanceId,
+        tenantId: s.tenantId,
+        signalName: s.signalName,
+        correlationKey: s.correlationKey,
+        status: s.status,
+        receivedAt: s.receivedAt,
+        matchedAt: s.matchedAt,
+        consumedAt: s.consumedAt,
+      }),
+    );
     await this.signalStore.upsertMany(signals);
-    const timers = projectTimers(events).map((t): TimerProjection => ({
-      id: t.id,
-      instanceId: t.instanceId,
-      tenantId: t.tenantId,
-      timerName: t.timerName,
-      status: t.status,
-      scheduledAt: t.scheduledAt,
-      fireAt: t.fireAt,
-      firedAt: t.firedAt,
-      cancelledAt: t.cancelledAt,
-    }));
+    const timers = projectTimers(events).map(
+      (t): TimerProjection => ({
+        id: t.id,
+        instanceId: t.instanceId,
+        tenantId: t.tenantId,
+        timerName: t.timerName,
+        status: t.status,
+        scheduledAt: t.scheduledAt,
+        fireAt: t.fireAt,
+        firedAt: t.firedAt,
+        cancelledAt: t.cancelledAt,
+      }),
+    );
     await this.timerStore.upsertMany(timers);
     return {
       instanceId,
@@ -224,9 +225,10 @@ export class WorkflowReplayer {
     const definition = this.resolveDefinitionFor(events);
     const expected = projectInstance(events, definition);
     const storedInstance = await this.fetchInstanceRow(instanceId);
-    const instanceDrift = expected === null
-      ? { instanceMissing: storedInstance !== null, fields: [] as DriftField[] }
-      : compareInstanceProjection(expected, storedInstance);
+    const instanceDrift =
+      expected === null
+        ? { instanceMissing: storedInstance !== null, fields: [] as DriftField[] }
+        : compareInstanceProjection(expected, storedInstance);
 
     const expectedActivities = projectActivities(events);
     const storedActivities = await this.fetchActivityRows(instanceId);
@@ -274,12 +276,14 @@ export class WorkflowReplayer {
     };
   }
 
-  async listInstanceIds(opts: {
-    readonly tenantId?: string;
-    readonly status?: string;
-    readonly limit?: number;
-    readonly offset?: number;
-  } = {}): Promise<readonly string[]> {
+  async listInstanceIds(
+    opts: {
+      readonly tenantId?: string;
+      readonly status?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    } = {},
+  ): Promise<readonly string[]> {
     const limit = opts.limit ?? 1000;
     const offset = opts.offset ?? 0;
     const filters: string[] = [];
@@ -304,12 +308,14 @@ export class WorkflowReplayer {
     return result.rows.map((r) => r.instance_id);
   }
 
-  async bulkResync(opts: {
-    readonly tenantId?: string;
-    readonly status?: string;
-    readonly batchSize?: number;
-    readonly maxInstances?: number;
-  } = {}): Promise<readonly ResyncReport[]> {
+  async bulkResync(
+    opts: {
+      readonly tenantId?: string;
+      readonly status?: string;
+      readonly batchSize?: number;
+      readonly maxInstances?: number;
+    } = {},
+  ): Promise<readonly ResyncReport[]> {
     const batchSize = opts.batchSize ?? 100;
     const maxInstances = opts.maxInstances ?? Number.POSITIVE_INFINITY;
     const reports: ResyncReport[] = [];
@@ -333,7 +339,9 @@ export class WorkflowReplayer {
     return reports;
   }
 
-  private resolveDefinitionFor(events: readonly { readonly payload: Record<string, unknown> }[]): WorkflowDefinition | undefined {
+  private resolveDefinitionFor(
+    events: readonly { readonly payload: Record<string, unknown> }[],
+  ): WorkflowDefinition | undefined {
     const first = events[0];
     if (first === undefined) return undefined;
     const definitionId =
@@ -428,11 +436,7 @@ function compareInstanceProjection(
     ["failed_at", stored.failed_at, expected.failedAt],
     ["cancelled_at", stored.cancelled_at, expected.cancelledAt],
     ["suspended_at", stored.suspended_at, expected.suspendedAt],
-    [
-      "compensation_started_at",
-      stored.compensation_started_at,
-      expected.compensationStartedAt,
-    ],
+    ["compensation_started_at", stored.compensation_started_at, expected.compensationStartedAt],
     [
       "compensation_completed_at",
       stored.compensation_completed_at,

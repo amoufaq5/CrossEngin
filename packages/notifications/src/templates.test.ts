@@ -77,9 +77,7 @@ describe("canTransitionTemplate", () => {
 
 describe("NotificationTemplateSchema", () => {
   it("accepts a valid approved email template", () => {
-    expect(() =>
-      NotificationTemplateSchema.parse(baseEmailTemplate),
-    ).not.toThrow();
+    expect(() => NotificationTemplateSchema.parse(baseEmailTemplate)).not.toThrow();
   });
 
   it("rejects content channel mismatch (template=email, content=sms)", () => {
@@ -143,9 +141,7 @@ describe("NotificationTemplateSchema", () => {
           channel: "sms",
           body: "Your code is {code}",
         },
-        variables: [
-          { name: "code", type: "string", required: true, redactInLogs: true },
-        ],
+        variables: [{ name: "code", type: "string", required: true, redactInLogs: true }],
         bodySizeBytes: 30,
       }),
     ).not.toThrow();
@@ -237,9 +233,7 @@ describe("validateRenderInput", () => {
     const urlTemplate: NotificationTemplate = {
       ...baseEmailTemplate,
       id: "ntpl_resetlink",
-      variables: [
-        { name: "link", type: "url", required: true, redactInLogs: false },
-      ],
+      variables: [{ name: "link", type: "url", required: true, redactInLogs: false }],
     };
     expect(
       validateRenderInput(urlTemplate, {

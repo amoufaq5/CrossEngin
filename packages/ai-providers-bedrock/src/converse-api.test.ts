@@ -127,10 +127,9 @@ describe("buildBedrockConverseRequest", () => {
   });
 
   it("passes inferenceConfig with maxTokens + temperature", () => {
-    const built = buildBedrockConverseRequest(
-      baseReq({ maxTokens: 256, temperature: 0.25 }),
-      { defaultMaxTokens: 1024 },
-    );
+    const built = buildBedrockConverseRequest(baseReq({ maxTokens: 256, temperature: 0.25 }), {
+      defaultMaxTokens: 1024,
+    });
     expect(built.inferenceConfig?.maxTokens).toBe(256);
     expect(built.inferenceConfig?.temperature).toBe(0.25);
   });
@@ -326,10 +325,11 @@ describe("buildBedrockConverseRequest — cacheControl threading (M2.9.6)", () =
 
 describe("normalizeConverseUsage", () => {
   it("includes cached input only when > 0", () => {
-    const u = normalizeConverseUsage(
-      "anthropic.claude-3-5-sonnet-20241022-v2:0",
-      { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 20 },
-    );
+    const u = normalizeConverseUsage("anthropic.claude-3-5-sonnet-20241022-v2:0", {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadInputTokens: 20,
+    });
     expect(u.inputTokens).toBe(100);
     expect(u.outputTokens).toBe(50);
     expect(u.cachedInputTokens).toBe(20);
@@ -337,16 +337,19 @@ describe("normalizeConverseUsage", () => {
   });
 
   it("omits cachedInputTokens when zero", () => {
-    const u = normalizeConverseUsage(
-      "anthropic.claude-3-5-sonnet-20241022-v2:0",
-      { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0 },
-    );
+    const u = normalizeConverseUsage("anthropic.claude-3-5-sonnet-20241022-v2:0", {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadInputTokens: 0,
+    });
     expect(u.cachedInputTokens).toBeUndefined();
   });
 });
 
 describe("extractTextFromConverseResponse", () => {
-  function withContent(content: BedrockConverseResponse["output"]["message"]["content"]): BedrockConverseResponse {
+  function withContent(
+    content: BedrockConverseResponse["output"]["message"]["content"],
+  ): BedrockConverseResponse {
     return {
       output: { message: { role: "assistant", content } },
       stopReason: "end_turn",
@@ -374,11 +377,7 @@ describe("extractTextFromConverseResponse", () => {
 
   it("skips cachePoint blocks (M2.9.6 forward-compat)", () => {
     const text = extractTextFromConverseResponse(
-      withContent([
-        { text: "hello" },
-        { cachePoint: { type: "default" } },
-        { text: "world" },
-      ]),
+      withContent([{ text: "hello" }, { cachePoint: { type: "default" } }, { text: "world" }]),
     );
     expect(text).toBe("helloworld");
   });
@@ -417,9 +416,7 @@ describe("buildBedrockImageBlock (M2.9.7)", () => {
   });
 
   it("rejects empty imageBase64", () => {
-    expect(() =>
-      buildBedrockImageBlock({ format: "png", imageBase64: "" }),
-    ).toThrow(/non-empty/);
+    expect(() => buildBedrockImageBlock({ format: "png", imageBase64: "" })).toThrow(/non-empty/);
   });
 });
 
@@ -479,9 +476,7 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
           {
             role: "user",
             content: "what is this?",
-            attachments: [
-              { kind: "image", format: "png", bytes: "iVBORw0KGgo..." },
-            ],
+            attachments: [{ kind: "image", format: "png", bytes: "iVBORw0KGgo..." }],
           },
         ],
       }),
@@ -602,7 +597,9 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
     expect(assistantMsg.role).toBe("assistant");
     expect(assistantMsg.content).toHaveLength(2);
     expect(assistantMsg.content[0]).toEqual({ text: "Here is a generated image:" });
-    const imgBlock = assistantMsg.content[1] as { image: { format: string; source: { bytes: string } } };
+    const imgBlock = assistantMsg.content[1] as {
+      image: { format: string; source: { bytes: string } };
+    };
     expect(imgBlock.image.format).toBe("png");
     expect(imgBlock.image.source.bytes).toBe("ABCD");
   });
@@ -674,9 +671,7 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
           messages: [
             {
               role: "user",
-              content: [
-                { type: "image_url", url: "https://example.com/cat.png" },
-              ],
+              content: [{ type: "image_url", url: "https://example.com/cat.png" }],
             },
           ],
         }),
@@ -739,9 +734,7 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
           messages: [
             {
               role: "user",
-              content: [
-                { type: "document_url", url: "https://example.com/spec.pdf" },
-              ],
+              content: [{ type: "document_url", url: "https://example.com/spec.pdf" }],
             },
           ],
         }),
@@ -757,9 +750,7 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
           messages: [
             {
               role: "user",
-              content: [
-                { type: "document", format, bytes: "BYTES", name: `doc.${format}` },
-              ],
+              content: [{ type: "document", format, bytes: "BYTES", name: `doc.${format}` }],
             },
           ],
         }),
@@ -781,9 +772,7 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
           messages: [
             {
               role: "user",
-              content: [
-                { type: "document", format, bytes: "BYTES", name: `report.${format}` },
-              ],
+              content: [{ type: "document", format, bytes: "BYTES", name: `report.${format}` }],
             },
           ],
         }),
@@ -803,9 +792,7 @@ describe("buildBedrockConverseRequest — user image attachments (M2.X)", () => 
         messages: [
           {
             role: "user",
-            content: [
-              { type: "document", format: "pdf", bytes: "PDF_BYTES" },
-            ],
+            content: [{ type: "document", format: "pdf", bytes: "PDF_BYTES" }],
           },
         ],
       }),

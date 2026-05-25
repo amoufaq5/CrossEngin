@@ -27,21 +27,17 @@ export const TRAINING_STATUSES = [
 export type TrainingStatus = (typeof TRAINING_STATUSES)[number];
 export const TrainingStatusSchema = z.enum(TRAINING_STATUSES);
 
-export const TRAINING_TRANSITIONS: Readonly<
-  Record<TrainingStatus, readonly TrainingStatus[]>
-> = Object.freeze({
-  queued: ["preparing", "cancelled"],
-  preparing: ["running", "failed", "cancelled"],
-  running: ["succeeded", "failed", "cancelled"],
-  succeeded: [],
-  failed: [],
-  cancelled: [],
-});
+export const TRAINING_TRANSITIONS: Readonly<Record<TrainingStatus, readonly TrainingStatus[]>> =
+  Object.freeze({
+    queued: ["preparing", "cancelled"],
+    preparing: ["running", "failed", "cancelled"],
+    running: ["succeeded", "failed", "cancelled"],
+    succeeded: [],
+    failed: [],
+    cancelled: [],
+  });
 
-export function canTransitionTraining(
-  from: TrainingStatus,
-  to: TrainingStatus,
-): boolean {
+export function canTransitionTraining(from: TrainingStatus, to: TrainingStatus): boolean {
   return TRAINING_TRANSITIONS[from].includes(to);
 }
 
@@ -184,10 +180,7 @@ export const TrainingRunSchema = z
         });
       }
     }
-    if (
-      v.actualCostUsd !== null &&
-      v.actualCostUsd > v.estimatedCostUsd * 3
-    ) {
+    if (v.actualCostUsd !== null && v.actualCostUsd > v.estimatedCostUsd * 3) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["actualCostUsd"],

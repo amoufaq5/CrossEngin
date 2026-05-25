@@ -72,7 +72,7 @@ describe("buildOpenAIResponsesRequest — message translation", () => {
             content: "looking up",
             toolUses: [{ id: "call_1", name: "search", input: { q: "x" } }],
           },
-          { role: "tool", content: "{\"hits\":1}", toolCallId: "call_1" },
+          { role: "tool", content: '{"hits":1}', toolCallId: "call_1" },
         ],
       }),
       { defaultModel: "gpt-4o-mini" },
@@ -88,7 +88,7 @@ describe("buildOpenAIResponsesRequest — message translation", () => {
     expect(built.input[3]).toEqual({
       type: "function_call_output",
       call_id: "call_1",
-      output: "{\"hits\":1}",
+      output: '{"hits":1}',
     });
   });
 
@@ -320,9 +320,7 @@ describe("extractReasoningSummary", () => {
       object: "response",
       model: "gpt-4o",
       status: "completed",
-      output: [
-        { role: "assistant", content: [{ type: "output_text", text: "ok" }] },
-      ],
+      output: [{ role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
       usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
     };
     expect(extractReasoningSummary(response)).toBe("");
@@ -352,7 +350,9 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[0]).toEqual({ type: "input_text", text: "what's in this?" });
     expect(userMsg.content[1]).toEqual({
@@ -362,11 +362,12 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
   });
 
   it("string user content still maps to a single input_text block (M2.X.5 backwards compat)", () => {
-    const built = buildOpenAIResponsesRequest(
-      req([{ role: "user", content: "hello" }]),
-      { defaultModel: "gpt-4o" },
-    );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const built = buildOpenAIResponsesRequest(req([{ role: "user", content: "hello" }]), {
+      defaultModel: "gpt-4o",
+    });
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content).toEqual([{ type: "input_text", text: "hello" }]);
   });
 
@@ -376,14 +377,14 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
         {
           role: "user",
           content: "describe",
-          attachments: [
-            { kind: "image", format: "jpeg", bytes: "XYZ" },
-          ],
+          attachments: [{ kind: "image", format: "jpeg", bytes: "XYZ" }],
         },
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[0]).toEqual({ type: "input_text", text: "describe" });
     expect(userMsg.content[1]).toEqual({
@@ -429,7 +430,9 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content.map((b) => b.type)).toEqual([
       "input_text",
       "input_image",
@@ -469,7 +472,9 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[1]).toEqual({
       type: "input_image",
@@ -495,7 +500,9 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[1]).toEqual({
       type: "input_file",
@@ -517,7 +524,9 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       ]),
       { defaultModel: "gpt-4o" },
     );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, unknown>> };
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, unknown>>;
+    };
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[1]).toEqual({
       type: "input_file",
@@ -531,9 +540,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
         req([
           {
             role: "user",
-            content: [
-              { type: "document_url", url: "https://example.com/spec.pdf" },
-            ],
+            content: [{ type: "document_url", url: "https://example.com/spec.pdf" }],
           },
         ]),
         { defaultModel: "gpt-4o" },
@@ -553,14 +560,14 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
         req([
           {
             role: "user",
-            content: [
-              { type: "document", format, bytes: "BYTES", name: `doc.${format}` },
-            ],
+            content: [{ type: "document", format, bytes: "BYTES", name: `doc.${format}` }],
           },
         ]),
         { defaultModel: "gpt-4o" },
       );
-      const block = (built.input[0]! as unknown as { content: ReadonlyArray<Record<string, unknown>> }).content[0] as {
+      const block = (
+        built.input[0]! as unknown as { content: ReadonlyArray<Record<string, unknown>> }
+      ).content[0] as {
         type: string;
         filename: string;
         file_data: string;
@@ -592,9 +599,7 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
       req([
         {
           role: "user",
-          content: [
-            { type: "document", format: "pdf", bytes: "PDF_BYTES" },
-          ],
+          content: [{ type: "document", format: "pdf", bytes: "PDF_BYTES" }],
         },
       ]),
       { defaultModel: "gpt-4o" },
@@ -604,11 +609,12 @@ describe("buildOpenAIResponsesRequest — image inputs (M2.8.6)", () => {
   });
 
   it("empty string content emits a single empty input_text block (Responses API rejects empty content array)", () => {
-    const built = buildOpenAIResponsesRequest(
-      req([{ role: "user", content: "" }]),
-      { defaultModel: "gpt-4o" },
-    );
-    const userMsg = built.input[0]! as unknown as { content: ReadonlyArray<Record<string, string>> };
+    const built = buildOpenAIResponsesRequest(req([{ role: "user", content: "" }]), {
+      defaultModel: "gpt-4o",
+    });
+    const userMsg = built.input[0]! as unknown as {
+      content: ReadonlyArray<Record<string, string>>;
+    };
     expect(userMsg.content).toEqual([{ type: "input_text", text: "" }]);
   });
 });

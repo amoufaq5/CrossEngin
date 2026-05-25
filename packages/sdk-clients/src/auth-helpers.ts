@@ -49,14 +49,16 @@ export const AuthHelperConfigSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["tokenStorage"],
-        message: "oauth2_refresh_token requires persistent storage (refresh tokens must survive restart)",
+        message:
+          "oauth2_refresh_token requires persistent storage (refresh tokens must survive restart)",
       });
     }
     if (v.method === "api_key_header" && v.tokenStorage === "process_environment") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["tokenStorage"],
-        message: "api_key_header from environment variable is permitted only for CI/CD contexts; document explicitly",
+        message:
+          "api_key_header from environment variable is permitted only for CI/CD contexts; document explicitly",
       });
     }
     if (
@@ -89,7 +91,9 @@ export const RetryPolicySchema = z
     initialDelayMs: z.number().int().min(0).max(10_000),
     maxDelayMs: z.number().int().min(100).max(60_000),
     jitterFactor: z.number().min(0).max(1).default(0.1),
-    retryOnStatuses: z.array(z.number().int().min(100).max(599)).default([408, 429, 500, 502, 503, 504]),
+    retryOnStatuses: z
+      .array(z.number().int().min(100).max(599))
+      .default([408, 429, 500, 502, 503, 504]),
     retryOnNetworkErrors: z.boolean().default(true),
     respectRetryAfterHeader: z.boolean().default(true),
     idempotencyKeyOnNonIdempotentRetries: z.boolean().default(true),
@@ -131,7 +135,8 @@ export const RetryPolicySchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["retryOnStatuses"],
-        message: "client-error statuses (400, 401, 403, 404) must not be retried — clients should fix the request",
+        message:
+          "client-error statuses (400, 401, 403, 404) must not be retried — clients should fix the request",
       });
     }
     if (!v.idempotencyKeyOnNonIdempotentRetries) {
@@ -158,10 +163,7 @@ export function defaultRetryPolicy(): RetryPolicy {
   };
 }
 
-export function nextDelayMs(
-  policy: RetryPolicy,
-  attemptNumber: number,
-): number {
+export function nextDelayMs(policy: RetryPolicy, attemptNumber: number): number {
   if (policy.strategy === "no_retry") return 0;
   if (attemptNumber < 1) return 0;
   let base: number;

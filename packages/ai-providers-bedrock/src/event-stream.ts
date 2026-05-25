@@ -215,8 +215,7 @@ export function* mapEventToChunks(
       return;
     }
     case "metadata": {
-      const body = payload as ConverseMetadataPayload &
-        ConverseMetadataTracePayload;
+      const body = payload as ConverseMetadataPayload & ConverseMetadataTracePayload;
       const cached = body.usage.cacheReadInputTokens ?? 0;
       if (body.trace?.guardrail !== undefined) {
         state.guardrailTrace = body.trace.guardrail;

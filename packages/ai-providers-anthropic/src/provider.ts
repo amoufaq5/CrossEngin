@@ -32,8 +32,18 @@ export const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com";
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body: string | Uint8Array; signal?: AbortSignal },
-) => Promise<{ ok: boolean; status: number; text(): Promise<string>; body: ReadableStream<Uint8Array> | null }>;
+  init: {
+    method: string;
+    headers: Record<string, string>;
+    body: string | Uint8Array;
+    signal?: AbortSignal;
+  },
+) => Promise<{
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+  body: ReadableStream<Uint8Array> | null;
+}>;
 
 export interface AnthropicProviderOptions {
   readonly apiKey: string;
@@ -164,7 +174,10 @@ export class AnthropicProvider implements LlmProvider {
     }
   }
 
-  async chunksFromTextStream(sse: string, model?: AnthropicModel): Promise<readonly CompletionChunk[]> {
+  async chunksFromTextStream(
+    sse: string,
+    model?: AnthropicModel,
+  ): Promise<readonly CompletionChunk[]> {
     return [...chunksFromSse(sse, model ?? this.defaultModel)];
   }
 
@@ -284,12 +297,14 @@ export class AnthropicProvider implements LlmProvider {
     }
   }
 
-  async listFiles(options: {
-    readonly limit?: number;
-    readonly beforeId?: string;
-    readonly afterId?: string;
-    readonly order?: "asc" | "desc";
-  } = {}): Promise<AnthropicFileListResponse> {
+  async listFiles(
+    options: {
+      readonly limit?: number;
+      readonly beforeId?: string;
+      readonly afterId?: string;
+      readonly order?: "asc" | "desc";
+    } = {},
+  ): Promise<AnthropicFileListResponse> {
     if (
       options.limit !== undefined &&
       (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000)

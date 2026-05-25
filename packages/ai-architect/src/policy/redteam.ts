@@ -82,9 +82,7 @@ export function coverageByCategory(
   return counts;
 }
 
-export function coverageByRefusal(
-  suite: AdversarialTestSuite,
-): ReadonlySet<string> {
+export function coverageByRefusal(suite: AdversarialTestSuite): ReadonlySet<string> {
   const covered = new Set<string>();
   for (const c of suite) {
     if (c.expectedRefusal !== undefined) covered.add(c.expectedRefusal);

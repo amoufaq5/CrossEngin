@@ -48,13 +48,15 @@ interface CapturedCall {
   body: string | Uint8Array;
 }
 
-function buildFetch(opts: {
-  status?: number;
-  responseBody?: string;
-  asStream?: boolean;
-  capture?: CapturedCall[];
-  throwOnce?: Error;
-} = {}): FetchLike {
+function buildFetch(
+  opts: {
+    status?: number;
+    responseBody?: string;
+    asStream?: boolean;
+    capture?: CapturedCall[];
+    throwOnce?: Error;
+  } = {},
+): FetchLike {
   const status = opts.status ?? 200;
   const responseBody = opts.responseBody ?? STREAM_SAMPLE;
   let didThrow = false;
@@ -183,7 +185,9 @@ describe("AnthropicProvider.complete (streaming)", () => {
       defaultModel: "claude-sonnet-4-6",
       fetch: buildFetch({
         status: 401,
-        responseBody: JSON.stringify({ error: { type: "authentication_error", message: "bad key" } }),
+        responseBody: JSON.stringify({
+          error: { type: "authentication_error", message: "bad key" },
+        }),
       }),
     });
     await expect(async () => {
@@ -260,9 +264,9 @@ describe("AnthropicProvider.embed", () => {
       apiKey: API_KEY,
       defaultModel: "claude-sonnet-4-6",
     });
-    await expect(
-      provider.embed({ texts: ["hello"], tenantId: TENANT }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.embed({ texts: ["hello"], tenantId: TENANT })).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
   });
 });
 
@@ -394,8 +398,22 @@ describe("AnthropicProvider Files API (M2.X.5.aa.z.1)", () => {
       capture: captured,
       responseBody: JSON.stringify({
         data: [
-          { id: "file_a", type: "file", filename: "a.pdf", mime_type: "application/pdf", size_bytes: 100, created_at: "2026-01-01T00:00:00Z" },
-          { id: "file_b", type: "file", filename: "b.pdf", mime_type: "application/pdf", size_bytes: 200, created_at: "2026-01-02T00:00:00Z" },
+          {
+            id: "file_a",
+            type: "file",
+            filename: "a.pdf",
+            mime_type: "application/pdf",
+            size_bytes: 100,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+          {
+            id: "file_b",
+            type: "file",
+            filename: "b.pdf",
+            mime_type: "application/pdf",
+            size_bytes: 200,
+            created_at: "2026-01-02T00:00:00Z",
+          },
         ],
         has_more: false,
         first_id: "file_a",

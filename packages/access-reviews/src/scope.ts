@@ -95,13 +95,7 @@ export const PrincipalUnderReviewSchema = z.object({
   tenantId: z.string().uuid().nullable(),
   isExternal: z.boolean(),
   managerUserId: z.string().uuid().nullable(),
-  mfaStatus: z.enum([
-    "none",
-    "totp_only",
-    "weak_only_sms",
-    "webauthn",
-    "any_strong",
-  ]),
+  mfaStatus: z.enum(["none", "totp_only", "weak_only_sms", "webauthn", "any_strong"]),
   lastLoginAt: z.string().datetime({ offset: true }).nullable(),
 });
 export type PrincipalUnderReview = z.infer<typeof PrincipalUnderReviewSchema>;
@@ -144,9 +138,7 @@ export const principalMatchesScope = (
     case "external_users_only":
       return (
         principal.isExternal &&
-        !scope.externalDomainsExcluded.some((d) =>
-          principal.displayLabel.endsWith(`@${d}`),
-        )
+        !scope.externalDomainsExcluded.some((d) => principal.displayLabel.endsWith(`@${d}`))
       );
     case "service_accounts_only":
       return (

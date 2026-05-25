@@ -55,9 +55,9 @@ describe("PlanSchema", () => {
   });
 
   it("rejects annualDiscountPercent on monthly plans", () => {
-    expect(() =>
-      PlanSchema.parse({ ...basePlan, annualDiscountPercent: 15 }),
-    ).toThrow(/applies only to year-interval plans/);
+    expect(() => PlanSchema.parse({ ...basePlan, annualDiscountPercent: 15 })).toThrow(
+      /applies only to year-interval plans/,
+    );
   });
 
   it("rejects duplicate metered-price meters", () => {
@@ -73,9 +73,7 @@ describe("PlanSchema", () => {
   });
 
   it("rejects malformed stripe ids", () => {
-    expect(() =>
-      PlanSchema.parse({ ...basePlan, stripeProductId: "bad_id" }),
-    ).toThrow();
+    expect(() => PlanSchema.parse({ ...basePlan, stripeProductId: "bad_id" })).toThrow();
   });
 });
 
@@ -100,9 +98,7 @@ describe("computeOverage", () => {
   });
 
   it("rejects negative usage", () => {
-    expect(() =>
-      computeOverage({ plan: basePlan, meter: "ai_call", usedUnits: -1 }),
-    ).toThrow();
+    expect(() => computeOverage({ plan: basePlan, meter: "ai_call", usedUnits: -1 })).toThrow();
   });
 });
 

@@ -98,9 +98,7 @@ export function computeErrorBudget(
   totalRequests: number,
   failedRequests: number,
 ): ErrorBudgetCalculation | null {
-  const target = slo.targets.find(
-    (t): t is SloAvailabilityTarget => t.kind === "availability",
-  );
+  const target = slo.targets.find((t): t is SloAvailabilityTarget => t.kind === "availability");
   if (target === undefined) return null;
   if (totalRequests < 0 || failedRequests < 0 || failedRequests > totalRequests) {
     throw new Error("invalid request counts for error-budget calculation");
@@ -118,7 +116,12 @@ export function computeErrorBudget(
   }
   const allowedFailureRate = 1 - target.target;
   const actualFailureRate = failedRequests / totalRequests;
-  const errorBudgetUsed = allowedFailureRate === 0 ? (failedRequests > 0 ? 1 : 0) : actualFailureRate / allowedFailureRate;
+  const errorBudgetUsed =
+    allowedFailureRate === 0
+      ? failedRequests > 0
+        ? 1
+        : 0
+      : actualFailureRate / allowedFailureRate;
   const errorBudgetRemaining = Math.max(0, 1 - errorBudgetUsed);
   return {
     slo,

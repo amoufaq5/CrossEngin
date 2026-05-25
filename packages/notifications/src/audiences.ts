@@ -101,19 +101,11 @@ export const OncallRotationSchema = z
     rotationKind: z.enum(ONCALL_ROTATION_KINDS),
     shifts: z.array(OncallShiftSchema).min(1),
     escalationChainUserIds: z.array(z.string().uuid()).default([]),
-    escalationTimeoutSeconds: z
-      .number()
-      .int()
-      .min(60)
-      .max(86_400)
-      .default(900),
+    escalationTimeoutSeconds: z.number().int().min(60).max(86_400).default(900),
     timezone: z.string().min(1),
   })
   .superRefine((r, ctx) => {
-    if (
-      r.rotationKind === "escalation_chain" &&
-      r.escalationChainUserIds.length === 0
-    ) {
+    if (r.rotationKind === "escalation_chain" && r.escalationChainUserIds.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["escalationChainUserIds"],
@@ -123,10 +115,7 @@ export const OncallRotationSchema = z
   });
 export type OncallRotation = z.infer<typeof OncallRotationSchema>;
 
-export const findActiveOncallUser = (
-  rotation: OncallRotation,
-  now: Date,
-): string | null => {
+export const findActiveOncallUser = (rotation: OncallRotation, now: Date): string | null => {
   const t = now.getTime();
   for (const shift of rotation.shifts) {
     const start = Date.parse(shift.startsAt);

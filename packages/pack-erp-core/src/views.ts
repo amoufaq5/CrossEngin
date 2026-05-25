@@ -1,8 +1,4 @@
-import {
-  ListViewSchema,
-  type ListView,
-  type ViewDeclaration,
-} from "@crossengin/views";
+import { ListViewSchema, type ListView, type ViewDeclaration } from "@crossengin/views";
 
 export const ACCOUNT_LIST_VIEW: ListView = ListViewSchema.parse({
   kind: "list",

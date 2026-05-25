@@ -44,34 +44,25 @@ export const GENERATION_TRANSITIONS: Readonly<
   failed: [],
 });
 
-export function canTransitionGeneration(
-  from: GenerationStatus,
-  to: GenerationStatus,
-): boolean {
+export function canTransitionGeneration(from: GenerationStatus, to: GenerationStatus): boolean {
   return GENERATION_TRANSITIONS[from].includes(to);
 }
 
-export const NAMING_CONVENTIONS = [
-  "camelCase",
-  "snake_case",
-  "PascalCase",
-  "kebab-case",
-] as const;
+export const NAMING_CONVENTIONS = ["camelCase", "snake_case", "PascalCase", "kebab-case"] as const;
 export type NamingConvention = (typeof NAMING_CONVENTIONS)[number];
 
-export const LANGUAGE_NAMING: Readonly<Record<TargetLanguage, NamingConvention>> =
-  Object.freeze({
-    typescript: "camelCase",
-    python: "snake_case",
-    go: "PascalCase",
-    java: "camelCase",
-    csharp: "PascalCase",
-    ruby: "snake_case",
-    rust: "snake_case",
-    php: "camelCase",
-    swift: "camelCase",
-    kotlin: "camelCase",
-  });
+export const LANGUAGE_NAMING: Readonly<Record<TargetLanguage, NamingConvention>> = Object.freeze({
+  typescript: "camelCase",
+  python: "snake_case",
+  go: "PascalCase",
+  java: "camelCase",
+  csharp: "PascalCase",
+  ruby: "snake_case",
+  rust: "snake_case",
+  php: "camelCase",
+  swift: "camelCase",
+  kotlin: "camelCase",
+});
 
 export const GeneratorConfigSchema = z
   .object({
@@ -188,7 +179,8 @@ export const GenerationRunSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["testsFailed"],
-          message: "succeeded status requires testsFailed=0 (cannot ship a client with failing tests)",
+          message:
+            "succeeded status requires testsFailed=0 (cannot ship a client with failing tests)",
         });
       }
       if (v.lintErrors !== null && v.lintErrors > 0) {

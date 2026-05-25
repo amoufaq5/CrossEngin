@@ -26,16 +26,15 @@ export const BACKUP_STATUSES = [
 export type BackupStatus = (typeof BACKUP_STATUSES)[number];
 export const BackupStatusSchema = z.enum(BACKUP_STATUSES);
 
-export const BACKUP_TRANSITIONS: Readonly<
-  Record<BackupStatus, readonly BackupStatus[]>
-> = Object.freeze({
-  scheduled: ["running", "failed"],
-  running: ["succeeded", "failed"],
-  succeeded: ["verified", "expired", "failed"],
-  failed: [],
-  verified: ["expired"],
-  expired: [],
-});
+export const BACKUP_TRANSITIONS: Readonly<Record<BackupStatus, readonly BackupStatus[]>> =
+  Object.freeze({
+    scheduled: ["running", "failed"],
+    running: ["succeeded", "failed"],
+    succeeded: ["verified", "expired", "failed"],
+    failed: [],
+    verified: ["expired"],
+    expired: [],
+  });
 
 export function canTransitionBackup(from: BackupStatus, to: BackupStatus): boolean {
   return BACKUP_TRANSITIONS[from].includes(to);
@@ -153,10 +152,7 @@ export const BackupRecordSchema = z
   });
 export type BackupRecord = z.infer<typeof BackupRecordSchema>;
 
-export function isBackupExpired(
-  record: BackupRecord,
-  now: Date = new Date(),
-): boolean {
+export function isBackupExpired(record: BackupRecord, now: Date = new Date()): boolean {
   return now.getTime() >= new Date(record.expiresAt).getTime();
 }
 
@@ -171,10 +167,7 @@ export function expiredBackups(
   return records.filter((r) => isBackupExpired(r, now));
 }
 
-export function backupSatisfiesTier(
-  policy: BackupPolicy,
-  spec: DrTierSpec,
-): boolean {
+export function backupSatisfiesTier(policy: BackupPolicy, spec: DrTierSpec): boolean {
   if (policy.tier !== spec.tier) return false;
   if (policy.retentionDays < spec.retentionDays) return false;
   if (spec.requiresCrossRegion && policy.crossRegionCopyTo.length === 0) return false;

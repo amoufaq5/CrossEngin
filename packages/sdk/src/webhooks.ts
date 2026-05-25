@@ -199,10 +199,7 @@ export function nextRetryDelayMs(attempt: number): number {
   return Math.min(delay, RETRY_MAX_DELAY_MS);
 }
 
-export function shouldRetry(
-  record: WebhookDeliveryRecord,
-  httpStatus: number,
-): boolean {
+export function shouldRetry(record: WebhookDeliveryRecord, httpStatus: number): boolean {
   if (record.attempt >= record.maxAttempts) return false;
   if (httpStatus >= 200 && httpStatus < 300) return false;
   if (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
@@ -218,10 +215,7 @@ export function canonicalSignaturePayload(input: {
   return `${input.timestampSeconds.toString()}.${input.body}`;
 }
 
-export function formatSignatureHeader(
-  timestampSeconds: number,
-  sha256Hex: string,
-): string {
+export function formatSignatureHeader(timestampSeconds: number, sha256Hex: string): string {
   return `t=${timestampSeconds.toString()},v1=${sha256Hex}`;
 }
 
@@ -240,10 +234,7 @@ export function parseSignatureHeader(
 
 export const SIGNATURE_TOLERANCE_SECONDS = 300;
 
-export function isSignatureFresh(
-  signedAtSeconds: number,
-  nowSeconds: number,
-): boolean {
+export function isSignatureFresh(signedAtSeconds: number, nowSeconds: number): boolean {
   const drift = Math.abs(nowSeconds - signedAtSeconds);
   return drift <= SIGNATURE_TOLERANCE_SECONDS;
 }

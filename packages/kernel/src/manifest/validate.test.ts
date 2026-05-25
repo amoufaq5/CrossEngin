@@ -151,9 +151,7 @@ describe("validateManifest — relations", () => {
         { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
         { name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] },
       ],
-      relations: [
-        { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
-      ],
+      relations: [{ kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" }],
     });
     expect(() => validateManifest(m)).not.toThrow();
   });
@@ -163,9 +161,7 @@ describe("validateManifest — relations", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [{ name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] }],
-      relations: [
-        { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
-      ],
+      relations: [{ kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" }],
     });
     expect(() => validateManifest(m)).toThrow(/Patient/);
   });
@@ -239,9 +235,7 @@ describe("validateManifest — permissions", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       roles: baseRoles,
       permissions: {
         Prescription: {
@@ -257,9 +251,7 @@ describe("validateManifest — permissions", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       roles: baseRoles,
       permissions: {
         NonExistent: { read: { roles: ["pharmacist"] } },
@@ -272,9 +264,7 @@ describe("validateManifest — permissions", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       roles: baseRoles,
       permissions: {
         Prescription: { read: { roles: ["mystery"] } },
@@ -287,9 +277,7 @@ describe("validateManifest — permissions", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -314,9 +302,7 @@ describe("validateManifest — permissions", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       roles: baseRoles,
       permissions: {
         Prescription: {
@@ -352,9 +338,7 @@ describe("validateManifest — permissions", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       roles: baseRoles,
       permissions: {
         Prescription: {
@@ -371,9 +355,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -408,9 +390,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -429,9 +409,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -450,9 +428,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -479,9 +455,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -640,9 +614,7 @@ describe("validateManifest — jobs", () => {
     const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "status", type: { kind: "text" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "status", type: { kind: "text" } }] }],
       workflows: {
         prescription_lifecycle: {
           kind: "entityLifecycle",
@@ -789,9 +761,7 @@ describe("validateManifest — views", () => {
             { field: "qty", sortable: true, filterable: true, hidden: false, truncate: true },
           ],
           rowAction: { kind: "openRecord", view: "prescriptionDetail" },
-          bulkActions: [
-            { kind: "workflow", name: "verify", label: { en: "Verify" } },
-          ],
+          bulkActions: [{ kind: "workflow", name: "verify", label: { en: "Verify" } }],
         },
       },
     });
@@ -949,8 +919,6 @@ describe("validateManifest — search", () => {
         defaultDictionary: "simple",
       },
     });
-    expect(() => validateManifest(m)).toThrow(
-      /facet 'unknown_facet' has no matching root field/,
-    );
+    expect(() => validateManifest(m)).toThrow(/facet 'unknown_facet' has no matching root field/);
   });
 });

@@ -42,14 +42,7 @@ export const CostAttributionRecordSchema = z
     isEstimated: z.boolean().default(false),
     estimatedConfidence: z.number().min(0).max(1).optional(),
     sourceDataClass: z
-      .enum([
-        "public",
-        "internal",
-        "commercial_sensitive",
-        "pii",
-        "phi",
-        "regulated",
-      ])
+      .enum(["public", "internal", "commercial_sensitive", "pii", "phi", "regulated"])
       .optional(),
     notes: z.string().min(1).optional(),
   })
@@ -93,7 +86,8 @@ export const CostAttributionRecordSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["providerCostCents"],
-        message: "providerCostCents > 2x attributed costCents is suspicious; investigate before recording",
+        message:
+          "providerCostCents > 2x attributed costCents is suspicious; investigate before recording",
       });
     }
   });
@@ -123,9 +117,7 @@ export function filterAttributions(
   });
 }
 
-export function totalCostCents(
-  records: readonly CostAttributionRecord[],
-): number {
+export function totalCostCents(records: readonly CostAttributionRecord[]): number {
   return records.reduce((acc, r) => acc + r.costCents, 0);
 }
 

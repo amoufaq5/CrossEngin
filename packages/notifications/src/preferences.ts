@@ -30,13 +30,7 @@ export const PreferenceMatrixEntrySchema = z.object({
   channel: z.enum(NOTIFICATION_CHANNELS),
   optedIn: z.boolean(),
   updatedAt: z.string().datetime({ offset: true }),
-  source: z.enum([
-    "default_policy",
-    "user_set",
-    "admin_set",
-    "regulatory_requirement",
-    "import",
-  ]),
+  source: z.enum(["default_policy", "user_set", "admin_set", "regulatory_requirement", "import"]),
 });
 export type PreferenceMatrixEntry = z.infer<typeof PreferenceMatrixEntrySchema>;
 
@@ -62,11 +56,7 @@ export const UserPreferenceMatrixSchema = z
       seen.add(key);
     }
     for (const e of m.entries) {
-      if (
-        e.optedIn === false &&
-        !isCategorySuppressible(e.category) &&
-        e.source === "user_set"
-      ) {
+      if (e.optedIn === false && !isCategorySuppressible(e.category) && e.source === "user_set") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["entries"],
@@ -83,9 +73,7 @@ export const isPreferenceOptedIn = (
   category: ContentCategory,
   channel: NotificationChannel,
 ): boolean => {
-  const entry = matrix.entries.find(
-    (e) => e.category === category && e.channel === channel,
-  );
+  const entry = matrix.entries.find((e) => e.category === category && e.channel === channel);
   if (entry !== undefined) return entry.optedIn;
   return !requiresExplicitOptIn(category);
 };
@@ -111,10 +99,7 @@ export const SuppressionRecordSchema = z
         message: `${s.reason} is a permanent reason; expiresAt must be null`,
       });
     }
-    if (
-      s.reason === "manual_block" ||
-      s.reason === "do_not_contact_register"
-    ) {
+    if (s.reason === "manual_block" || s.reason === "do_not_contact_register") {
       if (s.appliedBy === null && s.reason === "manual_block") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -135,10 +120,7 @@ export const SuppressionRecordSchema = z
   });
 export type SuppressionRecord = z.infer<typeof SuppressionRecordSchema>;
 
-export const isSuppressionActive = (
-  suppression: SuppressionRecord,
-  now: Date,
-): boolean => {
+export const isSuppressionActive = (suppression: SuppressionRecord, now: Date): boolean => {
   if (suppression.expiresAt === null) return true;
   return now.getTime() < Date.parse(suppression.expiresAt);
 };
@@ -196,11 +178,7 @@ export const computeDispatchEligibility = (input: {
       suppressionId: active.id,
     };
   }
-  const optedIn = isPreferenceOptedIn(
-    input.preferences,
-    input.category,
-    input.channel,
-  );
+  const optedIn = isPreferenceOptedIn(input.preferences, input.category, input.channel);
   if (!optedIn) {
     return { eligible: false, reason: "not_opted_in", suppressionId: null };
   }

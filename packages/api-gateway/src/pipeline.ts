@@ -71,15 +71,11 @@ export const StageResultSchema = z
         message: `durationMs ${s.durationMs} does not match completedAt - startedAt (${expectedDuration})`,
       });
     }
-    if (
-      s.outcome === "deny" &&
-      (s.problemTypeUri === null || s.responseStatus === null)
-    ) {
+    if (s.outcome === "deny" && (s.problemTypeUri === null || s.responseStatus === null)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["problemTypeUri"],
-        message:
-          "deny outcome requires problemTypeUri + responseStatus",
+        message: "deny outcome requires problemTypeUri + responseStatus",
       });
     }
     if (
@@ -111,7 +107,10 @@ export const PipelineExecutionSchema = z
     idempotencyOutcome: z.enum(IDEMPOTENCY_OUTCOMES).nullable(),
     principalId: z.string().uuid().nullable(),
     routeOperationId: z.string().max(120).nullable(),
-    resolvedApiVersion: z.string().regex(/^v[0-9]+$/).nullable(),
+    resolvedApiVersion: z
+      .string()
+      .regex(/^v[0-9]+$/)
+      .nullable(),
     correlationId: z.string().max(200).nullable(),
     rateLimitDecisionId: z
       .string()
@@ -207,9 +206,7 @@ const percentile = (sorted: readonly number[], p: number): number => {
   return sorted[idx] ?? 0;
 };
 
-export const summarizePipeline = (
-  executions: readonly PipelineExecution[],
-): PipelineSummary => {
+export const summarizePipeline = (executions: readonly PipelineExecution[]): PipelineSummary => {
   if (executions.length === 0) {
     return {
       totalRequests: 0,
@@ -253,5 +250,4 @@ export const summarizePipeline = (
   };
 };
 
-export const expectedStageOrder = (): readonly PipelineStage[] =>
-  PIPELINE_STAGES;
+export const expectedStageOrder = (): readonly PipelineStage[] => PIPELINE_STAGES;

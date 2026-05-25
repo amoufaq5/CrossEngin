@@ -24,8 +24,7 @@ const successRecord: LoginRecord = {
   outcome: "success",
   initiation: "sp_initiated",
   federatedSubjectId: "alice@acme.com",
-  requestedNameIdFormat:
-    "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+  requestedNameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
   principalId: "22222222-2222-2222-2222-222222222222",
   mfaFactor: "totp",
   mfaCompletedAt: "2026-05-15T10:00:00.300Z",
@@ -79,15 +78,15 @@ describe("LoginRecordSchema", () => {
   });
 
   it("rejects success with null principalId", () => {
-    expect(() =>
-      LoginRecordSchema.parse({ ...successRecord, principalId: null }),
-    ).toThrow(/success outcome requires principalId/);
+    expect(() => LoginRecordSchema.parse({ ...successRecord, principalId: null })).toThrow(
+      /success outcome requires principalId/,
+    );
   });
 
   it("rejects success with failureCategory set", () => {
-    expect(() =>
-      LoginRecordSchema.parse({ ...successRecord, failureCategory: "mfa" }),
-    ).toThrow(/success outcome must not have failureCategory/);
+    expect(() => LoginRecordSchema.parse({ ...successRecord, failureCategory: "mfa" })).toThrow(
+      /success outcome must not have failureCategory/,
+    );
   });
 
   it("rejects mismatched outcome/failureCategory", () => {
@@ -111,9 +110,9 @@ describe("LoginRecordSchema", () => {
   });
 
   it("rejects latencyMs mismatch", () => {
-    expect(() =>
-      LoginRecordSchema.parse({ ...successRecord, latencyMs: 9999 }),
-    ).toThrow(/does not match/);
+    expect(() => LoginRecordSchema.parse({ ...successRecord, latencyMs: 9999 })).toThrow(
+      /does not match/,
+    );
   });
 
   it("rejects mfa_failed without mfaFactor", () => {
@@ -170,9 +169,7 @@ describe("aggregateLogins", () => {
       ...successRecord,
       id: `login_${latency.toString().padStart(8, "0")}`,
       latencyMs: latency,
-      completedAt: new Date(
-        Date.parse("2026-05-15T10:00:00Z") + latency,
-      ).toISOString(),
+      completedAt: new Date(Date.parse("2026-05-15T10:00:00Z") + latency).toISOString(),
     });
     const stats = aggregateLogins([make(50), make(100), make(200), make(500)]);
     expect(stats.p50LatencyMs).toBeGreaterThan(0);
@@ -255,9 +252,9 @@ describe("ScimProvisioningRecordSchema", () => {
   });
 
   it("rejects latency mismatch", () => {
-    expect(() =>
-      ScimProvisioningRecordSchema.parse({ ...base, latencyMs: 9999 }),
-    ).toThrow(/does not match/);
+    expect(() => ScimProvisioningRecordSchema.parse({ ...base, latencyMs: 9999 })).toThrow(
+      /does not match/,
+    );
   });
 
   it("rejects conflict without errorMessage", () => {

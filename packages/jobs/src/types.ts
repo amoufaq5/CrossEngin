@@ -139,7 +139,13 @@ export const OnFailureSchema = z.object({
 });
 export type OnFailure = z.infer<typeof OnFailureSchema>;
 
-export const JOB_TIERS = ["free", "operate_base", "operate_premium", "regulated", "enterprise"] as const;
+export const JOB_TIERS = [
+  "free",
+  "operate_base",
+  "operate_premium",
+  "regulated",
+  "enterprise",
+] as const;
 export type JobTier = (typeof JOB_TIERS)[number];
 
 export const JOB_TIER_DEFAULT_CONCURRENCY: Readonly<Record<JobTier, number>> = Object.freeze({
@@ -190,21 +196,19 @@ export const JobDeclarationSchema = z
   );
 export type JobDeclaration = z.infer<typeof JobDeclarationSchema>;
 
-export const JobRegistrySchema = z
-  .array(JobDeclarationSchema)
-  .superRefine((jobs, ctx) => {
-    const seen = new Set<string>();
-    jobs.forEach((j, i) => {
-      if (seen.has(j.id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate job id '${j.id}'`,
-        });
-      }
-      seen.add(j.id);
-    });
+export const JobRegistrySchema = z.array(JobDeclarationSchema).superRefine((jobs, ctx) => {
+  const seen = new Set<string>();
+  jobs.forEach((j, i) => {
+    if (seen.has(j.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate job id '${j.id}'`,
+      });
+    }
+    seen.add(j.id);
   });
+});
 export type JobRegistry = z.infer<typeof JobRegistrySchema>;
 
 export function durationToMillis(iso8601: string): number {

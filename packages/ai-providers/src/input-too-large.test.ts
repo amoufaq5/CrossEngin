@@ -86,9 +86,7 @@ describe("isInputTooLargeError — Error-shaped inputs", () => {
   });
 
   it("returns false for invalid_request_error (separate category)", () => {
-    expect(isInputTooLargeError(fakeProviderError("invalid_request_error"))).toBe(
-      false,
-    );
+    expect(isInputTooLargeError(fakeProviderError("invalid_request_error"))).toBe(false);
   });
 
   it("returns false for retryable kinds (e.g. rate_limit)", () => {

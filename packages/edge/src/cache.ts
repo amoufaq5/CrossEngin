@@ -96,21 +96,19 @@ export const CachePolicySchema = z
   });
 export type CachePolicy = z.infer<typeof CachePolicySchema>;
 
-export const CachePolicySetSchema = z
-  .array(CachePolicySchema)
-  .superRefine((policies, ctx) => {
-    const ids = new Set<string>();
-    policies.forEach((p, i) => {
-      if (ids.has(p.id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate cache policy id '${p.id}'`,
-        });
-      }
-      ids.add(p.id);
-    });
+export const CachePolicySetSchema = z.array(CachePolicySchema).superRefine((policies, ctx) => {
+  const ids = new Set<string>();
+  policies.forEach((p, i) => {
+    if (ids.has(p.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate cache policy id '${p.id}'`,
+      });
+    }
+    ids.add(p.id);
   });
+});
 export type CachePolicySet = z.infer<typeof CachePolicySetSchema>;
 
 export interface CacheRequest {
@@ -133,7 +131,8 @@ export function shouldCache(policy: CachePolicy, request: CacheRequest): boolean
 }
 
 export function cacheKeyFor(policy: CachePolicy, request: CacheRequest): string {
-  const base = policy.keyStrategy === "path_only" ? request.path : `${request.path}?${request.query ?? ""}`;
+  const base =
+    policy.keyStrategy === "path_only" ? request.path : `${request.path}?${request.query ?? ""}`;
   if (policy.keyStrategy === "path_query_vary_headers") {
     const headers = policy.varyHeaders
       .map((h) => `${h.toLowerCase()}=${request.headers[h.toLowerCase()] ?? ""}`)

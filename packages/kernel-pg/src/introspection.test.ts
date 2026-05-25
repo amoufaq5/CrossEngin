@@ -37,9 +37,7 @@ describe("parseLiveSchema", () => {
   });
 
   it("assembles a table with its columns, indexes, and policies", () => {
-    const tables: TableRow[] = [
-      { schema: "meta", name: "tenants", rls_enabled: true },
-    ];
+    const tables: TableRow[] = [{ schema: "meta", name: "tenants", rls_enabled: true }];
     const columns: ColumnRow[] = [
       {
         table_name: "tenants",
@@ -93,9 +91,30 @@ describe("parseLiveSchema", () => {
       { schema: "meta", name: "b", rls_enabled: false },
     ];
     const columns: ColumnRow[] = [
-      { table_name: "a", column_name: "x", data_type: "int", not_null: true, default_expr: null, attnum: 1 },
-      { table_name: "b", column_name: "y", data_type: "int", not_null: false, default_expr: null, attnum: 1 },
-      { table_name: "a", column_name: "z", data_type: "int", not_null: false, default_expr: null, attnum: 2 },
+      {
+        table_name: "a",
+        column_name: "x",
+        data_type: "int",
+        not_null: true,
+        default_expr: null,
+        attnum: 1,
+      },
+      {
+        table_name: "b",
+        column_name: "y",
+        data_type: "int",
+        not_null: false,
+        default_expr: null,
+        attnum: 1,
+      },
+      {
+        table_name: "a",
+        column_name: "z",
+        data_type: "int",
+        not_null: false,
+        default_expr: null,
+        attnum: 2,
+      },
     ];
     const live = parseLiveSchema("meta", tables, columns, [], []);
     const a = live.tables.find((t) => t.name === "a");
@@ -107,7 +126,14 @@ describe("parseLiveSchema", () => {
   it("orphans rows whose table is not in the table list", () => {
     const tables: TableRow[] = [];
     const columns: ColumnRow[] = [
-      { table_name: "ghost", column_name: "x", data_type: "int", not_null: true, default_expr: null, attnum: 1 },
+      {
+        table_name: "ghost",
+        column_name: "x",
+        data_type: "int",
+        not_null: true,
+        default_expr: null,
+        attnum: 1,
+      },
     ];
     const live = parseLiveSchema("meta", tables, columns, [], []);
     expect(live.tables).toHaveLength(0);
@@ -118,8 +144,22 @@ describe("parseLiveSchema", () => {
       "meta",
       [{ schema: "meta", name: "t", rls_enabled: false }],
       [
-        { table_name: "t", column_name: "x", data_type: "int", not_null: false, default_expr: null, attnum: 1 },
-        { table_name: "t", column_name: "y", data_type: "int", not_null: true, default_expr: null, attnum: 2 },
+        {
+          table_name: "t",
+          column_name: "x",
+          data_type: "int",
+          not_null: false,
+          default_expr: null,
+          attnum: 1,
+        },
+        {
+          table_name: "t",
+          column_name: "y",
+          data_type: "int",
+          not_null: true,
+          default_expr: null,
+          attnum: 2,
+        },
       ],
       [],
       [],
@@ -133,10 +173,13 @@ describe("introspectSchema", () => {
   it("issues the four queries in parallel and feeds them into parseLiveSchema", async () => {
     const observedSqls: string[] = [];
     const conn: PgConnection = {
-      query: vi.fn(async <T,>(sql: string): Promise<PgQueryResult<T>> => {
+      query: vi.fn(async <T>(sql: string): Promise<PgQueryResult<T>> => {
         observedSqls.push(sql);
         if (sql.includes("relkind = 'r'") && sql.includes("relrowsecurity")) {
-          return { rows: [{ schema: "meta", name: "x", rls_enabled: false }] as unknown as readonly T[], rowCount: 1 };
+          return {
+            rows: [{ schema: "meta", name: "x", rls_enabled: false }] as unknown as readonly T[],
+            rowCount: 1,
+          };
         }
         if (sql.includes("pg_attribute")) {
           return { rows: [] as readonly T[], rowCount: 0 };

@@ -12,13 +12,7 @@ import {
 
 describe("constants", () => {
   it("PREVIEW_STATUSES has 5 entries", () => {
-    expect(PREVIEW_STATUSES).toEqual([
-      "pending",
-      "running",
-      "completed",
-      "failed",
-      "cancelled",
-    ]);
+    expect(PREVIEW_STATUSES).toEqual(["pending", "running", "completed", "failed", "cancelled"]);
   });
 
   it("ROW_VALIDATION_OUTCOMES has 6 entries", () => {
@@ -61,9 +55,7 @@ describe("PreviewRowSchema", () => {
       PreviewRowSchema.parse({
         rowIndex: 0,
         outcome: "valid",
-        issues: [
-          { field: "email", outcome: "type_mismatch", message: "x" },
-        ],
+        issues: [{ field: "email", outcome: "type_mismatch", message: "x" }],
       }),
     ).toThrow(/must not have issues/);
   });
@@ -114,9 +106,7 @@ describe("PreviewRunSchema", () => {
   });
 
   it("rejects completed without completedAt", () => {
-    expect(() =>
-      PreviewRunSchema.parse({ ...base, completedAt: null }),
-    ).toThrow(/completedAt/);
+    expect(() => PreviewRunSchema.parse({ ...base, completedAt: null })).toThrow(/completedAt/);
   });
 
   it("rejects failed without errorMessage", () => {
@@ -140,9 +130,9 @@ describe("PreviewRunSchema", () => {
   });
 
   it("rejects rowsRead > sampleSize", () => {
-    expect(() =>
-      PreviewRunSchema.parse({ ...base, rowsRead: 200 }),
-    ).toThrow(/must not exceed sampleSize/);
+    expect(() => PreviewRunSchema.parse({ ...base, rowsRead: 200 })).toThrow(
+      /must not exceed sampleSize/,
+    );
   });
 
   it("rejects duplicate rowIndex", () => {
@@ -179,9 +169,7 @@ describe("summarizePreview", () => {
       {
         rowIndex: 1,
         outcome: "type_mismatch",
-        issues: [
-          { field: "x", outcome: "type_mismatch", message: "x" },
-        ],
+        issues: [{ field: "x", outcome: "type_mismatch", message: "x" }],
       },
     ],
   };

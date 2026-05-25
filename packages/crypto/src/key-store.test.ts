@@ -203,7 +203,11 @@ describe("InMemoryKeyStore — listKeys", () => {
   it("filters by tenantId, algorithm, and purpose", async () => {
     const store = new InMemoryKeyStore();
     await store.createKey({ tenantId: TENANT_A, algorithm: "ed25519", purpose: "pack_signing" });
-    await store.createKey({ tenantId: TENANT_A, algorithm: "hmac-sha256", purpose: "webhook_signing" });
+    await store.createKey({
+      tenantId: TENANT_A,
+      algorithm: "hmac-sha256",
+      purpose: "webhook_signing",
+    });
     await store.createKey({ tenantId: TENANT_B, algorithm: "ed25519", purpose: "pack_signing" });
     expect(await store.listKeys({ tenantId: TENANT_A })).toHaveLength(2);
     expect(await store.listKeys({ algorithm: "ed25519" })).toHaveLength(2);

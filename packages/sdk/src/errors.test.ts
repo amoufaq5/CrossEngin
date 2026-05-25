@@ -48,9 +48,9 @@ describe("ProblemDetailsSchema", () => {
   });
 
   it("rejects status that doesn't match category", () => {
-    expect(() =>
-      ProblemDetailsSchema.parse({ ...base, status: 500 }),
-    ).toThrow(/expects HTTP status 404/);
+    expect(() => ProblemDetailsSchema.parse({ ...base, status: 500 })).toThrow(
+      /expects HTTP status 404/,
+    );
   });
 
   it("rejects validation without errors[]", () => {
@@ -101,15 +101,11 @@ describe("ProblemDetailsSchema", () => {
   });
 
   it("rejects malformed code", () => {
-    expect(() =>
-      ProblemDetailsSchema.parse({ ...base, code: "not_found" }),
-    ).toThrow();
+    expect(() => ProblemDetailsSchema.parse({ ...base, code: "not_found" })).toThrow();
   });
 
   it("rejects malformed type URI", () => {
-    expect(() =>
-      ProblemDetailsSchema.parse({ ...base, type: "not-a-url" }),
-    ).toThrow();
+    expect(() => ProblemDetailsSchema.parse({ ...base, type: "not-a-url" })).toThrow();
   });
 
   it("rejects duplicate field errors with same field+code", () => {

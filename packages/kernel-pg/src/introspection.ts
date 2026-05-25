@@ -189,21 +189,12 @@ export function parseLiveSchema(
   return { schema, tables: liveTables };
 }
 
-export async function introspectSchema(
-  conn: PgConnection,
-  schema: string,
-): Promise<LiveSchema> {
+export async function introspectSchema(conn: PgConnection, schema: string): Promise<LiveSchema> {
   const [tables, columns, indexes, policies] = await Promise.all([
     conn.query<TableRow>(TABLE_QUERY, [schema]),
     conn.query<ColumnRow>(COLUMN_QUERY, [schema]),
     conn.query<IndexRow>(INDEX_QUERY, [schema]),
     conn.query<PolicyRow>(POLICY_QUERY, [schema]),
   ]);
-  return parseLiveSchema(
-    schema,
-    tables.rows,
-    columns.rows,
-    indexes.rows,
-    policies.rows,
-  );
+  return parseLiveSchema(schema, tables.rows, columns.rows, indexes.rows, policies.rows);
 }

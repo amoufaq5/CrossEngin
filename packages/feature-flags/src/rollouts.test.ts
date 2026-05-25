@@ -75,15 +75,15 @@ describe("RolloutPlanSchema", () => {
   });
 
   it("rejects paused stage without pausedAt + reason", () => {
-    expect(() =>
-      RolloutPlanSchema.parse({ ...basePlan, currentStage: "paused" }),
-    ).toThrow(/paused stage requires/);
+    expect(() => RolloutPlanSchema.parse({ ...basePlan, currentStage: "paused" })).toThrow(
+      /paused stage requires/,
+    );
   });
 
   it("rejects rolled_back without full audit", () => {
-    expect(() =>
-      RolloutPlanSchema.parse({ ...basePlan, currentStage: "rolled_back" }),
-    ).toThrow(/rolled_back stage requires/);
+    expect(() => RolloutPlanSchema.parse({ ...basePlan, currentStage: "rolled_back" })).toThrow(
+      /rolled_back stage requires/,
+    );
   });
 
   it("rejects metric_driven_auto without blockingMetricSloIds", () => {
@@ -163,9 +163,7 @@ describe("isInRollout", () => {
   });
 
   it("returns true always for full_100pct", () => {
-    expect(
-      isInRollout({ ...basePlan, currentStage: "full_100pct" }, "tenant-1"),
-    ).toBe(true);
+    expect(isInRollout({ ...basePlan, currentStage: "full_100pct" }, "tenant-1")).toBe(true);
   });
 
   it("returns deterministic value per bucketing key", () => {
@@ -216,22 +214,12 @@ describe("nextScheduledStage", () => {
 
 describe("isObservationWindowSatisfied / computeCurrentPercentage", () => {
   it("isObservationWindowSatisfied true past threshold", () => {
-    expect(
-      isObservationWindowSatisfied(
-        basePlan,
-        new Date("2026-05-18T10:00:00Z"),
-        24,
-      ),
-    ).toBe(true);
+    expect(isObservationWindowSatisfied(basePlan, new Date("2026-05-18T10:00:00Z"), 24)).toBe(true);
   });
   it("isObservationWindowSatisfied false within threshold", () => {
-    expect(
-      isObservationWindowSatisfied(
-        basePlan,
-        new Date("2026-05-16T15:00:00Z"),
-        24,
-      ),
-    ).toBe(false);
+    expect(isObservationWindowSatisfied(basePlan, new Date("2026-05-16T15:00:00Z"), 24)).toBe(
+      false,
+    );
   });
   it("computeCurrentPercentage returns stage percentage", () => {
     expect(computeCurrentPercentage(basePlan)).toBe(10);

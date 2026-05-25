@@ -200,10 +200,13 @@ describe("escapeCsvCell (RFC 4180)", () => {
 
 describe("formatCsv", () => {
   it("renders header + rows separated by newlines + trailing newline", () => {
-    const csv = formatCsv(["a", "b"], [
-      ["1", "2"],
-      ["3", "4"],
-    ]);
+    const csv = formatCsv(
+      ["a", "b"],
+      [
+        ["1", "2"],
+        ["3", "4"],
+      ],
+    );
     expect(csv).toBe("a,b\n1,2\n3,4\n");
   });
 
@@ -222,7 +225,11 @@ describe("printCsv", () => {
   it("writes formatted CSV to stdout", () => {
     let stdoutBuf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { stdoutBuf += s; } },
+      stdout: {
+        write: (s) => {
+          stdoutBuf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printCsv(io, ["a", "b"], [["1", "2"]]);
@@ -232,7 +239,11 @@ describe("printCsv", () => {
   it("respects custom separator", () => {
     let stdoutBuf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { stdoutBuf += s; } },
+      stdout: {
+        write: (s) => {
+          stdoutBuf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printCsv(io, ["a", "b"], [["1", "2"]], ";");
@@ -301,7 +312,11 @@ describe("printTsv", () => {
   it("writes formatted TSV to stdout", () => {
     let stdoutBuf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { stdoutBuf += s; } },
+      stdout: {
+        write: (s) => {
+          stdoutBuf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printTsv(io, ["a", "b"], [["1", "2"]]);
@@ -335,7 +350,11 @@ describe("printNdjson", () => {
   it("writes formatted NDJSON to stdout", () => {
     let stdoutBuf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { stdoutBuf += s; } },
+      stdout: {
+        write: (s) => {
+          stdoutBuf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printNdjson(io, [{ a: 1 }, { b: 2 }]);
@@ -345,9 +364,7 @@ describe("printNdjson", () => {
 
 describe("formatYaml", () => {
   it("renders a flat object as key: value lines", () => {
-    expect(formatYaml({ a: 1, b: "x", c: true, d: null })).toBe(
-      "a: 1\nb: x\nc: true\nd: null\n",
-    );
+    expect(formatYaml({ a: 1, b: "x", c: true, d: null })).toBe("a: 1\nb: x\nc: true\nd: null\n");
   });
 
   it("quotes strings that look numeric / reserved / have special chars", () => {
@@ -366,9 +383,7 @@ describe("formatYaml", () => {
   });
 
   it("renders nested objects with indentation", () => {
-    expect(formatYaml({ outer: { inner: 1 } })).toBe(
-      "outer:\n  inner: 1\n",
-    );
+    expect(formatYaml({ outer: { inner: 1 } })).toBe("outer:\n  inner: 1\n");
   });
 
   it("renders arrays of scalars", () => {
@@ -416,7 +431,11 @@ describe("printYaml + printStructured", () => {
   it("printYaml writes YAML to stdout", () => {
     let buf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { buf += s; } },
+      stdout: {
+        write: (s) => {
+          buf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printYaml(io, { a: 1 });
@@ -426,7 +445,11 @@ describe("printYaml + printStructured", () => {
   it("printStructured emits JSON for format=json", () => {
     let buf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { buf += s; } },
+      stdout: {
+        write: (s) => {
+          buf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printStructured(io, "json", { a: 1 });
@@ -436,7 +459,11 @@ describe("printYaml + printStructured", () => {
   it("printStructured emits YAML for format=yaml", () => {
     let buf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { buf += s; } },
+      stdout: {
+        write: (s) => {
+          buf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printStructured(io, "yaml", { a: 1 });
@@ -446,7 +473,11 @@ describe("printYaml + printStructured", () => {
   it("printStructured falls back to JSON for non-yaml formats", () => {
     let buf = "";
     const io: IoStreams = {
-      stdout: { write: (s) => { buf += s; } },
+      stdout: {
+        write: (s) => {
+          buf += s;
+        },
+      },
       stderr: { write: () => {} },
     };
     printStructured(io, "csv", { a: 1 });

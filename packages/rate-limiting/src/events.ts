@@ -15,9 +15,11 @@ export const THROTTLE_EVENT_KINDS = [
 ] as const;
 export type ThrottleEventKind = (typeof THROTTLE_EVENT_KINDS)[number];
 
-export const ALERT_WORTHY_EVENT_KINDS: ReadonlySet<ThrottleEventKind> = new Set(
-  ["hard_limit_hit", "circuit_opened", "exception_approved"],
-);
+export const ALERT_WORTHY_EVENT_KINDS: ReadonlySet<ThrottleEventKind> = new Set([
+  "hard_limit_hit",
+  "circuit_opened",
+  "exception_approved",
+]);
 
 export const ThrottleEventSchema = z
   .object({
@@ -25,7 +27,10 @@ export const ThrottleEventSchema = z
     tenantId: z.string().uuid().nullable(),
     kind: z.enum(THROTTLE_EVENT_KINDS),
     occurredAt: z.string().datetime({ offset: true }),
-    policyId: z.string().regex(/^rlp_[a-z0-9]{8,40}$/).nullable(),
+    policyId: z
+      .string()
+      .regex(/^rlp_[a-z0-9]{8,40}$/)
+      .nullable(),
     quotaDefinitionId: z
       .string()
       .regex(/^rlq_[a-z0-9]{8,40}$/)
@@ -65,10 +70,7 @@ export const ThrottleEventSchema = z
         message: "exception_expired event requires exceptionId",
       });
     }
-    if (
-      (e.kind === "policy_activated" || e.kind === "policy_deactivated") &&
-      e.policyId === null
-    ) {
+    if ((e.kind === "policy_activated" || e.kind === "policy_deactivated") && e.policyId === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["policyId"],

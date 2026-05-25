@@ -10,12 +10,18 @@ import {
 const { Pool } = pg;
 
 interface PgPoolClient {
-  query(sql: string, params?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
+  query(
+    sql: string,
+    params?: readonly unknown[],
+  ): Promise<{ rows: unknown[]; rowCount: number | null }>;
   release(): void;
 }
 
 interface PgPool {
-  query(sql: string, params?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
+  query(
+    sql: string,
+    params?: readonly unknown[],
+  ): Promise<{ rows: unknown[]; rowCount: number | null }>;
   connect(): Promise<PgPoolClient>;
   end(): Promise<void>;
 }

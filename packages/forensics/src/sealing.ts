@@ -8,11 +8,7 @@ import {
   verifyEd25519,
 } from "@crossengin/crypto";
 
-import {
-  GENESIS_HASH,
-  type ChainedLogEntry,
-  type LogKind,
-} from "./tamper-evident-logs.js";
+import { GENESIS_HASH, type ChainedLogEntry, type LogKind } from "./tamper-evident-logs.js";
 
 const FORENSICS_HASH_ALGORITHM = "sha256" as const;
 const EVIDENCE_DOMAIN_TAG = "crossengin.evidence.v1\n";
@@ -184,11 +180,7 @@ export function sealEvidence(input: {
     typeof input.bytes === "string" ? new TextEncoder().encode(input.bytes) : input.bytes;
   const sha256Hex = sha256(bytes);
   const canonical = canonicalEvidenceBytes(bytes, sha256Hex, input.sealedAt);
-  const signatureBase64 = signEd25519(
-    input.privateKeyBase64,
-    input.publicKeyBase64,
-    canonical,
-  );
+  const signatureBase64 = signEd25519(input.privateKeyBase64, input.publicKeyBase64, canonical);
   return {
     sha256Hex,
     signatureBase64,
@@ -205,9 +197,7 @@ export async function sealEvidenceWithStore(input: {
   readonly sealedAt: string;
 }): Promise<EvidenceSeal> {
   if (input.handle.algorithm !== "ed25519") {
-    throw new Error(
-      `evidence sealing requires an ed25519 key, got ${input.handle.algorithm}`,
-    );
+    throw new Error(`evidence sealing requires an ed25519 key, got ${input.handle.algorithm}`);
   }
   if (input.handle.purpose !== "evidence_sealing") {
     throw new Error(
@@ -233,9 +223,7 @@ export function verifyEvidenceSeal(input: {
   readonly seal: EvidenceSeal;
   readonly publicKeyBase64: string;
 }): boolean {
-  if (
-    ed25519PublicKeyFingerprint(input.publicKeyBase64) !== input.seal.signingKeyFingerprint
-  ) {
+  if (ed25519PublicKeyFingerprint(input.publicKeyBase64) !== input.seal.signingKeyFingerprint) {
     return false;
   }
   const bytes =

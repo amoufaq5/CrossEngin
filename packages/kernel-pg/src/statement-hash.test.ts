@@ -44,11 +44,7 @@ describe("hashStatement", () => {
 
   it("is deterministic across invocations", () => {
     const stmt = "ALTER TABLE meta.foo ENABLE ROW LEVEL SECURITY;";
-    const runs = new Set([
-      hashStatement(stmt),
-      hashStatement(stmt),
-      hashStatement(stmt),
-    ]);
+    const runs = new Set([hashStatement(stmt), hashStatement(stmt), hashStatement(stmt)]);
     expect(runs.size).toBe(1);
   });
 

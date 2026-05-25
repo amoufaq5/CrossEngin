@@ -45,7 +45,10 @@ function fixtureRoute(): HandlerInput["route"] {
     id: "rt_route0001",
     operationId: "webhooks.order_shipped",
     method: "POST",
-    pathSegments: [{ kind: "literal", value: "webhooks" }, { kind: "literal", value: "order" }],
+    pathSegments: [
+      { kind: "literal", value: "webhooks" },
+      { kind: "literal", value: "order" },
+    ],
     apiVersion: "v1",
     isDeprecated: false,
     deprecatedSince: null,
@@ -132,9 +135,7 @@ describe("createSignalBridgeHandler — success", () => {
     const engine = buildEngine();
     const bridge = buildBridge({ engine });
     const handler = createSignalBridgeHandler({ bridge, nowSeconds: () => NOW_SECONDS });
-    const result = await handler(
-      handlerInput({ body: { order: { id: "po-1" } } }),
-    );
+    const result = await handler(handlerInput({ body: { order: { id: "po-1" } } }));
     if (result.kind !== "json") throw new Error("expected json");
     expect(result.status).toBe(202);
     const body = result.body as Record<string, unknown>;

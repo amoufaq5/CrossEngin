@@ -181,17 +181,10 @@ describe("isPrincipalExempt / isApiKeyExempt", () => {
       ...basePolicy,
       exemptPrincipalIds: ["33333333-3333-3333-3333-333333333333"],
     };
-    expect(
-      isPrincipalExempt(p, "33333333-3333-3333-3333-333333333333"),
-    ).toBe(true);
+    expect(isPrincipalExempt(p, "33333333-3333-3333-3333-333333333333")).toBe(true);
   });
   it("returns false for non-exempt principal", () => {
-    expect(
-      isPrincipalExempt(
-        basePolicy,
-        "44444444-4444-4444-4444-444444444444",
-      ),
-    ).toBe(false);
+    expect(isPrincipalExempt(basePolicy, "44444444-4444-4444-4444-444444444444")).toBe(false);
   });
   it("returns false for null principal", () => {
     expect(isPrincipalExempt(basePolicy, null)).toBe(false);

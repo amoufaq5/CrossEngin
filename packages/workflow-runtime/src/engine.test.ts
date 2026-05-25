@@ -1,12 +1,8 @@
 import type { WorkflowDefinition } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
-import type {
-  ActivityRegistry} from "./activity-handlers.js";
-import {
-  createDefaultRegistry,
-  type ActivityHandler,
-} from "./activity-handlers.js";
+import type { ActivityRegistry } from "./activity-handlers.js";
+import { createDefaultRegistry, type ActivityHandler } from "./activity-handlers.js";
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
 import { WorkflowEngine } from "./engine.js";
@@ -19,9 +15,7 @@ import {
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
 
-function definitionFixture(
-  overrides: Partial<WorkflowDefinition> = {},
-): WorkflowDefinition {
+function definitionFixture(overrides: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
   const base: WorkflowDefinition = {
     id: "wfd_def00001",
     tenantId: null,
@@ -31,10 +25,38 @@ function definitionFixture(
     description: "",
     status: "published",
     states: [
-      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "awaiting_approval", kind: "waiting", label: "Awaiting", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "approved", kind: "terminal_success", label: "Approved", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "rejected", kind: "terminal_failure", label: "Rejected", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "draft",
+        kind: "initial",
+        label: "Draft",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "awaiting_approval",
+        kind: "waiting",
+        label: "Awaiting",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "approved",
+        kind: "terminal_success",
+        label: "Approved",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "rejected",
+        kind: "terminal_failure",
+        label: "Rejected",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
     ],
     transitions: [
       {
@@ -91,12 +113,14 @@ function definitionFixture(
   return { ...base, ...overrides };
 }
 
-function makeEngine(opts: {
-  readonly definition?: WorkflowDefinition;
-  readonly registry?: ActivityRegistry;
-  readonly clock?: FixedClock;
-  readonly instrumentation?: WorkflowInstrumentation;
-} = {}) {
+function makeEngine(
+  opts: {
+    readonly definition?: WorkflowDefinition;
+    readonly registry?: ActivityRegistry;
+    readonly clock?: FixedClock;
+    readonly instrumentation?: WorkflowInstrumentation;
+  } = {},
+) {
   const definition = opts.definition ?? definitionFixture();
   const log = new InMemoryEventLog();
   const clock = opts.clock ?? new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
@@ -108,9 +132,7 @@ function makeEngine(opts: {
     activityRegistry: registry,
     clock,
     idGenerator: ids,
-    ...(opts.instrumentation !== undefined
-      ? { instrumentation: opts.instrumentation }
-      : {}),
+    ...(opts.instrumentation !== undefined ? { instrumentation: opts.instrumentation } : {}),
   });
   return { engine, log, clock, definition, ids };
 }
@@ -126,10 +148,7 @@ describe("startInstance", () => {
     expect(state.status).toBe("waiting_for_signal");
     expect(state.currentState).toBe("awaiting_approval");
     const events = await engine.listEvents(state.instanceId);
-    expect(events.map((e) => e.kind)).toEqual([
-      "instance_started",
-      "state_transitioned",
-    ]);
+    expect(events.map((e) => e.kind)).toEqual(["instance_started", "state_transitioned"]);
   });
 
   it("uses the injected clock for occurredAt", async () => {
@@ -292,7 +311,14 @@ describe("tickTimers", () => {
     const def: WorkflowDefinition = {
       ...definitionFixture(),
       states: [
-        { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
         {
           name: "awaiting_approval",
           kind: "waiting",
@@ -306,8 +332,22 @@ describe("tickTimers", () => {
           onExitActions: [],
           slaSeconds: null,
         },
-        { name: "approved", kind: "terminal_success", label: "Approved", onEntryActions: [], onExitActions: [], slaSeconds: null },
-        { name: "rejected", kind: "terminal_failure", label: "Rejected", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "approved",
+          kind: "terminal_success",
+          label: "Approved",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "rejected",
+          kind: "terminal_failure",
+          label: "Rejected",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
       ],
     };
     const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
@@ -330,7 +370,14 @@ describe("tickTimers", () => {
     const def: WorkflowDefinition = {
       ...definitionFixture(),
       states: [
-        { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
         {
           name: "awaiting_approval",
           kind: "waiting",
@@ -344,8 +391,22 @@ describe("tickTimers", () => {
           onExitActions: [],
           slaSeconds: null,
         },
-        { name: "approved", kind: "terminal_success", label: "A", onEntryActions: [], onExitActions: [], slaSeconds: null },
-        { name: "rejected", kind: "terminal_failure", label: "R", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "approved",
+          kind: "terminal_success",
+          label: "A",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "rejected",
+          kind: "terminal_failure",
+          label: "R",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
       ],
     };
     const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
@@ -379,7 +440,14 @@ describe("schedule_activity action", () => {
           onExitActions: [],
           slaSeconds: null,
         },
-        { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "Done",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
       ],
       transitions: [
         {
@@ -432,7 +500,14 @@ describe("schedule_activity action", () => {
           onExitActions: [],
           slaSeconds: null,
         },
-        { name: "failed", kind: "terminal_failure", label: "Failed", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "failed",
+          kind: "terminal_failure",
+          label: "Failed",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
       ],
       transitions: [
         {
@@ -477,7 +552,14 @@ describe("schedule_activity action", () => {
           onExitActions: [],
           slaSeconds: null,
         },
-        { name: "failed", kind: "terminal_failure", label: "F", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "failed",
+          kind: "terminal_failure",
+          label: "F",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
       ],
       transitions: [
         {
@@ -503,7 +585,14 @@ describe("set_variable action", () => {
     const def: WorkflowDefinition = {
       ...definitionFixture(),
       states: [
-        { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
         {
           name: "after_set",
           kind: "intermediate",
@@ -514,7 +603,14 @@ describe("set_variable action", () => {
           onExitActions: [],
           slaSeconds: null,
         },
-        { name: "done", kind: "terminal_success", label: "D", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "D",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
       ],
       transitions: [
         {
@@ -715,9 +811,7 @@ describe("WorkflowEngine — instrumentation (M8)", () => {
       correlationKey: "po-5",
       tenantId: TENANT,
     });
-    const completedCount = cap.events.filter(
-      (e) => e.kind === "instance_completed",
-    ).length;
+    const completedCount = cap.events.filter((e) => e.kind === "instance_completed").length;
     expect(completedCount).toBe(1);
   });
 
@@ -847,12 +941,14 @@ describe("WorkflowEngine — instrumentation (M8)", () => {
 });
 
 describe("WorkflowEngine — activity execution instrumentation (M8.1)", () => {
-  function activityDef(overrides: {
-    activityKey?: string;
-    activityKind?: string;
-    completedTransition?: boolean;
-    failedTransition?: boolean;
-  } = {}): WorkflowDefinition {
+  function activityDef(
+    overrides: {
+      activityKey?: string;
+      activityKind?: string;
+      completedTransition?: boolean;
+      failedTransition?: boolean;
+    } = {},
+  ): WorkflowDefinition {
     const activityKey = overrides.activityKey ?? "process_payment";
     const activityKind = overrides.activityKind ?? "transformation";
     const transitions = [];
@@ -932,9 +1028,7 @@ describe("WorkflowEngine — activity execution instrumentation (M8.1)", () => {
       tenantId: TENANT,
       correlationKey: "act-1",
     });
-    const activityEvents = cap.events.filter((e) =>
-      e.kind.startsWith("activity_"),
-    );
+    const activityEvents = cap.events.filter((e) => e.kind.startsWith("activity_"));
     expect(activityEvents.map((e) => e.kind)).toEqual([
       "activity_scheduled",
       "activity_started",
@@ -1052,9 +1146,7 @@ describe("WorkflowEngine — activity execution instrumentation (M8.1)", () => {
       tenantId: TENANT,
       correlationKey: "act-order",
     });
-    const scheduledIdx = cap.events.findIndex(
-      (e) => e.kind === "activity_scheduled",
-    );
+    const scheduledIdx = cap.events.findIndex((e) => e.kind === "activity_scheduled");
     const startedIdx = cap.events.findIndex((e) => e.kind === "activity_started");
     expect(scheduledIdx).toBeGreaterThanOrEqual(0);
     expect(startedIdx).toBeGreaterThan(scheduledIdx);
@@ -1072,9 +1164,7 @@ describe("WorkflowEngine — activity execution instrumentation (M8.1)", () => {
       tenantId: TENANT,
       correlationKey: "act-corr-xyz",
     });
-    const activityEvents = cap.events.filter((e) =>
-      e.kind.startsWith("activity_"),
-    );
+    const activityEvents = cap.events.filter((e) => e.kind.startsWith("activity_"));
     for (const e of activityEvents) {
       expect(e.correlationId).toBe("act-corr-xyz");
     }
@@ -1294,9 +1384,7 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
     expect(sets).toHaveLength(2);
     expect(sets[0]!.attributes["timerName"]).toBe("reminder");
     expect(sets[1]!.attributes["timerName"]).toBe("deadline");
-    expect(sets[0]!.attributes["timerId"]).not.toBe(
-      sets[1]!.attributes["timerId"],
-    );
+    expect(sets[0]!.attributes["timerId"]).not.toBe(sets[1]!.attributes["timerId"]);
   });
 
   // A scheduled timer puts the instance in waiting_for_timer, so the cancel is
@@ -1320,8 +1408,14 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
           kind: "waiting",
           label: "Armed",
           onEntryActions: [
-            { kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds: 3_600 } },
-            { kind: "schedule_timer", parameters: { timerName: "checkpoint", relativeSeconds: 60 } },
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "deadline", relativeSeconds: 3_600 },
+            },
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "checkpoint", relativeSeconds: 60 },
+            },
           ],
           onExitActions: [],
           slaSeconds: null,
@@ -1330,9 +1424,7 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
           name: "settled",
           kind: "terminal_success",
           label: "Settled",
-          onEntryActions: [
-            { kind: "cancel_timer", parameters: { timerName: "deadline" } },
-          ],
+          onEntryActions: [{ kind: "cancel_timer", parameters: { timerName: "deadline" } }],
           onExitActions: [],
           slaSeconds: null,
         },
@@ -1404,9 +1496,7 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
     const cancelled = cap.events.find((e) => e.kind === "timer_cancelled");
     expect(deadlineSet).toBeDefined();
     expect(cancelled).toBeDefined();
-    expect(cancelled!.attributes["timerId"]).toBe(
-      deadlineSet!.attributes["timerId"],
-    );
+    expect(cancelled!.attributes["timerId"]).toBe(deadlineSet!.attributes["timerId"]);
   });
 
   it("a cancelled timer does NOT fire on a later tick", async () => {
@@ -1441,9 +1531,7 @@ describe("WorkflowEngine — timer lifecycle instrumentation (M8.2)", () => {
           name: "draft",
           kind: "initial",
           label: "Draft",
-          onEntryActions: [
-            { kind: "cancel_timer", parameters: { timerName: "ghost" } },
-          ],
+          onEntryActions: [{ kind: "cancel_timer", parameters: { timerName: "ghost" } }],
           onExitActions: [],
           slaSeconds: null,
         },

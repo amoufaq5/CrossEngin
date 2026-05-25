@@ -67,21 +67,15 @@ describe("HyperparametersSchema", () => {
   });
 
   it("rejects loraRank without loraAlpha", () => {
-    expect(() =>
-      HyperparametersSchema.parse({ ...base, loraRank: 16 }),
-    ).toThrow(/loraAlpha/);
+    expect(() => HyperparametersSchema.parse({ ...base, loraRank: 16 })).toThrow(/loraAlpha/);
   });
 
   it("rejects loraAlpha without loraRank", () => {
-    expect(() =>
-      HyperparametersSchema.parse({ ...base, loraAlpha: 32 }),
-    ).toThrow(/loraRank/);
+    expect(() => HyperparametersSchema.parse({ ...base, loraAlpha: 32 })).toThrow(/loraRank/);
   });
 
   it("rejects learningRate > 1", () => {
-    expect(() =>
-      HyperparametersSchema.parse({ ...base, learningRate: 1.5 }),
-    ).toThrow();
+    expect(() => HyperparametersSchema.parse({ ...base, learningRate: 1.5 })).toThrow();
   });
 });
 
@@ -145,15 +139,15 @@ describe("TrainingRunSchema", () => {
   });
 
   it("rejects succeeded without outputModelArtifactSha256", () => {
-    expect(() =>
-      TrainingRunSchema.parse({ ...base, outputModelArtifactSha256: null }),
-    ).toThrow(/outputModelArtifactSha256/);
+    expect(() => TrainingRunSchema.parse({ ...base, outputModelArtifactSha256: null })).toThrow(
+      /outputModelArtifactSha256/,
+    );
   });
 
   it("rejects succeeded without actualCostUsd", () => {
-    expect(() =>
-      TrainingRunSchema.parse({ ...base, actualCostUsd: null }),
-    ).toThrow(/actualCostUsd/);
+    expect(() => TrainingRunSchema.parse({ ...base, actualCostUsd: null })).toThrow(
+      /actualCostUsd/,
+    );
   });
 
   it("rejects failed without failureReason", () => {
@@ -181,9 +175,9 @@ describe("TrainingRunSchema", () => {
   });
 
   it("rejects actualCostUsd > 3x estimate", () => {
-    expect(() =>
-      TrainingRunSchema.parse({ ...base, actualCostUsd: 500 }),
-    ).toThrow(/exceeds 3x estimate/);
+    expect(() => TrainingRunSchema.parse({ ...base, actualCostUsd: 500 })).toThrow(
+      /exceeds 3x estimate/,
+    );
   });
 });
 

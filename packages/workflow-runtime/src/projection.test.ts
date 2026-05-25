@@ -5,7 +5,9 @@ import { projectActivities, projectInstance, projectSignals, projectTimers } fro
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
-function event(o: Partial<WorkflowEvent> & { kind: WorkflowEvent["kind"]; sequenceNumber: number }): WorkflowEvent {
+function event(
+  o: Partial<WorkflowEvent> & { kind: WorkflowEvent["kind"]; sequenceNumber: number },
+): WorkflowEvent {
   return {
     id: o.id ?? `wfe_${o.sequenceNumber.toString().padStart(8, "0")}`,
     instanceId: o.instanceId ?? "wfi_00000001",
@@ -104,10 +106,7 @@ describe("projectInstance — transitions", () => {
 
   it("rejects a duplicate instance_started", () => {
     expect(() =>
-      projectInstance([
-        startEvent(),
-        { ...startEvent(), id: "wfe_00000002", sequenceNumber: 1 },
-      ]),
+      projectInstance([startEvent(), { ...startEvent(), id: "wfe_00000002", sequenceNumber: 1 }]),
     ).toThrow(/duplicate instance_started/);
   });
 });

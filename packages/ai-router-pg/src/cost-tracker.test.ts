@@ -81,10 +81,7 @@ describe("PostgresCostTracker.getWindow", () => {
 
   it("filters by tenant_id in the SELECT", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const tracker = new PostgresCostTracker({ conn });
     await tracker.getWindow(TENANT);
     expect(capture[0]?.sql).toContain("FROM meta.llm_cost_windows");
@@ -96,10 +93,7 @@ describe("PostgresCostTracker.getWindow", () => {
 describe("PostgresCostTracker.recordUsage", () => {
   it("issues an UPSERT into meta.llm_cost_windows", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
     const tracker = new PostgresCostTracker({ conn, clock: () => 12_345 });
     await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.5 });
     expect(capture.length).toBe(1);
@@ -109,10 +103,7 @@ describe("PostgresCostTracker.recordUsage", () => {
 
   it("threads tenantId, nowMs, costUsd, windowMs as params", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
     const tracker = new PostgresCostTracker({
       conn,
       windowSeconds: 60,
@@ -124,10 +115,7 @@ describe("PostgresCostTracker.recordUsage", () => {
 
   it("uses the injected clock (not Date.now)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
     const tracker = new PostgresCostTracker({
       conn,
       clock: () => 999_999_999,
@@ -138,10 +126,7 @@ describe("PostgresCostTracker.recordUsage", () => {
 
   it("uses the default window (86400s) when windowSeconds is omitted", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
     const tracker = new PostgresCostTracker({ conn, clock: () => 0 });
     await tracker.recordUsage({ tenantId: TENANT, costUsd: 1.0 });
     expect(capture[0]?.params?.[3]).toBe(86_400_000);
@@ -149,28 +134,20 @@ describe("PostgresCostTracker.recordUsage", () => {
 
   it("encodes the expiry CASE branch (CASE WHEN ... THEN EXCLUDED ELSE existing)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 1 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
     const tracker = new PostgresCostTracker({ conn, clock: () => 0 });
     await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.1 });
     const sql = capture[0]?.sql ?? "";
     expect(sql).toContain("EXCLUDED.window_start_at");
     expect(sql).toContain("EXCLUDED.window_cost_usd");
-    expect(sql).toContain(
-      "meta.llm_cost_windows.window_cost_usd + EXCLUDED.window_cost_usd",
-    );
+    expect(sql).toContain("meta.llm_cost_windows.window_cost_usd + EXCLUDED.window_cost_usd");
   });
 });
 
 describe("PostgresCostTracker.checkCeiling", () => {
   it("returns per_request_exceeded without hitting the DB when over the per-request cap", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const tracker = new PostgresCostTracker({ conn });
     const check = await tracker.checkCeiling({
       tenantId: TENANT,
@@ -185,10 +162,7 @@ describe("PostgresCostTracker.checkCeiling", () => {
 
   it("short-circuits when no maxUsdPerWindow is configured (no DB read)", async () => {
     const capture: Capture[] = [];
-    const conn = mockConnection(
-      () => ({ rows: [], rowCount: 0 }),
-      capture,
-    );
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), capture);
     const tracker = new PostgresCostTracker({ conn });
     const check = await tracker.checkCeiling({
       tenantId: TENANT,

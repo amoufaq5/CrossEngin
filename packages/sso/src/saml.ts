@@ -128,10 +128,7 @@ export const SamlAssertionSchema = z
       sessionIndex: z.string().optional(),
       authnContextClassRef: z.enum(AUTHN_CONTEXT_CLASSES),
     }),
-    attributes: z.record(
-      z.string(),
-      z.array(z.string()).min(1),
-    ),
+    attributes: z.record(z.string(), z.array(z.string()).min(1)),
     signatureAlgorithm: z.enum(SIGNATURE_ALGORITHMS),
     digestAlgorithm: z.enum(DIGEST_ALGORITHMS),
   })
@@ -166,19 +163,13 @@ export const isAssertionTimeValid = (
   return t + skew >= notBefore && t - skew < notOnOrAfter;
 };
 
-export const isAudienceAccepted = (
-  assertion: SamlAssertion,
-  expectedAudience: string,
-): boolean => assertion.conditions.audiences.includes(expectedAudience);
+export const isAudienceAccepted = (assertion: SamlAssertion, expectedAudience: string): boolean =>
+  assertion.conditions.audiences.includes(expectedAudience);
 
-export const isAllowedNameIdFormat = (
-  format: string,
-  allowedFormats: readonly string[],
-): boolean => allowedFormats.includes(format);
+export const isAllowedNameIdFormat = (format: string, allowedFormats: readonly string[]): boolean =>
+  allowedFormats.includes(format);
 
-export const requiresStrongAuthnContext = (
-  classRef: AuthnContextClass,
-): boolean =>
+export const requiresStrongAuthnContext = (classRef: AuthnContextClass): boolean =>
   classRef === "urn:oasis:names:tc:SAML:2.0:ac:classes:MultiFactor" ||
   classRef === "urn:oasis:names:tc:SAML:2.0:ac:classes:TimeSyncToken" ||
   classRef === "urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorContract";

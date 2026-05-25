@@ -145,10 +145,7 @@ export const LifecycleEventSchema = z
   });
 export type LifecycleEvent = z.infer<typeof LifecycleEventSchema>;
 
-export function actionRequiresFourEyes(
-  action: LifecycleAction,
-  trigger: ActionTrigger,
-): boolean {
+export function actionRequiresFourEyes(action: LifecycleAction, trigger: ActionTrigger): boolean {
   if (action === "execute_deletion") return true;
   if (action === "archive" && trigger === "compliance_directive") return true;
   if (action === "schedule_deletion" && trigger === "platform_admin") return true;

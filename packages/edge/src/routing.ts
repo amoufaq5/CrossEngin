@@ -14,12 +14,7 @@ export const ROUTING_STRATEGIES = [
 export type RoutingStrategy = (typeof ROUTING_STRATEGIES)[number];
 export const RoutingStrategySchema = z.enum(ROUTING_STRATEGIES);
 
-export const ROUTING_DECISIONS = [
-  "primary",
-  "failover",
-  "blackhole",
-  "redirect",
-] as const;
+export const ROUTING_DECISIONS = ["primary", "failover", "blackhole", "redirect"] as const;
 export type RoutingDecision = (typeof ROUTING_DECISIONS)[number];
 
 export const RegionWeightSchema = z.object({
@@ -114,54 +109,43 @@ export const RoutingRuleSchema = z
   });
 export type RoutingRule = z.infer<typeof RoutingRuleSchema>;
 
-export const RoutingTableSchema = z
-  .array(RoutingRuleSchema)
-  .superRefine((rules, ctx) => {
-    const ids = new Set<string>();
-    rules.forEach((r, i) => {
-      if (ids.has(r.id)) {
+export const RoutingTableSchema = z.array(RoutingRuleSchema).superRefine((rules, ctx) => {
+  const ids = new Set<string>();
+  rules.forEach((r, i) => {
+    if (ids.has(r.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate routing rule id '${r.id}'`,
+      });
+    }
+    ids.add(r.id);
+  });
+  const priorityToCountries = new Map<number, Set<string>>();
+  rules.forEach((r, i) => {
+    const bucket = priorityToCountries.get(r.priority) ?? new Set<string>();
+    for (const country of r.sourceCountries) {
+      if (bucket.has(country)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate routing rule id '${r.id}'`,
+          path: [i, "sourceCountries"],
+          message: `country '${country}' is matched by another rule at the same priority ${r.priority}`,
         });
       }
-      ids.add(r.id);
-    });
-    const priorityToCountries = new Map<number, Set<string>>();
-    rules.forEach((r, i) => {
-      const bucket = priorityToCountries.get(r.priority) ?? new Set<string>();
-      for (const country of r.sourceCountries) {
-        if (bucket.has(country)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "sourceCountries"],
-            message: `country '${country}' is matched by another rule at the same priority ${r.priority}`,
-          });
-        }
-        bucket.add(country);
-      }
-      priorityToCountries.set(r.priority, bucket);
-    });
+      bucket.add(country);
+    }
+    priorityToCountries.set(r.priority, bucket);
   });
+});
 export type RoutingTable = z.infer<typeof RoutingTableSchema>;
 
-export function rulesForCountry(
-  table: RoutingTable,
-  country: string,
-): readonly RoutingRule[] {
+export function rulesForCountry(table: RoutingTable, country: string): readonly RoutingRule[] {
   return [...table]
-    .filter(
-      (r) =>
-        r.sourceCountries.length === 0 || r.sourceCountries.includes(country),
-    )
+    .filter((r) => r.sourceCountries.length === 0 || r.sourceCountries.includes(country))
     .sort((a, b) => a.priority - b.priority);
 }
 
-export function pickRegion(
-  rule: RoutingRule,
-  random: number = Math.random(),
-): Region | null {
+export function pickRegion(rule: RoutingRule, random: number = Math.random()): Region | null {
   if (rule.decision === "blackhole") return null;
   if (rule.strategy === "weighted") {
     let cumulative = 0;

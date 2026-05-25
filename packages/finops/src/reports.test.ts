@@ -92,9 +92,9 @@ describe("CostReportSchema", () => {
   });
 
   it("rejects breakdown sum mismatch", () => {
-    expect(() =>
-      CostReportSchema.parse({ ...base, totalCostCents: 200_000 }),
-    ).toThrow(/breakdown sum/);
+    expect(() => CostReportSchema.parse({ ...base, totalCostCents: 200_000 })).toThrow(
+      /breakdown sum/,
+    );
   });
 
   it("rejects duplicate categories in breakdown", () => {

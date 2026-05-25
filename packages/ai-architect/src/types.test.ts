@@ -84,9 +84,7 @@ describe("AgentToolCallSchema", () => {
   });
 
   it("rejects an unknown tool name", () => {
-    expect(() =>
-      AgentToolCallSchema.parse({ tool: "magicWand", args: {} }),
-    ).toThrow();
+    expect(() => AgentToolCallSchema.parse({ tool: "magicWand", args: {} })).toThrow();
   });
 
   it("rejects an applyManifestPatch missing approvalToken", () => {

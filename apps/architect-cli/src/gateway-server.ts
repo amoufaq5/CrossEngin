@@ -83,8 +83,7 @@ export async function startGatewayServer(
   });
 
   const address = server.address();
-  const boundPort =
-    address !== null && typeof address === "object" ? address.port : opts.port;
+  const boundPort = address !== null && typeof address === "object" ? address.port : opts.port;
 
   return {
     host,
@@ -196,7 +195,8 @@ export function buildIncomingFromNode(
   }
   const remoteAddress = input.req.socket.remoteAddress ?? "127.0.0.1";
   const isEncrypted =
-    "encrypted" in input.req.socket && Boolean((input.req.socket as { encrypted?: boolean }).encrypted);
+    "encrypted" in input.req.socket &&
+    Boolean((input.req.socket as { encrypted?: boolean }).encrypted);
   return buildIncomingRequest({
     id: input.requestId,
     receivedAt: input.receivedAtIso,

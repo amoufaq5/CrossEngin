@@ -145,7 +145,10 @@ export const MobileShellConfigSchema = z
   .object({
     appName: z.string().min(1).max(30),
     appId: z.string().regex(/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/),
-    minIosVersion: z.string().regex(/^\d+\.\d+$/).default("16.4"),
+    minIosVersion: z
+      .string()
+      .regex(/^\d+\.\d+$/)
+      .default("16.4"),
     minAndroidApiLevel: z.number().int().min(21).max(40).default(29),
     plugins: NativePluginCatalogSchema,
     liveUpdateChannels: z.array(LiveUpdateChannelSchema).min(1),
@@ -159,7 +162,8 @@ export const MobileShellConfigSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["biometricUnlockOnAppOpen"],
-        message: "phiOfflineCacheEnabled=true requires biometricUnlockOnAppOpen=true (per ADR-0019)",
+        message:
+          "phiOfflineCacheEnabled=true requires biometricUnlockOnAppOpen=true (per ADR-0019)",
       });
     }
     const channelIds = new Set<string>();
@@ -181,9 +185,7 @@ export function selectChannel(
   kind: LiveUpdateChannelKind,
   region: string,
 ): LiveUpdateChannel | null {
-  return (
-    shell.liveUpdateChannels.find((c) => c.kind === kind && c.region === region) ?? null
-  );
+  return shell.liveUpdateChannels.find((c) => c.kind === kind && c.region === region) ?? null;
 }
 
 export function pluginsForCapability(

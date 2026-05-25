@@ -23,23 +23,19 @@ export const INCIDENT_STATUSES = [
 export type IncidentStatus = (typeof INCIDENT_STATUSES)[number];
 export const IncidentStatusSchema = z.enum(INCIDENT_STATUSES);
 
-export const INCIDENT_TRANSITIONS: Readonly<
-  Record<IncidentStatus, readonly IncidentStatus[]>
-> = Object.freeze({
-  declared: ["triaged", "cancelled"],
-  triaged: ["mitigating", "cancelled"],
-  mitigating: ["mitigated", "resolved", "cancelled"],
-  mitigated: ["resolved", "mitigating"],
-  resolved: ["postmortem_pending", "closed"],
-  postmortem_pending: ["closed"],
-  closed: [],
-  cancelled: [],
-});
+export const INCIDENT_TRANSITIONS: Readonly<Record<IncidentStatus, readonly IncidentStatus[]>> =
+  Object.freeze({
+    declared: ["triaged", "cancelled"],
+    triaged: ["mitigating", "cancelled"],
+    mitigating: ["mitigated", "resolved", "cancelled"],
+    mitigated: ["resolved", "mitigating"],
+    resolved: ["postmortem_pending", "closed"],
+    postmortem_pending: ["closed"],
+    closed: [],
+    cancelled: [],
+  });
 
-export function canTransitionIncident(
-  from: IncidentStatus,
-  to: IncidentStatus,
-): boolean {
+export function canTransitionIncident(from: IncidentStatus, to: IncidentStatus): boolean {
   return INCIDENT_TRANSITIONS[from].includes(to);
 }
 
@@ -143,9 +139,7 @@ export const IncidentRecordSchema = z
       });
     }
     if (
-      (v.status === "resolved" ||
-        v.status === "postmortem_pending" ||
-        v.status === "closed") &&
+      (v.status === "resolved" || v.status === "postmortem_pending" || v.status === "closed") &&
       v.resolvedAt === null
     ) {
       ctx.addIssue({
@@ -189,9 +183,7 @@ export const IncidentRecordSchema = z
     const required = v.severity === "sev1" ? SEV1_REQUIRED_ROLES : REQUIRED_ROLES;
     const missing = rolesMissingRequired(v.roleAssignments, required);
     if (
-      (v.status === "triaged" ||
-        v.status === "mitigating" ||
-        v.status === "mitigated") &&
+      (v.status === "triaged" || v.status === "mitigating" || v.status === "mitigated") &&
       missing.length > 0
     ) {
       ctx.addIssue({
@@ -226,7 +218,12 @@ export const IncidentRecordSchema = z
       tenantSet.add(t);
     });
     const profile = profileFor(v.severity);
-    if (profile.requiresStatusPage && !v.publiclyVisible && v.status !== "declared" && v.status !== "cancelled") {
+    if (
+      profile.requiresStatusPage &&
+      !v.publiclyVisible &&
+      v.status !== "declared" &&
+      v.status !== "cancelled"
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["publiclyVisible"],

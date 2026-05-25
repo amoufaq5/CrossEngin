@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  PERMISSION_ERROR_KINDS,
-  isPermissionError,
-  isPermissionErrorKind,
-} from "./permission.js";
+import { PERMISSION_ERROR_KINDS, isPermissionError, isPermissionErrorKind } from "./permission.js";
 
 describe("PERMISSION_ERROR_KINDS", () => {
   it("includes permission_error (HTTP 403 across all three providers)", () => {
@@ -103,9 +99,7 @@ describe("isPermissionError — Error-shaped inputs", () => {
   });
 
   it("returns false for authentication_error (HTTP 401 — adjacent but distinct)", () => {
-    expect(isPermissionError(fakeProviderError("authentication_error"))).toBe(
-      false,
-    );
+    expect(isPermissionError(fakeProviderError("authentication_error"))).toBe(false);
   });
 
   it("returns false for not_found_error (HTTP 404)", () => {
@@ -117,9 +111,7 @@ describe("isPermissionError — Error-shaped inputs", () => {
   });
 
   it("returns false for invalid_request_error", () => {
-    expect(isPermissionError(fakeProviderError("invalid_request_error"))).toBe(
-      false,
-    );
+    expect(isPermissionError(fakeProviderError("invalid_request_error"))).toBe(false);
   });
 
   it("returns false for retryable kinds", () => {
@@ -128,9 +120,7 @@ describe("isPermissionError — Error-shaped inputs", () => {
   });
 
   it("returns false for moderation kinds", () => {
-    expect(isPermissionError(fakeProviderError("guardrail_intervened"))).toBe(
-      false,
-    );
+    expect(isPermissionError(fakeProviderError("guardrail_intervened"))).toBe(false);
     expect(isPermissionError(fakeProviderError("content_filtered"))).toBe(false);
   });
 

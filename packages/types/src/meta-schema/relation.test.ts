@@ -66,15 +66,11 @@ describe("RelationSchema", () => {
   });
 
   it("rejects many_to_many missing right side", () => {
-    expect(() =>
-      RelationSchema.parse({ kind: "many_to_many", left: "Doctor" }),
-    ).toThrow();
+    expect(() => RelationSchema.parse({ kind: "many_to_many", left: "Doctor" })).toThrow();
   });
 
   it("rejects unknown relation kind", () => {
-    expect(() =>
-      RelationSchema.parse({ kind: "self_referential", from: "X", to: "X" }),
-    ).toThrow();
+    expect(() => RelationSchema.parse({ kind: "self_referential", from: "X", to: "X" })).toThrow();
   });
 
   it("rejects unknown onDelete value", () => {

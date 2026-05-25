@@ -7,12 +7,7 @@ export const API_VERSIONS = ["v1", "v2"] as const;
 export type ApiVersion = (typeof API_VERSIONS)[number];
 export const ApiVersionSchema = z.enum(API_VERSIONS);
 
-export const API_VERSION_STATUSES = [
-  "preview",
-  "stable",
-  "deprecated",
-  "sunset",
-] as const;
+export const API_VERSION_STATUSES = ["preview", "stable", "deprecated", "sunset"] as const;
 export type ApiVersionStatus = (typeof API_VERSION_STATUSES)[number];
 export const ApiVersionStatusSchema = z.enum(API_VERSION_STATUSES);
 
@@ -27,10 +22,7 @@ export const ApiVersionSpecSchema = z
     breakingChangeCount: z.number().int().nonnegative().default(0),
   })
   .superRefine((v, ctx) => {
-    if (
-      (v.status === "deprecated" || v.status === "sunset") &&
-      v.deprecatedAt === null
-    ) {
+    if ((v.status === "deprecated" || v.status === "sunset") && v.deprecatedAt === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["deprecatedAt"],
@@ -55,10 +47,7 @@ export const ApiVersionSpecSchema = z
         });
       }
     }
-    if (
-      (v.status === "deprecated" || v.status === "sunset") &&
-      v.migrationGuideUrl === undefined
-    ) {
+    if ((v.status === "deprecated" || v.status === "sunset") && v.migrationGuideUrl === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["migrationGuideUrl"],
@@ -68,42 +57,35 @@ export const ApiVersionSpecSchema = z
   });
 export type ApiVersionSpec = z.infer<typeof ApiVersionSpecSchema>;
 
-export const ApiVersionCatalogSchema = z
-  .array(ApiVersionSpecSchema)
-  .superRefine((entries, ctx) => {
-    const versions = new Set<ApiVersion>();
-    let stableCount = 0;
-    entries.forEach((e, i) => {
-      if (versions.has(e.version)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i],
-          message: `duplicate version '${e.version}'`,
-        });
-      }
-      versions.add(e.version);
-      if (e.status === "stable") stableCount++;
-    });
-    if (stableCount > 1) {
+export const ApiVersionCatalogSchema = z.array(ApiVersionSpecSchema).superRefine((entries, ctx) => {
+  const versions = new Set<ApiVersion>();
+  let stableCount = 0;
+  entries.forEach((e, i) => {
+    if (versions.has(e.version)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: [],
-        message: `at most one version can be 'stable' (found ${stableCount})`,
+        path: [i],
+        message: `duplicate version '${e.version}'`,
       });
     }
+    versions.add(e.version);
+    if (e.status === "stable") stableCount++;
   });
+  if (stableCount > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [],
+      message: `at most one version can be 'stable' (found ${stableCount})`,
+    });
+  }
+});
 export type ApiVersionCatalog = z.infer<typeof ApiVersionCatalogSchema>;
 
-export function currentStableVersion(
-  catalog: ApiVersionCatalog,
-): ApiVersionSpec | null {
+export function currentStableVersion(catalog: ApiVersionCatalog): ApiVersionSpec | null {
   return catalog.find((v) => v.status === "stable") ?? null;
 }
 
-export function daysUntilSunset(
-  spec: ApiVersionSpec,
-  now: Date = new Date(),
-): number | null {
+export function daysUntilSunset(spec: ApiVersionSpec, now: Date = new Date()): number | null {
   if (spec.sunsetAt === null) return null;
   const ms = new Date(spec.sunsetAt).getTime() - now.getTime();
   return Math.floor(ms / 1000 / SECONDS_PER_DAY);

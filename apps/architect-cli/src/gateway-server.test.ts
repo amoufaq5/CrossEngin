@@ -191,7 +191,11 @@ describe("startGatewayServer integration", () => {
     });
   }
 
-  function curl(host: string, port: number, path: string): Promise<{ status: number; body: string }> {
+  function curl(
+    host: string,
+    port: number,
+    path: string,
+  ): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
       const req = nodeRequest({ host, port, path, method: "GET" }, (res) => {
         const chunks: Buffer[] = [];

@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  ANTHROPIC_FILES_BETA_HEADER,
-  buildAnthropicMultipartUpload,
-} from "./files-api.js";
+import { ANTHROPIC_FILES_BETA_HEADER, buildAnthropicMultipartUpload } from "./files-api.js";
 
 describe("ANTHROPIC_FILES_BETA_HEADER", () => {
   it("is the documented beta header value", () => {
@@ -37,9 +34,7 @@ describe("buildAnthropicMultipartUpload", () => {
       bytes: new TextEncoder().encode("X"),
       filename: "x.bin",
     });
-    expect(decodeBody(result.body)).toContain(
-      "Content-Type: application/octet-stream",
-    );
+    expect(decodeBody(result.body)).toContain("Content-Type: application/octet-stream");
   });
 
   it("escapes quotes in filename", () => {
@@ -47,9 +42,7 @@ describe("buildAnthropicMultipartUpload", () => {
       bytes: new TextEncoder().encode("X"),
       filename: 'file"name".pdf',
     });
-    expect(decodeBody(result.body)).toContain(
-      'filename="file\\"name\\".pdf"',
-    );
+    expect(decodeBody(result.body)).toContain('filename="file\\"name\\".pdf"');
   });
 
   it("rejects empty filename", () => {
@@ -100,8 +93,9 @@ describe("buildAnthropicMultipartUpload", () => {
       filename: "x.pdf",
     });
     const text = decodeBody(result.body);
-    const boundaryMatch =
-      /boundary=(-+CrossEnginAnthropicBoundary[a-z0-9]+)/.exec(result.contentType);
+    const boundaryMatch = /boundary=(-+CrossEnginAnthropicBoundary[a-z0-9]+)/.exec(
+      result.contentType,
+    );
     expect(boundaryMatch).not.toBeNull();
     expect(text).toMatch(new RegExp(`--${boundaryMatch![1]}--\\r\\n$`));
   });

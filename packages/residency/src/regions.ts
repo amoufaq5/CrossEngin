@@ -62,39 +62,37 @@ export const RegionRecordSchema = z.object({
 });
 export type RegionRecord = z.infer<typeof RegionRecordSchema>;
 
-export const RegionCatalogSchema = z
-  .array(RegionRecordSchema)
-  .superRefine((records, ctx) => {
-    const seen = new Set<Region>();
-    records.forEach((r, i) => {
-      if (seen.has(r.region)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "region"],
-          message: `duplicate region '${r.region}'`,
-        });
-      }
-      seen.add(r.region);
-    });
-
-    const byRegion = new Map(records.map((r) => [r.region, r]));
-    records.forEach((r, i) => {
-      if (r.drReplicaOf !== undefined && !byRegion.has(r.drReplicaOf)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "drReplicaOf"],
-          message: `drReplicaOf references unknown region '${r.drReplicaOf}'`,
-        });
-      }
-      if (r.drReplicaIn !== undefined && !byRegion.has(r.drReplicaIn)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "drReplicaIn"],
-          message: `drReplicaIn references unknown region '${r.drReplicaIn}'`,
-        });
-      }
-    });
+export const RegionCatalogSchema = z.array(RegionRecordSchema).superRefine((records, ctx) => {
+  const seen = new Set<Region>();
+  records.forEach((r, i) => {
+    if (seen.has(r.region)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "region"],
+        message: `duplicate region '${r.region}'`,
+      });
+    }
+    seen.add(r.region);
   });
+
+  const byRegion = new Map(records.map((r) => [r.region, r]));
+  records.forEach((r, i) => {
+    if (r.drReplicaOf !== undefined && !byRegion.has(r.drReplicaOf)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "drReplicaOf"],
+        message: `drReplicaOf references unknown region '${r.drReplicaOf}'`,
+      });
+    }
+    if (r.drReplicaIn !== undefined && !byRegion.has(r.drReplicaIn)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "drReplicaIn"],
+        message: `drReplicaIn references unknown region '${r.drReplicaIn}'`,
+      });
+    }
+  });
+});
 export type RegionCatalog = z.infer<typeof RegionCatalogSchema>;
 
 export const DEFAULT_REGION_CATALOG: RegionCatalog = [

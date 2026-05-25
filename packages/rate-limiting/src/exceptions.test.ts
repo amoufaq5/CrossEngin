@@ -146,14 +146,10 @@ describe("RateLimitExceptionSchema", () => {
 
 describe("isExceptionActive", () => {
   it("returns true for active within expiry", () => {
-    expect(
-      isExceptionActive(baseException, new Date("2026-11-25T12:00:00Z")),
-    ).toBe(true);
+    expect(isExceptionActive(baseException, new Date("2026-11-25T12:00:00Z"))).toBe(true);
   });
   it("returns false past expiry", () => {
-    expect(
-      isExceptionActive(baseException, new Date("2026-12-01T00:00:00Z")),
-    ).toBe(false);
+    expect(isExceptionActive(baseException, new Date("2026-12-01T00:00:00Z"))).toBe(false);
   });
 });
 
@@ -162,9 +158,7 @@ describe("applyException", () => {
     expect(applyException(100, baseException)).toBe(300);
   });
   it("multiplier < 1 with additive yields capped tighter limit", () => {
-    expect(
-      applyException(100, { ...baseException, multiplier: 0.5, additiveBurst: 10 }),
-    ).toBe(60);
+    expect(applyException(100, { ...baseException, multiplier: 0.5, additiveBurst: 10 })).toBe(60);
   });
 });
 

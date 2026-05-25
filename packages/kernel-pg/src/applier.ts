@@ -1,13 +1,6 @@
 import type { PgConnection } from "./connection.js";
-import {
-  ensureMigrationLog,
-  isStatementApplied,
-  recordStatement,
-} from "./migration-log.js";
-import {
-  type PreconditionReport,
-  checkPreconditions,
-} from "./preconditions.js";
+import { ensureMigrationLog, isStatementApplied, recordStatement } from "./migration-log.js";
+import { type PreconditionReport, checkPreconditions } from "./preconditions.js";
 import { excerptStatement, hashStatement } from "./statement-hash.js";
 
 export const ADVISORY_LOCK_KEY: bigint = 8_675_309n;
@@ -114,14 +107,7 @@ export class MigrationApplier {
         } catch (err) {
           const durationMs = this.now() - stmtStart;
           const errorMessage = err instanceof Error ? err.message : String(err);
-          await recordStatement(
-            this.connection,
-            this.schema,
-            sql,
-            durationMs,
-            false,
-            errorMessage,
-          );
+          await recordStatement(this.connection, this.schema, sql, durationMs, false, errorMessage);
           records.push({
             statementHash,
             excerpt,

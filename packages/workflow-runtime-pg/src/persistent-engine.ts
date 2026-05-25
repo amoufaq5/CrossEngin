@@ -34,9 +34,7 @@ export interface PersistentEngineBundle {
   readonly stores: PersistentStores;
 }
 
-export function buildPersistentEngine(
-  input: BuildPersistentEngineInput,
-): PersistentEngineBundle {
+export function buildPersistentEngine(input: BuildPersistentEngineInput): PersistentEngineBundle {
   const stores = buildPersistentStores({ conn: input.conn });
   const innerEventLog = new PostgresEventLog({
     conn: input.conn,

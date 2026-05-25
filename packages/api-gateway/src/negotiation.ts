@@ -14,13 +14,7 @@ export const COMMON_CONTENT_TYPES = [
 ] as const;
 export type CommonContentType = (typeof COMMON_CONTENT_TYPES)[number];
 
-export const SUPPORTED_ENCODINGS = [
-  "identity",
-  "gzip",
-  "br",
-  "deflate",
-  "zstd",
-] as const;
+export const SUPPORTED_ENCODINGS = ["identity", "gzip", "br", "deflate", "zstd"] as const;
 export type SupportedEncoding = (typeof SUPPORTED_ENCODINGS)[number];
 
 export interface AcceptEntry {
@@ -29,9 +23,7 @@ export interface AcceptEntry {
   readonly parameters: Readonly<Record<string, string>>;
 }
 
-export const parseAcceptHeader = (
-  header: string | null,
-): readonly AcceptEntry[] => {
+export const parseAcceptHeader = (header: string | null): readonly AcceptEntry[] => {
   if (header === null || header.trim().length === 0) return [];
   return header
     .split(",")
@@ -52,7 +44,10 @@ const parseAcceptPiece = (piece: string): AcceptEntry | null => {
     const eqIdx = seg.indexOf("=");
     if (eqIdx === -1) continue;
     const k = seg.slice(0, eqIdx).trim();
-    const v = seg.slice(eqIdx + 1).trim().replace(/^"|"$/g, "");
+    const v = seg
+      .slice(eqIdx + 1)
+      .trim()
+      .replace(/^"|"$/g, "");
     if (k === "q") {
       const parsed = Number(v);
       if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
@@ -65,10 +60,7 @@ const parseAcceptPiece = (piece: string): AcceptEntry | null => {
   return { mediaType, quality, parameters };
 };
 
-export const matchesMediaType = (
-  pattern: string,
-  candidate: string,
-): boolean => {
+export const matchesMediaType = (pattern: string, candidate: string): boolean => {
   if (pattern === "*/*") return true;
   if (pattern === candidate) return true;
   const [pType, pSub] = pattern.split("/");
@@ -158,14 +150,11 @@ export const ContentNegotiationDecisionSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["rejectedReason"],
-        message:
-          "rejected content type requires rejectedReason",
+        message: "rejected content type requires rejectedReason",
       });
     }
   });
-export type ContentNegotiationDecision = z.infer<
-  typeof ContentNegotiationDecisionSchema
->;
+export type ContentNegotiationDecision = z.infer<typeof ContentNegotiationDecisionSchema>;
 
 export const parseAcceptLanguageHeader = (
   header: string | null,
@@ -205,8 +194,8 @@ export const selectResponseLanguage = (input: {
     if (input.availableLanguages.includes(e.tag)) return e.tag;
     const baseTag = e.tag.split("-")[0];
     if (baseTag !== undefined) {
-      const fallback = input.availableLanguages.find((l) =>
-        l.startsWith(`${baseTag}-`) || l === baseTag,
+      const fallback = input.availableLanguages.find(
+        (l) => l.startsWith(`${baseTag}-`) || l === baseTag,
       );
       if (fallback !== undefined) return fallback;
     }

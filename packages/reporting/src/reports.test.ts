@@ -25,15 +25,15 @@ describe("ReportFilterSchema", () => {
   });
 
   it("rejects a single-value operator missing value", () => {
-    expect(() =>
-      ReportFilterSchema.parse({ field: "status", operator: "eq" }),
-    ).toThrow(/requires 'value'/);
+    expect(() => ReportFilterSchema.parse({ field: "status", operator: "eq" })).toThrow(
+      /requires 'value'/,
+    );
   });
 
   it("rejects an array operator missing values", () => {
-    expect(() =>
-      ReportFilterSchema.parse({ field: "status", operator: "in" }),
-    ).toThrow(/non-empty 'values' array/);
+    expect(() => ReportFilterSchema.parse({ field: "status", operator: "in" })).toThrow(
+      /non-empty 'values' array/,
+    );
   });
 
   it("accepts a between operator with range tuple", () => {
@@ -59,9 +59,7 @@ describe("AggregationSchema", () => {
   });
 
   it("sum requires field", () => {
-    expect(() => AggregationSchema.parse({ name: "s", kind: "sum" })).toThrow(
-      /requires a 'field'/,
-    );
+    expect(() => AggregationSchema.parse({ name: "s", kind: "sum" })).toThrow(/requires a 'field'/);
   });
 
   it("AGGREGATION_KINDS includes count_distinct + p95", () => {

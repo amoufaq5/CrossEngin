@@ -1,14 +1,7 @@
 import type { Bcp47Locale } from "./locales.js";
 import { languageOf } from "./locales.js";
 
-export const PLURAL_CATEGORIES = [
-  "zero",
-  "one",
-  "two",
-  "few",
-  "many",
-  "other",
-] as const;
+export const PLURAL_CATEGORIES = ["zero", "one", "two", "few", "many", "other"] as const;
 export type PluralCategory = (typeof PLURAL_CATEGORIES)[number];
 
 export const PLURAL_TYPES = ["cardinal", "ordinal"] as const;

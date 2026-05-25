@@ -103,9 +103,9 @@ describe("FeatureFlagSchema", () => {
   });
 
   it("rejects a boolean flag with string defaultValue", () => {
-    expect(() =>
-      FeatureFlagSchema.parse({ ...base, defaultValue: "true" }),
-    ).toThrow(/boolean defaultValue/);
+    expect(() => FeatureFlagSchema.parse({ ...base, defaultValue: "true" })).toThrow(
+      /boolean defaultValue/,
+    );
   });
 
   it("rejects an archived flag that's still enabled", () => {

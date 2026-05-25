@@ -112,9 +112,7 @@ describe("ClientReleaseSchema", () => {
   });
 
   it("rejects published without publishedBy", () => {
-    expect(() =>
-      ClientReleaseSchema.parse({ ...base, publishedBy: null }),
-    ).toThrow(/publishedBy/);
+    expect(() => ClientReleaseSchema.parse({ ...base, publishedBy: null })).toThrow(/publishedBy/);
   });
 
   it("rejects deprecated without reason", () => {
@@ -138,15 +136,13 @@ describe("ClientReleaseSchema", () => {
   });
 
   it("rejects stable channel with pre-release version", () => {
-    expect(() =>
-      ClientReleaseSchema.parse({ ...base, version: "1.2.0-beta.1" }),
-    ).toThrow(/plain semver/);
+    expect(() => ClientReleaseSchema.parse({ ...base, version: "1.2.0-beta.1" })).toThrow(
+      /plain semver/,
+    );
   });
 
   it("rejects beta channel without pre-release", () => {
-    expect(() =>
-      ClientReleaseSchema.parse({ ...base, channel: "beta" }),
-    ).toThrow(/pre-release/);
+    expect(() => ClientReleaseSchema.parse({ ...base, channel: "beta" })).toThrow(/pre-release/);
   });
 
   it("rejects critical advisory on non-yanked/deprecated release", () => {

@@ -19,27 +19,21 @@ export const PAYMENT_LIFECYCLE_WORKFLOW: Workflow = {
       from: "pending",
       to: "captured",
       trigger: { kind: "automatic" },
-      guards: [
-        { kind: "permission", permission: "Payment.transition.capture" },
-      ],
+      guards: [{ kind: "permission", permission: "Payment.transition.capture" }],
     },
     {
       name: "settle",
       from: "captured",
       to: "settled",
       trigger: { kind: "automatic" },
-      guards: [
-        { kind: "permission", permission: "Payment.transition.settle" },
-      ],
+      guards: [{ kind: "permission", permission: "Payment.transition.settle" }],
     },
     {
       name: "refund",
       from: ["captured", "settled"],
       to: "refunded",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Payment.transition.refund" },
-      ],
+      guards: [{ kind: "permission", permission: "Payment.transition.refund" }],
     },
     {
       name: "fail",
@@ -52,9 +46,7 @@ export const PAYMENT_LIFECYCLE_WORKFLOW: Workflow = {
       from: "pending",
       to: "cancelled",
       trigger: { kind: "userAction" },
-      guards: [
-        { kind: "permission", permission: "Payment.transition.cancel" },
-      ],
+      guards: [{ kind: "permission", permission: "Payment.transition.cancel" }],
     },
   ],
   slas: [

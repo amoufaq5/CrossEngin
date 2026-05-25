@@ -7,14 +7,13 @@ export const GRANT_STATUSES = ["pending", "granted", "denied", "revoked"] as con
 export type GrantStatus = (typeof GRANT_STATUSES)[number];
 export const GrantStatusSchema = z.enum(GRANT_STATUSES);
 
-export const GRANT_TRANSITIONS: Readonly<
-  Record<GrantStatus, readonly GrantStatus[]>
-> = Object.freeze({
-  pending: ["granted", "denied"],
-  granted: ["revoked"],
-  denied: ["pending"],
-  revoked: ["pending"],
-});
+export const GRANT_TRANSITIONS: Readonly<Record<GrantStatus, readonly GrantStatus[]>> =
+  Object.freeze({
+    pending: ["granted", "denied"],
+    granted: ["revoked"],
+    denied: ["pending"],
+    revoked: ["pending"],
+  });
 
 export function canTransitionGrant(from: GrantStatus, to: GrantStatus): boolean {
   return GRANT_TRANSITIONS[from].includes(to);
@@ -84,21 +83,19 @@ export const ScopeGrantSchema = z
   });
 export type ScopeGrant = z.infer<typeof ScopeGrantSchema>;
 
-export const PermissionGrantSetSchema = z
-  .array(ScopeGrantSchema)
-  .superRefine((entries, ctx) => {
-    const scopes = new Set<ScopeKey>();
-    entries.forEach((e, i) => {
-      if (scopes.has(e.scope)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "scope"],
-          message: `duplicate scope '${e.scope}'`,
-        });
-      }
-      scopes.add(e.scope);
-    });
+export const PermissionGrantSetSchema = z.array(ScopeGrantSchema).superRefine((entries, ctx) => {
+  const scopes = new Set<ScopeKey>();
+  entries.forEach((e, i) => {
+    if (scopes.has(e.scope)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "scope"],
+        message: `duplicate scope '${e.scope}'`,
+      });
+    }
+    scopes.add(e.scope);
   });
+});
 export type PermissionGrantSet = z.infer<typeof PermissionGrantSetSchema>;
 
 export interface PermissionRequest {
@@ -118,9 +115,7 @@ export interface PermissionResolution {
   readonly pendingScopes: readonly ScopeKey[];
 }
 
-export function resolvePermissions(
-  input: PermissionResolutionInput,
-): PermissionResolution {
+export function resolvePermissions(input: PermissionResolutionInput): PermissionResolution {
   const grantedSet = new Set<ScopeKey>();
   const pendingSet = new Set<ScopeKey>();
   for (const g of input.grants) {
@@ -147,9 +142,7 @@ export function resolvePermissions(
   };
 }
 
-export function buildInitialGrantSet(
-  request: PermissionRequest,
-): PermissionGrantSet {
+export function buildInitialGrantSet(request: PermissionRequest): PermissionGrantSet {
   const out: ScopeGrant[] = [];
   for (const scope of request.requiredScopes) {
     out.push({

@@ -42,9 +42,7 @@ describe("inferTypeFromSample", () => {
   });
 
   it("infers uuid", () => {
-    expect(
-      inferTypeFromSample("550e8400-e29b-41d4-a716-446655440000"),
-    ).toBe("uuid");
+    expect(inferTypeFromSample("550e8400-e29b-41d4-a716-446655440000")).toBe("uuid");
   });
 
   it("infers email", () => {
@@ -137,9 +135,7 @@ describe("InferredColumnSchema", () => {
   });
 
   it("rejects malformed column name", () => {
-    expect(() =>
-      InferredColumnSchema.parse({ ...base, name: "1invalid" }),
-    ).toThrow();
+    expect(() => InferredColumnSchema.parse({ ...base, name: "1invalid" })).toThrow();
   });
 
   it("rejects distinctSamples > total samples", () => {

@@ -1,12 +1,7 @@
 import { BedrockError } from "./errors.js";
 
-export const BEDROCK_MODEL_IMPORT_JOB_STATUSES = [
-  "InProgress",
-  "Completed",
-  "Failed",
-] as const;
-export type BedrockModelImportJobStatus =
-  (typeof BEDROCK_MODEL_IMPORT_JOB_STATUSES)[number];
+export const BEDROCK_MODEL_IMPORT_JOB_STATUSES = ["InProgress", "Completed", "Failed"] as const;
+export type BedrockModelImportJobStatus = (typeof BEDROCK_MODEL_IMPORT_JOB_STATUSES)[number];
 
 export function isBedrockModelImportJobStatus(
   value: unknown,
@@ -23,13 +18,9 @@ export const BEDROCK_MODEL_IMPORT_JOB_NAME_CONTAINS_MIN_LEN = 1;
 export const BEDROCK_MODEL_IMPORT_JOB_NAME_CONTAINS_MAX_LEN = 63;
 
 export const BEDROCK_MODEL_IMPORT_JOB_SORT_BY_VALUES = ["CreationTime"] as const;
-export type BedrockModelImportJobSortBy =
-  (typeof BEDROCK_MODEL_IMPORT_JOB_SORT_BY_VALUES)[number];
+export type BedrockModelImportJobSortBy = (typeof BEDROCK_MODEL_IMPORT_JOB_SORT_BY_VALUES)[number];
 
-export const BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES = [
-  "Ascending",
-  "Descending",
-] as const;
+export const BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES = ["Ascending", "Descending"] as const;
 export type BedrockModelImportJobSortOrder =
   (typeof BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES)[number];
 
@@ -78,9 +69,7 @@ export interface BedrockModelImportJobDetail {
   readonly importedModelKmsKeyArn?: string;
 }
 
-export function parseModelImportJobDetail(
-  raw: unknown,
-): BedrockModelImportJobDetail {
+export function parseModelImportJobDetail(raw: unknown): BedrockModelImportJobDetail {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -110,34 +99,22 @@ export function parseModelImportJobDetail(
     creationTime,
     modelDataSource,
   };
-  if (
-    typeof j["importedModelName"] === "string" &&
-    j["importedModelName"].length > 0
-  ) {
+  if (typeof j["importedModelName"] === "string" && j["importedModelName"].length > 0) {
     out.importedModelName = j["importedModelName"];
   }
-  if (
-    typeof j["importedModelArn"] === "string" &&
-    j["importedModelArn"].length > 0
-  ) {
+  if (typeof j["importedModelArn"] === "string" && j["importedModelArn"].length > 0) {
     out.importedModelArn = j["importedModelArn"];
   }
   if (typeof j["failureMessage"] === "string" && j["failureMessage"].length > 0) {
     out.failureMessage = j["failureMessage"];
   }
-  if (
-    typeof j["lastModifiedTime"] === "string" &&
-    j["lastModifiedTime"].length > 0
-  ) {
+  if (typeof j["lastModifiedTime"] === "string" && j["lastModifiedTime"].length > 0) {
     out.lastModifiedTime = j["lastModifiedTime"];
   }
   if (typeof j["endTime"] === "string" && j["endTime"].length > 0) {
     out.endTime = j["endTime"];
   }
-  if (
-    typeof j["importedModelKmsKeyArn"] === "string" &&
-    j["importedModelKmsKeyArn"].length > 0
-  ) {
+  if (typeof j["importedModelKmsKeyArn"] === "string" && j["importedModelKmsKeyArn"].length > 0) {
     out.importedModelKmsKeyArn = j["importedModelKmsKeyArn"];
   }
   if (j["vpcConfig"] !== undefined && j["vpcConfig"] !== null) {
@@ -157,8 +134,7 @@ function parseModelDataSource(raw: unknown): BedrockModelImportJobDataSource {
   if (o.s3DataSource === null || typeof o.s3DataSource !== "object") {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "getModelImportJob: modelDataSource.s3DataSource is missing or not an object",
+      message: "getModelImportJob: modelDataSource.s3DataSource is missing or not an object",
     });
   }
   const inner = o.s3DataSource as Record<string, unknown>;
@@ -188,10 +164,7 @@ function parseVpcConfig(raw: unknown): BedrockModelImportJobVpcConfig {
     });
   }
   const securityGroupIds = o["securityGroupIds"];
-  if (
-    !Array.isArray(securityGroupIds) ||
-    !securityGroupIds.every((s) => typeof s === "string")
-  ) {
+  if (!Array.isArray(securityGroupIds) || !securityGroupIds.every((s) => typeof s === "string")) {
     throw new BedrockError({
       kind: "api_error",
       message: "getModelImportJob: vpcConfig.securityGroupIds is not a string[]",
@@ -292,11 +265,7 @@ export function buildModelImportJobListQuery(
     out["nextToken"] = options.nextToken;
   }
   if (options.sortBy !== undefined) {
-    if (
-      !(BEDROCK_MODEL_IMPORT_JOB_SORT_BY_VALUES as readonly string[]).includes(
-        options.sortBy,
-      )
-    ) {
+    if (!(BEDROCK_MODEL_IMPORT_JOB_SORT_BY_VALUES as readonly string[]).includes(options.sortBy)) {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `listModelImportJobs: invalid sortBy '${String(options.sortBy)}'`,
@@ -306,9 +275,7 @@ export function buildModelImportJobListQuery(
   }
   if (options.sortOrder !== undefined) {
     if (
-      !(BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES as readonly string[]).includes(
-        options.sortOrder,
-      )
+      !(BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES as readonly string[]).includes(options.sortOrder)
     ) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -320,9 +287,7 @@ export function buildModelImportJobListQuery(
   return out;
 }
 
-export function parseModelImportJobListResponse(
-  raw: unknown,
-): BedrockModelImportJobListResponse {
+export function parseModelImportJobListResponse(raw: unknown): BedrockModelImportJobListResponse {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -358,9 +323,7 @@ export function parseModelImportJobListResponse(
   return out;
 }
 
-export function parseModelImportJobSummary(
-  raw: unknown,
-): BedrockModelImportJobSummary {
+export function parseModelImportJobSummary(raw: unknown): BedrockModelImportJobSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -386,25 +349,16 @@ export function parseModelImportJobSummary(
     status,
     creationTime,
   };
-  if (
-    typeof j["lastModifiedTime"] === "string" &&
-    j["lastModifiedTime"].length > 0
-  ) {
+  if (typeof j["lastModifiedTime"] === "string" && j["lastModifiedTime"].length > 0) {
     summary.lastModifiedTime = j["lastModifiedTime"];
   }
   if (typeof j["endTime"] === "string" && j["endTime"].length > 0) {
     summary.endTime = j["endTime"];
   }
-  if (
-    typeof j["importedModelArn"] === "string" &&
-    j["importedModelArn"].length > 0
-  ) {
+  if (typeof j["importedModelArn"] === "string" && j["importedModelArn"].length > 0) {
     summary.importedModelArn = j["importedModelArn"];
   }
-  if (
-    typeof j["importedModelName"] === "string" &&
-    j["importedModelName"].length > 0
-  ) {
+  if (typeof j["importedModelName"] === "string" && j["importedModelName"].length > 0) {
     summary.importedModelName = j["importedModelName"];
   }
   return summary;

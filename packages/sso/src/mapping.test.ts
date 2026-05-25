@@ -176,10 +176,7 @@ describe("MappingSetSchema", () => {
   it("rejects duplicate target fields", () => {
     expect(() =>
       MappingSetSchema.parse({
-        claimMappings: [
-          goodEmail,
-          { ...goodEmail, id: "cm_email-2", sourceKey: "alternateEmail" },
-        ],
+        claimMappings: [goodEmail, { ...goodEmail, id: "cm_email-2", sourceKey: "alternateEmail" }],
         groupSyncRules: [],
         jitPolicy: validJitPolicy,
       }),

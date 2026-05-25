@@ -57,9 +57,7 @@ describe("negotiateAcceptLanguage", () => {
   const supported = ["en", "ar", "ar-AE", "fr"] as const;
 
   it("prefers higher-q entries", () => {
-    expect(
-      negotiateAcceptLanguage("fr;q=0.5, en;q=0.9, ar;q=0.1", supported),
-    ).toBe("en");
+    expect(negotiateAcceptLanguage("fr;q=0.5, en;q=0.9, ar;q=0.1", supported)).toBe("en");
   });
 
   it("returns null when nothing matches", () => {

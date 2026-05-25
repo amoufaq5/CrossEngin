@@ -49,9 +49,9 @@ describe("fieldTypeToPostgresType", () => {
   });
 
   it("maps array<integer> to INTEGER[]", () => {
-    expect(
-      fieldTypeToPostgresType({ kind: "array", element: { kind: "integer" } }),
-    ).toBe("INTEGER[]");
+    expect(fieldTypeToPostgresType({ kind: "array", element: { kind: "integer" } })).toBe(
+      "INTEGER[]",
+    );
   });
 
   it("maps array<text(50)> to VARCHAR(50)[]", () => {

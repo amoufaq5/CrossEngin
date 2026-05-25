@@ -8,12 +8,7 @@ import tseslint from "typescript-eslint";
 // (ADR-0246) — it is slow and surfaces a large separate backlog.
 export default tseslint.config(
   {
-    ignores: [
-      "**/dist/**",
-      "**/.next/**",
-      "**/node_modules/**",
-      "**/coverage/**",
-    ],
+    ignores: ["**/dist/**", "**/.next/**", "**/node_modules/**", "**/coverage/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

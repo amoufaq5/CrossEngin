@@ -1,10 +1,10 @@
-import type {
-  IncomingRequest,
-  ResolvedPrincipal,
-  RouteDefinition,
-} from "@crossengin/api-gateway";
+import type { IncomingRequest, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 
-import { type OutgoingResponse, outgoingResponseFromJson, emptyOutgoingResponse } from "./adapters.js";
+import {
+  type OutgoingResponse,
+  outgoingResponseFromJson,
+  emptyOutgoingResponse,
+} from "./adapters.js";
 
 export interface HandlerInput {
   readonly request: IncomingRequest;
@@ -15,9 +15,19 @@ export interface HandlerInput {
 }
 
 export type HandlerOutput =
-  | { readonly kind: "json"; readonly status: number; readonly headers?: Record<string, string>; readonly body: unknown }
+  | {
+      readonly kind: "json";
+      readonly status: number;
+      readonly headers?: Record<string, string>;
+      readonly body: unknown;
+    }
   | { readonly kind: "empty"; readonly status: number; readonly headers?: Record<string, string> }
-  | { readonly kind: "bytes"; readonly status: number; readonly headers?: Record<string, string>; readonly bodyBytes: Uint8Array };
+  | {
+      readonly kind: "bytes";
+      readonly status: number;
+      readonly headers?: Record<string, string>;
+      readonly bodyBytes: Uint8Array;
+    };
 
 export type Handler = (input: HandlerInput) => Promise<HandlerOutput> | HandlerOutput;
 

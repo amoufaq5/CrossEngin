@@ -23,9 +23,7 @@ describe("FieldTransformSchema", () => {
   });
 
   it("rejects regex_extract without pattern", () => {
-    expect(() =>
-      FieldTransformSchema.parse({ kind: "regex_extract" }),
-    ).toThrow(/pattern/);
+    expect(() => FieldTransformSchema.parse({ kind: "regex_extract" })).toThrow(/pattern/);
   });
 
   it("rejects regex_extract with invalid regex", () => {
@@ -38,9 +36,7 @@ describe("FieldTransformSchema", () => {
   });
 
   it("rejects split without delimiter", () => {
-    expect(() =>
-      FieldTransformSchema.parse({ kind: "split" }),
-    ).toThrow(/delimiter/);
+    expect(() => FieldTransformSchema.parse({ kind: "split" })).toThrow(/delimiter/);
   });
 
   it("rejects concat with fewer than two sourceFields", () => {
@@ -53,21 +49,15 @@ describe("FieldTransformSchema", () => {
   });
 
   it("rejects lookup without lookupTable", () => {
-    expect(() =>
-      FieldTransformSchema.parse({ kind: "lookup" }),
-    ).toThrow(/lookupTable/);
+    expect(() => FieldTransformSchema.parse({ kind: "lookup" })).toThrow(/lookupTable/);
   });
 
   it("rejects date_parse without inputFormat", () => {
-    expect(() =>
-      FieldTransformSchema.parse({ kind: "date_parse" }),
-    ).toThrow(/inputFormat/);
+    expect(() => FieldTransformSchema.parse({ kind: "date_parse" })).toThrow(/inputFormat/);
   });
 
   it("rejects default_if_null without defaultValue", () => {
-    expect(() =>
-      FieldTransformSchema.parse({ kind: "default_if_null" }),
-    ).toThrow(/defaultValue/);
+    expect(() => FieldTransformSchema.parse({ kind: "default_if_null" })).toThrow(/defaultValue/);
   });
 });
 
@@ -87,9 +77,9 @@ describe("FieldMappingSchema", () => {
   });
 
   it("rejects required=true with targetNullable=true", () => {
-    expect(() =>
-      FieldMappingSchema.parse({ ...base, targetNullable: true }),
-    ).toThrow(/required=true implies targetNullable=false/);
+    expect(() => FieldMappingSchema.parse({ ...base, targetNullable: true })).toThrow(
+      /required=true implies targetNullable=false/,
+    );
   });
 
   it("rejects skipIfNull combined with required", () => {
@@ -102,9 +92,7 @@ describe("FieldMappingSchema", () => {
   });
 
   it("rejects malformed targetField", () => {
-    expect(() =>
-      FieldMappingSchema.parse({ ...base, targetField: "Email" }),
-    ).toThrow();
+    expect(() => FieldMappingSchema.parse({ ...base, targetField: "Email" })).toThrow();
   });
 });
 
@@ -190,9 +178,7 @@ describe("EntityMappingSchema", () => {
   });
 
   it("rejects malformed mapping id", () => {
-    expect(() =>
-      EntityMappingSchema.parse({ ...base, id: "SF-Account" }),
-    ).toThrow();
+    expect(() => EntityMappingSchema.parse({ ...base, id: "SF-Account" })).toThrow();
   });
 });
 

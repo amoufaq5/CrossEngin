@@ -71,9 +71,7 @@ describe("PaginationRequestSchema", () => {
   });
 
   it("rejects malformed cursor", () => {
-    expect(() =>
-      PaginationRequestSchema.parse({ cursor: "not!base64url" }),
-    ).toThrow();
+    expect(() => PaginationRequestSchema.parse({ cursor: "not!base64url" })).toThrow();
   });
 });
 

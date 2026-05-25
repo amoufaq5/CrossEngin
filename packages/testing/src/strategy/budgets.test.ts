@@ -60,7 +60,10 @@ describe("checkFrontendBudget", () => {
   });
 
   it("respects the regression tolerance percent", () => {
-    const tight = FrontendBudgetSchema.parse({ ...DEFAULT_FRONTEND_BUDGET, regressionTolerancePercent: 0 });
+    const tight = FrontendBudgetSchema.parse({
+      ...DEFAULT_FRONTEND_BUDGET,
+      regressionTolerancePercent: 0,
+    });
     const r = checkFrontendBudget({
       budget: tight,
       measured: { ...measured, fcpMs: 1_501 },

@@ -219,14 +219,10 @@ describe("SubjectAccessRequestSchema", () => {
 
 describe("isRequestOverdue", () => {
   it("returns true past deadline for in-progress request", () => {
-    expect(
-      isRequestOverdue(baseRequest, new Date("2026-07-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isRequestOverdue(baseRequest, new Date("2026-07-01T00:00:00Z"))).toBe(true);
   });
   it("returns false within deadline", () => {
-    expect(
-      isRequestOverdue(baseRequest, new Date("2026-06-01T00:00:00Z")),
-    ).toBe(false);
+    expect(isRequestOverdue(baseRequest, new Date("2026-06-01T00:00:00Z"))).toBe(false);
   });
   it("returns false for completed request even past deadline", () => {
     expect(
@@ -247,10 +243,7 @@ describe("isRequestOverdue", () => {
 
 describe("computeDeadline", () => {
   it("computes GDPR Article 15 deadline (+30 days)", () => {
-    const d = computeDeadline(
-      new Date("2026-05-16T10:00:00Z"),
-      "gdpr_article_15",
-    );
+    const d = computeDeadline(new Date("2026-05-16T10:00:00Z"), "gdpr_article_15");
     expect(d.startsWith("2026-06-15")).toBe(true);
   });
 });

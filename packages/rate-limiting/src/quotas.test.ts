@@ -150,11 +150,7 @@ describe("QuotaUsageSchema", () => {
 
 describe("computePeriodStart / computePeriodEnd", () => {
   it("aligns to day boundary", () => {
-    const start = computePeriodStart(
-      "day",
-      new Date("2026-05-16T10:42:13Z"),
-      null,
-    );
+    const start = computePeriodStart("day", new Date("2026-05-16T10:42:13Z"), null);
     expect(start).toBe("2026-05-16T00:00:00.000Z");
   });
   it("uses billingCycleStart for billing_period", () => {
@@ -166,15 +162,10 @@ describe("computePeriodStart / computePeriodEnd", () => {
     expect(start).toBe("2026-05-01T00:00:00.000Z");
   });
   it("computePeriodEnd returns null for lifetime", () => {
-    expect(
-      computePeriodEnd("lifetime", new Date("2026-05-16T00:00:00Z")),
-    ).toBeNull();
+    expect(computePeriodEnd("lifetime", new Date("2026-05-16T00:00:00Z"))).toBeNull();
   });
   it("computePeriodEnd returns +day for day period", () => {
-    const end = computePeriodEnd(
-      "day",
-      new Date("2026-05-16T00:00:00Z"),
-    );
+    const end = computePeriodEnd("day", new Date("2026-05-16T00:00:00Z"));
     expect(end).toBe("2026-05-17T00:00:00.000Z");
   });
 });

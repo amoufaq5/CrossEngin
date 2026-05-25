@@ -182,31 +182,19 @@ describe("propagateClassification", () => {
 
 describe("isValidDowngrade", () => {
   it("allows no-downgrade (same level)", () => {
-    expect(
-      isValidDowngrade("internal", "internal", "derived_from", null),
-    ).toBe(true);
+    expect(isValidDowngrade("internal", "internal", "derived_from", null)).toBe(true);
   });
   it("blocks downgrade on derived_from", () => {
-    expect(
-      isValidDowngrade("pii_personal", "internal", "derived_from", null),
-    ).toBe(false);
+    expect(isValidDowngrade("pii_personal", "internal", "derived_from", null)).toBe(false);
   });
   it("allows downgrade via anonymized_from with k≥5", () => {
-    expect(
-      isValidDowngrade("pii_personal", "public", "anonymized_from", 7),
-    ).toBe(true);
+    expect(isValidDowngrade("pii_personal", "public", "anonymized_from", 7)).toBe(true);
   });
   it("blocks anonymized_from with k<5", () => {
-    expect(
-      isValidDowngrade("pii_personal", "public", "anonymized_from", 4),
-    ).toBe(false);
+    expect(isValidDowngrade("pii_personal", "public", "anonymized_from", 4)).toBe(false);
   });
   it("aggregated_from requires k≥11", () => {
-    expect(
-      isValidDowngrade("phi_protected", "internal", "aggregated_from", 11),
-    ).toBe(true);
-    expect(
-      isValidDowngrade("phi_protected", "internal", "aggregated_from", 10),
-    ).toBe(false);
+    expect(isValidDowngrade("phi_protected", "internal", "aggregated_from", 11)).toBe(true);
+    expect(isValidDowngrade("phi_protected", "internal", "aggregated_from", 10)).toBe(false);
   });
 });

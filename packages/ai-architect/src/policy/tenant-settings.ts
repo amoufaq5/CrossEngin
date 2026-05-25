@@ -19,9 +19,7 @@ export const TenantAiSettingsSchema = z
     sharedCatalogOptIn: z.boolean().default(false),
     crossTenantPatternLearningOptIn: z.boolean().default(false),
     allowedExternalProviders: z.array(z.enum(EXTERNAL_PROVIDERS)).default(["fireworks"]),
-    schemaChangeApprovalTier: z
-      .enum(SCHEMA_CHANGE_APPROVAL_TIERS)
-      .default("always_human"),
+    schemaChangeApprovalTier: z.enum(SCHEMA_CHANGE_APPROVAL_TIERS).default("always_human"),
     perSessionTokenCeiling: z.number().int().positive().default(50_000),
     perTenantMonthlyDollarCeiling: z.number().int().positive().default(200),
     summarizationFrequencyTurns: z.number().int().min(5).max(100).default(20),
@@ -35,7 +33,8 @@ export const TenantAiSettingsSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["allowedExternalProviders"],
-        message: "allowedExternalProviders must include 'fireworks' (the default EU-resident provider)",
+        message:
+          "allowedExternalProviders must include 'fireworks' (the default EU-resident provider)",
       });
     }
     const seen = new Set<string>();
@@ -52,28 +51,27 @@ export const TenantAiSettingsSchema = z
   });
 export type TenantAiSettings = z.infer<typeof TenantAiSettingsSchema>;
 
-export const PACK_FORCED_DEFAULTS: Readonly<
-  Record<string, Partial<TenantAiSettings>>
-> = Object.freeze({
-  hipaa: {
-    sharedCatalogOptIn: false,
-    crossTenantPatternLearningOptIn: false,
-    allowedExternalProviders: ["fireworks"],
-  },
-  "21-cfr-part-11": {
-    sharedCatalogOptIn: false,
-    crossTenantPatternLearningOptIn: false,
-    allowedExternalProviders: ["fireworks"],
-  },
-  "uae-moh": {
-    sharedCatalogOptIn: false,
-    crossTenantPatternLearningOptIn: false,
-    allowedExternalProviders: ["fireworks"],
-  },
-  gdpr: {
-    sharedCatalogOptIn: false,
-  },
-});
+export const PACK_FORCED_DEFAULTS: Readonly<Record<string, Partial<TenantAiSettings>>> =
+  Object.freeze({
+    hipaa: {
+      sharedCatalogOptIn: false,
+      crossTenantPatternLearningOptIn: false,
+      allowedExternalProviders: ["fireworks"],
+    },
+    "21-cfr-part-11": {
+      sharedCatalogOptIn: false,
+      crossTenantPatternLearningOptIn: false,
+      allowedExternalProviders: ["fireworks"],
+    },
+    "uae-moh": {
+      sharedCatalogOptIn: false,
+      crossTenantPatternLearningOptIn: false,
+      allowedExternalProviders: ["fireworks"],
+    },
+    gdpr: {
+      sharedCatalogOptIn: false,
+    },
+  });
 
 export function applyPackForcedDefaults(
   settings: TenantAiSettings,
@@ -94,9 +92,10 @@ export interface SettingChangeAttempt {
   readonly proposed: Partial<TenantAiSettings>;
 }
 
-export function validateSettingChange(
-  attempt: SettingChangeAttempt,
-): { readonly allowed: boolean; readonly reason?: string } {
+export function validateSettingChange(attempt: SettingChangeAttempt): {
+  readonly allowed: boolean;
+  readonly reason?: string;
+} {
   for (const packId of attempt.activePackIds) {
     const forced = PACK_FORCED_DEFAULTS[packId];
     if (forced === undefined) continue;

@@ -45,10 +45,9 @@ export const ThemeOverlaySchema = z
       })
       .optional(),
   })
-  .refine(
-    (v) => v.brandColor !== v.accentColor || v.brandColor === undefined,
-    { message: "brandColor and accentColor must differ" },
-  );
+  .refine((v) => v.brandColor !== v.accentColor || v.brandColor === undefined, {
+    message: "brandColor and accentColor must differ",
+  });
 export type ThemeOverlay = z.infer<typeof ThemeOverlaySchema>;
 
 export const FAMILY_DEFAULT_BRAND_COLORS: Readonly<Record<Family, string>> = Object.freeze({

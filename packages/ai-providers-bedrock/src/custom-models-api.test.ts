@@ -17,19 +17,12 @@ import {
 
 describe("BEDROCK_CUSTOM_MODEL constants", () => {
   it("statuses cover the 3 documented mixed-case values", () => {
-    expect(BEDROCK_CUSTOM_MODEL_STATUSES).toEqual([
-      "Active",
-      "Creating",
-      "Failed",
-    ]);
+    expect(BEDROCK_CUSTOM_MODEL_STATUSES).toEqual(["Active", "Creating", "Failed"]);
   });
 
   it("documents AWS-supported sort dimensions", () => {
     expect(BEDROCK_CUSTOM_MODEL_SORT_BY_VALUES).toEqual(["CreationTime"]);
-    expect(BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES).toEqual([
-      "Ascending",
-      "Descending",
-    ]);
+    expect(BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES).toEqual(["Ascending", "Descending"]);
   });
 
   it("isBedrockCustomModelStatus is case-sensitive", () => {
@@ -55,21 +48,19 @@ describe("buildCustomModelListQuery", () => {
   });
 
   it("rejects unparseable creation-time values", () => {
-    expect(() =>
-      buildCustomModelListQuery({ creationTimeAfter: "yesterday" }),
-    ).toThrow(/creationTimeAfter/);
-    expect(() =>
-      buildCustomModelListQuery({ creationTimeBefore: "not-a-date" }),
-    ).toThrow(/creationTimeBefore/);
+    expect(() => buildCustomModelListQuery({ creationTimeAfter: "yesterday" })).toThrow(
+      /creationTimeAfter/,
+    );
+    expect(() => buildCustomModelListQuery({ creationTimeBefore: "not-a-date" })).toThrow(
+      /creationTimeBefore/,
+    );
   });
 
   it("threads + validates nameContains length", () => {
     expect(buildCustomModelListQuery({ nameContains: "tenant-x" })).toEqual({
       nameContains: "tenant-x",
     });
-    expect(() => buildCustomModelListQuery({ nameContains: "" })).toThrow(
-      /nameContains/,
-    );
+    expect(() => buildCustomModelListQuery({ nameContains: "" })).toThrow(/nameContains/);
     expect(() =>
       buildCustomModelListQuery({
         nameContains: "x".repeat(BEDROCK_CUSTOM_MODEL_NAME_CONTAINS_MAX_LEN + 1),
@@ -80,20 +71,19 @@ describe("buildCustomModelListQuery", () => {
   it("threads baseModelArnEquals + foundationModelArnEquals", () => {
     const out = buildCustomModelListQuery({
       baseModelArnEquals: "arn:aws:bedrock:us-east-1::foundation-model/abc",
-      foundationModelArnEquals:
-        "arn:aws:bedrock:us-east-1::foundation-model/xyz",
+      foundationModelArnEquals: "arn:aws:bedrock:us-east-1::foundation-model/xyz",
     });
     expect(out["baseModelArnEquals"]).toMatch(/^arn:aws:bedrock:/);
     expect(out["foundationModelArnEquals"]).toMatch(/^arn:aws:bedrock:/);
   });
 
   it("rejects empty baseModelArnEquals / foundationModelArnEquals", () => {
-    expect(() =>
-      buildCustomModelListQuery({ baseModelArnEquals: "" }),
-    ).toThrow(/baseModelArnEquals/);
-    expect(() =>
-      buildCustomModelListQuery({ foundationModelArnEquals: "" }),
-    ).toThrow(/foundationModelArnEquals/);
+    expect(() => buildCustomModelListQuery({ baseModelArnEquals: "" })).toThrow(
+      /baseModelArnEquals/,
+    );
+    expect(() => buildCustomModelListQuery({ foundationModelArnEquals: "" })).toThrow(
+      /foundationModelArnEquals/,
+    );
   });
 
   it("threads isOwned boolean", () => {
@@ -109,9 +99,9 @@ describe("buildCustomModelListQuery", () => {
     expect(buildCustomModelListQuery({ modelStatus: "Active" })).toEqual({
       modelStatus: "Active",
     });
-    expect(() =>
-      buildCustomModelListQuery({ modelStatus: "Inactive" as never }),
-    ).toThrow(/modelStatus/);
+    expect(() => buildCustomModelListQuery({ modelStatus: "Inactive" as never })).toThrow(
+      /modelStatus/,
+    );
   });
 
   it("threads valid maxResults at bounds", () => {
@@ -142,18 +132,14 @@ describe("buildCustomModelListQuery", () => {
         maxResults: BEDROCK_CUSTOM_MODEL_LIST_MAX_RESULTS_MAX + 1,
       }),
     ).toThrow(/maxResults/);
-    expect(() => buildCustomModelListQuery({ maxResults: 1.5 })).toThrow(
-      /maxResults/,
-    );
+    expect(() => buildCustomModelListQuery({ maxResults: 1.5 })).toThrow(/maxResults/);
   });
 
   it("threads + validates nextToken", () => {
     expect(buildCustomModelListQuery({ nextToken: "page-2" })).toEqual({
       nextToken: "page-2",
     });
-    expect(() => buildCustomModelListQuery({ nextToken: "" })).toThrow(
-      /nextToken/,
-    );
+    expect(() => buildCustomModelListQuery({ nextToken: "" })).toThrow(/nextToken/);
   });
 
   it("threads sortBy + sortOrder", () => {
@@ -166,12 +152,8 @@ describe("buildCustomModelListQuery", () => {
   });
 
   it("rejects unknown sortBy / sortOrder", () => {
-    expect(() => buildCustomModelListQuery({ sortBy: "Name" as never })).toThrow(
-      /sortBy/,
-    );
-    expect(() =>
-      buildCustomModelListQuery({ sortOrder: "asc" as never }),
-    ).toThrow(/sortOrder/);
+    expect(() => buildCustomModelListQuery({ sortBy: "Name" as never })).toThrow(/sortBy/);
+    expect(() => buildCustomModelListQuery({ sortOrder: "asc" as never })).toThrow(/sortOrder/);
   });
 
   it("composes all parameters together", () => {
@@ -203,9 +185,7 @@ describe("buildCustomModelListQuery", () => {
   });
 
   it("throws BedrockError on invalid input", () => {
-    expect(() => buildCustomModelListQuery({ maxResults: -1 })).toThrow(
-      BedrockError,
-    );
+    expect(() => buildCustomModelListQuery({ maxResults: -1 })).toThrow(BedrockError);
   });
 });
 
@@ -325,9 +305,7 @@ describe("parseCustomModelListResponse", () => {
   });
 
   it("rejects non-array modelSummaries", () => {
-    expect(() =>
-      parseCustomModelListResponse({ modelSummaries: "oops" }),
-    ).toThrow(/not an array/);
+    expect(() => parseCustomModelListResponse({ modelSummaries: "oops" })).toThrow(/not an array/);
   });
 });
 
@@ -337,8 +315,7 @@ describe("parseCustomModelDetail", () => {
       modelArn:
         "arn:aws:bedrock:us-east-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc",
       modelName: "tenant-x-claude-finetune",
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/xyz",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/xyz",
       baseModelArn:
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
       creationTime: "2026-04-15T12:00:00Z",
@@ -378,9 +355,7 @@ describe("parseCustomModelDetail", () => {
     expect(d.customizationType).toBe("FINE_TUNING");
     expect(d.modelKmsKeyArn).toMatch(/^arn:aws:kms:/);
     expect(d.hyperParameters?.["epochCount"]).toBe("10");
-    expect(d.validationDataConfig?.validators[0]!.s3Uri).toBe(
-      "s3://tenant-x-data/validation/",
-    );
+    expect(d.validationDataConfig?.validators[0]!.s3Uri).toBe("s3://tenant-x-data/validation/");
     expect(d.trainingMetrics?.trainingLoss).toBe(0.42);
     expect(d.validationMetrics?.[0]!.validationLoss).toBe(0.51);
   });
@@ -400,12 +375,10 @@ describe("parseCustomModelDetail", () => {
       },
     });
     expect(
-      d.customizationConfig?.distillationConfig?.teacherModelConfig
-        .teacherModelIdentifier,
+      d.customizationConfig?.distillationConfig?.teacherModelConfig.teacherModelIdentifier,
     ).toMatch(/claude-3-5-sonnet/);
     expect(
-      d.customizationConfig?.distillationConfig?.teacherModelConfig
-        .maxResponseLengthForInference,
+      d.customizationConfig?.distillationConfig?.teacherModelConfig.maxResponseLengthForInference,
     ).toBe(4096);
   });
 
@@ -422,9 +395,9 @@ describe("parseCustomModelDetail", () => {
   });
 
   it("rejects trainingDataConfig without s3Uri", () => {
-    expect(() =>
-      parseCustomModelDetail({ ...minimal(), trainingDataConfig: {} }),
-    ).toThrow(/trainingDataConfig\.s3Uri/);
+    expect(() => parseCustomModelDetail({ ...minimal(), trainingDataConfig: {} })).toThrow(
+      /trainingDataConfig\.s3Uri/,
+    );
   });
 
   it("rejects non-string hyperParameters value", () => {
@@ -443,9 +416,9 @@ describe("parseCustomModelDetail", () => {
   });
 
   it("rejects validationDataConfig without validators array", () => {
-    expect(() =>
-      parseCustomModelDetail({ ...minimal(), validationDataConfig: {} }),
-    ).toThrow(/validators/);
+    expect(() => parseCustomModelDetail({ ...minimal(), validationDataConfig: {} })).toThrow(
+      /validators/,
+    );
   });
 
   it("rejects non-finite trainingLoss", () => {

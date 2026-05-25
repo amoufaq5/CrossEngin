@@ -72,9 +72,7 @@ describe("OBSERVATION_LIFECYCLE_WORKFLOW", () => {
   it("entered_in_error is the only terminal state (FHIR amendment discipline)", () => {
     const wf = OBSERVATION_LIFECYCLE_WORKFLOW;
     if (wf.kind !== "entityLifecycle") throw new Error("not entityLifecycle");
-    const terminals = wf.states
-      .filter((s) => s.category === "terminal")
-      .map((s) => s.name);
+    const terminals = wf.states.filter((s) => s.category === "terminal").map((s) => s.name);
     expect(terminals).toEqual(["entered_in_error"]);
   });
 

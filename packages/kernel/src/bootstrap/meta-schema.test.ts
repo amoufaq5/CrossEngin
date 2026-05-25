@@ -270,9 +270,7 @@ describe("META_TABLES", () => {
       for (const col of table.columns) {
         if (col.references && col.references.schema === "meta") {
           const isSelfReference = col.references.table === table.name;
-          expect(
-            isSelfReference || seen.has(col.references.table),
-          ).toBe(true);
+          expect(isSelfReference || seen.has(col.references.table)).toBe(true);
         }
       }
       seen.add(table.name);
@@ -323,8 +321,8 @@ describe("table column shapes", () => {
 
   it("META_MANIFESTS enforces (tenant_id, hash) uniqueness", () => {
     expect(
-      META_MANIFESTS.uniqueConstraints?.some((u) =>
-        u.columns.includes("tenant_id") && u.columns.includes("hash"),
+      META_MANIFESTS.uniqueConstraints?.some(
+        (u) => u.columns.includes("tenant_id") && u.columns.includes("hash"),
       ),
     ).toBe(true);
   });
@@ -365,9 +363,12 @@ describe("table column shapes", () => {
   });
 
   it("META_COMPLIANCE_ATTESTATIONS uses (tenant_id, pack_id, pack_version, attestation_id) uniqueness", () => {
-    expect(
-      META_COMPLIANCE_ATTESTATIONS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "pack_id", "pack_version", "attestation_id"]);
+    expect(META_COMPLIANCE_ATTESTATIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "pack_id",
+      "pack_version",
+      "attestation_id",
+    ]);
   });
 
   it("META_EVENTS indexes (tenant_id, occurred_at) and event_name separately", () => {
@@ -403,10 +404,7 @@ describe("table column shapes", () => {
     const status = META_FILES.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("uploading");
     expect(status?.check).toContain("quarantined");
-    expect(META_FILES.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "storage_key",
-    ]);
+    expect(META_FILES.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "storage_key"]);
   });
 
   it("META_FILES check-constrains data_class to the DATA_CLASSES enum", () => {
@@ -450,10 +448,7 @@ describe("table column shapes", () => {
   });
 
   it("META_REPORT_RUNS enforces (tenant_id, run_id) uniqueness + status + engine enums", () => {
-    expect(META_REPORT_RUNS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "run_id",
-    ]);
+    expect(META_REPORT_RUNS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "run_id"]);
     const status = META_REPORT_RUNS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("throttled");
     const engine = META_REPORT_RUNS.columns.find((c) => c.name === "engine");
@@ -489,8 +484,8 @@ describe("table column shapes", () => {
 
   it("META_INVOICES enforces (tenant_id, number) uniqueness + status enum", () => {
     expect(
-      META_INVOICES.uniqueConstraints?.some((u) =>
-        u.columns.includes("tenant_id") && u.columns.includes("number"),
+      META_INVOICES.uniqueConstraints?.some(
+        (u) => u.columns.includes("tenant_id") && u.columns.includes("number"),
       ),
     ).toBe(true);
     const status = META_INVOICES.columns.find((c) => c.name === "status");
@@ -537,7 +532,9 @@ describe("table column shapes", () => {
 
   it("META_FEATURE_FLAGS enforces unique flag keys with snake-case dotted check", () => {
     const key = META_FEATURE_FLAGS.columns.find((c) => c.name === "key");
-    expect((key?.unique as { constraintName: string } | undefined)?.constraintName).toBe("feature_flags_key_key");
+    expect((key?.unique as { constraintName: string } | undefined)?.constraintName).toBe(
+      "feature_flags_key_key",
+    );
     expect(key?.check).toContain("[a-z]");
   });
 
@@ -564,9 +561,7 @@ describe("table column shapes", () => {
   });
 
   it("META_DEPLOYMENTS triggered_by FK-references META_USERS with RESTRICT", () => {
-    const triggeredBy = META_DEPLOYMENTS.columns.find(
-      (c) => c.name === "triggered_by",
-    );
+    const triggeredBy = META_DEPLOYMENTS.columns.find((c) => c.name === "triggered_by");
     expect(triggeredBy?.references?.table).toBe("users");
     expect(triggeredBy?.references?.onDelete).toBe("RESTRICT");
   });
@@ -652,7 +647,9 @@ describe("table column shapes", () => {
     const url = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "url");
     expect(url?.check).toContain("https://");
     const eid = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "endpoint_id");
-    expect((eid?.unique as { constraintName: string } | undefined)?.constraintName).toBe("webhook_endpoints_endpoint_id_key");
+    expect((eid?.unique as { constraintName: string } | undefined)?.constraintName).toBe(
+      "webhook_endpoints_endpoint_id_key",
+    );
   });
 
   it("META_WEBHOOK_DELIVERIES check-constrains status to the six delivery states", () => {
@@ -664,10 +661,7 @@ describe("table column shapes", () => {
   });
 
   it("META_IDEMPOTENCY_RECORDS enforces (tenant_id, key) uniqueness", () => {
-    expect(META_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "key",
-    ]);
+    expect(META_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "key"]);
   });
 
   it("META_IDEMPOTENCY_RECORDS check-constrains key pattern (8..64 chars)", () => {
@@ -690,10 +684,7 @@ describe("table column shapes", () => {
   });
 
   it("META_PACK_VERSIONS enforces (pack_id, version) uniqueness + status enum", () => {
-    expect(META_PACK_VERSIONS.uniqueConstraints?.[0]?.columns).toEqual([
-      "pack_id",
-      "version",
-    ]);
+    expect(META_PACK_VERSIONS.uniqueConstraints?.[0]?.columns).toEqual(["pack_id", "version"]);
     const status = META_PACK_VERSIONS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'published'");
     expect(status?.check).toContain("'withdrawn'");
@@ -742,10 +733,7 @@ describe("table column shapes", () => {
   });
 
   it("META_IMPORT_SOURCES enforces (tenant_id, source_id) uniqueness", () => {
-    expect(META_IMPORT_SOURCES.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "source_id",
-    ]);
+    expect(META_IMPORT_SOURCES.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "source_id"]);
   });
 
   it("META_BACKFILL_JOBS check-constrains status to the seven lifecycle states", () => {
@@ -775,9 +763,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ONBOARDING_RUNS enforces one active run per tenant", () => {
-    expect(META_ONBOARDING_RUNS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-    ]);
+    expect(META_ONBOARDING_RUNS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id"]);
   });
 
   it("META_ONBOARDING_RUNS check-constrains current_stage to the seven stages", () => {
@@ -843,10 +829,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ML_MODELS enforces (family, version) uniqueness", () => {
-    expect(META_ML_MODELS.uniqueConstraints?.[0]?.columns).toEqual([
-      "family",
-      "version",
-    ]);
+    expect(META_ML_MODELS.uniqueConstraints?.[0]?.columns).toEqual(["family", "version"]);
   });
 
   it("META_ML_MODELS check-constrains status to the eight lifecycle states", () => {
@@ -872,10 +855,7 @@ describe("table column shapes", () => {
   });
 
   it("META_COST_BUDGETS enforces (tenant_id, budget_id) uniqueness", () => {
-    expect(META_COST_BUDGETS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "budget_id",
-    ]);
+    expect(META_COST_BUDGETS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "budget_id"]);
   });
 
   it("META_COST_BUDGETS check-constrains period to five values", () => {
@@ -951,7 +931,9 @@ describe("table column shapes", () => {
 
   it("META_TENANT_TOMBSTONES enforces unique tombstone_id with 'tomb_' prefix", () => {
     const tid = META_TENANT_TOMBSTONES.columns.find((c) => c.name === "tombstone_id");
-    expect((tid?.unique as { constraintName: string } | undefined)?.constraintName).toBe("tenant_tombstones_tombstone_id_key");
+    expect((tid?.unique as { constraintName: string } | undefined)?.constraintName).toBe(
+      "tenant_tombstones_tombstone_id_key",
+    );
     expect(tid?.check).toContain("tomb_");
   });
 
@@ -964,7 +946,9 @@ describe("table column shapes", () => {
 
   it("META_INCIDENTS enforces unique incident_id with INC-YYYY-NNNN pattern", () => {
     const iid = META_INCIDENTS.columns.find((c) => c.name === "incident_id");
-    expect((iid?.unique as { constraintName: string } | undefined)?.constraintName).toBe("incidents_incident_id_key");
+    expect((iid?.unique as { constraintName: string } | undefined)?.constraintName).toBe(
+      "incidents_incident_id_key",
+    );
     expect(iid?.check).toContain("INC-");
   });
 
@@ -1136,9 +1120,7 @@ describe("table column shapes", () => {
   });
 
   it("META_SDK_CLIENT_INSTALLATIONS check-constrains upgrade_nag_status to four values", () => {
-    const nag = META_SDK_CLIENT_INSTALLATIONS.columns.find(
-      (c) => c.name === "upgrade_nag_status",
-    );
+    const nag = META_SDK_CLIENT_INSTALLATIONS.columns.find((c) => c.name === "upgrade_nag_status");
     expect(nag?.check).toContain("'none'");
     expect(nag?.check).toContain("'soft_warning'");
     expect(nag?.check).toContain("'forced_upgrade_required'");
@@ -1172,17 +1154,13 @@ describe("table column shapes", () => {
   });
 
   it("META_SCIM_CLIENTS bearer_token_sha256 is CHAR(64) with hex check", () => {
-    const tok = META_SCIM_CLIENTS.columns.find(
-      (c) => c.name === "bearer_token_sha256",
-    );
+    const tok = META_SCIM_CLIENTS.columns.find((c) => c.name === "bearer_token_sha256");
     expect(tok?.type).toBe("CHAR(64)");
     expect(tok?.check).toContain("[0-9a-f]{64}");
   });
 
   it("META_SCIM_PROVISIONING resource_type enum has the 5 SCIM resource types", () => {
-    const rt = META_SCIM_PROVISIONING.columns.find(
-      (c) => c.name === "resource_type",
-    );
+    const rt = META_SCIM_PROVISIONING.columns.find((c) => c.name === "resource_type");
     expect(rt?.check).toContain("'User'");
     expect(rt?.check).toContain("'Group'");
     expect(rt?.check).toContain("'EnterpriseUser'");
@@ -1191,9 +1169,7 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_TEMPLATES enforces (tenant, template, channel, locale, version) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_TEMPLATES.uniqueConstraints?.[0]?.columns,
-    ).toEqual([
+    expect(META_NOTIFICATION_TEMPLATES.uniqueConstraints?.[0]?.columns).toEqual([
       "tenant_id",
       "template_id",
       "channel",
@@ -1203,31 +1179,30 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_TEMPLATES allows NULL tenant_id (platform templates)", () => {
-    const tenantId = META_NOTIFICATION_TEMPLATES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_NOTIFICATION_TEMPLATES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_NOTIFICATION_PREFERENCES enforces (tenant, user, category, channel) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_PREFERENCES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "user_id", "category", "channel"]);
+    expect(META_NOTIFICATION_PREFERENCES.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "user_id",
+      "category",
+      "channel",
+    ]);
   });
 
   it("META_NOTIFICATION_SUPPRESSIONS enforces (tenant, channel, address) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_SUPPRESSIONS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "channel", "recipient_address"]);
+    expect(META_NOTIFICATION_SUPPRESSIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "channel",
+      "recipient_address",
+    ]);
   });
 
   it("META_NOTIFICATION_SUPPRESSIONS check-constrains reason to the 7 suppression reasons", () => {
-    const reason = META_NOTIFICATION_SUPPRESSIONS.columns.find(
-      (c) => c.name === "reason",
-    );
+    const reason = META_NOTIFICATION_SUPPRESSIONS.columns.find((c) => c.name === "reason");
     expect(reason?.check).toContain("'hard_bounce'");
     expect(reason?.check).toContain("'spam_complaint'");
     expect(reason?.check).toContain("'unsubscribe'");
@@ -1235,30 +1210,25 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_DISPATCHES enforces (tenant, idempotency_key) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_DISPATCHES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "idempotency_key"]);
+    expect(META_NOTIFICATION_DISPATCHES.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "idempotency_key",
+    ]);
   });
 
   it("META_NOTIFICATION_DISPATCHES check-constrains priority to 5 levels", () => {
-    const priority = META_NOTIFICATION_DISPATCHES.columns.find(
-      (c) => c.name === "priority",
-    );
+    const priority = META_NOTIFICATION_DISPATCHES.columns.find((c) => c.name === "priority");
     expect(priority?.check).toContain("'critical'");
     expect(priority?.check).toContain("'background'");
   });
 
   it("META_NOTIFICATION_DELIVERIES cascades on dispatch deletion", () => {
-    const fk = META_NOTIFICATION_DELIVERIES.columns.find(
-      (c) => c.name === "dispatch_id",
-    );
+    const fk = META_NOTIFICATION_DELIVERIES.columns.find((c) => c.name === "dispatch_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_NOTIFICATION_DIGESTS frequency excludes immediate and never (batches only)", () => {
-    const freq = META_NOTIFICATION_DIGESTS.columns.find(
-      (c) => c.name === "frequency",
-    );
+    const freq = META_NOTIFICATION_DIGESTS.columns.find((c) => c.name === "frequency");
     expect(freq?.check).not.toContain("'immediate'");
     expect(freq?.check).not.toContain("'never'");
     expect(freq?.check).toContain("'hourly'");
@@ -1266,19 +1236,13 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_TEMPLATES allows NULL tenant_id (platform templates)", () => {
-    const tenantId = META_ACCESS_REVIEW_TEMPLATES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_ACCESS_REVIEW_TEMPLATES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_ACCESS_REVIEW_TEMPLATES framework enum covers SOC 2, ISO 27001, HIPAA, PCI, GDPR, CFR 21", () => {
-    const framework = META_ACCESS_REVIEW_TEMPLATES.columns.find(
-      (c) => c.name === "framework",
-    );
+    const framework = META_ACCESS_REVIEW_TEMPLATES.columns.find((c) => c.name === "framework");
     expect(framework?.check).toContain("'soc2_type2'");
     expect(framework?.check).toContain("'iso27001'");
     expect(framework?.check).toContain("'hipaa_security_rule'");
@@ -1287,9 +1251,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_CAMPAIGNS status enum has the 7 lifecycle states", () => {
-    const status = META_ACCESS_REVIEW_CAMPAIGNS.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_ACCESS_REVIEW_CAMPAIGNS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'draft'");
     expect(status?.check).toContain("'scheduled'");
     expect(status?.check).toContain("'in_progress'");
@@ -1300,44 +1262,32 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_ITEMS cascades on campaign deletion", () => {
-    const fk = META_ACCESS_REVIEW_ITEMS.columns.find(
-      (c) => c.name === "campaign_id",
-    );
+    const fk = META_ACCESS_REVIEW_ITEMS.columns.find((c) => c.name === "campaign_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_ACCESS_REVIEW_ITEMS risk_level enum has 4 levels", () => {
-    const risk = META_ACCESS_REVIEW_ITEMS.columns.find(
-      (c) => c.name === "risk_level",
-    );
+    const risk = META_ACCESS_REVIEW_ITEMS.columns.find((c) => c.name === "risk_level");
     expect(risk?.check).toContain("'low'");
     expect(risk?.check).toContain("'critical'");
   });
 
   it("META_ACCESS_REVIEW_DECISIONS attestation enum has the 5 attestation kinds", () => {
-    const att = META_ACCESS_REVIEW_DECISIONS.columns.find(
-      (c) => c.name === "attestation_kind",
-    );
+    const att = META_ACCESS_REVIEW_DECISIONS.columns.find((c) => c.name === "attestation_kind");
     expect(att?.check).toContain("'click_through_acknowledgement'");
     expect(att?.check).toContain("'qualified_e_signature'");
     expect(att?.check).toContain("'two_person_attestation'");
   });
 
   it("META_ACCESS_REVIEW_DECISIONS cascades on item deletion + restricts on campaign", () => {
-    const itemFk = META_ACCESS_REVIEW_DECISIONS.columns.find(
-      (c) => c.name === "item_id",
-    );
-    const campaignFk = META_ACCESS_REVIEW_DECISIONS.columns.find(
-      (c) => c.name === "campaign_id",
-    );
+    const itemFk = META_ACCESS_REVIEW_DECISIONS.columns.find((c) => c.name === "item_id");
+    const campaignFk = META_ACCESS_REVIEW_DECISIONS.columns.find((c) => c.name === "campaign_id");
     expect(itemFk?.references?.onDelete).toBe("CASCADE");
     expect(campaignFk?.references?.onDelete).toBe("RESTRICT");
   });
 
   it("META_ACCESS_REVIEW_EXCEPTIONS reason enum covers emergency + regulatory categories", () => {
-    const reason = META_ACCESS_REVIEW_EXCEPTIONS.columns.find(
-      (c) => c.name === "reason",
-    );
+    const reason = META_ACCESS_REVIEW_EXCEPTIONS.columns.find((c) => c.name === "reason");
     expect(reason?.check).toContain("'emergency_break_glass'");
     expect(reason?.check).toContain("'regulatory_exemption'");
     expect(reason?.check).toContain("'dual_role_business_need'");
@@ -1352,42 +1302,34 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_EVIDENCE sealed_sha256 is CHAR(64) hex", () => {
-    const sha = META_ACCESS_REVIEW_EVIDENCE.columns.find(
-      (c) => c.name === "sealed_sha256",
-    );
+    const sha = META_ACCESS_REVIEW_EVIDENCE.columns.find((c) => c.name === "sealed_sha256");
     expect(sha?.type).toBe("CHAR(64)");
     expect(sha?.check).toContain("[0-9a-f]{64}");
   });
 
   it("META_WORKFLOW_DEFINITIONS allows NULL tenant_id (platform definitions)", () => {
-    const tenantId = META_WORKFLOW_DEFINITIONS.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_WORKFLOW_DEFINITIONS.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_WORKFLOW_DEFINITIONS enforces (tenant, key, version) uniqueness", () => {
-    expect(
-      META_WORKFLOW_DEFINITIONS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "definition_key", "version"]);
+    expect(META_WORKFLOW_DEFINITIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "definition_key",
+      "version",
+    ]);
   });
 
   it("META_WORKFLOW_DEFINITIONS compensation_strategy enum has 4 strategies", () => {
-    const strat = META_WORKFLOW_DEFINITIONS.columns.find(
-      (c) => c.name === "compensation_strategy",
-    );
+    const strat = META_WORKFLOW_DEFINITIONS.columns.find((c) => c.name === "compensation_strategy");
     expect(strat?.check).toContain("'immediate_reverse_order'");
     expect(strat?.check).toContain("'manual_review'");
     expect(strat?.check).toContain("'no_compensation'");
   });
 
   it("META_WORKFLOW_INSTANCES status enum covers 12 lifecycle states", () => {
-    const status = META_WORKFLOW_INSTANCES.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_WORKFLOW_INSTANCES.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'running'");
     expect(status?.check).toContain("'waiting_for_signal'");
     expect(status?.check).toContain("'compensating'");
@@ -1395,23 +1337,17 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_INSTANCES has parent FK pointing back to instances (child workflows)", () => {
-    const parent = META_WORKFLOW_INSTANCES.columns.find(
-      (c) => c.name === "parent_instance_id",
-    );
+    const parent = META_WORKFLOW_INSTANCES.columns.find((c) => c.name === "parent_instance_id");
     expect(parent?.references?.table).toBe("workflow_instances");
   });
 
   it("META_WORKFLOW_ACTIVITIES cascades on instance deletion", () => {
-    const fk = META_WORKFLOW_ACTIVITIES.columns.find(
-      (c) => c.name === "instance_id",
-    );
+    const fk = META_WORKFLOW_ACTIVITIES.columns.find((c) => c.name === "instance_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_WORKFLOW_ACTIVITIES kind enum covers 10 activity kinds", () => {
-    const kind = META_WORKFLOW_ACTIVITIES.columns.find(
-      (c) => c.name === "kind",
-    );
+    const kind = META_WORKFLOW_ACTIVITIES.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'http_call'");
     expect(kind?.check).toContain("'manual_task'");
     expect(kind?.check).toContain("'child_workflow'");
@@ -1419,18 +1355,18 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_SIGNALS delivery_guarantee enum has 3 levels", () => {
-    const delivery = META_WORKFLOW_SIGNALS.columns.find(
-      (c) => c.name === "delivery_guarantee",
-    );
+    const delivery = META_WORKFLOW_SIGNALS.columns.find((c) => c.name === "delivery_guarantee");
     expect(delivery?.check).toContain("'at_most_once'");
     expect(delivery?.check).toContain("'at_least_once'");
     expect(delivery?.check).toContain("'exactly_once_idempotent'");
   });
 
   it("META_WORKFLOW_SIGNALS enforces (tenant, name, idempotency_key) uniqueness", () => {
-    expect(
-      META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "signal_name", "idempotency_key"]);
+    expect(META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "signal_name",
+      "idempotency_key",
+    ]);
   });
 
   it("META_WORKFLOW_TIMERS kind enum has 4 kinds", () => {
@@ -1442,26 +1378,21 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_EVENTS enforces append-only per-instance ordering via unique (instance, sequence)", () => {
-    expect(
-      META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["instance_id", "sequence_number"]);
+    expect(META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns).toEqual([
+      "instance_id",
+      "sequence_number",
+    ]);
   });
 
   it("META_WORKFLOW_EVENTS cascades on instance deletion", () => {
-    const fk = META_WORKFLOW_EVENTS.columns.find(
-      (c) => c.name === "instance_id",
-    );
+    const fk = META_WORKFLOW_EVENTS.columns.find((c) => c.name === "instance_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_LINEAGE_NODES allows NULL tenant_id (platform-wide nodes)", () => {
-    const tenantId = META_LINEAGE_NODES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_LINEAGE_NODES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_LINEAGE_NODES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_LINEAGE_NODES.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_LINEAGE_NODES kind enum covers 14 node kinds", () => {
@@ -1473,21 +1404,15 @@ describe("table column shapes", () => {
   });
 
   it("META_LINEAGE_NODES classification enum has the 6 data classifications", () => {
-    const classification = META_LINEAGE_NODES.columns.find(
-      (c) => c.name === "classification",
-    );
+    const classification = META_LINEAGE_NODES.columns.find((c) => c.name === "classification");
     expect(classification?.check).toContain("'pii_personal'");
     expect(classification?.check).toContain("'phi_protected'");
     expect(classification?.check).toContain("'regulated_financial'");
   });
 
   it("META_LINEAGE_EDGES restricts on source/target node deletion (preserve history)", () => {
-    const source = META_LINEAGE_EDGES.columns.find(
-      (c) => c.name === "source_node_id",
-    );
-    const target = META_LINEAGE_EDGES.columns.find(
-      (c) => c.name === "target_node_id",
-    );
+    const source = META_LINEAGE_EDGES.columns.find((c) => c.name === "source_node_id");
+    const target = META_LINEAGE_EDGES.columns.find((c) => c.name === "target_node_id");
     expect(source?.references?.onDelete).toBe("RESTRICT");
     expect(target?.references?.onDelete).toBe("RESTRICT");
   });
@@ -1500,9 +1425,7 @@ describe("table column shapes", () => {
   });
 
   it("META_PROVENANCE_RECORDS operation_kind enum covers 15 operations", () => {
-    const op = META_PROVENANCE_RECORDS.columns.find(
-      (c) => c.name === "operation_kind",
-    );
+    const op = META_PROVENANCE_RECORDS.columns.find((c) => c.name === "operation_kind");
     expect(op?.check).toContain("'ingest'");
     expect(op?.check).toContain("'anonymize'");
     expect(op?.check).toContain("'ai_inference'");
@@ -1510,9 +1433,7 @@ describe("table column shapes", () => {
   });
 
   it("META_DATA_SUBJECTS enforces (tenant, identifier kind + sha) uniqueness", () => {
-    expect(
-      META_DATA_SUBJECTS.uniqueConstraints?.[0]?.columns,
-    ).toEqual([
+    expect(META_DATA_SUBJECTS.uniqueConstraints?.[0]?.columns).toEqual([
       "tenant_id",
       "primary_identifier_kind",
       "primary_identifier_sha256",
@@ -1520,34 +1441,27 @@ describe("table column shapes", () => {
   });
 
   it("META_DATA_SUBJECTS primary_identifier_sha256 is CHAR(64) hex", () => {
-    const sha = META_DATA_SUBJECTS.columns.find(
-      (c) => c.name === "primary_identifier_sha256",
-    );
+    const sha = META_DATA_SUBJECTS.columns.find((c) => c.name === "primary_identifier_sha256");
     expect(sha?.type).toBe("CHAR(64)");
     expect(sha?.check).toContain("[0-9a-f]{64}");
   });
 
   it("META_SUBJECT_NODE_OCCURRENCES cascades on subject + node deletion", () => {
-    const subjectFk = META_SUBJECT_NODE_OCCURRENCES.columns.find(
-      (c) => c.name === "subject_id",
-    );
-    const nodeFk = META_SUBJECT_NODE_OCCURRENCES.columns.find(
-      (c) => c.name === "node_id",
-    );
+    const subjectFk = META_SUBJECT_NODE_OCCURRENCES.columns.find((c) => c.name === "subject_id");
+    const nodeFk = META_SUBJECT_NODE_OCCURRENCES.columns.find((c) => c.name === "node_id");
     expect(subjectFk?.references?.onDelete).toBe("CASCADE");
     expect(nodeFk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_SUBJECT_NODE_OCCURRENCES enforces (subject, node) uniqueness", () => {
-    expect(
-      META_SUBJECT_NODE_OCCURRENCES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["subject_id", "node_id"]);
+    expect(META_SUBJECT_NODE_OCCURRENCES.uniqueConstraints?.[0]?.columns).toEqual([
+      "subject_id",
+      "node_id",
+    ]);
   });
 
   it("META_SUBJECT_ACCESS_REQUESTS legal_basis enum covers GDPR/CCPA/LGPD/PIPEDA/UAE", () => {
-    const basis = META_SUBJECT_ACCESS_REQUESTS.columns.find(
-      (c) => c.name === "legal_basis",
-    );
+    const basis = META_SUBJECT_ACCESS_REQUESTS.columns.find((c) => c.name === "legal_basis");
     expect(basis?.check).toContain("'gdpr_article_15'");
     expect(basis?.check).toContain("'ccpa_right_to_know'");
     expect(basis?.check).toContain("'lgpd_article_18'");
@@ -1556,9 +1470,7 @@ describe("table column shapes", () => {
   });
 
   it("META_SUBJECT_ACCESS_REQUESTS status enum has the 7 lifecycle states", () => {
-    const status = META_SUBJECT_ACCESS_REQUESTS.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_SUBJECT_ACCESS_REQUESTS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'submitted'");
     expect(status?.check).toContain("'verified'");
     expect(status?.check).toContain("'partial_complete'");
@@ -1566,19 +1478,13 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_POLICIES allows NULL tenant_id (platform policies)", () => {
-    const tenantId = META_RATE_LIMIT_POLICIES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_RATE_LIMIT_POLICIES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_RATE_LIMIT_POLICIES algorithm enum has 6 algorithms", () => {
-    const alg = META_RATE_LIMIT_POLICIES.columns.find(
-      (c) => c.name === "algorithm",
-    );
+    const alg = META_RATE_LIMIT_POLICIES.columns.find((c) => c.name === "algorithm");
     expect(alg?.check).toContain("'token_bucket'");
     expect(alg?.check).toContain("'leaky_bucket'");
     expect(alg?.check).toContain("'sliding_window_log'");
@@ -1586,16 +1492,12 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_POLICIES response_code restricted to 429 or 503", () => {
-    const code = META_RATE_LIMIT_POLICIES.columns.find(
-      (c) => c.name === "response_code",
-    );
+    const code = META_RATE_LIMIT_POLICIES.columns.find((c) => c.name === "response_code");
     expect(code?.check).toContain("(429, 503)");
   });
 
   it("META_QUOTA_DEFINITIONS target enum covers 10 quota targets", () => {
-    const target = META_QUOTA_DEFINITIONS.columns.find(
-      (c) => c.name === "target",
-    );
+    const target = META_QUOTA_DEFINITIONS.columns.find((c) => c.name === "target");
     expect(target?.check).toContain("'api_requests'");
     expect(target?.check).toContain("'ai_tokens'");
     expect(target?.check).toContain("'ml_training_minutes'");
@@ -1603,31 +1505,27 @@ describe("table column shapes", () => {
   });
 
   it("META_QUOTA_DEFINITIONS period enum has 7 periods", () => {
-    const period = META_QUOTA_DEFINITIONS.columns.find(
-      (c) => c.name === "period",
-    );
+    const period = META_QUOTA_DEFINITIONS.columns.find((c) => c.name === "period");
     expect(period?.check).toContain("'minute'");
     expect(period?.check).toContain("'billing_period'");
     expect(period?.check).toContain("'lifetime'");
   });
 
   it("META_QUOTA_USAGE enforces (tenant, quota_def, period_start) uniqueness", () => {
-    expect(
-      META_QUOTA_USAGE.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "quota_definition_id", "period_start_at"]);
+    expect(META_QUOTA_USAGE.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "quota_definition_id",
+      "period_start_at",
+    ]);
   });
 
   it("META_QUOTA_USAGE restricts on quota_definitions deletion", () => {
-    const fk = META_QUOTA_USAGE.columns.find(
-      (c) => c.name === "quota_definition_id",
-    );
+    const fk = META_QUOTA_USAGE.columns.find((c) => c.name === "quota_definition_id");
     expect(fk?.references?.onDelete).toBe("RESTRICT");
   });
 
   it("META_RATE_LIMIT_DECISIONS outcome enum covers 10 decision outcomes", () => {
-    const outcome = META_RATE_LIMIT_DECISIONS.columns.find(
-      (c) => c.name === "outcome",
-    );
+    const outcome = META_RATE_LIMIT_DECISIONS.columns.find((c) => c.name === "outcome");
     expect(outcome?.check).toContain("'allowed'");
     expect(outcome?.check).toContain("'denied_quota_exceeded'");
     expect(outcome?.check).toContain("'bypassed_critical_priority'");
@@ -1635,17 +1533,13 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_EXCEPTIONS multiplier is NUMERIC(8, 4) bounded 0.1 - 100", () => {
-    const m = META_RATE_LIMIT_EXCEPTIONS.columns.find(
-      (c) => c.name === "multiplier",
-    );
+    const m = META_RATE_LIMIT_EXCEPTIONS.columns.find((c) => c.name === "multiplier");
     expect(m?.type).toBe("NUMERIC(8, 4)");
     expect(m?.check).toContain("BETWEEN 0.1 AND 100");
   });
 
   it("META_RATE_LIMIT_EXCEPTIONS kind enum has 6 exception kinds", () => {
-    const kind = META_RATE_LIMIT_EXCEPTIONS.columns.find(
-      (c) => c.name === "kind",
-    );
+    const kind = META_RATE_LIMIT_EXCEPTIONS.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'principal_overage'");
     expect(kind?.check).toContain("'incident_response_bypass'");
     expect(kind?.check).toContain("'load_test_temporary'");
@@ -1660,9 +1554,11 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_ROUTES enforces (method, version, operation) uniqueness", () => {
-    expect(
-      META_GATEWAY_ROUTES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["method", "api_version", "operation_id"]);
+    expect(META_GATEWAY_ROUTES.uniqueConstraints?.[0]?.columns).toEqual([
+      "method",
+      "api_version",
+      "operation_id",
+    ]);
   });
 
   it("META_GATEWAY_ROUTES method enum has 9 HTTP methods", () => {
@@ -1673,15 +1569,15 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_IDEMPOTENCY_RECORDS enforces (tenant, op, key) uniqueness", () => {
-    expect(
-      META_GATEWAY_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "operation_id", "idempotency_key"]);
+    expect(META_GATEWAY_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "operation_id",
+      "idempotency_key",
+    ]);
   });
 
   it("META_GATEWAY_IDEMPOTENCY_RECORDS method restricted to non-idempotent HTTP methods", () => {
-    const method = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find(
-      (c) => c.name === "method",
-    );
+    const method = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find((c) => c.name === "method");
     expect(method?.check).toContain("'POST'");
     expect(method?.check).toContain("'PUT'");
     expect(method?.check).toContain("'PATCH'");
@@ -1690,9 +1586,7 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_IDEMPOTENCY_RECORDS status enum has 4 lifecycle states", () => {
-    const status = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'in_progress'");
     expect(status?.check).toContain("'completed_success'");
     expect(status?.check).toContain("'completed_error'");
@@ -1700,19 +1594,13 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_PIPELINE_EXECUTIONS allows NULL tenant_id (anonymous traffic)", () => {
-    const tenantId = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_GATEWAY_PIPELINE_EXECUTIONS final_stage enum covers 17 stages", () => {
-    const stage = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
-      (c) => c.name === "final_stage",
-    );
+    const stage = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find((c) => c.name === "final_stage");
     expect(stage?.check).toContain("'receive'");
     expect(stage?.check).toContain("'authenticate'");
     expect(stage?.check).toContain("'check_rate_limit'");
@@ -1730,33 +1618,23 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_TARGETING_RULES cascades on flag deletion", () => {
-    const fk = META_FEATURE_FLAG_TARGETING_RULES.columns.find(
-      (c) => c.name === "flag_id",
-    );
+    const fk = META_FEATURE_FLAG_TARGETING_RULES.columns.find((c) => c.name === "flag_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_FEATURE_FLAG_TARGETING_RULES allows NULL tenant_id (platform rules)", () => {
-    const tenantId = META_FEATURE_FLAG_TARGETING_RULES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_FEATURE_FLAG_TARGETING_RULES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    expect(META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES restricts on flag deletion (preserve audit)", () => {
-    const fk = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
-      (c) => c.name === "flag_id",
-    );
+    const fk = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
     expect(fk?.references?.onDelete).toBe("RESTRICT");
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES status enum has 4 lifecycle states", () => {
-    const status = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'armed'");
     expect(status?.check).toContain("'triggered_active'");
     expect(status?.check).toContain("'released'");
@@ -1764,9 +1642,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES trigger_kind covers 8 trigger kinds", () => {
-    const trigger = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
-      (c) => c.name === "trigger_kind",
-    );
+    const trigger = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "trigger_kind");
     expect(trigger?.check).toContain("'manual_admin'");
     expect(trigger?.check).toContain("'incident_response'");
     expect(trigger?.check).toContain("'compliance_directive'");
@@ -1774,9 +1650,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_EVALUATIONS reason enum covers 17 reasons", () => {
-    const reason = META_FEATURE_FLAG_EVALUATIONS.columns.find(
-      (c) => c.name === "reason",
-    );
+    const reason = META_FEATURE_FLAG_EVALUATIONS.columns.find((c) => c.name === "reason");
     expect(reason?.check).toContain("'default_returned'");
     expect(reason?.check).toContain("'kill_switch_active'");
     expect(reason?.check).toContain("'percentage_bucket_match'");
@@ -1785,9 +1659,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_EVALUATIONS environment enum restricted to 4 envs", () => {
-    const env = META_FEATURE_FLAG_EVALUATIONS.columns.find(
-      (c) => c.name === "environment",
-    );
+    const env = META_FEATURE_FLAG_EVALUATIONS.columns.find((c) => c.name === "environment");
     expect(env?.check).toContain("'preview'");
     expect(env?.check).toContain("'staging'");
     expect(env?.check).toContain("'production'");
@@ -1795,16 +1667,12 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_CHANGES cascades on flag deletion", () => {
-    const fk = META_FEATURE_FLAG_CHANGES.columns.find(
-      (c) => c.name === "flag_id",
-    );
+    const fk = META_FEATURE_FLAG_CHANGES.columns.find((c) => c.name === "flag_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_FEATURE_FLAG_CHANGES kind enum covers 23 change kinds", () => {
-    const kind = META_FEATURE_FLAG_CHANGES.columns.find(
-      (c) => c.name === "kind",
-    );
+    const kind = META_FEATURE_FLAG_CHANGES.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'flag_created'");
     expect(kind?.check).toContain("'default_value_changed'");
     expect(kind?.check).toContain("'rollout_stage_advanced'");
@@ -1812,9 +1680,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_CHANGES outcome enum has 4 outcomes", () => {
-    const outcome = META_FEATURE_FLAG_CHANGES.columns.find(
-      (c) => c.name === "outcome",
-    );
+    const outcome = META_FEATURE_FLAG_CHANGES.columns.find((c) => c.name === "outcome");
     expect(outcome?.check).toContain("'succeeded'");
     expect(outcome?.check).toContain("'blocked_by_four_eyes'");
     expect(outcome?.check).toContain("'blocked_by_policy'");
@@ -1853,9 +1719,7 @@ describe("emitMetaBootstrapSql", () => {
 
   it("includes RLS ENABLE + policy for each tenant-scoped table", () => {
     const sql = emitMetaBootstrapSql();
-    const rlsEnableCount = sql.filter((s) =>
-      s.includes("ENABLE ROW LEVEL SECURITY"),
-    ).length;
+    const rlsEnableCount = sql.filter((s) => s.includes("ENABLE ROW LEVEL SECURITY")).length;
     const tenantScoped = META_TABLES.filter((t) => t.rls?.enabled === true);
     expect(rlsEnableCount).toBe(tenantScoped.length);
   });

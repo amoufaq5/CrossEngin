@@ -90,11 +90,7 @@ export function printYaml(io: IoStreams, value: unknown): void {
 // Emit a structured envelope as JSON or YAML based on format. Used by
 // retention surfaces where --format=json and --format=yaml share the
 // same envelope shape.
-export function printStructured(
-  io: IoStreams,
-  format: string,
-  value: unknown,
-): void {
+export function printStructured(io: IoStreams, format: string, value: unknown): void {
   if (format === "yaml") {
     printYaml(io, value);
   } else {
@@ -126,10 +122,7 @@ export function escapeCsvCell(value: unknown): string {
   return str;
 }
 
-export function escapeCsvCellWithSep(
-  value: unknown,
-  separator: string,
-): string {
+export function escapeCsvCellWithSep(value: unknown, separator: string): string {
   if (value === null || value === undefined) return "";
   let str: string;
   if (typeof value === "string") {
@@ -139,8 +132,7 @@ export function escapeCsvCellWithSep(
   } else {
     str = String(value);
   }
-  const sepEscape =
-    separator === "\\" ? "\\\\" : separator.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sepEscape = separator === "\\" ? "\\\\" : separator.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(`["\\n\\r${sepEscape}]`);
   if (pattern.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
@@ -153,9 +145,8 @@ export function formatCsv(
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
   separator: string = ",",
 ): string {
-  const escape = separator === ","
-    ? escapeCsvCell
-    : (value: unknown) => escapeCsvCellWithSep(value, separator);
+  const escape =
+    separator === "," ? escapeCsvCell : (value: unknown) => escapeCsvCellWithSep(value, separator);
   const lines: string[] = [headers.map(escape).join(separator)];
   for (const row of rows) {
     lines.push(row.map(escape).join(separator));
@@ -282,9 +273,7 @@ export function formatDiff(counts: DiffCounts): string {
   for (const [name, added, removed, modified] of sections) {
     if (added + removed + modified > 0) {
       anyChange = true;
-      lines.push(
-        `  ${name}: +${added.toString()} -${removed.toString()} ~${modified.toString()}`,
-      );
+      lines.push(`  ${name}: +${added.toString()} -${removed.toString()} ~${modified.toString()}`);
     }
   }
   if (!anyChange) {

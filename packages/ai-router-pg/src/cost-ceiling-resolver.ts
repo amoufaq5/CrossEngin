@@ -55,9 +55,7 @@ export class PostgresCostCeilingResolver {
     return (await this.resolveDetailed(tenantId)).ceiling;
   };
 
-  readonly resolveDetailed = async (
-    tenantId: string,
-  ): Promise<CostCeilingResolution> => {
+  readonly resolveDetailed = async (tenantId: string): Promise<CostCeilingResolution> => {
     const ceilingResult = await this.conn.query<CeilingRow>(
       `SELECT max_usd_per_request::TEXT AS max_usd_per_request,
               max_usd_per_window::TEXT AS max_usd_per_window,

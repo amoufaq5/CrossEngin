@@ -60,18 +60,12 @@ describe("getCounter / incrementVectorClock", () => {
   });
 
   it("incrementVectorClock bumps existing counter", () => {
-    const c = incrementVectorClock(
-      [{ region: "eu-central", counter: 5 }],
-      "eu-central",
-    );
+    const c = incrementVectorClock([{ region: "eu-central", counter: 5 }], "eu-central");
     expect(c).toEqual([{ region: "eu-central", counter: 6 }]);
   });
 
   it("keeps entries sorted after insert", () => {
-    const c = incrementVectorClock(
-      [{ region: "us-east", counter: 1 }],
-      "eu-central",
-    );
+    const c = incrementVectorClock([{ region: "us-east", counter: 1 }], "eu-central");
     expect(c.map((e) => e.region)).toEqual(["eu-central", "us-east"]);
   });
 });
@@ -177,8 +171,6 @@ describe("StampedEventSchema", () => {
 
 describe("tickEvent", () => {
   it("increments the origin region's counter", () => {
-    expect(tickEvent([], "eu-central")).toEqual([
-      { region: "eu-central", counter: 1 },
-    ]);
+    expect(tickEvent([], "eu-central")).toEqual([{ region: "eu-central", counter: 1 }]);
   });
 });

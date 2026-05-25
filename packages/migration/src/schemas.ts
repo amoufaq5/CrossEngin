@@ -55,14 +55,13 @@ export const InferredColumnSchema = z
     maxValue: z.union([z.number(), z.string()]).optional(),
     confidence: z.number().min(0).max(1),
     semanticHints: z.array(SemanticHintSchema).default([]),
-    examples: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).max(5).default([]),
+    examples: z
+      .array(z.union([z.string(), z.number(), z.boolean(), z.null()]))
+      .max(5)
+      .default([]),
   })
   .superRefine((v, ctx) => {
-    if (
-      v.minLength !== undefined &&
-      v.maxLength !== undefined &&
-      v.minLength > v.maxLength
-    ) {
+    if (v.minLength !== undefined && v.maxLength !== undefined && v.minLength > v.maxLength) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["minLength"],
@@ -96,7 +95,8 @@ export const InferredColumnSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["semanticHints"],
-          message: "primary_key_candidate columns must have distinctSamples=total samples (no duplicates)",
+          message:
+            "primary_key_candidate columns must have distinctSamples=total samples (no duplicates)",
         });
       }
     }
@@ -205,9 +205,7 @@ export function consolidateTypes(types: readonly InferredType[]): InferredType {
     return [...counts.keys()][0] ?? "unknown";
   }
   if (counts.has("decimal") && counts.has("integer")) {
-    const others = [...counts.keys()].filter(
-      (k) => k !== "decimal" && k !== "integer",
-    );
+    const others = [...counts.keys()].filter((k) => k !== "decimal" && k !== "integer");
     if (others.length === 0) return "decimal";
   }
   if (counts.has("datetime") && counts.has("date")) {

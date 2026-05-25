@@ -26,12 +26,7 @@ describe("constants", () => {
   });
 
   it("SOURCE_SCHEDULES has 4 entries", () => {
-    expect(SOURCE_SCHEDULES).toEqual([
-      "one_shot",
-      "interval",
-      "cron",
-      "webhook_driven",
-    ]);
+    expect(SOURCE_SCHEDULES).toEqual(["one_shot", "interval", "cron", "webhook_driven"]);
   });
 });
 

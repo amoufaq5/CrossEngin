@@ -40,9 +40,7 @@ export function resolveEffectiveRoles(
   return effective;
 }
 
-export function validateRoleGraph(
-  roleDefinitions: ReadonlyMap<RoleName, RoleDefinition>,
-): void {
+export function validateRoleGraph(roleDefinitions: ReadonlyMap<RoleName, RoleDefinition>): void {
   const effective = new Set<RoleName>();
   const visiting = new Set<RoleName>();
 

@@ -15,13 +15,7 @@ import {
 
 describe("constants", () => {
   it("LISTING_STATUSES has 5 entries", () => {
-    expect(LISTING_STATUSES).toEqual([
-      "draft",
-      "submitted",
-      "approved",
-      "live",
-      "delisted",
-    ]);
+    expect(LISTING_STATUSES).toEqual(["draft", "submitted", "approved", "live", "delisted"]);
   });
 
   it("PRICING_MODELS has 6 entries", () => {
@@ -100,9 +94,7 @@ describe("ListingPricingSchema", () => {
   });
 
   it("rejects malformed currency", () => {
-    expect(() =>
-      ListingPricingSchema.parse({ ...base, currency: "usd" }),
-    ).toThrow();
+    expect(() => ListingPricingSchema.parse({ ...base, currency: "usd" })).toThrow();
   });
 });
 
@@ -140,9 +132,9 @@ describe("MarketplaceListingSchema", () => {
   });
 
   it("rejects live without publishedVersion", () => {
-    expect(() =>
-      MarketplaceListingSchema.parse({ ...base, publishedVersion: null }),
-    ).toThrow(/publishedVersion/);
+    expect(() => MarketplaceListingSchema.parse({ ...base, publishedVersion: null })).toThrow(
+      /publishedVersion/,
+    );
   });
 
   it("rejects approved without approvedBy", () => {
@@ -223,9 +215,9 @@ describe("PackReviewSchema", () => {
   });
 
   it("rejects hidden without hiddenReason", () => {
-    expect(() =>
-      PackReviewSchema.parse({ ...base, moderationStatus: "hidden" }),
-    ).toThrow(/hiddenReason/);
+    expect(() => PackReviewSchema.parse({ ...base, moderationStatus: "hidden" })).toThrow(
+      /hiddenReason/,
+    );
   });
 
   it("rejects editedAt before submittedAt", () => {

@@ -31,7 +31,10 @@ export const AlertChannelTargetSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("slack"),
-    channel: z.string().min(1).regex(/^#?[a-z0-9_-]+$/),
+    channel: z
+      .string()
+      .min(1)
+      .regex(/^#?[a-z0-9_-]+$/),
     acknowledgeTimeoutMinutes: z.number().int().positive().optional(),
   }),
   z.object({
@@ -119,7 +122,10 @@ export const AlertConditionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("cross_tenant_query_attempt"),
     minCount: z.number().int().positive().default(1),
-    overWindow: z.string().regex(/^\d+[smh]$/).default("1m"),
+    overWindow: z
+      .string()
+      .regex(/^\d+[smh]$/)
+      .default("1m"),
   }),
   z.object({
     kind: z.literal("ai_cost_spike"),
@@ -149,10 +155,7 @@ export interface AlertRouteResolution {
   readonly channels: readonly AlertChannelTarget[];
 }
 
-export function resolveRoute(
-  policy: AlertPolicy,
-  severity: Severity,
-): AlertRouteResolution | null {
+export function resolveRoute(policy: AlertPolicy, severity: Severity): AlertRouteResolution | null {
   const route = policy.routes.find((r) => r.severity === severity);
   if (route === undefined) return null;
   return { severity: route.severity, channels: route.channels };

@@ -12,9 +12,7 @@ describe("DisclosurePolicySchema", () => {
   });
 
   it("rejects an invalid email", () => {
-    expect(() =>
-      DisclosurePolicySchema.parse({ contact: { email: "not-an-email" } }),
-    ).toThrow();
+    expect(() => DisclosurePolicySchema.parse({ contact: { email: "not-an-email" } })).toThrow();
   });
 
   it("accepts a PGP key + url + safe harbor", () => {
@@ -64,9 +62,7 @@ describe("emitSecurityMd", () => {
   });
 
   it("reflects the bug bounty program kind", () => {
-    const none = emitSecurityMd(
-      DisclosurePolicySchema.parse({ contact: { email: "x@y.com" } }),
-    );
+    const none = emitSecurityMd(DisclosurePolicySchema.parse({ contact: { email: "x@y.com" } }));
     expect(none).toContain("No public bug bounty");
 
     const priv = emitSecurityMd(

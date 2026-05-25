@@ -16,13 +16,7 @@ export const REINDEX_REASONS = [
 ] as const;
 export type ReindexReason = (typeof REINDEX_REASONS)[number];
 
-export const REINDEX_STATUSES = [
-  "queued",
-  "running",
-  "completed",
-  "failed",
-  "cancelled",
-] as const;
+export const REINDEX_STATUSES = ["queued", "running", "completed", "failed", "cancelled"] as const;
 export type ReindexStatus = (typeof REINDEX_STATUSES)[number];
 
 export const ReindexRequestSchema = z

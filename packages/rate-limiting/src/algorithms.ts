@@ -10,12 +10,16 @@ export const RATE_LIMIT_ALGORITHMS = [
 ] as const;
 export type RateLimitAlgorithm = (typeof RATE_LIMIT_ALGORITHMS)[number];
 
-export const ALGORITHM_SUPPORTS_BURST: ReadonlySet<RateLimitAlgorithm> = new Set(
-  ["token_bucket", "sliding_window_log"],
-);
+export const ALGORITHM_SUPPORTS_BURST: ReadonlySet<RateLimitAlgorithm> = new Set([
+  "token_bucket",
+  "sliding_window_log",
+]);
 
-export const ALGORITHM_IS_RECOMMENDED_FOR_DISTRIBUTED: ReadonlySet<RateLimitAlgorithm> =
-  new Set(["token_bucket", "sliding_window", "fixed_window"]);
+export const ALGORITHM_IS_RECOMMENDED_FOR_DISTRIBUTED: ReadonlySet<RateLimitAlgorithm> = new Set([
+  "token_bucket",
+  "sliding_window",
+  "fixed_window",
+]);
 
 const TokenBucketParamsSchema = z.object({
   kind: z.literal("token_bucket"),
@@ -95,10 +99,7 @@ export const evaluateTokenBucket = (input: {
   const elapsedMs = input.now.getTime() - Date.parse(input.state.lastRefillAt);
   const elapsedSec = Math.max(0, elapsedMs / 1000);
   const refilled = elapsedSec * input.params.refillTokensPerSecond;
-  const newTokens = Math.min(
-    input.params.capacity,
-    input.state.tokens + refilled,
-  );
+  const newTokens = Math.min(input.params.capacity, input.state.tokens + refilled);
   if (newTokens >= input.cost) {
     return {
       allowed: true,
@@ -128,10 +129,7 @@ export interface FixedWindowState {
   readonly count: number;
 }
 
-export const computeFixedWindowStart = (
-  now: Date,
-  windowSeconds: number,
-): string => {
+export const computeFixedWindowStart = (now: Date, windowSeconds: number): string => {
   const nowSec = Math.floor(now.getTime() / 1000);
   const startSec = nowSec - (nowSec % windowSeconds);
   return new Date(startSec * 1000).toISOString();
@@ -148,10 +146,7 @@ export const evaluateFixedWindow = (input: {
   readonly remainingInWindow: number;
   readonly resetAt: string;
 } => {
-  const currentWindowStart = computeFixedWindowStart(
-    input.now,
-    input.windowSeconds,
-  );
+  const currentWindowStart = computeFixedWindowStart(input.now, input.windowSeconds);
   const stateInThisWindow =
     input.state !== null && input.state.windowStartAt === currentWindowStart;
   const currentCount = stateInThisWindow ? (input.state?.count ?? 0) : 0;
@@ -201,10 +196,7 @@ export const evaluateSlidingWindow = (input: {
   return {
     allowed: projected <= input.maxRequestsPerWindow,
     currentCount: total,
-    remainingInWindow: Math.max(
-      0,
-      input.maxRequestsPerWindow - projected,
-    ),
+    remainingInWindow: Math.max(0, input.maxRequestsPerWindow - projected),
   };
 };
 
@@ -227,6 +219,5 @@ export const evaluateConcurrentRequest = (input: {
 export const algorithmSupportsBurst = (alg: RateLimitAlgorithm): boolean =>
   ALGORITHM_SUPPORTS_BURST.has(alg);
 
-export const isAlgorithmDistributedFriendly = (
-  alg: RateLimitAlgorithm,
-): boolean => ALGORITHM_IS_RECOMMENDED_FOR_DISTRIBUTED.has(alg);
+export const isAlgorithmDistributedFriendly = (alg: RateLimitAlgorithm): boolean =>
+  ALGORITHM_IS_RECOMMENDED_FOR_DISTRIBUTED.has(alg);

@@ -70,15 +70,15 @@ describe("RouteLatencyBudgetSchema", () => {
   });
 
   it("rejects p95 < p50", () => {
-    expect(() =>
-      RouteLatencyBudgetSchema.parse({ ...base, p50: "300ms", p95: "100ms" }),
-    ).toThrow(/p95 must be >= p50/);
+    expect(() => RouteLatencyBudgetSchema.parse({ ...base, p50: "300ms", p95: "100ms" })).toThrow(
+      /p95 must be >= p50/,
+    );
   });
 
   it("rejects p99 < p95", () => {
-    expect(() =>
-      RouteLatencyBudgetSchema.parse({ ...base, p95: "1s", p99: "500ms" }),
-    ).toThrow(/p99 must be >= p95/);
+    expect(() => RouteLatencyBudgetSchema.parse({ ...base, p95: "1s", p99: "500ms" })).toThrow(
+      /p99 must be >= p95/,
+    );
   });
 
   it("rejects pagerOnBreach=true without critical severity", () => {
@@ -148,9 +148,9 @@ describe("BudgetBreachRecordSchema", () => {
   });
 
   it("rejects observedMs <= budgetMs", () => {
-    expect(() =>
-      BudgetBreachRecordSchema.parse({ ...base, observedMs: 500 }),
-    ).toThrow(/observedMs > budgetMs/);
+    expect(() => BudgetBreachRecordSchema.parse({ ...base, observedMs: 500 })).toThrow(
+      /observedMs > budgetMs/,
+    );
   });
 
   it("rejects windowEnd <= windowStart", () => {
@@ -163,9 +163,9 @@ describe("BudgetBreachRecordSchema", () => {
   });
 
   it("rejects critical severity without alertSent=true", () => {
-    expect(() =>
-      BudgetBreachRecordSchema.parse({ ...base, alertSent: false }),
-    ).toThrow(/alertSent=true/);
+    expect(() => BudgetBreachRecordSchema.parse({ ...base, alertSent: false })).toThrow(
+      /alertSent=true/,
+    );
   });
 
   it("rejects resolvedAt before observedAt", () => {

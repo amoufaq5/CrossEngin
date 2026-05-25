@@ -2,10 +2,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { WorkflowInstrumentationEvent } from "@crossengin/workflow-runtime";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 import { PostgresWorkflowInstrumentation } from "./instrumentation.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -26,7 +23,9 @@ function mockConnection(
   };
 }
 
-function event(overrides: Partial<WorkflowInstrumentationEvent> = {}): WorkflowInstrumentationEvent {
+function event(
+  overrides: Partial<WorkflowInstrumentationEvent> = {},
+): WorkflowInstrumentationEvent {
   return {
     kind: "instance_started",
     tenantId: TENANT,
@@ -71,9 +70,7 @@ describe("PostgresWorkflowInstrumentation", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const conn = mockConnection(capture);
     const inst = new PostgresWorkflowInstrumentation({ conn });
-    await inst.onEvent(
-      event({ instanceId: null, definitionId: null, kind: "engine_error" }),
-    );
+    await inst.onEvent(event({ instanceId: null, definitionId: null, kind: "engine_error" }));
     expect(capture[0]?.params?.[1]).toBeNull();
     expect(capture[0]?.params?.[2]).toBeNull();
     expect(capture[0]?.params?.[3]).toBe("engine_error");

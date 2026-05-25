@@ -62,9 +62,9 @@ describe("RoutingRuleSchema", () => {
   });
 
   it("requires geo_dns to declare source countries", () => {
-    expect(() =>
-      RoutingRuleSchema.parse({ ...base, sourceCountries: [] }),
-    ).toThrow(/source country/);
+    expect(() => RoutingRuleSchema.parse({ ...base, sourceCountries: [] })).toThrow(
+      /source country/,
+    );
   });
 
   it("requires weighted strategy to declare weights summing to 100", () => {
@@ -109,15 +109,13 @@ describe("RoutingRuleSchema", () => {
   });
 
   it("rejects blackhole decision with failover regions", () => {
-    expect(() =>
-      RoutingRuleSchema.parse({ ...base, decision: "blackhole" }),
-    ).toThrow(/blackhole decision/);
+    expect(() => RoutingRuleSchema.parse({ ...base, decision: "blackhole" })).toThrow(
+      /blackhole decision/,
+    );
   });
 
   it("rejects invalid country code", () => {
-    expect(() =>
-      RoutingRuleSchema.parse({ ...base, sourceCountries: ["DEU"] }),
-    ).toThrow();
+    expect(() => RoutingRuleSchema.parse({ ...base, sourceCountries: ["DEU"] })).toThrow();
   });
 });
 
@@ -148,19 +146,13 @@ describe("RoutingTableSchema", () => {
 
   it("rejects two rules matching the same country at the same priority", () => {
     expect(() =>
-      RoutingTableSchema.parse([
-        rule("r1", 10, ["DE"]),
-        rule("r2", 10, ["DE"]),
-      ]),
+      RoutingTableSchema.parse([rule("r1", 10, ["DE"]), rule("r2", 10, ["DE"])]),
     ).toThrow(/same priority/);
   });
 
   it("allows the same country at different priorities (failover)", () => {
     expect(() =>
-      RoutingTableSchema.parse([
-        rule("r1", 10, ["DE"]),
-        rule("r2", 20, ["DE"]),
-      ]),
+      RoutingTableSchema.parse([rule("r1", 10, ["DE"]), rule("r2", 20, ["DE"])]),
     ).not.toThrow();
   });
 });

@@ -33,9 +33,9 @@ describe("NativePluginDeclarationSchema", () => {
   });
 
   it("rejects mismatched capability for the declared plugin id", () => {
-    expect(() =>
-      NativePluginDeclarationSchema.parse({ ...baseDecl, capability: "ble" }),
-    ).toThrow(/provides 'camera' capability/);
+    expect(() => NativePluginDeclarationSchema.parse({ ...baseDecl, capability: "ble" })).toThrow(
+      /provides 'camera' capability/,
+    );
   });
 
   it("requires permissionPromptCopyKey for prompt-bearing capabilities (third-party)", () => {

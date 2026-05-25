@@ -27,21 +27,21 @@ describe("emitColumn — basics", () => {
   });
 
   it("emits VARCHAR(N) for text with maxLength", () => {
-    expect(
-      emitColumn({ name: "name", type: { kind: "text", maxLength: 100 } }, { schema }),
-    ).toBe(`"name" VARCHAR(100)`);
+    expect(emitColumn({ name: "name", type: { kind: "text", maxLength: 100 } }, { schema })).toBe(
+      `"name" VARCHAR(100)`,
+    );
   });
 
   it("adds NOT NULL when required", () => {
-    expect(
-      emitColumn({ name: "name", type: { kind: "text" }, required: true }, { schema }),
-    ).toBe(`"name" TEXT NOT NULL`);
+    expect(emitColumn({ name: "name", type: { kind: "text" }, required: true }, { schema })).toBe(
+      `"name" TEXT NOT NULL`,
+    );
   });
 
   it("adds UNIQUE when unique=true", () => {
-    expect(
-      emitColumn({ name: "email", type: { kind: "email" }, unique: true }, { schema }),
-    ).toBe(`"email" VARCHAR(320) UNIQUE`);
+    expect(emitColumn({ name: "email", type: { kind: "email" }, unique: true }, { schema })).toBe(
+      `"email" VARCHAR(320) UNIQUE`,
+    );
   });
 
   it("does NOT add UNIQUE for unique={scope: [...]} (composite handled at table level)", () => {
@@ -174,29 +174,26 @@ describe("emitColumn — enum CHECK", () => {
 describe("emitColumn — integer range CHECK", () => {
   it("emits BETWEEN for both bounds", () => {
     expect(
-      emitColumn(
-        { name: "qty", type: { kind: "integer", min: 1, max: 100 } },
-        { schema },
-      ),
+      emitColumn({ name: "qty", type: { kind: "integer", min: 1, max: 100 } }, { schema }),
     ).toBe(`"qty" INTEGER CHECK ("qty" BETWEEN 1 AND 100)`);
   });
 
   it("emits >= for min only", () => {
-    expect(
-      emitColumn({ name: "qty", type: { kind: "integer", min: 0 } }, { schema }),
-    ).toBe(`"qty" INTEGER CHECK ("qty" >= 0)`);
+    expect(emitColumn({ name: "qty", type: { kind: "integer", min: 0 } }, { schema })).toBe(
+      `"qty" INTEGER CHECK ("qty" >= 0)`,
+    );
   });
 
   it("emits <= for max only", () => {
-    expect(
-      emitColumn({ name: "qty", type: { kind: "integer", max: 100 } }, { schema }),
-    ).toBe(`"qty" INTEGER CHECK ("qty" <= 100)`);
+    expect(emitColumn({ name: "qty", type: { kind: "integer", max: 100 } }, { schema })).toBe(
+      `"qty" INTEGER CHECK ("qty" <= 100)`,
+    );
   });
 
   it("emits no CHECK when no bounds", () => {
-    expect(
-      emitColumn({ name: "qty", type: { kind: "integer" } }, { schema }),
-    ).toBe(`"qty" INTEGER`);
+    expect(emitColumn({ name: "qty", type: { kind: "integer" } }, { schema })).toBe(
+      `"qty" INTEGER`,
+    );
   });
 });
 

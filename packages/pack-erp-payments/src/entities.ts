@@ -24,14 +24,7 @@ export const PAYMENT_ENTITY: Entity = {
       name: "state",
       type: {
         kind: "enum",
-        values: [
-          "pending",
-          "captured",
-          "settled",
-          "refunded",
-          "failed",
-          "cancelled",
-        ],
+        values: ["pending", "captured", "settled", "refunded", "failed", "cancelled"],
       },
       required: true,
       default: { kind: "literal", value: "pending" },

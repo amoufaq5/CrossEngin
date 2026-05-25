@@ -41,9 +41,7 @@ describe("FileReferenceSchema", () => {
   });
 
   it("rejects a malformed sha256", () => {
-    expect(() =>
-      FileReferenceSchema.parse({ ...baseRef, checksumSha256: "tooshort" }),
-    ).toThrow();
+    expect(() => FileReferenceSchema.parse({ ...baseRef, checksumSha256: "tooshort" })).toThrow();
   });
 
   it("rejects archiveAfter > deleteAfter", () => {
@@ -63,9 +61,7 @@ describe("FileReferenceSchema", () => {
   });
 
   it("rejects negative sizeBytes", () => {
-    expect(() =>
-      FileReferenceSchema.parse({ ...baseRef, sizeBytes: -1 }),
-    ).toThrow();
+    expect(() => FileReferenceSchema.parse({ ...baseRef, sizeBytes: -1 })).toThrow();
   });
 
   it("FILE_STATUSES has six values", () => {

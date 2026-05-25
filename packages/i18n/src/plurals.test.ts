@@ -20,14 +20,7 @@ describe("pluralCategoriesFor", () => {
   });
 
   it("Arabic uses six categories", () => {
-    expect(pluralCategoriesFor("ar")).toEqual([
-      "zero",
-      "one",
-      "two",
-      "few",
-      "many",
-      "other",
-    ]);
+    expect(pluralCategoriesFor("ar")).toEqual(["zero", "one", "two", "few", "many", "other"]);
   });
 
   it("Chinese uses only other", () => {
@@ -60,9 +53,7 @@ describe("isCompleteForLocale / missingPluralCases", () => {
   });
 
   it("Arabic needs all six", () => {
-    expect(
-      isCompleteForLocale("ar", ["zero", "one", "two", "few", "many", "other"]),
-    ).toBe(true);
+    expect(isCompleteForLocale("ar", ["zero", "one", "two", "few", "many", "other"])).toBe(true);
     expect(isCompleteForLocale("ar", ["one", "other"])).toBe(false);
     expect([...missingPluralCases("ar", ["one", "other"])].sort()).toEqual([
       "few",

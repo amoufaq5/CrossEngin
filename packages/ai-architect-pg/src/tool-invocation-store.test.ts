@@ -8,10 +8,15 @@ const SESSION = "00000000-0000-4000-8000-000000000002";
 const TS = "2026-05-17T12:00:00.000Z";
 
 function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
+  handler: (
+    sql: string,
+    params: readonly unknown[] | undefined,
+  ) => PgQueryResult<Record<string, unknown>>,
 ): PgConnection {
   return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
+    query: vi.fn(async (sql: string, params?: readonly unknown[]) =>
+      handler(sql, params),
+    ) as PgConnection["query"],
     transaction: vi.fn() as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
@@ -27,7 +32,7 @@ function invocationRow(overrides: Record<string, unknown> = {}): Record<string, 
     tool_call_id: "tu_1",
     tool_name: "validate_manifest",
     input: { manifest_json: "{}" },
-    output: "{\"ok\":true}",
+    output: '{"ok":true}',
     is_error: false,
     duration_ms: 4,
     started_at: TS,
@@ -50,7 +55,7 @@ describe("PostgresArchitectToolInvocationStore.append", () => {
       toolCallId: "tu_1",
       toolName: "validate_manifest",
       input: { manifest_json: "{}" },
-      output: "{\"ok\":true}",
+      output: '{"ok":true}',
       isError: false,
       durationMs: 4,
     });
@@ -64,7 +69,7 @@ describe("PostgresArchitectToolInvocationStore.append", () => {
         invocationRow({
           is_error: true,
           duration_ms: 50,
-          output: "{\"error\":\"boom\"}",
+          output: '{"error":"boom"}',
         }),
       ],
       rowCount: 1,
@@ -77,7 +82,7 @@ describe("PostgresArchitectToolInvocationStore.append", () => {
       toolCallId: "tu_1",
       toolName: "validate_manifest",
       input: {},
-      output: "{\"error\":\"boom\"}",
+      output: '{"error":"boom"}',
       isError: true,
       durationMs: 50,
     });

@@ -21,8 +21,7 @@ export const pack: CompliancePack = {
         type: "enum",
         values: ["covered_entity", "business_associate", "hybrid_entity"],
         required: true,
-        helpText:
-          "HIPAA role of the tenant under 45 CFR §160.103. Drives which obligations apply.",
+        helpText: "HIPAA role of the tenant under 45 CFR §160.103. Drives which obligations apply.",
       },
       breachNotificationDays: {
         type: "integer",
@@ -113,7 +112,13 @@ export const pack: CompliancePack = {
             name: "notification_status",
             type: {
               kind: "enum",
-              values: ["pending", "in_progress", "individuals_notified", "hhs_notified", "completed"],
+              values: [
+                "pending",
+                "in_progress",
+                "individuals_notified",
+                "hhs_notified",
+                "completed",
+              ],
             },
             required: true,
             default: { kind: "literal", value: "pending" },

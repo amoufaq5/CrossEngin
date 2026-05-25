@@ -50,16 +50,9 @@ import {
   type EmbeddingAggregation,
   type MultimodalEmbeddingResult,
 } from "./embeddings.js";
-import {
-  BedrockError,
-  fromHttpResponse,
-  fromNetworkError,
-} from "./errors.js";
+import { BedrockError, fromHttpResponse, fromNetworkError } from "./errors.js";
 import { readConverseEventStream } from "./event-stream.js";
-import {
-  buildBedrockGuardrailConfig,
-  type BedrockGuardrailConfig,
-} from "./guardrails.js";
+import { buildBedrockGuardrailConfig, type BedrockGuardrailConfig } from "./guardrails.js";
 import {
   buildGuardrailListQuery,
   parseGuardrailDetail,
@@ -161,8 +154,7 @@ import {
 } from "./tagging-api.js";
 
 export const BEDROCK_DEFAULT_REGION = "us-east-1";
-export const BEDROCK_DEFAULT_MODEL: BedrockChatModel =
-  "anthropic.claude-3-5-sonnet-20241022-v2:0";
+export const BEDROCK_DEFAULT_MODEL: BedrockChatModel = "anthropic.claude-3-5-sonnet-20241022-v2:0";
 
 export type FetchLike = (
   url: string,
@@ -252,9 +244,7 @@ export class BedrockProvider implements LlmProvider {
     }
     const embedModel = opts.defaultEmbeddingModel ?? BEDROCK_DEFAULT_EMBEDDING_MODEL;
     if (!isBedrockEmbeddingModel(embedModel)) {
-      throw new Error(
-        `BedrockProvider: unsupported defaultEmbeddingModel ${embedModel}`,
-      );
+      throw new Error(`BedrockProvider: unsupported defaultEmbeddingModel ${embedModel}`);
     }
     this.credentials = {
       accessKeyId: opts.accessKeyId,
@@ -268,11 +258,7 @@ export class BedrockProvider implements LlmProvider {
     this.defaultEmbeddingDimensions = opts.defaultEmbeddingDimensions;
     this.defaultCohereInputType = opts.defaultCohereInputType;
     const concurrency = opts.titanConcurrency ?? DEFAULT_TITAN_CONCURRENCY;
-    if (
-      !Number.isInteger(concurrency) ||
-      concurrency < 1 ||
-      concurrency > MAX_TITAN_CONCURRENCY
-    ) {
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_TITAN_CONCURRENCY) {
       throw new Error(
         `BedrockProvider: titanConcurrency must be an integer in [1, ${MAX_TITAN_CONCURRENCY.toString()}], got ${concurrency.toString()}`,
       );
@@ -316,9 +302,7 @@ export class BedrockProvider implements LlmProvider {
     const model = this.resolveModel(req.model);
     const built = buildBedrockConverseRequest(req, {
       defaultMaxTokens: this.defaultMaxTokens,
-      ...(effectiveGuardrail !== undefined
-        ? { guardrailConfig: effectiveGuardrail }
-        : {}),
+      ...(effectiveGuardrail !== undefined ? { guardrailConfig: effectiveGuardrail } : {}),
     });
     const body = new TextEncoder().encode(JSON.stringify(built));
     const url = `${this.baseUrl}/model/${encodeURIComponent(model)}/converse-stream`;
@@ -345,10 +329,7 @@ export class BedrockProvider implements LlmProvider {
     req: CompletionRequest,
     guardrailOverride?: BedrockGuardrailConfig | null,
   ): Promise<BedrockConverseResponse> {
-    return this.completeNonStreamingInternal(
-      req,
-      this.resolveGuardrailOverride(guardrailOverride),
-    );
+    return this.completeNonStreamingInternal(req, this.resolveGuardrailOverride(guardrailOverride));
   }
 
   private async completeNonStreamingInternal(
@@ -358,9 +339,7 @@ export class BedrockProvider implements LlmProvider {
     const model = this.resolveModel(req.model);
     const built = buildBedrockConverseRequest(req, {
       defaultMaxTokens: this.defaultMaxTokens,
-      ...(effectiveGuardrail !== undefined
-        ? { guardrailConfig: effectiveGuardrail }
-        : {}),
+      ...(effectiveGuardrail !== undefined ? { guardrailConfig: effectiveGuardrail } : {}),
     });
     const body = new TextEncoder().encode(JSON.stringify(built));
     const url = `${this.baseUrl}/model/${encodeURIComponent(model)}/converse`;
@@ -411,7 +390,9 @@ export class BedrockProvider implements LlmProvider {
     model: BedrockEmbeddingModel,
     texts: readonly string[],
   ): Promise<EmbeddingAggregation> {
-    const callOne = async (text: string): Promise<{
+    const callOne = async (
+      text: string,
+    ): Promise<{
       embedding: readonly number[];
       tokens: number;
     }> => {
@@ -432,9 +413,7 @@ export class BedrockProvider implements LlmProvider {
     }>(texts.length);
     for (let start = 0; start < texts.length; start += this.titanConcurrency) {
       const end = Math.min(start + this.titanConcurrency, texts.length);
-      const chunk = await Promise.all(
-        texts.slice(start, end).map((t) => callOne(t)),
-      );
+      const chunk = await Promise.all(texts.slice(start, end).map((t) => callOne(t)));
       for (let i = 0; i < chunk.length; i++) {
         results[start + i] = chunk[i]!;
       }
@@ -466,9 +445,7 @@ export class BedrockProvider implements LlmProvider {
     const dim = vectors[0]?.length ?? 0;
     const reported = parsed.meta?.billed_units?.input_tokens;
     const inputTokens =
-      typeof reported === "number" && reported > 0
-        ? reported
-        : approximateCohereTokens(texts);
+      typeof reported === "number" && reported > 0 ? reported : approximateCohereTokens(texts);
     return { vectors, dim, inputTokens };
   }
 
@@ -680,8 +657,7 @@ export class BedrockProvider implements LlmProvider {
     if (jobIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "stopModelCustomizationJob: jobIdentifier must be a non-empty string",
+        message: "stopModelCustomizationJob: jobIdentifier must be a non-empty string",
       });
     }
     const path = `/model-customization-jobs/${encodeURIComponent(jobIdentifier)}/stop`;
@@ -694,8 +670,7 @@ export class BedrockProvider implements LlmProvider {
     if (jobIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "getModelCustomizationJob: jobIdentifier must be a non-empty string",
+        message: "getModelCustomizationJob: jobIdentifier must be a non-empty string",
       });
     }
     const path = `/model-customization-jobs/${encodeURIComponent(jobIdentifier)}`;
@@ -732,9 +707,7 @@ export class BedrockProvider implements LlmProvider {
     return parseModelCustomizationJobListResponse(raw);
   }
 
-  async getModelImportJob(
-    jobIdentifier: string,
-  ): Promise<BedrockModelImportJobDetail> {
+  async getModelImportJob(jobIdentifier: string): Promise<BedrockModelImportJobDetail> {
     if (jobIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -775,9 +748,7 @@ export class BedrockProvider implements LlmProvider {
     return parseModelImportJobListResponse(raw);
   }
 
-  async getCustomModel(
-    modelIdentifier: string,
-  ): Promise<BedrockCustomModelDetail> {
+  async getCustomModel(modelIdentifier: string): Promise<BedrockCustomModelDetail> {
     if (modelIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -829,9 +800,7 @@ export class BedrockProvider implements LlmProvider {
     return parseCustomModelListResponse(raw);
   }
 
-  async getImportedModel(
-    modelIdentifier: string,
-  ): Promise<BedrockImportedModelDetail> {
+  async getImportedModel(modelIdentifier: string): Promise<BedrockImportedModelDetail> {
     if (modelIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -883,9 +852,7 @@ export class BedrockProvider implements LlmProvider {
     return parseImportedModelListResponse(raw);
   }
 
-  async getInferenceProfile(
-    profileIdentifier: string,
-  ): Promise<BedrockInferenceProfileDetail> {
+  async getInferenceProfile(profileIdentifier: string): Promise<BedrockInferenceProfileDetail> {
     if (profileIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -910,8 +877,7 @@ export class BedrockProvider implements LlmProvider {
     if (profileIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "deleteInferenceProfile: profileIdentifier must be a non-empty string",
+        message: "deleteInferenceProfile: profileIdentifier must be a non-empty string",
       });
     }
     const detail = await this.getInferenceProfile(profileIdentifier);
@@ -932,8 +898,7 @@ export class BedrockProvider implements LlmProvider {
     if (profileIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "updateInferenceProfile: profileIdentifier must be a non-empty string",
+        message: "updateInferenceProfile: profileIdentifier must be a non-empty string",
       });
     }
     const bodyStr = buildUpdateInferenceProfileBody(input);
@@ -996,8 +961,7 @@ export class BedrockProvider implements LlmProvider {
     if (provisionedModelId.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "getProvisionedModelThroughput: provisionedModelId must be a non-empty string",
+        message: "getProvisionedModelThroughput: provisionedModelId must be a non-empty string",
       });
     }
     const path = `/provisioned-model-throughputs/${encodeURIComponent(provisionedModelId)}`;
@@ -1018,8 +982,7 @@ export class BedrockProvider implements LlmProvider {
     if (provisionedModelId.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "deleteProvisionedModelThroughput: provisionedModelId must be a non-empty string",
+        message: "deleteProvisionedModelThroughput: provisionedModelId must be a non-empty string",
       });
     }
     const path = `/provisioned-model-throughput/${encodeURIComponent(provisionedModelId)}`;
@@ -1033,8 +996,7 @@ export class BedrockProvider implements LlmProvider {
     if (provisionedModelId.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "updateProvisionedModelThroughput: provisionedModelId must be a non-empty string",
+        message: "updateProvisionedModelThroughput: provisionedModelId must be a non-empty string",
       });
     }
     const bodyStr = buildUpdateProvisionedModelThroughputBody(input);
@@ -1084,14 +1046,11 @@ export class BedrockProvider implements LlmProvider {
     return parseProvisionedModelListResponse(raw);
   }
 
-  async getFoundationModel(
-    modelIdentifier: string,
-  ): Promise<BedrockFoundationModelDetail> {
+  async getFoundationModel(modelIdentifier: string): Promise<BedrockFoundationModelDetail> {
     if (modelIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "getFoundationModel: modelIdentifier must be a non-empty string",
+        message: "getFoundationModel: modelIdentifier must be a non-empty string",
       });
     }
     const path = `/foundation-models/${encodeURIComponent(modelIdentifier)}`;
@@ -1160,10 +1119,7 @@ export class BedrockProvider implements LlmProvider {
     return parseGuardrailDetail(raw);
   }
 
-  async deleteGuardrail(
-    guardrailIdentifier: string,
-    guardrailVersion?: string,
-  ): Promise<void> {
+  async deleteGuardrail(guardrailIdentifier: string, guardrailVersion?: string): Promise<void> {
     if (guardrailIdentifier.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -1202,9 +1158,7 @@ export class BedrockProvider implements LlmProvider {
     return parseGuardrailListResponse(raw);
   }
 
-  async createBatch(
-    input: BedrockCreateBatchInput,
-  ): Promise<BedrockCreateBatchResponse> {
+  async createBatch(input: BedrockCreateBatchInput): Promise<BedrockCreateBatchResponse> {
     const bodyStr = buildCreateBatchBody(input);
     const body = new TextEncoder().encode(bodyStr);
     const text = await this.signedControlPlanePost({
@@ -1234,9 +1188,7 @@ export class BedrockProvider implements LlmProvider {
     await this.signedControlPlanePost({ path });
   }
 
-  async listBatches(
-    options: BedrockListBatchesOptions = {},
-  ): Promise<BedrockBatchJobListResponse> {
+  async listBatches(options: BedrockListBatchesOptions = {}): Promise<BedrockBatchJobListResponse> {
     const query = buildBatchListQuery(options);
     const text = await this.signedControlPlaneGet({
       path: "/model-invocation-jobs/",
@@ -1493,9 +1445,7 @@ function deriveDefaultResidency(region: string): readonly Region[] {
 
 function encodeQueryString(query: Record<string, string>): string {
   const keys = Object.keys(query).sort();
-  return keys
-    .map((k) => `${awsUriEncode(k)}=${awsUriEncode(query[k] ?? "")}`)
-    .join("&");
+  return keys.map((k) => `${awsUriEncode(k)}=${awsUriEncode(query[k] ?? "")}`).join("&");
 }
 
 function awsUriEncode(value: string): string {

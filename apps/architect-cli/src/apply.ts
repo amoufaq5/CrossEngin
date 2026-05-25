@@ -35,10 +35,7 @@ interface ResolvedPlan {
   readonly packSchema: string;
 }
 
-export async function runApply(
-  command: ParsedCommand,
-  ctx: RunContext,
-): Promise<number> {
+export async function runApply(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const dryRun = getBooleanFlag(command, "dry-run");
   const confirm = getBooleanFlag(command, "confirm");
   const packSlug = getStringFlag(command, "pack");
@@ -166,9 +163,7 @@ function emitDryRun(io: IoStreams, command: ParsedCommand, plan: ResolvedPlan): 
       statementCount: allStatements.length,
       metaStatementCount: plan.metaStatements.length,
       packStatementCount: plan.packStatements.length,
-      pack: plan.pack === null
-        ? null
-        : { slug: plan.pack.slug, schema: plan.packSchema },
+      pack: plan.pack === null ? null : { slug: plan.pack.slug, schema: plan.packSchema },
       availablePacks: listAvailablePacks(),
       statements: allStatements,
     });

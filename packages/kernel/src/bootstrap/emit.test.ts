@@ -22,9 +22,7 @@ describe("emitColumn", () => {
   });
 
   it("adds NOT NULL", () => {
-    expect(emitColumn({ name: "x", type: "INTEGER", notNull: true })).toBe(
-      `"x" INTEGER NOT NULL`,
-    );
+    expect(emitColumn({ name: "x", type: "INTEGER", notNull: true })).toBe(`"x" INTEGER NOT NULL`);
   });
 
   it("adds DEFAULT verbatim (raw SQL expression)", () => {
@@ -34,9 +32,7 @@ describe("emitColumn", () => {
   });
 
   it("adds inline UNIQUE for boolean unique", () => {
-    expect(emitColumn({ name: "slug", type: "TEXT", unique: true })).toBe(
-      `"slug" TEXT UNIQUE`,
-    );
+    expect(emitColumn({ name: "slug", type: "TEXT", unique: true })).toBe(`"slug" TEXT UNIQUE`);
   });
 
   it("does NOT add inline UNIQUE for object unique (named constraint emits separately)", () => {
@@ -144,9 +140,9 @@ describe("emitCreateTable", () => {
 
 describe("emitIndex", () => {
   it("emits a basic btree index", () => {
-    expect(
-      emitIndex(minimalTable, { name: "idx_x_name", columns: ["name"] }),
-    ).toBe(`CREATE INDEX "idx_x_name" ON "meta"."x" ("name");`);
+    expect(emitIndex(minimalTable, { name: "idx_x_name", columns: ["name"] })).toBe(
+      `CREATE INDEX "idx_x_name" ON "meta"."x" ("name");`,
+    );
   });
 
   it("emits a unique index", () => {
@@ -181,9 +177,7 @@ describe("emitIndex", () => {
 
 describe("emitRlsEnable", () => {
   it("emits ENABLE ROW LEVEL SECURITY", () => {
-    expect(emitRlsEnable(minimalTable)).toBe(
-      `ALTER TABLE "meta"."x" ENABLE ROW LEVEL SECURITY;`,
-    );
+    expect(emitRlsEnable(minimalTable)).toBe(`ALTER TABLE "meta"."x" ENABLE ROW LEVEL SECURITY;`);
   });
 });
 
@@ -223,9 +217,7 @@ describe("emitTable", () => {
       indexes: [{ name: "idx_x_tenant", columns: ["tenant_id"] }],
       rls: {
         enabled: true,
-        policies: [
-          { name: "x_isolation", using: "tenant_id = current_setting('a')::UUID" },
-        ],
+        policies: [{ name: "x_isolation", using: "tenant_id = current_setting('a')::UUID" }],
       },
     };
     const statements = emitTable(def);

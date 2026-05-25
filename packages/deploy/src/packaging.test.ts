@@ -52,15 +52,11 @@ describe("HelmChartDeclarationSchema", () => {
   });
 
   it("rejects a non-semver version", () => {
-    expect(() =>
-      HelmChartDeclarationSchema.parse({ ...base, version: "1.0" }),
-    ).toThrow();
+    expect(() => HelmChartDeclarationSchema.parse({ ...base, version: "1.0" })).toThrow();
   });
 
   it("rejects a license other than crossengin-commercial", () => {
-    expect(() =>
-      HelmChartDeclarationSchema.parse({ ...base, license: "MIT" as never }),
-    ).toThrow();
+    expect(() => HelmChartDeclarationSchema.parse({ ...base, license: "MIT" as never })).toThrow();
   });
 });
 
@@ -82,21 +78,19 @@ describe("TerraformModuleDeclarationSchema", () => {
   });
 
   it("rejects saas edition", () => {
-    expect(() =>
-      TerraformModuleDeclarationSchema.parse({ ...base, edition: "saas" }),
-    ).toThrow();
+    expect(() => TerraformModuleDeclarationSchema.parse({ ...base, edition: "saas" })).toThrow();
   });
 
   it("rejects duplicate inputs", () => {
-    expect(() =>
-      TerraformModuleDeclarationSchema.parse({ ...base, inputs: ["x", "x"] }),
-    ).toThrow(/duplicate input/);
+    expect(() => TerraformModuleDeclarationSchema.parse({ ...base, inputs: ["x", "x"] })).toThrow(
+      /duplicate input/,
+    );
   });
 
   it("rejects duplicate outputs", () => {
-    expect(() =>
-      TerraformModuleDeclarationSchema.parse({ ...base, outputs: ["y", "y"] }),
-    ).toThrow(/duplicate output/);
+    expect(() => TerraformModuleDeclarationSchema.parse({ ...base, outputs: ["y", "y"] })).toThrow(
+      /duplicate output/,
+    );
   });
 });
 
@@ -117,15 +111,13 @@ describe("LicenseTermSchema", () => {
   });
 
   it("rejects expiresAt <= issuedAt", () => {
-    expect(() =>
-      LicenseTermSchema.parse({ ...base, expiresAt: "2026-01-01T00:00:00Z" }),
-    ).toThrow(/expiresAt must be after issuedAt/);
+    expect(() => LicenseTermSchema.parse({ ...base, expiresAt: "2026-01-01T00:00:00Z" })).toThrow(
+      /expiresAt must be after issuedAt/,
+    );
   });
 
   it("rejects saas edition (license applies only to on_prem/byoc)", () => {
-    expect(() =>
-      LicenseTermSchema.parse({ ...base, edition: "saas" }),
-    ).toThrow();
+    expect(() => LicenseTermSchema.parse({ ...base, edition: "saas" })).toThrow();
   });
 });
 
@@ -150,9 +142,7 @@ describe("helpers", () => {
   });
 
   it("daysUntilLicenseExpiry counts down", () => {
-    expect(
-      daysUntilLicenseExpiry(baseTerm, new Date("2026-12-22T00:00:00Z")),
-    ).toBe(10);
+    expect(daysUntilLicenseExpiry(baseTerm, new Date("2026-12-22T00:00:00Z"))).toBe(10);
   });
 
   it("requiresLicense returns true for on_prem and byoc, false for saas", () => {

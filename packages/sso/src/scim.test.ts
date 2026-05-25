@@ -160,9 +160,7 @@ describe("ScimBulkRequestSchema", () => {
     expect(() =>
       ScimBulkRequestSchema.parse({
         schemas: ["urn:ietf:params:scim:api:messages:2.0:BulkRequest"],
-        Operations: [
-          { method: "POST", path: "/Users", data: {} },
-        ],
+        Operations: [{ method: "POST", path: "/Users", data: {} }],
       }),
     ).toThrow(/require bulkId/);
   });

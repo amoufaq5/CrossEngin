@@ -10,7 +10,10 @@ import {
 
 const now = "2026-05-13T10:00:00.000Z";
 
-function nums(covered: number, total: number): {
+function nums(
+  covered: number,
+  total: number,
+): {
   covered: number;
   total: number;
   percent: number;
@@ -35,21 +38,17 @@ const baseReport = CoverageReportSchema.parse({
 
 describe("CoverageNumbersSchema", () => {
   it("rejects covered > total", () => {
-    expect(() =>
-      CoverageNumbersSchema.parse({ covered: 110, total: 100, percent: 100 }),
-    ).toThrow();
+    expect(() => CoverageNumbersSchema.parse({ covered: 110, total: 100, percent: 100 })).toThrow();
   });
 
   it("rejects mismatched percent", () => {
-    expect(() =>
-      CoverageNumbersSchema.parse({ covered: 50, total: 100, percent: 25 }),
-    ).toThrow(/does not match/);
+    expect(() => CoverageNumbersSchema.parse({ covered: 50, total: 100, percent: 25 })).toThrow(
+      /does not match/,
+    );
   });
 
   it("accepts total=0 with percent=100", () => {
-    expect(() =>
-      CoverageNumbersSchema.parse({ covered: 0, total: 0, percent: 100 }),
-    ).not.toThrow();
+    expect(() => CoverageNumbersSchema.parse({ covered: 0, total: 0, percent: 100 })).not.toThrow();
   });
 });
 

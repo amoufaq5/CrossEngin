@@ -156,14 +156,10 @@ describe("RetentionPolicySchema", () => {
 
 describe("isPolicyActive", () => {
   it("returns true when enabled and not disabled", () => {
-    expect(
-      isPolicyActive(basePolicy, new Date("2026-06-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isPolicyActive(basePolicy, new Date("2026-06-01T00:00:00Z"))).toBe(true);
   });
   it("returns false before enabledAt", () => {
-    expect(
-      isPolicyActive(basePolicy, new Date("2025-12-31T00:00:00Z")),
-    ).toBe(false);
+    expect(isPolicyActive(basePolicy, new Date("2025-12-31T00:00:00Z"))).toBe(false);
   });
   it("returns false when disabled", () => {
     expect(
@@ -183,8 +179,7 @@ describe("isPolicyActive", () => {
 describe("computeNodeRetentionUntil", () => {
   it("returns createdAt + minimumRetentionDays", () => {
     const r = computeNodeRetentionUntil(baseNode, basePolicy);
-    const expectedMs =
-      Date.parse(baseNode.createdAt) + 2190 * 86_400_000;
+    const expectedMs = Date.parse(baseNode.createdAt) + 2190 * 86_400_000;
     expect(Date.parse(r)).toBe(expectedMs);
   });
 });
@@ -239,9 +234,7 @@ describe("decideRetention", () => {
 
 describe("Article15EvidencePackSchema", () => {
   it("accepts a compiling pack", () => {
-    expect(() =>
-      Article15EvidencePackSchema.parse(baseEvidencePack),
-    ).not.toThrow();
+    expect(() => Article15EvidencePackSchema.parse(baseEvidencePack)).not.toThrow();
   });
 
   it("rejects sealed without sealedSha256 + storageUri + encryptionKeyFingerprint", () => {

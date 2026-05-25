@@ -256,21 +256,15 @@ function fakeRetention(opts: {
       sql: "SELECT * FROM meta.opt_out_history (fake pair-wise)",
       params: [] as unknown[],
     }),
-    buildDiffHistoryTimelineNwayQuery: (
-      _input: DiffHistoryTimelineNwayInput,
-    ) => ({
+    buildDiffHistoryTimelineNwayQuery: (_input: DiffHistoryTimelineNwayInput) => ({
       sql: "SELECT * FROM meta.opt_out_history (fake nway)",
       params: [] as unknown[],
     }),
-    buildDiffHistoryTimelineCrossTableQuery: (
-      _input: DiffHistoryTimelineCrossTableInput,
-    ) => ({
+    buildDiffHistoryTimelineCrossTableQuery: (_input: DiffHistoryTimelineCrossTableInput) => ({
       sql: "SELECT * FROM meta.opt_out_history (fake cross-table)",
       params: [] as unknown[],
     }),
-    buildSummarizeOptOutHistoryQuery: (
-      _input: SummarizeOptOutHistoryInput,
-    ) => ({
+    buildSummarizeOptOutHistoryQuery: (_input: SummarizeOptOutHistoryInput) => ({
       sql: "SELECT key, count FROM meta.opt_out_history (fake summary)",
       params: [] as unknown[],
     }),
@@ -285,10 +279,7 @@ function fakeRetention(opts: {
         }
       );
     },
-    explainAnalyzeQuery: async (
-      sql: string,
-      params: ReadonlyArray<unknown>,
-    ) => {
+    explainAnalyzeQuery: async (sql: string, params: ReadonlyArray<unknown>) => {
       opts.explainAnalyzeCapture?.push({ sql, params });
       if (opts.throws !== undefined) throw opts.throws;
       return (
@@ -358,9 +349,7 @@ function fakeRetention(opts: {
         }
       );
     },
-    diffHistoryTimelineCrossTable: async (
-      input: DiffHistoryTimelineCrossTableInput,
-    ) => {
+    diffHistoryTimelineCrossTable: async (input: DiffHistoryTimelineCrossTableInput) => {
       opts.diffTimelineCrossTableCapture?.push(input);
       if (opts.throws !== undefined) throw opts.throws;
       return (
@@ -503,9 +492,7 @@ function fakeRetention(opts: {
   } as unknown as PostgresTraceRetention;
 }
 
-function makeOptOut(
-  overrides: Partial<ExpiringOptOut> = {},
-): ExpiringOptOut {
+function makeOptOut(overrides: Partial<ExpiringOptOut> = {}): ExpiringOptOut {
   return {
     tenantId: TENANT_A,
     tableName: "workflow_traces",
@@ -560,13 +547,10 @@ describe("runRetention expiring", () => {
   it("threads --within-days through to expiringOptOuts", async () => {
     const { ctx } = buffers();
     const capture: ExpiringOptOutsInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "expiring", "--within-days", "7"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "expiring", "--within-days", "7"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.withinDays).toBe(7);
   });
@@ -574,39 +558,30 @@ describe("runRetention expiring", () => {
   it("threads --include-expired through to expiringOptOuts", async () => {
     const { ctx } = buffers();
     const capture: ExpiringOptOutsInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "expiring", "--include-expired"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "expiring", "--include-expired"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.includeExpired).toBe(true);
   });
 
   it("returns exit 2 with clear error on negative --within-days", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "expiring", "--within-days", "-5"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "expiring", "--within-days", "-5"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --within-days");
   });
 
   it("returns exit 2 on non-numeric --within-days", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "expiring", "--within-days", "soon"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "expiring", "--within-days", "soon"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --within-days");
   });
@@ -624,13 +599,10 @@ describe("runRetention expiring", () => {
 
   it("human-format empty result with --include-expired uses 'expired or expiring' wording", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "expiring", "--include-expired"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ results: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "expiring", "--include-expired"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ results: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("expired or expiring");
   });
@@ -661,15 +633,12 @@ describe("runRetention expiring", () => {
 
   it("json-format emits structured output with results array", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "expiring", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          results: [makeOptOut({ daysUntilExpiry: 5 })],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "expiring", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        results: [makeOptOut({ daysUntilExpiry: 5 })],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.withinDays).toBe(30);
@@ -682,14 +651,7 @@ describe("runRetention expiring", () => {
   it("json-format includes withinDays + includeExpired flags in output", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "expiring",
-        "--within-days",
-        "7",
-        "--include-expired",
-        "--format=json",
-      ),
+      parsed("retention", "expiring", "--within-days", "7", "--include-expired", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ results: [] }),
@@ -718,29 +680,17 @@ describe("runRetention expiring", () => {
 
 describe("formatExpiringTable", () => {
   it("renders positive daysUntilExpiry as 'Nd'", () => {
-    const out = formatExpiringTable(
-      [makeOptOut({ daysUntilExpiry: 5.7 })],
-      30,
-      false,
-    );
+    const out = formatExpiringTable([makeOptOut({ daysUntilExpiry: 5.7 })], 30, false);
     expect(out).toContain("5.7d");
   });
 
   it("renders negative daysUntilExpiry as 'EXPIRED Nd ago'", () => {
-    const out = formatExpiringTable(
-      [makeOptOut({ daysUntilExpiry: -3.2 })],
-      30,
-      true,
-    );
+    const out = formatExpiringTable([makeOptOut({ daysUntilExpiry: -3.2 })], 30, true);
     expect(out).toContain("EXPIRED 3.2d ago");
   });
 
   it("renders <no reason> when optOutReason is null", () => {
-    const out = formatExpiringTable(
-      [makeOptOut({ optOutReason: null })],
-      30,
-      false,
-    );
+    const out = formatExpiringTable([makeOptOut({ optOutReason: null })], 30, false);
     expect(out).toContain("<no reason>");
   });
 
@@ -754,20 +704,12 @@ describe("formatExpiringTable", () => {
   });
 
   it("uses 'expired or expiring' header when includeExpired=true", () => {
-    const out = formatExpiringTable(
-      [makeOptOut()],
-      30,
-      true,
-    );
+    const out = formatExpiringTable([makeOptOut()], 30, true);
     expect(out).toContain("expired or expiring");
   });
 
   it("uses 'expiring' header when includeExpired=false", () => {
-    const out = formatExpiringTable(
-      [makeOptOut()],
-      30,
-      false,
-    );
+    const out = formatExpiringTable([makeOptOut()], 30, false);
     expect(out).toMatch(/^Opt-outs expiring within 30 day/);
   });
 });
@@ -785,13 +727,10 @@ describe("runRetention effective", () => {
 
   it("returns exit 2 when table arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -799,13 +738,10 @@ describe("runRetention effective", () => {
   it("threads tenantId + tableName through to effectiveRetention", async () => {
     const { ctx } = buffers();
     const effectiveCapture: { tenantId: string; tableName: string }[] = [];
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ effectiveCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ effectiveCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(effectiveCapture[0]).toEqual({
       tenantId: TENANT_A,
@@ -815,20 +751,17 @@ describe("runRetention effective", () => {
 
   it("human-format renders source='tenant' with retention days + enabled", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          effective: {
-            source: "tenant",
-            retentionDays: 30,
-            enabled: true,
-            tenantId: TENANT_A,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        effective: {
+          source: "tenant",
+          retentionDays: 30,
+          enabled: true,
+          tenantId: TENANT_A,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Tenant override");
     expect(out()).toContain("30 day(s)");
@@ -838,22 +771,19 @@ describe("runRetention effective", () => {
 
   it("human-format renders source='tenant_opt_out' with reason + until", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          effective: {
-            source: "tenant_opt_out",
-            retentionDays: null,
-            enabled: false,
-            tenantId: TENANT_A,
-            optOutReason: "legal_hold:case#42",
-            optOutUntil: "2027-01-01T00:00:00.000Z",
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        effective: {
+          source: "tenant_opt_out",
+          retentionDays: null,
+          enabled: false,
+          tenantId: TENANT_A,
+          optOutReason: "legal_hold:case#42",
+          optOutUntil: "2027-01-01T00:00:00.000Z",
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Tenant opt-out");
     expect(out()).toContain("legal_hold:case#42");
@@ -862,22 +792,19 @@ describe("runRetention effective", () => {
 
   it("human-format renders source='tenant_opt_out' with 'indefinite' when optOutUntil is null", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          effective: {
-            source: "tenant_opt_out",
-            retentionDays: null,
-            enabled: false,
-            tenantId: TENANT_A,
-            optOutReason: null,
-            optOutUntil: null,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        effective: {
+          source: "tenant_opt_out",
+          retentionDays: null,
+          enabled: false,
+          tenantId: TENANT_A,
+          optOutReason: null,
+          optOutUntil: null,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("indefinite");
     expect(out()).toContain("<no reason>");
@@ -885,19 +812,16 @@ describe("runRetention effective", () => {
 
   it("human-format renders source='platform' with enabled flag", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          effective: {
-            source: "platform",
-            retentionDays: 90,
-            enabled: true,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        effective: {
+          source: "platform",
+          retentionDays: 90,
+          enabled: true,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Platform default");
     expect(out()).toContain("90 day(s)");
@@ -906,38 +830,32 @@ describe("runRetention effective", () => {
 
   it("human-format renders source='platform' with Enabled:no when disabled", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          effective: {
-            source: "platform",
-            retentionDays: 90,
-            enabled: false,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        effective: {
+          source: "platform",
+          retentionDays: 90,
+          enabled: false,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Enabled:    no");
   });
 
   it("human-format renders source='none' with clear message", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          effective: {
-            source: "none",
-            retentionDays: null,
-            enabled: false,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        effective: {
+          source: "none",
+          retentionDays: null,
+          enabled: false,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("No policy configured");
   });
@@ -953,13 +871,7 @@ describe("runRetention effective", () => {
       optOutUntil: "2027-01-01T00:00:00.000Z",
     };
     const code = await runRetention(
-      parsed(
-        "retention",
-        "effective",
-        TENANT_A,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "effective", TENANT_A, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ effective: resolution }),
@@ -974,15 +886,12 @@ describe("runRetention effective", () => {
 
   it("propagates resolver errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "effective", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("connection refused"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "effective", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("connection refused"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("connection refused");
   });
@@ -1076,11 +985,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
   it("returns exit 1 when --pairs-file path doesn't exist", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "effective-batch",
-        "--pairs-file=/nonexistent/path/pairs.json",
-      ),
+      parsed("retention", "effective-batch", "--pairs-file=/nonexistent/path/pairs.json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1119,9 +1024,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
   });
 
   it("returns exit 2 when an entry is missing tenantId", async () => {
-    const path = await writePairsFile(
-      JSON.stringify([{ tableName: "workflow_traces" }]),
-    );
+    const path = await writePairsFile(JSON.stringify([{ tableName: "workflow_traces" }]));
     const { ctx, err } = buffers();
     const code = await runRetention(
       parsed("retention", "effective-batch", `--pairs-file=${path}`),
@@ -1136,9 +1039,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
   });
 
   it("returns exit 2 when an entry is missing tableName", async () => {
-    const path = await writePairsFile(
-      JSON.stringify([{ tenantId: TENANT_A }]),
-    );
+    const path = await writePairsFile(JSON.stringify([{ tenantId: TENANT_A }]));
     const { ctx, err } = buffers();
     const code = await runRetention(
       parsed("retention", "effective-batch", `--pairs-file=${path}`),
@@ -1207,10 +1108,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
           tenantId: TENANT_A,
         },
       ],
-      [
-        `${TENANT_B}:llm_call_traces`,
-        { source: "platform", retentionDays: 90, enabled: true },
-      ],
+      [`${TENANT_B}:llm_call_traces`, { source: "platform", retentionDays: 90, enabled: true }],
     ]);
     const { ctx, out } = buffers();
     const code = await runRetention(
@@ -1235,9 +1133,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
 
   it("JSON envelope shape {action, count, results[]}", async () => {
     const path = await writePairsFile(
-      JSON.stringify([
-        { tenantId: TENANT_A, tableName: "workflow_traces" },
-      ]),
+      JSON.stringify([{ tenantId: TENANT_A, tableName: "workflow_traces" }]),
     );
     const resultMap = new Map<string, EffectiveRetentionResolution>([
       [
@@ -1252,12 +1148,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
     ]);
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "effective-batch",
-        `--pairs-file=${path}`,
-        "--format=json",
-      ),
+      parsed("retention", "effective-batch", `--pairs-file=${path}`, "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ effectiveBatchResults: resultMap }),
@@ -1300,12 +1191,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
     ]);
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "effective-batch",
-        `--pairs-file=${path}`,
-        "--format=json",
-      ),
+      parsed("retention", "effective-batch", `--pairs-file=${path}`, "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ effectiveBatchResults: resultMap }),
@@ -1319,9 +1205,7 @@ describe("runRetention effective-batch (M6.7.zz.tenant.opt-out.cli.effective-bat
 
   it("adapter errors propagate as exit 1", async () => {
     const path = await writePairsFile(
-      JSON.stringify([
-        { tenantId: TENANT_A, tableName: "workflow_traces" },
-      ]),
+      JSON.stringify([{ tenantId: TENANT_A, tableName: "workflow_traces" }]),
     );
     const { ctx, err } = buffers();
     const code = await runRetention(
@@ -1446,13 +1330,10 @@ describe("runRetention opt-out", () => {
   it("threads tenantId + tableName + defaults to setTenantOptOut", async () => {
     const { ctx } = buffers();
     const setOptOutCapture: SetTenantOptOutInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ setOptOutCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-out", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ setOptOutCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(setOptOutCapture[0]).toEqual({
       tenantId: TENANT_A,
@@ -1495,36 +1376,20 @@ describe("runRetention opt-out", () => {
     const { ctx } = buffers();
     const setOptOutCapture: SetTenantOptOutInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--until",
-        "2027-01-01",
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--until", "2027-01-01"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ setOptOutCapture }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(setOptOutCapture[0]?.optOutUntil).toMatch(
-      /^2027-01-01T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-    );
+    expect(setOptOutCapture[0]?.optOutUntil).toMatch(/^2027-01-01T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 
   it("returns exit 2 on invalid --until", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--until",
-        "not-a-date",
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--until", "not-a-date"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1537,13 +1402,7 @@ describe("runRetention opt-out", () => {
   it("returns exit 2 on empty --reason", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--reason=",
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--reason="),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1556,14 +1415,7 @@ describe("runRetention opt-out", () => {
   it("returns exit 2 on --reason longer than 256 chars", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--reason",
-        "x".repeat(257),
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--reason", "x".repeat(257)),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1576,14 +1428,7 @@ describe("runRetention opt-out", () => {
   it("returns exit 2 on non-integer --retention-days", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--retention-days",
-        "abc",
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--retention-days", "abc"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1596,14 +1441,7 @@ describe("runRetention opt-out", () => {
   it("returns exit 2 on --retention-days < 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--retention-days",
-        "0",
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--retention-days", "0"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1640,13 +1478,7 @@ describe("runRetention opt-out", () => {
   it("json-format emits envelope {action, policy}", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -1661,15 +1493,12 @@ describe("runRetention opt-out", () => {
 
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("CHECK constraint violated"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-out", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("CHECK constraint violated"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("CHECK constraint violated");
   });
@@ -1699,13 +1528,10 @@ describe("runRetention opt-in", () => {
   it("threads tenantId + tableName to clearTenantOptOut", async () => {
     const { ctx } = buffers();
     const clearOptOutCapture: ClearTenantOptOutInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ clearOptOutCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-in", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ clearOptOutCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(clearOptOutCapture[0]).toEqual({
       tenantId: TENANT_A,
@@ -1716,37 +1542,31 @@ describe("runRetention opt-in", () => {
 
   it("human-format prints idempotent no-op when no policy is found", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ clearOptOutResult: null }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-in", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ clearOptOutResult: null }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("idempotent no-op");
   });
 
   it("human-format prints the policy when a row was updated", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          clearOptOutResult: {
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            retentionDays: 90,
-            enabled: false,
-            optOut: false,
-            optOutReason: "legal_hold:case#42",
-            optOutUntil: null,
-            lastPrunedAt: null,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-in", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        clearOptOutResult: {
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: false,
+          optOut: false,
+          optOutReason: "legal_hold:case#42",
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Tenant opted in");
     expect(out()).toContain("legal_hold:case#42");
@@ -1755,13 +1575,7 @@ describe("runRetention opt-in", () => {
   it("json-format emits envelope {action, policy=null} on idempotent no-op", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-in",
-        TENANT_A,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "opt-in", TENANT_A, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ clearOptOutResult: null }),
@@ -1775,24 +1589,19 @@ describe("runRetention opt-in", () => {
 
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "opt-in", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("PG connection refused"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-in", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("PG connection refused"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
   });
 });
 
 describe("formatPolicyChange", () => {
-  function policy(
-    overrides: Partial<TenantRetentionPolicyRow> = {},
-  ): TenantRetentionPolicyRow {
+  function policy(overrides: Partial<TenantRetentionPolicyRow> = {}): TenantRetentionPolicyRow {
     return {
       tenantId: TENANT_A,
       tableName: "workflow_traces",
@@ -1831,18 +1640,12 @@ describe("formatPolicyChange", () => {
   });
 
   it("omits the Until line on opt-in with null until", () => {
-    const out = formatPolicyChange(
-      "opted in",
-      policy({ optOut: false, optOutUntil: null }),
-    );
+    const out = formatPolicyChange("opted in", policy({ optOut: false, optOutUntil: null }));
     expect(out).not.toContain("Until:");
   });
 
   it("renders the reason when set", () => {
-    const out = formatPolicyChange(
-      "opted out",
-      policy({ optOutReason: "legal_hold:case#42" }),
-    );
+    const out = formatPolicyChange("opted out", policy({ optOutReason: "legal_hold:case#42" }));
     expect(out).toContain("Reason:     legal_hold:case#42");
   });
 
@@ -1853,9 +1656,7 @@ describe("formatPolicyChange", () => {
 });
 
 describe("runRetention list-policies", () => {
-  function platformPolicy(
-    overrides: Partial<RetentionPolicyRow> = {},
-  ): RetentionPolicyRow {
+  function platformPolicy(overrides: Partial<RetentionPolicyRow> = {}): RetentionPolicyRow {
     return {
       tableName: "workflow_traces",
       retentionDays: 90,
@@ -1883,16 +1684,13 @@ describe("runRetention list-policies", () => {
 
   it("returns both platform + tenant sections with no filters", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "list-policies"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          platformPolicies: [platformPolicy()],
-          tenantPolicies: [tenantPolicy()],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "list-policies"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        platformPolicies: [platformPolicy()],
+        tenantPolicies: [tenantPolicy()],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Platform defaults");
     expect(out()).toContain("Per-tenant policies");
@@ -1900,19 +1698,16 @@ describe("runRetention list-policies", () => {
 
   it("--tenant scopes per-tenant section but not platform section", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "list-policies", "--tenant", TENANT_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          platformPolicies: [platformPolicy()],
-          tenantPolicies: [
-            tenantPolicy({ tenantId: TENANT_A }),
-            tenantPolicy({ tenantId: TENANT_B }),
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "list-policies", "--tenant", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        platformPolicies: [platformPolicy()],
+        tenantPolicies: [
+          tenantPolicy({ tenantId: TENANT_A }),
+          tenantPolicy({ tenantId: TENANT_B }),
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Per-tenant policies (1 total)");
     expect(out()).toContain("Platform defaults (1 total)");
@@ -1947,14 +1742,7 @@ describe("runRetention list-policies", () => {
   it("--tenant + --table apply both filters", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "list-policies",
-        "--tenant",
-        TENANT_A,
-        "--table",
-        "workflow_traces",
-      ),
+      parsed("retention", "list-policies", "--tenant", TENANT_A, "--table", "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -2018,14 +1806,7 @@ describe("runRetention list-policies", () => {
   it("renders the filter suffix when --tenant or --table is set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "list-policies",
-        "--tenant",
-        TENANT_A,
-        "--table",
-        "workflow_traces",
-      ),
+      parsed("retention", "list-policies", "--tenant", TENANT_A, "--table", "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -2040,16 +1821,13 @@ describe("runRetention list-policies", () => {
 
   it("json-format emits structured envelope with all sections + filters", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "list-policies", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          platformPolicies: [platformPolicy()],
-          tenantPolicies: [tenantPolicy()],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "list-policies", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        platformPolicies: [platformPolicy()],
+        tenantPolicies: [tenantPolicy()],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.tenantFilter).toBeNull();
@@ -2229,11 +2007,7 @@ describe("formatPoliciesList", () => {
   });
 
   it("omits the filter suffix when both filters are null", () => {
-    const out = formatPoliciesList(
-      [],
-      [],
-      { tenantFilter: null, tableFilter: null },
-    );
+    const out = formatPoliciesList([], [], { tenantFilter: null, tableFilter: null });
     expect(out).not.toContain("filtered:");
   });
 });
@@ -2261,13 +2035,10 @@ describe("runRetention set", () => {
 
   it("returns exit 2 when --days flag is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "set", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "set", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing --days flag");
   });
@@ -2276,14 +2047,7 @@ describe("runRetention set", () => {
     const { ctx } = buffers();
     const setRetentionCapture: SetTenantRetentionInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ setRetentionCapture }),
@@ -2303,16 +2067,7 @@ describe("runRetention set", () => {
     const { ctx } = buffers();
     const setRetentionCapture: SetTenantRetentionInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-        "--enabled",
-        "false",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30", "--enabled", "false"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ setRetentionCapture }),
@@ -2326,16 +2081,7 @@ describe("runRetention set", () => {
     const { ctx } = buffers();
     const setRetentionCapture: SetTenantRetentionInput[] = [];
     await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-        "--enabled",
-        "true",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30", "--enabled", "true"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ setRetentionCapture }),
@@ -2347,16 +2093,7 @@ describe("runRetention set", () => {
   it("returns exit 2 on invalid --enabled", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-        "--enabled",
-        "yes",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30", "--enabled", "yes"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -2369,14 +2106,7 @@ describe("runRetention set", () => {
   it("returns exit 2 on non-integer --days", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "abc",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "abc"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -2389,14 +2119,7 @@ describe("runRetention set", () => {
   it("returns exit 2 on --days < 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "0",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "0"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -2409,14 +2132,7 @@ describe("runRetention set", () => {
   it("human-format prints the post-mutation policy with action verb", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -2431,15 +2147,7 @@ describe("runRetention set", () => {
   it("json-format emits envelope {action: 'set', policy}", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-        "--format=json",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -2456,14 +2164,7 @@ describe("runRetention set", () => {
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -2489,13 +2190,10 @@ describe("runRetention delete", () => {
 
   it("returns exit 2 when table arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "delete", TENANT_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "delete", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -2503,13 +2201,10 @@ describe("runRetention delete", () => {
   it("threads tenantId + tableName to adapter", async () => {
     const { ctx } = buffers();
     const deleteCapture: DeleteTenantPolicyInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "delete", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ deleteCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "delete", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ deleteCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(deleteCapture[0]).toEqual({
       tenantId: TENANT_A,
@@ -2520,13 +2215,10 @@ describe("runRetention delete", () => {
 
   it("human-format prints 'deleted per-tenant policy' when row removed", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "delete", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ deleteResult: true }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "delete", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ deleteResult: true }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("deleted per-tenant policy");
     expect(out()).toContain(TENANT_A);
@@ -2535,13 +2227,10 @@ describe("runRetention delete", () => {
 
   it("human-format prints 'idempotent no-op' when no row matched", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "delete", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ deleteResult: false }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "delete", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ deleteResult: false }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("idempotent no-op");
     expect(out()).toContain("no per-tenant policy");
@@ -2550,13 +2239,7 @@ describe("runRetention delete", () => {
   it("json-format emits envelope {action, deleted, tenantId, tableName} when row removed", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "delete",
-        TENANT_A,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "delete", TENANT_A, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ deleteResult: true }),
@@ -2573,13 +2256,7 @@ describe("runRetention delete", () => {
   it("json-format emits envelope with deleted=false on no-op", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "delete",
-        TENANT_A,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "delete", TENANT_A, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ deleteResult: false }),
@@ -2595,27 +2272,21 @@ describe("runRetention delete", () => {
 
   it("returns exit 0 on idempotent no-op (re-runnable)", async () => {
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "delete", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ deleteResult: false }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "delete", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ deleteResult: false }),
+    } as RetentionContext);
     expect(code).toBe(0);
   });
 
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "delete", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("PG connection refused"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "delete", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("PG connection refused"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("PG connection refused");
   });
@@ -2624,9 +2295,7 @@ describe("runRetention delete", () => {
 describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
   const ACTOR = "11111111-1111-4111-8111-111111111111";
 
-  function entry(
-    overrides: Partial<OptOutHistoryEntry> = {},
-  ): OptOutHistoryEntry {
+  function entry(overrides: Partial<OptOutHistoryEntry> = {}): OptOutHistoryEntry {
     return {
       id: "10000000-0000-4000-8000-000000000001",
       tenantId: TENANT_A,
@@ -2700,37 +2369,23 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const { ctx } = buffers();
     const historyCapture: ListOptOutHistoryInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--since",
-        "2026-05-01",
-        "--until",
-        "2026-05-31",
-      ),
+      parsed("retention", "history", "--since", "2026-05-01", "--until", "2026-05-31"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(historyCapture[0]?.since).toMatch(
-      /^2026-05-01T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-    );
-    expect(historyCapture[0]?.until).toMatch(
-      /^2026-05-31T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-    );
+    expect(historyCapture[0]?.since).toMatch(/^2026-05-01T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(historyCapture[0]?.until).toMatch(/^2026-05-31T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 
   it("returns exit 2 on invalid --kind", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--kind", "bogus"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--kind", "bogus"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --kind");
   });
@@ -2738,14 +2393,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
   it("returns exit 2 on FIRST invalid --kind occurrence (multi)", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--kind",
-        "opt_out_set",
-        "--kind",
-        "bogus",
-      ),
+      parsed("retention", "history", "--kind", "opt_out_set", "--kind", "bogus"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -2759,24 +2407,14 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const { ctx } = buffers();
     const historyCapture: ListOptOutHistoryInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--kind",
-        "opt_out_set",
-        "--kind",
-        "opt_out_cleared",
-      ),
+      parsed("retention", "history", "--kind", "opt_out_set", "--kind", "opt_out_cleared"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(historyCapture[0]?.eventKinds).toEqual([
-      "opt_out_set",
-      "opt_out_cleared",
-    ]);
+    expect(historyCapture[0]?.eventKinds).toEqual(["opt_out_set", "opt_out_cleared"]);
   });
 
   it("JSON envelope echoes multi-element eventKinds array when --kind repeated", async () => {
@@ -2803,13 +2441,10 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
 
   it("JSON envelope eventKinds=null when --kind NOT set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.kinds).toBeNull();
@@ -2817,13 +2452,10 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
 
   it("returns exit 2 on invalid --kind-not", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--kind-not", "bogus"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--kind-not", "bogus"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --kind-not 'bogus'");
   });
@@ -2832,12 +2464,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const { ctx } = buffers();
     const historyCapture: ListOptOutHistoryInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--kind-not",
-        "policy_deleted",
-      ),
+      parsed("retention", "history", "--kind-not", "policy_deleted"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture }),
@@ -2851,24 +2478,14 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const { ctx } = buffers();
     const historyCapture: ListOptOutHistoryInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--kind-not",
-        "policy_deleted",
-        "--kind-not",
-        "retention_set",
-      ),
+      parsed("retention", "history", "--kind-not", "policy_deleted", "--kind-not", "retention_set"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture }),
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(historyCapture[0]?.eventKindsNot).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(historyCapture[0]?.eventKindsNot).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("composes --kind + --kind-not threading both independently", async () => {
@@ -2891,10 +2508,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(historyCapture[0]?.eventKinds).toEqual([
-      "opt_out_set",
-      "opt_out_cleared",
-    ]);
+    expect(historyCapture[0]?.eventKinds).toEqual(["opt_out_set", "opt_out_cleared"]);
     expect(historyCapture[0]?.eventKindsNot).toEqual(["policy_deleted"]);
   });
 
@@ -2917,21 +2531,15 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     );
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
-    expect(parsedJson.kindsNot).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(parsedJson.kindsNot).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("JSON envelope eventKindsNot=null when --kind-not NOT set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.kindsNot).toBeNull();
@@ -2939,52 +2547,40 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
 
   it("returns exit 2 on invalid --since", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--since", "not-a-date"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--since", "not-a-date"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --since");
   });
 
   it("returns exit 2 on invalid --until", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--until", "not-a-date"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--until", "not-a-date"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --until");
   });
 
   it("returns exit 2 on non-integer --limit", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--limit", "abc"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--limit", "abc"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --limit");
   });
 
   it("returns exit 2 on --limit < 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--limit", "0"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--limit", "0"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --limit");
   });
@@ -3077,13 +2673,10 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const { ctx } = buffers();
     const historyCapture: ListOptOutHistoryInput[] = [];
     const AFTER_ID = "50000000-0000-4000-8000-000000000005";
-    const code = await runRetention(
-      parsed("retention", "history", "--after-id", AFTER_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--after-id", AFTER_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(historyCapture[0]?.afterId).toBe(AFTER_ID);
   });
@@ -3091,18 +2684,15 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
   it("human-format prints next-page hint when results.length === limit", async () => {
     const { ctx, out } = buffers();
     const LAST_ID = "60000000-0000-4000-8000-000000000099";
-    const code = await runRetention(
-      parsed("retention", "history", "--limit", "2"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            entry({ id: "60000000-0000-4000-8000-000000000001" }),
-            entry({ id: LAST_ID }),
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--limit", "2"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          entry({ id: "60000000-0000-4000-8000-000000000001" }),
+          entry({ id: LAST_ID }),
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain(`--after-id ${LAST_ID}`);
     expect(out()).toContain("next page");
@@ -3110,15 +2700,12 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
 
   it("human-format omits next-page hint when results.length < limit", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--limit", "100"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [entry()],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--limit", "100"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [entry()],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).not.toContain("next page");
     expect(out()).not.toContain("--after-id");
@@ -3129,15 +2716,7 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
     const AFTER_ID = "50000000-0000-4000-8000-000000000005";
     const LAST_ID = "60000000-0000-4000-8000-000000000099";
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--after-id",
-        AFTER_ID,
-        "--limit",
-        "2",
-        "--format=json",
-      ),
+      parsed("retention", "history", "--after-id", AFTER_ID, "--limit", "2", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -3172,13 +2751,10 @@ describe("runRetention history (M6.7.zz.tenant.opt-out.history)", () => {
 
   it("json-format afterId is null when --after-id is not provided", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.afterId).toBeNull();
@@ -3190,9 +2766,7 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
   const ACTOR_A = "11111111-1111-4000-8000-111111111111";
   const ACTOR_B = "22222222-2222-4000-8000-222222222222";
 
-  function historyEntry(
-    overrides: Partial<OptOutHistoryEntry> = {},
-  ): OptOutHistoryEntry {
+  function historyEntry(overrides: Partial<OptOutHistoryEntry> = {}): OptOutHistoryEntry {
     return {
       id: "h1",
       tenantId: TENANT_A,
@@ -3210,13 +2784,10 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
   it("threads joinActor=true to adapter when --with-actor-names is set", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--with-actor-names"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--with-actor-names"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.joinActor).toBe(true);
   });
@@ -3234,63 +2805,54 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
 
   it("human-format renders display_name (uuid) when actorDisplayName is populated", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--with-actor-names"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            historyEntry({
-              actorId: ACTOR_A,
-              actorDisplayName: "Alice Smith",
-              actorEmail: "alice@example.com",
-            }),
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--with-actor-names"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          historyEntry({
+            actorId: ACTOR_A,
+            actorDisplayName: "Alice Smith",
+            actorEmail: "alice@example.com",
+          }),
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain(`actor=Alice Smith (${ACTOR_A})`);
   });
 
   it("human-format falls back to email when display_name is null", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--with-actor-names"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            historyEntry({
-              actorId: ACTOR_B,
-              actorDisplayName: null,
-              actorEmail: "bob@example.com",
-            }),
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--with-actor-names"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          historyEntry({
+            actorId: ACTOR_B,
+            actorDisplayName: null,
+            actorEmail: "bob@example.com",
+          }),
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain(`actor=bob@example.com (${ACTOR_B})`);
   });
 
   it("human-format falls back to raw UUID when both display_name and email are null (orphan FK)", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--with-actor-names"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            historyEntry({
-              actorId: ACTOR_A,
-              actorDisplayName: null,
-              actorEmail: null,
-            }),
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--with-actor-names"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          historyEntry({
+            actorId: ACTOR_A,
+            actorDisplayName: null,
+            actorEmail: null,
+          }),
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain(`actor=${ACTOR_A}`);
     expect(out()).not.toContain(`actor=null`);
@@ -3299,21 +2861,18 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
 
   it("human-format renders <system> for null actor_id regardless of --with-actor-names", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--with-actor-names"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            historyEntry({
-              actorId: null,
-              actorDisplayName: null,
-              actorEmail: null,
-            }),
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--with-actor-names"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          historyEntry({
+            actorId: null,
+            actorDisplayName: null,
+            actorEmail: null,
+          }),
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("actor=<system>");
   });
@@ -3334,12 +2893,7 @@ describe("runRetention history --with-actor-names (M6.7.zz.tenant.opt-out.histor
   it("JSON envelope includes actorDisplayName + actorEmail fields when entries carry them", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--with-actor-names",
-        "--format=json",
-      ),
+      parsed("retention", "history", "--with-actor-names", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -3400,13 +2954,10 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
   it("threads actorIds as single-element array when --actor-id set once", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--actor-id", ACTOR_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--actor-id", ACTOR_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorIds).toEqual([ACTOR_A]);
   });
@@ -3415,14 +2966,7 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id",
-        ACTOR_A,
-        "--actor-id",
-        ACTOR_B,
-      ),
+      parsed("retention", "history", "--actor-id", ACTOR_A, "--actor-id", ACTOR_B),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -3496,13 +3040,7 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
   it("JSON envelope echoes actorIds array when --actor-id set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id",
-        ACTOR_A,
-        "--format=json",
-      ),
+      parsed("retention", "history", "--actor-id", ACTOR_A, "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -3516,15 +3054,7 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
   it("JSON envelope echoes multi-element actorIds when --actor-id repeated", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id",
-        ACTOR_A,
-        "--actor-id",
-        ACTOR_B,
-        "--format=json",
-      ),
+      parsed("retention", "history", "--actor-id", ACTOR_A, "--actor-id", ACTOR_B, "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -3537,13 +3067,10 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
 
   it("JSON envelope actorIds is null when --actor-id NOT set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedOut = JSON.parse(out());
     expect(parsedOut.actorIds).toBeNull();
@@ -3551,13 +3078,10 @@ describe("runRetention history --actor-id (M6.7.zz.tenant.opt-out.cli.history.ac
 
   it("human-format empty-result message preserved when --actor-id has no matches", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--actor-id", ACTOR_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--actor-id", ACTOR_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("no history entries match");
   });
@@ -3571,13 +3095,10 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
   it("threads actorIdsNot as single-element array when --actor-id-not set once", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--actor-id-not", ACTOR_ALICE),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--actor-id-not", ACTOR_ALICE), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorIdsNot).toEqual([ACTOR_ALICE]);
   });
@@ -3586,14 +3107,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id-not",
-        ACTOR_ALICE,
-        "--actor-id-not",
-        ACTOR_BOB,
-      ),
+      parsed("retention", "history", "--actor-id-not", ACTOR_ALICE, "--actor-id-not", ACTOR_BOB),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -3618,14 +3132,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id",
-        ACTOR_ALICE,
-        "--actor-id-not",
-        ACTOR_BOB,
-      ),
+      parsed("retention", "history", "--actor-id", ACTOR_ALICE, "--actor-id-not", ACTOR_BOB),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -3665,14 +3172,7 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
   it("JSON envelope echoes actorIdsNot array when --actor-id-not set once", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id-not",
-        ACTOR_ALICE,
-        "--format",
-        "json",
-      ),
+      parsed("retention", "history", "--actor-id-not", ACTOR_ALICE, "--format", "json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -3708,13 +3208,10 @@ describe("runRetention history --actor-id-not (M6.7.zz.tenant.opt-out.cli.histor
 
   it("JSON envelope actorIdsNot=null when --actor-id-not NOT set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format", "json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.actorIdsNot).toBeNull();
@@ -3734,21 +3231,16 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
       } as RetentionContext,
     );
     expect(code).toBe(2);
-    expect(err()).toContain(
-      "--system-only and --no-system are mutually exclusive",
-    );
+    expect(err()).toContain("--system-only and --no-system are mutually exclusive");
   });
 
   it("threads actorPresence='system_only' when --system-only set", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--system-only"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--system-only"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorPresence).toBe("system_only");
   });
@@ -3756,13 +3248,10 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
   it("threads actorPresence='no_system' when --no-system set", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--no-system"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--no-system"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorPresence).toBe("no_system");
   });
@@ -3782,13 +3271,7 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--tenant",
-        TENANT_A,
-        "--system-only",
-      ),
+      parsed("retention", "history", "--tenant", TENANT_A, "--system-only"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -3803,13 +3286,7 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--actor-id-not",
-        ACTOR_ALICE,
-        "--no-system",
-      ),
+      parsed("retention", "history", "--actor-id-not", ACTOR_ALICE, "--no-system"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -3852,13 +3329,10 @@ describe("runRetention history --system-only / --no-system (M6.7.zz.tenant.opt-o
 
   it("JSON envelope systemOnly=false + noSystem=false when neither flag set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format", "json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.systemOnly).toBe(false);
@@ -3875,13 +3349,10 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
   it("threads beforeId to adapter when --before-id set", async () => {
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--before-id", BEFORE_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--before-id", BEFORE_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.beforeId).toBe(BEFORE_ID);
   });
@@ -3900,14 +3371,7 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
   it("returns exit 2 when --after-id and --before-id are both set (mutually exclusive)", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--after-id",
-        AFTER_ID,
-        "--before-id",
-        BEFORE_ID,
-      ),
+      parsed("retention", "history", "--after-id", AFTER_ID, "--before-id", BEFORE_ID),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -3920,14 +3384,7 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
   it("JSON envelope echoes beforeId field when --before-id set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--before-id",
-        BEFORE_ID,
-        "--format",
-        "json",
-      ),
+      parsed("retention", "history", "--before-id", BEFORE_ID, "--format", "json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -3940,13 +3397,10 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
 
   it("JSON envelope beforeId=null when --before-id NOT set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format", "json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.beforeId).toBeNull();
@@ -3955,14 +3409,7 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
   it("JSON envelope nextBeforeId is the FIRST entry id when entries.length === limit", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--limit",
-        "2",
-        "--format",
-        "json",
-      ),
+      parsed("retention", "history", "--limit", "2", "--format", "json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -4001,13 +3448,10 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
 
   it("JSON envelope nextBeforeId=null when entries.length < limit", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format", "json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.nextBeforeId).toBeNull();
@@ -4015,27 +3459,24 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
 
   it("human-format prints previous-page hint when entries.length === limit", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--limit", "1"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            {
-              id: FIRST_ID,
-              tenantId: "00000000-0000-4000-8000-00000000000A",
-              tableName: "workflow_traces",
-              eventKind: "opt_out_set",
-              actorId: null,
-              occurredAt: "2026-06-01T00:00:00.000Z",
-              prevState: null,
-              nextState: { opt_out: true },
-              attributes: {},
-            },
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--limit", "1"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          {
+            id: FIRST_ID,
+            tenantId: "00000000-0000-4000-8000-00000000000A",
+            tableName: "workflow_traces",
+            eventKind: "opt_out_set",
+            actorId: null,
+            occurredAt: "2026-06-01T00:00:00.000Z",
+            prevState: null,
+            nextState: { opt_out: true },
+            attributes: {},
+          },
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("previous page: crossengin retention history --before-id");
     expect(out()).toContain(FIRST_ID);
@@ -4043,27 +3484,24 @@ describe("runRetention history --before-id (M6.7.zz.tenant.opt-out.history.befor
 
   it("human-format omits previous-page hint when entries.length < limit", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          historyEntries: [
-            {
-              id: FIRST_ID,
-              tenantId: "00000000-0000-4000-8000-00000000000A",
-              tableName: "workflow_traces",
-              eventKind: "opt_out_set",
-              actorId: null,
-              occurredAt: "2026-06-01T00:00:00.000Z",
-              prevState: null,
-              nextState: { opt_out: true },
-              attributes: {},
-            },
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        historyEntries: [
+          {
+            id: FIRST_ID,
+            tenantId: "00000000-0000-4000-8000-00000000000A",
+            tableName: "workflow_traces",
+            eventKind: "opt_out_set",
+            actorId: null,
+            occurredAt: "2026-06-01T00:00:00.000Z",
+            prevState: null,
+            nextState: { opt_out: true },
+            attributes: {},
+          },
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).not.toContain("previous page");
   });
@@ -4117,12 +3555,7 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
     const capture: ListOptOutHistoryInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--range",
-        `${AFTER_ID}..${BEFORE_ID}`,
-      ),
+      parsed("retention", "history", "--range", `${AFTER_ID}..${BEFORE_ID}`),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -4135,13 +3568,10 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
 
   it("returns exit 2 when --range is missing the separator", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--range", AFTER_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--range", AFTER_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --range");
     expect(err()).toContain("<after-id>..<before-id>");
@@ -4149,26 +3579,20 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
 
   it("returns exit 2 when --range has empty after-id half", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--range", `..${BEFORE_ID}`),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--range", `..${BEFORE_ID}`), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --range");
   });
 
   it("returns exit 2 when --range has empty before-id half", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--range", `${AFTER_ID}..`),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--range", `${AFTER_ID}..`), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --range");
   });
@@ -4216,14 +3640,7 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
   it("JSON envelope echoes range field + afterId + beforeId when --range set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--range",
-        `${AFTER_ID}..${BEFORE_ID}`,
-        "--format",
-        "json",
-      ),
+      parsed("retention", "history", "--range", `${AFTER_ID}..${BEFORE_ID}`, "--format", "json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -4238,13 +3655,10 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
 
   it("JSON envelope range=null when --range not set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "history", "--format", "json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ historyEntries: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "history", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ historyEntries: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.range).toBeNull();
@@ -4290,14 +3704,7 @@ describe("runRetention history --range (M6.7.zz.tenant.opt-out.cli.history.range
   it("bare --after-id + --before-id (without --range) still mutually exclusive with helpful message pointing at --range", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "history",
-        "--after-id",
-        AFTER_ID,
-        "--before-id",
-        BEFORE_ID,
-      ),
+      parsed("retention", "history", "--after-id", AFTER_ID, "--before-id", BEFORE_ID),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -4366,14 +3773,7 @@ describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () =
     const { ctx } = buffers();
     const setOptOutCapture: SetTenantOptOutInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-out",
-        TENANT_A,
-        "workflow_traces",
-        "--actor",
-        ACTOR,
-      ),
+      parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--actor", ACTOR),
       {
         ...ctx,
         retentionOverride: fakeRetention({ setOptOutCapture }),
@@ -4387,14 +3787,7 @@ describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () =
     const { ctx } = buffers();
     const clearOptOutCapture: ClearTenantOptOutInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "opt-in",
-        TENANT_A,
-        "workflow_traces",
-        "--actor",
-        ACTOR,
-      ),
+      parsed("retention", "opt-in", TENANT_A, "workflow_traces", "--actor", ACTOR),
       {
         ...ctx,
         retentionOverride: fakeRetention({ clearOptOutCapture }),
@@ -4408,16 +3801,7 @@ describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () =
     const { ctx } = buffers();
     const setRetentionCapture: SetTenantRetentionInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "set",
-        TENANT_A,
-        "workflow_traces",
-        "--days",
-        "30",
-        "--actor",
-        ACTOR,
-      ),
+      parsed("retention", "set", TENANT_A, "workflow_traces", "--days", "30", "--actor", ACTOR),
       {
         ...ctx,
         retentionOverride: fakeRetention({ setRetentionCapture }),
@@ -4431,14 +3815,7 @@ describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () =
     const { ctx } = buffers();
     const deleteCapture: DeleteTenantPolicyInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "delete",
-        TENANT_A,
-        "workflow_traces",
-        "--actor",
-        ACTOR,
-      ),
+      parsed("retention", "delete", TENANT_A, "workflow_traces", "--actor", ACTOR),
       {
         ...ctx,
         retentionOverride: fakeRetention({ deleteCapture }),
@@ -4451,13 +3828,10 @@ describe("runRetention --actor threading (M6.7.zz.tenant.opt-out.history)", () =
   it("opt-out omitting --actor passes null to adapter", async () => {
     const { ctx } = buffers();
     const setOptOutCapture: SetTenantOptOutInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ setOptOutCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "opt-out", TENANT_A, "workflow_traces"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ setOptOutCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(setOptOutCapture[0]?.actorId).toBeNull();
   });
@@ -4480,13 +3854,10 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
   it("threads historyId to adapter (default actorId null)", async () => {
     const { ctx } = buffers();
     const restoreCapture: RestoreTenantPolicyInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ restoreCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({ restoreCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(restoreCapture[0]).toEqual({
       historyId: HISTORY_ID,
@@ -4497,40 +3868,34 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
   it("threads --actor to adapter", async () => {
     const { ctx } = buffers();
     const restoreCapture: RestoreTenantPolicyInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--actor", ACTOR),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ restoreCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--actor", ACTOR), {
+      ...ctx,
+      retentionOverride: fakeRetention({ restoreCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(restoreCapture[0]?.actorId).toBe(ACTOR);
   });
 
   it("human-format prints 'restored' policy when kind=restored", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          restoreResult: {
-            kind: "restored",
-            policy: {
-              tenantId: TENANT_A,
-              tableName: "workflow_traces",
-              retentionDays: 90,
-              enabled: false,
-              optOut: true,
-              optOutReason: "legal_hold:case#42",
-              optOutUntil: "2027-01-01T00:00:00.000Z",
-              lastPrunedAt: null,
-            },
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        restoreResult: {
+          kind: "restored",
+          policy: {
+            tenantId: TENANT_A,
+            tableName: "workflow_traces",
+            retentionDays: 90,
+            enabled: false,
+            optOut: true,
+            optOutReason: "legal_hold:case#42",
+            optOutUntil: "2027-01-01T00:00:00.000Z",
+            lastPrunedAt: null,
           },
-        }),
-      } as RetentionContext,
-    );
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Tenant restored");
     expect(out()).toContain("90 day(s)");
@@ -4539,19 +3904,16 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
 
   it("human-format prints 'restored from <id>: policy deleted' when kind=deleted", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          restoreResult: {
-            kind: "deleted",
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        restoreResult: {
+          kind: "deleted",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain(`restored from ${HISTORY_ID}`);
     expect(out()).toContain("policy deleted");
@@ -4574,13 +3936,10 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
         lastPrunedAt: null,
       },
     };
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ restoreResult: restored }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ restoreResult: restored }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.action).toBe("restore");
@@ -4590,19 +3949,16 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
 
   it("json-format emits envelope with kind=deleted variant", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          restoreResult: {
-            kind: "deleted",
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        restoreResult: {
+          kind: "deleted",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.result.kind).toBe("deleted");
@@ -4611,15 +3967,12 @@ describe("runRetention restore (M6.7.zz.tenant.opt-out.cli.restore)", () => {
 
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("history id 'xxx' not found"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("history id 'xxx' not found"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("not found");
   });
@@ -4632,16 +3985,13 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
     const { ctx } = buffers();
     const previewRestoreCapture: PreviewRestoreTenantPolicyInput[] = [];
     const restoreCapture: RestoreTenantPolicyInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewRestoreCapture,
-          restoreCapture,
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewRestoreCapture,
+        restoreCapture,
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(previewRestoreCapture).toHaveLength(1);
     expect(restoreCapture).toHaveLength(0);
@@ -4650,13 +4000,10 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
   it("threads historyId to preview adapter", async () => {
     const { ctx } = buffers();
     const previewRestoreCapture: PreviewRestoreTenantPolicyInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ previewRestoreCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ previewRestoreCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(previewRestoreCapture[0]).toEqual({ historyId: HISTORY_ID });
   });
@@ -4684,20 +4031,17 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
 
   it("human-format renders preview header + source-history + action for would_delete", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewRestoreResult: {
-            kind: "would_delete",
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            sourceHistoryId: HISTORY_ID,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewRestoreResult: {
+          kind: "would_delete",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          sourceHistoryId: HISTORY_ID,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Restore preview (no changes applied)");
     expect(out()).toContain(`Source history: ${HISTORY_ID}`);
@@ -4708,23 +4052,20 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
 
   it("human-format renders would_set_opt_out with retention + until + reason", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewRestoreResult: {
-            kind: "would_set_opt_out",
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            retentionDays: 90,
-            optOutUntil: "2027-01-01T00:00:00.000Z",
-            optOutReason: "legal_hold:case#42",
-            sourceHistoryId: HISTORY_ID,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewRestoreResult: {
+          kind: "would_set_opt_out",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          optOutUntil: "2027-01-01T00:00:00.000Z",
+          optOutReason: "legal_hold:case#42",
+          sourceHistoryId: HISTORY_ID,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Action:         setTenantOptOut");
     expect(out()).toContain("retention_days: 90");
@@ -4734,23 +4075,20 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
 
   it("human-format renders 'indefinite' for null optOutUntil + '<no reason>' for null reason", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewRestoreResult: {
-            kind: "would_set_opt_out",
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            retentionDays: 365,
-            optOutUntil: null,
-            optOutReason: null,
-            sourceHistoryId: HISTORY_ID,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewRestoreResult: {
+          kind: "would_set_opt_out",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          optOutUntil: null,
+          optOutReason: null,
+          sourceHistoryId: HISTORY_ID,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("opt_out_until:  indefinite");
     expect(out()).toContain("opt_out_reason: <no reason>");
@@ -4758,22 +4096,19 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
 
   it("human-format renders would_set_retention with retention + enabled", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewRestoreResult: {
-            kind: "would_set_retention",
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            retentionDays: 30,
-            enabled: true,
-            sourceHistoryId: HISTORY_ID,
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewRestoreResult: {
+          kind: "would_set_retention",
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          retentionDays: 30,
+          enabled: true,
+          sourceHistoryId: HISTORY_ID,
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Action:         setTenantRetention");
     expect(out()).toContain("retention_days: 30");
@@ -4783,13 +4118,7 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
   it("json-format emits envelope {action, dryRun:true, historyId, preview}", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "restore",
-        HISTORY_ID,
-        "--dry-run",
-        "--format=json",
-      ),
+      parsed("retention", "restore", HISTORY_ID, "--dry-run", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -4812,13 +4141,10 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
 
   it("json-format live mode (no --dry-run) emits dryRun:false discriminator", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.dryRun).toBe(false);
@@ -4827,15 +4153,12 @@ describe("runRetention restore --dry-run (M6.7.zz.tenant.opt-out.cli.restore.dry
 
   it("--dry-run propagates preview-adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "restore", HISTORY_ID, "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("history id 'xxx' not found"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "restore", HISTORY_ID, "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("history id 'xxx' not found"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("not found");
   });
@@ -4907,9 +4230,7 @@ describe("formatRestorePreview", () => {
         sourceHistoryId: HISTORY_ID,
       },
     ]) {
-      expect(formatRestorePreview(preview)).toContain(
-        `Source history: ${HISTORY_ID}`,
-      );
+      expect(formatRestorePreview(preview)).toContain(`Source history: ${HISTORY_ID}`);
     }
   });
 });
@@ -4930,13 +4251,10 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
 
   it("returns exit 2 when idB arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -4944,70 +4262,61 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
   it("threads idA + idB to adapter", async () => {
     const { ctx } = buffers();
     const diffCapture: DiffHistoryEntriesInput[] = [];
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(diffCapture[0]).toEqual({ idA: ID_A, idB: ID_B });
   });
 
   it("human-format renders 'No differences' when fieldDiffs is empty", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          diffResult: {
-            idA: ID_A,
-            idB: ID_B,
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            occurredAtA: "2026-05-20T12:00:00.000Z",
-            occurredAtB: "2026-05-21T12:00:00.000Z",
-            eventKindA: "opt_out_set",
-            eventKindB: "opt_out_set",
-            actorIdA: null,
-            actorIdB: null,
-            fieldDiffs: [],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        diffResult: {
+          idA: ID_A,
+          idB: ID_B,
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          occurredAtA: "2026-05-20T12:00:00.000Z",
+          occurredAtB: "2026-05-21T12:00:00.000Z",
+          eventKindA: "opt_out_set",
+          eventKindB: "opt_out_set",
+          actorIdA: null,
+          actorIdB: null,
+          fieldDiffs: [],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("No differences");
   });
 
   it("human-format renders metadata + field-by-field diff", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          diffResult: {
-            idA: ID_A,
-            idB: ID_B,
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            occurredAtA: "2026-05-20T12:00:00.000Z",
-            occurredAtB: "2026-05-21T12:00:00.000Z",
-            eventKindA: "opt_out_set",
-            eventKindB: "retention_set",
-            actorIdA: null,
-            actorIdB: null,
-            fieldDiffs: [
-              { field: "opt_out", valueA: true, valueB: false },
-              { field: "retention_days", valueA: 365, valueB: 30 },
-            ],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        diffResult: {
+          idA: ID_A,
+          idB: ID_B,
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          occurredAtA: "2026-05-20T12:00:00.000Z",
+          occurredAtB: "2026-05-21T12:00:00.000Z",
+          eventKindA: "opt_out_set",
+          eventKindB: "retention_set",
+          actorIdA: null,
+          actorIdB: null,
+          fieldDiffs: [
+            { field: "opt_out", valueA: true, valueB: false },
+            { field: "retention_days", valueA: 365, valueB: 30 },
+          ],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Diff between history events");
     expect(out()).toContain(`A: ${ID_A}`);
@@ -5023,29 +4332,24 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
 
   it("human-format renders 'absent' for undefined values (e.g., DELETE event)", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          diffResult: {
-            idA: ID_A,
-            idB: ID_B,
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            occurredAtA: "2026-05-20T12:00:00.000Z",
-            occurredAtB: "2026-05-21T12:00:00.000Z",
-            eventKindA: "policy_deleted",
-            eventKindB: "opt_out_set",
-            actorIdA: null,
-            actorIdB: null,
-            fieldDiffs: [
-              { field: "opt_out", valueA: undefined, valueB: true },
-            ],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        diffResult: {
+          idA: ID_A,
+          idB: ID_B,
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          occurredAtA: "2026-05-20T12:00:00.000Z",
+          occurredAtB: "2026-05-21T12:00:00.000Z",
+          eventKindA: "policy_deleted",
+          eventKindB: "opt_out_set",
+          actorIdA: null,
+          actorIdB: null,
+          fieldDiffs: [{ field: "opt_out", valueA: undefined, valueB: true }],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("absent  →  true");
   });
@@ -5083,15 +4387,12 @@ describe("runRetention diff-history (M6.7.zz.tenant.opt-out.cli.diff-history)", 
 
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("history id(s) not found: xxx"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("history id(s) not found: xxx"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("not found");
   });
@@ -5104,14 +4405,7 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
   it("returns exit 2 when --kind is invalid value", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind",
-        "not_a_kind",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind", "not_a_kind"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -5148,14 +4442,7 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind",
-        "opt_out_set",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind", "opt_out_set"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -5185,22 +4472,16 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKinds).toEqual([
-      "opt_out_set",
-      "opt_out_cleared",
-    ]);
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set", "opt_out_cleared"]);
   });
 
   it("omits eventKinds when --kind NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.eventKinds).toBeUndefined();
   });
@@ -5208,14 +4489,7 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
   it("adapter mismatch error propagates as exit 1 with new always-list error format", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind",
-        "opt_out_set",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind", "opt_out_set"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -5226,9 +4500,7 @@ describe("runRetention diff-history --kind (M6.7.zz.tenant.opt-out.cli.diff-hist
       } as RetentionContext,
     );
     expect(code).toBe(1);
-    expect(err()).toContain(
-      "expected both events to have event_kind in ['opt_out_set']",
-    );
+    expect(err()).toContain("expected both events to have event_kind in ['opt_out_set']");
     expect(err()).toContain("A is 'retention_set'");
   });
 
@@ -5335,14 +4607,7 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--actor-id",
-        ACTOR_ALICE,
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--actor-id", ACTOR_ALICE),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -5378,13 +4643,10 @@ describe("runRetention diff-history --actor-id (M6.7.zz.tenant.opt-out.cli.diff-
   it("omits actorIds when --actor-id NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorIds).toBeUndefined();
   });
@@ -5566,13 +4828,7 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--with-actor-names",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--with-actor-names"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -5585,13 +4841,10 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   it("omits joinActor when --with-actor-names NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.joinActor).toBeUndefined();
   });
@@ -5599,13 +4852,7 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   it("human-format renders 'by Alice Smith (uuid)' suffix for each event when names populated", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--with-actor-names",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--with-actor-names"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -5637,13 +4884,7 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   it("human-format renders <system> for null actor_id with --with-actor-names", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--with-actor-names",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--with-actor-names"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -5675,13 +4916,7 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   it("human-format falls back to email when display_name is null", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--with-actor-names",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--with-actor-names"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -5712,27 +4947,24 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
 
   it("human-format omits 'by ...' suffix when --with-actor-names NOT set", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          diffResult: {
-            idA: ID_A,
-            idB: ID_B,
-            tenantId: TENANT_A,
-            tableName: "workflow_traces",
-            occurredAtA: "2026-05-20T12:00:00.000Z",
-            occurredAtB: "2026-05-21T12:00:00.000Z",
-            eventKindA: "opt_out_set",
-            eventKindB: "retention_set",
-            actorIdA: ACTOR_ALICE,
-            actorIdB: ACTOR_BOB,
-            fieldDiffs: [],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        diffResult: {
+          idA: ID_A,
+          idB: ID_B,
+          tenantId: TENANT_A,
+          tableName: "workflow_traces",
+          occurredAtA: "2026-05-20T12:00:00.000Z",
+          occurredAtB: "2026-05-21T12:00:00.000Z",
+          eventKindA: "opt_out_set",
+          eventKindB: "retention_set",
+          actorIdA: ACTOR_ALICE,
+          actorIdB: ACTOR_BOB,
+          fieldDiffs: [],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).not.toContain("by Alice");
     expect(out()).not.toContain("by <system>");
@@ -5742,15 +4974,7 @@ describe("runRetention diff-history --with-actor-names (M6.7.zz.tenant.opt-out.c
   it("JSON envelope echoes withActorNames=true and actor fields when set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--with-actor-names",
-        "--format",
-        "json",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--with-actor-names", "--format", "json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -5833,14 +5057,7 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--actor-id-not",
-        ACTOR_ALICE,
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--actor-id-not", ACTOR_ALICE),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -5876,13 +5093,10 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
   it("omits actorIdsNot when --actor-id-not NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorIdsNot).toBeUndefined();
   });
@@ -5936,10 +5150,7 @@ describe("runRetention diff-history --actor-id-not (M6.7.zz.tenant.opt-out.cli.d
     );
     expect(code).toBe(0);
     expect(capture[0]?.actorIds).toEqual([ACTOR_ALICE, ACTOR_BOB]);
-    expect(capture[0]?.actorIdsNot).toEqual([
-      ACTOR_CAROL,
-      "44444444-0000-4000-8000-000000000004",
-    ]);
+    expect(capture[0]?.actorIdsNot).toEqual([ACTOR_CAROL, "44444444-0000-4000-8000-000000000004"]);
   });
 
   it("adapter exclusion error propagates as exit 1 with multi-value error format", async () => {
@@ -6042,14 +5253,7 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
   it("returns exit 2 when --kind-not is invalid value", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-not",
-        "not_a_kind",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-not", "not_a_kind"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -6086,14 +5290,7 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-not",
-        "policy_deleted",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-not", "policy_deleted"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -6123,22 +5320,16 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKindsNot).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("omits eventKindsNot when --kind-not NOT set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.eventKindsNot).toBeUndefined();
   });
@@ -6166,10 +5357,7 @@ describe("runRetention diff-history --kind-not (M6.7.zz.tenant.opt-out.cli.diff-
     );
     expect(code).toBe(0);
     expect(capture[0]?.eventKinds).toEqual(["opt_out_set"]);
-    expect(capture[0]?.eventKindsNot).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("adapter exclusion error propagates as exit 1 with multi-value error", async () => {
@@ -6273,23 +5461,14 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
   it("returns exit 2 when --system-only AND --no-system both set", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only",
-        "--no-system",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only", "--no-system"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
       } as RetentionContext,
     );
     expect(code).toBe(2);
-    expect(err()).toContain(
-      "--system-only and --no-system are mutually exclusive",
-    );
+    expect(err()).toContain("--system-only and --no-system are mutually exclusive");
   });
 
   it("threads actorPresence='system_only' when --system-only set", async () => {
@@ -6323,13 +5502,10 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
   it("omits actorPresence when neither flag set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorPresence).toBeUndefined();
   });
@@ -6338,15 +5514,7 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--actor-id-not",
-        ACTOR_ALICE,
-        "--no-system",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--actor-id-not", ACTOR_ALICE, "--no-system"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -6371,23 +5539,14 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
       } as RetentionContext,
     );
     expect(code).toBe(1);
-    expect(err()).toContain(
-      "expected both events to be system-authored (actor_id IS NULL)",
-    );
+    expect(err()).toContain("expected both events to be system-authored (actor_id IS NULL)");
     expect(err()).toContain("A is '11111111-0000-4000-8000-000000000001'");
   });
 
   it("JSON envelope echoes systemOnly=true + noSystem=false when --system-only set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only",
-        "--format=json",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -6403,14 +5562,7 @@ describe("runRetention diff-history --system-only / --no-system (M6.7.zz.tenant.
   it("JSON envelope echoes noSystem=true + systemOnly=false when --no-system set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--no-system",
-        "--format=json",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--no-system", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -6448,14 +5600,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
   it("--kind-a invalid value exits 2 with valid-values list", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-a",
-        "bogus_kind",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-a", "bogus_kind"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -6491,14 +5636,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
   it("--kind-b invalid value exits 2", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-b",
-        "not_a_kind",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-b", "not_a_kind"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -6533,14 +5671,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
   it("--kind-not-b invalid value exits 2", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-not-b",
-        "bad_value",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-not-b", "bad_value"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -6554,14 +5685,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-a",
-        "opt_out_set",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-a", "opt_out_set"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -6599,14 +5723,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-b",
-        "policy_deleted",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-b", "policy_deleted"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -6636,24 +5753,14 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKindsNotA).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(capture[0]?.eventKindsNotA).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("threads eventKindsNotB when --kind-not-b set", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-not-b",
-        "policy_deleted",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-not-b", "policy_deleted"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -6760,13 +5867,10 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
   it("omits all per-side fields when no per-side flag set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.eventKindsA).toBeUndefined();
     expect(capture[0]?.eventKindsB).toBeUndefined();
@@ -6905,14 +6009,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
   it("adapter per-side error propagates as exit 1 with multi-value list error format", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--kind-a",
-        "opt_out_set",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--kind-a", "opt_out_set"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -6923,9 +6020,7 @@ describe("runRetention diff-history per-side expectations (M6.7.zz.tenant.opt-ou
       } as RetentionContext,
     );
     expect(code).toBe(1);
-    expect(err()).toContain(
-      "expected event A to have event_kind in ['opt_out_set']",
-    );
+    expect(err()).toContain("expected event A to have event_kind in ['opt_out_set']");
     expect(err()).toContain("A is 'policy_deleted'");
   });
 });
@@ -6938,59 +6033,34 @@ describe("runRetention diff-history per-side --system-only / --no-system (M6.7.z
   it("exit 2 when --system-only-a AND --no-system-a both set", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only-a",
-        "--no-system-a",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only-a", "--no-system-a"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
       } as RetentionContext,
     );
     expect(code).toBe(2);
-    expect(err()).toContain(
-      "--system-only-a and --no-system-a are mutually exclusive",
-    );
+    expect(err()).toContain("--system-only-a and --no-system-a are mutually exclusive");
   });
 
   it("exit 2 when --system-only-b AND --no-system-b both set", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only-b",
-        "--no-system-b",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only-b", "--no-system-b"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
       } as RetentionContext,
     );
     expect(code).toBe(2);
-    expect(err()).toContain(
-      "--system-only-b and --no-system-b are mutually exclusive",
-    );
+    expect(err()).toContain("--system-only-b and --no-system-b are mutually exclusive");
   });
 
   it("--system-only-a + --no-system-b allowed (different sides, asymmetric assertion)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only-a",
-        "--no-system-b",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only-a", "--no-system-b"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -7061,13 +6131,10 @@ describe("runRetention diff-history per-side --system-only / --no-system (M6.7.z
   it("omits per-side actorPresence fields when neither set (backward compat)", async () => {
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-history", ID_A, ID_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ diffCapture: capture }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-history", ID_A, ID_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({ diffCapture: capture }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.actorPresenceA).toBeUndefined();
     expect(capture[0]?.actorPresenceB).toBeUndefined();
@@ -7077,14 +6144,7 @@ describe("runRetention diff-history per-side --system-only / --no-system (M6.7.z
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only",
-        "--no-system-a",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only", "--no-system-a"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -7151,9 +6211,7 @@ describe("runRetention diff-history per-side --system-only / --no-system (M6.7.z
       } as RetentionContext,
     );
     expect(code).toBe(1);
-    expect(err()).toContain(
-      "expected event A to be system-authored",
-    );
+    expect(err()).toContain("expected event A to be system-authored");
     expect(err()).toContain(`A is '${ACTOR_ALICE}'`);
   });
 
@@ -7161,14 +6219,7 @@ describe("runRetention diff-history per-side --system-only / --no-system (M6.7.z
     const capture: DiffHistoryEntriesInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-history",
-        ID_A,
-        ID_B,
-        "--system-only-a",
-        "--no-system-a",
-      ),
+      parsed("retention", "diff-history", ID_A, ID_B, "--system-only-a", "--no-system-a"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -7197,13 +6248,10 @@ describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
     const { ctx } = buffers();
     const pruneCalled = { count: 0 };
     const previewCalled = { count: 0 };
-    const code = await runRetention(
-      parsed("retention", "prune", "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ pruneCalled, previewCalled }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "prune", "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ pruneCalled, previewCalled }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(previewCalled.count).toBe(1);
     expect(pruneCalled.count).toBe(0);
@@ -7221,13 +6269,10 @@ describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
 
   it("human-format --dry-run empty result adds (dry-run) suffix", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "prune", "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ previewResults: [] }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "prune", "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ previewResults: [] }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("(dry-run)");
   });
@@ -7272,31 +6317,26 @@ describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
     expect(out()).toContain("tenant=" + TENANT_A);
     expect(out()).toContain("(platform)");
     expect(out()).toContain("skipped_disabled");
-    expect(out()).toContain(
-      "Summary: 2 pruned (1042 rows), 1 skipped (1 skipped_disabled)",
-    );
+    expect(out()).toContain("Summary: 2 pruned (1042 rows), 1 skipped (1 skipped_disabled)");
   });
 
   it("human-format --dry-run renders 'would prune' summary verb + 'would_delete=' count label", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "prune", "--dry-run"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewResults: [
-            {
-              tableName: "workflow_traces",
-              tenantId: TENANT_A,
-              status: "previewed",
-              retentionDays: 30,
-              wouldDeleteCount: 42,
-              cutoffMs: Date.parse("2026-04-21T00:00:00.000Z"),
-            },
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "prune", "--dry-run"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewResults: [
+          {
+            tableName: "workflow_traces",
+            tenantId: TENANT_A,
+            status: "previewed",
+            retentionDays: 30,
+            wouldDeleteCount: 42,
+            cutoffMs: Date.parse("2026-04-21T00:00:00.000Z"),
+          },
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Retention prune dry-run results (1 entries)");
     expect(out()).toContain("would_delete=42");
@@ -7354,23 +6394,20 @@ describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
 
   it("json-format emits envelope {action, dryRun:false, results}", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "prune", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          pruneResults: [
-            {
-              tableName: "workflow_traces",
-              status: "pruned",
-              retentionDays: 90,
-              deletedCount: 100,
-              cutoffMs: 1_700_000_000_000,
-            },
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "prune", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        pruneResults: [
+          {
+            tableName: "workflow_traces",
+            status: "pruned",
+            retentionDays: 90,
+            deletedCount: 100,
+            cutoffMs: 1_700_000_000_000,
+          },
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.action).toBe("prune");
@@ -7382,23 +6419,20 @@ describe("runRetention prune (M6.7.zz.tenant.opt-out.cli.prune)", () => {
 
   it("json-format --dry-run emits envelope with dryRun:true", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "prune", "--dry-run", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          previewResults: [
-            {
-              tableName: "workflow_traces",
-              status: "previewed",
-              retentionDays: 90,
-              wouldDeleteCount: 50,
-              cutoffMs: 1_700_000_000_000,
-            },
-          ],
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "prune", "--dry-run", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        previewResults: [
+          {
+            tableName: "workflow_traces",
+            status: "previewed",
+            retentionDays: 90,
+            wouldDeleteCount: 50,
+            cutoffMs: 1_700_000_000_000,
+          },
+        ],
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsedJson = JSON.parse(out());
     expect(parsedJson.dryRun).toBe(true);
@@ -7512,26 +6546,20 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
 
   it("returns exit 2 when tenant-b is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-timeline", TENANT_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-timeline", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
 
   it("returns exit 2 when table-name is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff-timeline", TENANT_A, TENANT_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff-timeline", TENANT_A, TENANT_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -7581,15 +6609,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
   it("returns exit 2 when --limit is invalid", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--limit",
-        "0",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--limit", "0"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -7603,13 +6623,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -7658,13 +6672,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
   it("human-format renders 'No history events' when entries empty", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -7674,21 +6682,13 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
     expect(out()).toContain("Timeline for tenants on workflow_traces");
     expect(out()).toContain(`Tenant A: ${TENANT_A}`);
     expect(out()).toContain(`Tenant B: ${TENANT_B}`);
-    expect(out()).toContain(
-      "No history events for either tenant on this table.",
-    );
+    expect(out()).toContain("No history events for either tenant on this table.");
   });
 
   it("human-format renders chronological events with [A] / [B] tags", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -7749,13 +6749,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
   it("human-format renders '(policy deleted)' for nextState=null", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -7789,14 +6783,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
   it("JSON envelope shape {action, since, until, limit, result}", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -7817,13 +6804,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
   it("adapter errors propagate as exit 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -7860,13 +6841,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -7915,9 +6890,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(out()).toContain(
-      "Alice Smith (11111111-1111-1111-1111-111111111111)",
-    );
+    expect(out()).toContain("Alice Smith (11111111-1111-1111-1111-111111111111)");
   });
 
   it("human-format falls back to email when --with-actor-names + display_name null", async () => {
@@ -7959,9 +6932,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(out()).toContain(
-      "alice@example.com (11111111-1111-1111-1111-111111111111)",
-    );
+    expect(out()).toContain("alice@example.com (11111111-1111-1111-1111-111111111111)");
   });
 
   it("human-format renders <system> for null actor_id regardless of --with-actor-names", async () => {
@@ -8009,13 +6980,7 @@ describe("runRetention diff-timeline (M6.7.zz.tenant.opt-out.cli.diff-timeline)"
   it("human-format omits 'by <actor>' suffix when --with-actor-names is NOT set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -8164,12 +7129,7 @@ describe("runRetention diff-timeline N-way (M6.7.zz.tenant.opt-out.cli.diff-time
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.tenantIds).toEqual([
-      TENANT_A,
-      TENANT_B,
-      TENANT_C,
-      TENANT_D,
-    ]);
+    expect(capture[0]?.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C, TENANT_D]);
   });
 
   it("does NOT call diffHistoryTimelineNway when --add-tenant is absent", async () => {
@@ -8177,13 +7137,7 @@ describe("runRetention diff-timeline N-way (M6.7.zz.tenant.opt-out.cli.diff-time
     const nwayCapture: DiffHistoryTimelineNwayInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -8457,9 +7411,7 @@ describe("formatTimelineNwayDiff", () => {
       },
       { withActorNames: true },
     );
-    expect(out).toContain(
-      "by Alice Smith (11111111-1111-1111-1111-111111111111)",
-    );
+    expect(out).toContain("by Alice Smith (11111111-1111-1111-1111-111111111111)");
   });
 });
 
@@ -8569,13 +7521,7 @@ describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.dif
     const crossCapture: DiffHistoryTimelineCrossTableInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -8638,9 +7584,7 @@ describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.dif
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(out()).toContain(
-      `Cross-table timeline for tenant ${TENANT_A} across 3 tables`,
-    );
+    expect(out()).toContain(`Cross-table timeline for tenant ${TENANT_A} across 3 tables`);
     expect(out()).toContain("Table A: workflow_traces");
     expect(out()).toContain("Table B: llm_call_traces");
     expect(out()).toContain("Table C: llm_latency_samples");
@@ -8664,11 +7608,7 @@ describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.dif
         retentionOverride: fakeRetention({
           diffTimelineCrossTableResult: {
             tenantId: TENANT_A,
-            tableNames: [
-              "workflow_traces",
-              "llm_call_traces",
-              "llm_latency_samples",
-            ],
+            tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
             entries: [
               {
                 id: "h1",
@@ -8789,13 +7729,7 @@ describe("runRetention diff-timeline cross-table (M6.7.zz.tenant.opt-out.cli.dif
   it("missing positional arg with --cross-table returns exit 2 with cross-table usage hint", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        "workflow_traces",
-        "--cross-table",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, "workflow_traces", "--cross-table"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -8861,13 +7795,7 @@ describe("runRetention diff-timeline --actor-id (M6.7.zz.tenant.opt-out.cli.diff
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -9150,13 +8078,7 @@ describe("runRetention diff-timeline --actor-id-not (M6.7.zz.tenant.opt-out.cli.
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A_ANN,
-        TENANT_B_ANN,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A_ANN, TENANT_B_ANN, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -9366,23 +8288,14 @@ describe("runRetention diff-timeline --system-only / --no-system (M6.7.zz.tenant
       } as RetentionContext,
     );
     expect(code).toBe(2);
-    expect(err()).toContain(
-      "--system-only and --no-system are mutually exclusive",
-    );
+    expect(err()).toContain("--system-only and --no-system are mutually exclusive");
   });
 
   it("pair-wise: threads actorPresence='system_only' when --system-only set", async () => {
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--system-only",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--system-only"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -9396,14 +8309,7 @@ describe("runRetention diff-timeline --system-only / --no-system (M6.7.zz.tenant
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--no-system",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--no-system"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -9417,13 +8323,7 @@ describe("runRetention diff-timeline --system-only / --no-system (M6.7.zz.tenant
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -9673,23 +8573,14 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKinds).toEqual([
-      "opt_out_set",
-      "opt_out_cleared",
-    ]);
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set", "opt_out_cleared"]);
   });
 
   it("pair-wise: omits eventKinds when --kind NOT set (backward compat)", async () => {
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -9723,10 +8614,7 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKinds).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(capture[0]?.eventKinds).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("cross-table: threads eventKinds alongside --cross-table (multi-kind)", async () => {
@@ -9753,10 +8641,7 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKinds).toEqual([
-      "retention_set",
-      "policy_deleted",
-    ]);
+    expect(capture[0]?.eventKinds).toEqual(["retention_set", "policy_deleted"]);
   });
 
   it("composes with --actor-id + --with-actor-names + --since (multi-actor + multi-kind)", async () => {
@@ -9790,10 +8675,7 @@ describe("runRetention diff-timeline --kind (M6.7.zz.tenant.opt-out.cli.diff-tim
     );
     expect(code).toBe(0);
     expect(capture[0]?.actorIds).toEqual([ACTOR_A, ACTOR_B]);
-    expect(capture[0]?.eventKinds).toEqual([
-      "opt_out_set",
-      "opt_out_cleared",
-    ]);
+    expect(capture[0]?.eventKinds).toEqual(["opt_out_set", "opt_out_cleared"]);
     expect(capture[0]?.joinActor).toBe(true);
     expect(capture[0]?.since).toBe("2026-01-01T00:00:00.000Z");
   });
@@ -10020,10 +8902,7 @@ describe("runRetention diff-timeline --kind-not (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKindsNot).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("pair-wise: composes --kind + --kind-not threading both independently", async () => {
@@ -10099,10 +8978,7 @@ describe("runRetention diff-timeline --kind-not (M6.7.zz.tenant.opt-out.cli.diff
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.eventKindsNot).toEqual([
-      "policy_deleted",
-      "retention_set",
-    ]);
+    expect(capture[0]?.eventKindsNot).toEqual(["policy_deleted", "retention_set"]);
   });
 
   it("JSON envelope echoes kindsNot array (pair-wise)", async () => {
@@ -10133,14 +9009,7 @@ describe("runRetention diff-timeline --kind-not (M6.7.zz.tenant.opt-out.cli.diff
   it("JSON envelope kindsNot=null when --kind-not not set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -10181,13 +9050,7 @@ describe("runRetention diff-timeline --after-id (M6.7.zz.tenant.opt-out.cli.diff
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -10376,15 +9239,7 @@ describe("runRetention diff-timeline --after-id (M6.7.zz.tenant.opt-out.cli.diff
     const { ctx, out } = buffers();
     const LAST_ID = "60000000-0000-4000-8000-000000000006";
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--limit",
-        "1",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--limit", "1"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -10418,13 +9273,7 @@ describe("runRetention diff-timeline --after-id (M6.7.zz.tenant.opt-out.cli.diff
   it("human-format omits next-page hint when entries.length < limit", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -10523,13 +9372,7 @@ describe("runRetention diff-timeline --before-id (M6.7.zz.tenant.opt-out.cli.dif
     const capture: DiffHistoryTimelineInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces"),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTimelineCapture: capture }),
@@ -10740,15 +9583,7 @@ describe("runRetention diff-timeline --before-id (M6.7.zz.tenant.opt-out.cli.dif
   it("human-format prints previous-page hint when entries.length === limit", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff-timeline",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--limit",
-        "1",
-      ),
+      parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--limit", "1"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -10999,9 +9834,7 @@ describe("runRetention diff-timeline --range (M6.7.zz.tenant.opt-out.cli.diff-ti
       } as RetentionContext,
     );
     expect(code).toBe(2);
-    expect(err()).toContain(
-      "--range cannot be combined with --after-id or --before-id",
-    );
+    expect(err()).toContain("--range cannot be combined with --after-id or --before-id");
   });
 
   it("returns exit 2 when --range combined with --before-id", async () => {
@@ -11200,14 +10033,10 @@ describe("formatTimelineCrossTableDiff", () => {
       tableNames: ["workflow_traces", "llm_call_traces"],
       entries: [],
     });
-    expect(out).toContain(
-      `Cross-table timeline for tenant ${TENANT_A} across 2 tables`,
-    );
+    expect(out).toContain(`Cross-table timeline for tenant ${TENANT_A} across 2 tables`);
     expect(out).toContain("Table A: workflow_traces");
     expect(out).toContain("Table B: llm_call_traces");
-    expect(out).toContain(
-      "No history events for this tenant on any of these tables.",
-    );
+    expect(out).toContain("No history events for this tenant on any of these tables.");
   });
 
   it("renders [A]/[B]/[C] tagged event lines with state summary", () => {
@@ -11263,9 +10092,7 @@ describe("formatTimelineCrossTableDiff", () => {
       },
       { withActorNames: true },
     );
-    expect(out).toContain(
-      "by Alice Smith (11111111-1111-1111-1111-111111111111)",
-    );
+    expect(out).toContain("by Alice Smith (11111111-1111-1111-1111-111111111111)");
   });
 });
 
@@ -11414,9 +10241,7 @@ describe("formatTimelineDiff", () => {
       },
       { withActorNames: true },
     );
-    expect(out).toContain(
-      "by Alice Smith (11111111-1111-1111-1111-111111111111)",
-    );
+    expect(out).toContain("by Alice Smith (11111111-1111-1111-1111-111111111111)");
   });
 
   it("renders 'by <system>' when actorId is null + withActorNames=true", () => {
@@ -11484,26 +10309,20 @@ describe("runRetention diff (M6.7.zz.tenant.opt-out.cli.diff)", () => {
 
   it("returns exit 2 when tenantB arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff", TENANT_A),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff", TENANT_A), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
 
   it("returns exit 2 when table arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff", TENANT_A, TENANT_B),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff", TENANT_A, TENANT_B), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -11622,9 +10441,7 @@ describe("runRetention diff (M6.7.zz.tenant.opt-out.cli.diff)", () => {
               retentionDays: null,
               enabled: false,
             },
-            fieldDiffs: [
-              { field: "source", valueA: "tenant_opt_out", valueB: "none" },
-            ],
+            fieldDiffs: [{ field: "source", valueA: "tenant_opt_out", valueB: "none" }],
           },
         }),
       } as RetentionContext,
@@ -11651,14 +10468,7 @@ describe("runRetention diff (M6.7.zz.tenant.opt-out.cli.diff)", () => {
       enabled: true,
     };
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--format=json",
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -11668,9 +10478,7 @@ describe("runRetention diff (M6.7.zz.tenant.opt-out.cli.diff)", () => {
             tableName: "workflow_traces",
             resolutionA,
             resolutionB,
-            fieldDiffs: [
-              { field: "source", valueA: "tenant", valueB: "platform" },
-            ],
+            fieldDiffs: [{ field: "source", valueA: "tenant", valueB: "platform" }],
           },
         }),
       } as RetentionContext,
@@ -11705,13 +10513,10 @@ describe("runRetention diff (M6.7.zz.tenant.opt-out.cli.diff)", () => {
 describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-platform)", () => {
   it("returns exit 2 when tenant arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff", "--vs-platform"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff", "--vs-platform"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
     expect(err()).toContain("--vs-platform");
@@ -11719,13 +10524,10 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
 
   it("returns exit 2 when table arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff", TENANT_A, "--vs-platform"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff", TENANT_A, "--vs-platform"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -11735,13 +10537,7 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
     const diffTenantCapture: DiffTenantPoliciesInput[] = [];
     const diffTenantVsPlatformCapture: DiffTenantVsPlatformInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "--vs-platform",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "--vs-platform"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -11762,13 +10558,7 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
   it("human-format renders 'No differences' message when fieldDiffs empty", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "--vs-platform",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "--vs-platform"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -11791,9 +10581,7 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(out()).toContain(
-      "Diff between tenant and platform default (table: workflow_traces)",
-    );
+    expect(out()).toContain("Diff between tenant and platform default (table: workflow_traces)");
     expect(out()).toContain(
       "No differences — tenant has the same effective retention policy as the platform default.",
     );
@@ -11802,13 +10590,7 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
   it("human-format renders 'Field changes' for non-empty diff", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "--vs-platform",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "--vs-platform"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -11844,14 +10626,7 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
   it("JSON envelope includes vsPlatform:true discriminator + result", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "--vs-platform",
-        "--format=json",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "--vs-platform", "--format=json"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -11885,13 +10660,7 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "--vs-platform",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "--vs-platform"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -11907,13 +10676,10 @@ describe("runRetention diff --vs-platform (M6.7.zz.tenant.opt-out.cli.diff.vs-pl
 describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross-table)", () => {
   it("returns exit 2 when tenant arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff", "--cross-table"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff", "--cross-table"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
     expect(err()).toContain("--cross-table");
@@ -11921,13 +10687,10 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
 
   it("returns exit 2 when table-a arg is missing", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "diff", TENANT_A, "--cross-table"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "diff", TENANT_A, "--cross-table"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("missing arguments");
   });
@@ -11972,14 +10735,7 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
     const diffTenantVsPlatformCapture: DiffTenantVsPlatformInput[] = [];
     const diffTenantTablesCapture: DiffTenantTablesInput[] = [];
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "llm_call_traces",
-        "--cross-table",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "llm_call_traces", "--cross-table"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12003,14 +10759,7 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
   it("human-format renders 'No differences' message when fieldDiffs empty", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "llm_call_traces",
-        "--cross-table",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "llm_call_traces", "--cross-table"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12043,14 +10792,7 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
   it("human-format renders metadata + per-table resolutions + 'Field changes'", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "llm_call_traces",
-        "--cross-table",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "llm_call_traces", "--cross-table"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12133,14 +10875,7 @@ describe("runRetention diff --cross-table (M6.7.zz.tenant.opt-out.cli.diff.cross
   it("propagates adapter errors as exit 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        "workflow_traces",
-        "llm_call_traces",
-        "--cross-table",
-      ),
+      parsed("retention", "diff", TENANT_A, "workflow_traces", "llm_call_traces", "--cross-table"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12218,15 +10953,7 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
     const capture: DiffTenantPoliciesNwayInput[] = [];
     const { ctx } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--add-tenant",
-        TENANT_C,
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--add-tenant", TENANT_C),
       {
         ...ctx,
         retentionOverride: fakeRetention({ diffTenantNwayCapture: capture }),
@@ -12261,26 +10988,13 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    expect(capture[0]?.tenantIds).toEqual([
-      TENANT_A,
-      TENANT_B,
-      TENANT_C,
-      TENANT_D,
-    ]);
+    expect(capture[0]?.tenantIds).toEqual([TENANT_A, TENANT_B, TENANT_C, TENANT_D]);
   });
 
   it("human-format renders 'No differences' message when fieldVariations empty", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--add-tenant",
-        TENANT_C,
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--add-tenant", TENANT_C),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12328,15 +11042,7 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
   it("human-format renders per-field variations with tenant attribution", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--add-tenant",
-        TENANT_C,
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--add-tenant", TENANT_C),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12490,15 +11196,7 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
   it("adapter errors propagate as exit 1", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--add-tenant",
-        TENANT_C,
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--add-tenant", TENANT_C),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -12602,11 +11300,7 @@ describe("runRetention diff --cross-table --add-table (M6.7.zz.tenant.opt-out.cl
     expect(capture).toHaveLength(1);
     expect(capture[0]).toEqual({
       tenantId: TENANT_A,
-      tableNames: [
-        "workflow_traces",
-        "llm_call_traces",
-        "tenant_retention_opt_out_history",
-      ],
+      tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
     });
   });
 
@@ -12660,11 +11354,7 @@ describe("runRetention diff --cross-table --add-table (M6.7.zz.tenant.opt-out.cl
         retentionOverride: fakeRetention({
           diffTenantTablesNwayResult: {
             tenantId: TENANT_A,
-            tableNames: [
-              "workflow_traces",
-              "llm_call_traces",
-              "tenant_retention_opt_out_history",
-            ],
+            tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
             resolutions: [
               {
                 tableName: "workflow_traces",
@@ -12721,11 +11411,7 @@ describe("runRetention diff --cross-table --add-table (M6.7.zz.tenant.opt-out.cl
         retentionOverride: fakeRetention({
           diffTenantTablesNwayResult: {
             tenantId: TENANT_A,
-            tableNames: [
-              "workflow_traces",
-              "llm_call_traces",
-              "tenant_retention_opt_out_history",
-            ],
+            tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
             resolutions: [
               {
                 tableName: "workflow_traces",
@@ -12839,11 +11525,7 @@ describe("runRetention diff --cross-table --add-table (M6.7.zz.tenant.opt-out.cl
         retentionOverride: fakeRetention({
           diffTenantTablesNwayResult: {
             tenantId: TENANT_A,
-            tableNames: [
-              "workflow_traces",
-              "llm_call_traces",
-              "tenant_retention_opt_out_history",
-            ],
+            tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
             resolutions: [
               {
                 tableName: "workflow_traces",
@@ -12919,11 +11601,7 @@ describe("formatTenantTablesNwayDiff", () => {
   it("renders 'No differences' message when fieldVariations empty", () => {
     const out = formatTenantTablesNwayDiff({
       tenantId: TENANT_A,
-      tableNames: [
-        "workflow_traces",
-        "llm_call_traces",
-        "tenant_retention_opt_out_history",
-      ],
+      tableNames: ["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"],
       resolutions: [
         {
           tableName: "workflow_traces",
@@ -12947,11 +11625,7 @@ describe("formatTenantTablesNwayDiff", () => {
   it("renders A/B/C labels in table rows + variation lines", () => {
     const out = formatTenantTablesNwayDiff({
       tenantId: TENANT_A,
-      tableNames: [
-        "workflow_traces",
-        "llm_call_traces",
-        "llm_latency_samples",
-      ],
+      tableNames: ["workflow_traces", "llm_call_traces", "llm_latency_samples"],
       resolutions: [
         {
           tableName: "workflow_traces",
@@ -13131,14 +11805,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
   it("cross-tenant: exit 0 when fieldDiffs empty and --exit-on-divergence set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--exit-on-divergence",
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--exit-on-divergence"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -13168,14 +11835,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
   it("cross-tenant: exit 3 when fieldDiffs non-empty and --exit-on-divergence set", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--exit-on-divergence",
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--exit-on-divergence"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -13194,9 +11854,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
               retentionDays: 90,
               enabled: true,
             },
-            fieldDiffs: [
-              { field: "retention_days", valueA: 30, valueB: 90 },
-            ],
+            fieldDiffs: [{ field: "retention_days", valueA: 30, valueB: 90 }],
           },
         }),
       } as RetentionContext,
@@ -13227,9 +11885,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
               retentionDays: 90,
               enabled: true,
             },
-            fieldDiffs: [
-              { field: "retention_days", valueA: 30, valueB: 90 },
-            ],
+            fieldDiffs: [{ field: "retention_days", valueA: 30, valueB: 90 }],
           },
         }),
       } as RetentionContext,
@@ -13267,9 +11923,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
               retentionDays: 90,
               enabled: true,
             },
-            fieldDiffs: [
-              { field: "retention_days", valueA: 30, valueB: 90 },
-            ],
+            fieldDiffs: [{ field: "retention_days", valueA: 30, valueB: 90 }],
           },
         }),
       } as RetentionContext,
@@ -13308,9 +11962,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
               retentionDays: 90,
               enabled: true,
             },
-            fieldDiffs: [
-              { field: "retention_days", valueA: 30, valueB: 90 },
-            ],
+            fieldDiffs: [{ field: "retention_days", valueA: 30, valueB: 90 }],
           },
         }),
       } as RetentionContext,
@@ -13383,9 +12035,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
               retentionDays: 90,
               enabled: true,
             },
-            fieldDiffs: [
-              { field: "retention_days", valueA: 30, valueB: 90 },
-            ],
+            fieldDiffs: [{ field: "retention_days", valueA: 30, valueB: 90 }],
           },
         }),
       } as RetentionContext,
@@ -13433,14 +12083,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
   it("runtime errors (exit 1) take precedence over --exit-on-divergence", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--exit-on-divergence",
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--exit-on-divergence"),
       {
         ...ctx,
         retentionOverride: fakeRetention({
@@ -13456,9 +12099,7 @@ describe("runRetention diff --exit-on-divergence (M6.7.zz.tenant.opt-out.cli.dif
 describe("runRetention diff --threshold (M6.7.zz.tenant.opt-out.cli.diff.threshold)", () => {
   const TENANT_C = "00000000-0000-4000-8000-00000000000C";
 
-  function makeDiffResult(
-    fieldDiffsLen: number,
-  ): DiffTenantPoliciesResult {
+  function makeDiffResult(fieldDiffsLen: number): DiffTenantPoliciesResult {
     const fieldDiffs = Array.from({ length: fieldDiffsLen }, (_, i) => ({
       field: `field_${i}`,
       valueA: i,
@@ -13486,15 +12127,7 @@ describe("runRetention diff --threshold (M6.7.zz.tenant.opt-out.cli.diff.thresho
   it("returns exit 2 when --threshold is set without --exit-on-divergence", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "diff",
-        TENANT_A,
-        TENANT_B,
-        "workflow_traces",
-        "--threshold",
-        "2",
-      ),
+      parsed("retention", "diff", TENANT_A, TENANT_B, "workflow_traces", "--threshold", "2"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -14240,13 +12873,10 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("omits attributes from adapter input when --attributes is NOT set (backward compat)", async () => {
       const capture: SetTenantOptOutInput[] = [];
       const { ctx } = buffers();
-      const code = await runRetention(
-        parsed("retention", "opt-out", TENANT_A, "workflow_traces"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ setOptOutCapture: capture }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "opt-out", TENANT_A, "workflow_traces"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ setOptOutCapture: capture }),
+      } as RetentionContext);
       expect(code).toBe(0);
       expect(capture[0]?.attributes).toBeUndefined();
     });
@@ -14254,14 +12884,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("returns exit 2 when --attributes is invalid JSON", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-out",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          "{not json",
-        ),
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--attributes", "{not json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -14274,14 +12897,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("returns exit 2 when --attributes is a JSON array (not object)", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-out",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          '["a","b"]',
-        ),
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--attributes", '["a","b"]'),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -14294,14 +12910,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("returns exit 2 when --attributes is a JSON primitive", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-out",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          '"a string"',
-        ),
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--attributes", '"a string"'),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -14314,14 +12923,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("returns exit 2 when --attributes is null", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-out",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          "null",
-        ),
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--attributes", "null"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -14335,14 +12937,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
       const capture: SetTenantOptOutInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-out",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          "{not json",
-        ),
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--attributes", "{not json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ setOptOutCapture: capture }),
@@ -14356,14 +12951,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
       const capture: SetTenantOptOutInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-out",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          "{}",
-        ),
+        parsed("retention", "opt-out", TENANT_A, "workflow_traces", "--attributes", "{}"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ setOptOutCapture: capture }),
@@ -14426,14 +13014,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("returns exit 2 when --attributes is invalid JSON for opt-in", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "opt-in",
-          TENANT_A,
-          "workflow_traces",
-          "--attributes",
-          "not-json",
-        ),
+        parsed("retention", "opt-in", TENANT_A, "workflow_traces", "--attributes", "not-json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -14568,13 +13149,7 @@ describe("retention --attributes flag (M6.7.zz.tenant.opt-out.cli.history.attrib
     it("returns exit 2 when --attributes is invalid JSON for restore", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "restore",
-          HISTORY_ID,
-          "--attributes",
-          '"a string"',
-        ),
+        parsed("retention", "restore", HISTORY_ID, "--attributes", '"a string"'),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -14680,13 +13255,10 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
 
     it("all multi-value envelope fields are null when not set (across all 3 surfaces)", async () => {
       const { ctx: ctx1, out: outHistory } = buffers();
-      await runRetention(
-        parsed("retention", "history", "--format=json"),
-        {
-          ...ctx1,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "history", "--format=json"), {
+        ...ctx1,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       const histEnv = JSON.parse(outHistory());
       expect(histEnv.kinds).toBeNull();
       expect(histEnv.actorIds).toBeNull();
@@ -14714,13 +13286,10 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
       expect(tlEnv.actorIdsNot).toBeNull();
 
       const { ctx: ctx3, out: outDiff } = buffers();
-      await runRetention(
-        parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
-        {
-          ...ctx3,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "diff-history", ID_A, ID_B, "--format=json"), {
+        ...ctx3,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       const diffEnv = JSON.parse(outDiff());
       expect(diffEnv.kinds).toBeNull();
       expect(diffEnv.actorIds).toBeNull();
@@ -14731,13 +13300,10 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
   describe("boolean flag envelope shape (always boolean, never null)", () => {
     it("history systemOnly + noSystem are booleans when flags not set", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=json"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const env = JSON.parse(out());
       expect(typeof env.systemOnly).toBe("boolean");
@@ -14791,20 +13357,17 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
   });
 
   describe("action discriminator field (where present)", () => {
-    it("diff-history emits action=\"diff-history\"", async () => {
+    it('diff-history emits action="diff-history"', async () => {
       const { ctx, out } = buffers();
-      await runRetention(
-        parsed("retention", "diff-history", ID_A, ID_B, "--format=json"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "diff-history", ID_A, ID_B, "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       const env = JSON.parse(out());
       expect(env.action).toBe("diff-history");
     });
 
-    it("diff-timeline pair-wise emits action=\"diff-timeline\" without nway/crossTable", async () => {
+    it('diff-timeline pair-wise emits action="diff-timeline" without nway/crossTable', async () => {
       const { ctx, out } = buffers();
       await runRetention(
         parsed(
@@ -14826,7 +13389,7 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
       expect(env.crossTable).toBeUndefined();
     });
 
-    it("diff-timeline N-way emits action=\"diff-timeline\" + nway:true discriminator", async () => {
+    it('diff-timeline N-way emits action="diff-timeline" + nway:true discriminator', async () => {
       const { ctx, out } = buffers();
       await runRetention(
         parsed(
@@ -14849,7 +13412,7 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
       expect(env.nway).toBe(true);
     });
 
-    it("diff-timeline cross-table emits action=\"diff-timeline\" + crossTable:true discriminator", async () => {
+    it('diff-timeline cross-table emits action="diff-timeline" + crossTable:true discriminator', async () => {
       const { ctx, out } = buffers();
       await runRetention(
         parsed(
@@ -14875,64 +13438,41 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
   describe("canonical conventions on history surface (closes ADR-0224 Q1-3 — ADR-0225 rename milestone)", () => {
     it("history envelope uses kinds/kindsNot (canonical CLI-flag-derived naming)", async () => {
       const { ctx, out } = buffers();
-      await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--kind",
-          "opt_out_set",
-          "--format=json",
-        ),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "history", "--kind", "opt_out_set", "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       const env = JSON.parse(out());
       expect(env.kinds).toEqual(["opt_out_set"]);
       expect(env.eventKinds).toBeUndefined();
     });
 
-    it("history envelope emits action=\"history\" discriminator", async () => {
+    it('history envelope emits action="history" discriminator', async () => {
       const { ctx, out } = buffers();
-      await runRetention(
-        parsed("retention", "history", "--format=json"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "history", "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       const env = JSON.parse(out());
       expect(env.action).toBe("history");
     });
 
     it("history envelope echoes withActorNames boolean", async () => {
       const { ctx, out } = buffers();
-      await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--with-actor-names",
-          "--format=json",
-        ),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "history", "--with-actor-names", "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       const env = JSON.parse(out());
       expect(env.withActorNames).toBe(true);
     });
 
     it("history envelope withActorNames=false when --with-actor-names not set", async () => {
       const { ctx, out } = buffers();
-      await runRetention(
-        parsed("retention", "history", "--format=json"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      await runRetention(parsed("retention", "history", "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       const env = JSON.parse(out());
       expect(env.withActorNames).toBe(false);
     });
@@ -14947,15 +13487,7 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
     it("diff-history: envelope echoes kindsA (CLI-flag-derived) while result has eventKindA (domain-model)", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-history",
-          ID_A,
-          ID_B,
-          "--kind-a",
-          "opt_out_set",
-          "--format=json",
-        ),
+        parsed("retention", "diff-history", ID_A, ID_B, "--kind-a", "opt_out_set", "--format=json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -15028,13 +13560,7 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
     it("history: envelope kinds (input) vs entries[].eventKind (data) at different levels", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--kind",
-          "opt_out_set",
-          "--format=json",
-        ),
+        parsed("retention", "history", "--kind", "opt_out_set", "--format=json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -15066,27 +13592,24 @@ describe("retention JSON envelope cross-surface conventions (M6.7.zz.tenant.opt-
 
     it("history: entry data fields use domain-model names (id/eventKind/actorId/tenantId)", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=json"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            historyEntries: [
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_set",
-                actorId: ACTOR_ALICE,
-                occurredAt: "2026-05-20T12:00:00.000Z",
-                prevState: null,
-                nextState: null,
-                attributes: {},
-              },
-            ],
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=json"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: "10000000-0000-4000-8000-000000000001",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: ACTOR_ALICE,
+              occurredAt: "2026-05-20T12:00:00.000Z",
+              prevState: null,
+              nextState: null,
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const env = JSON.parse(out());
       const entry = env.entries[0];
@@ -15110,14 +13633,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
     it("exits 2 when --kind X + --kind-not X share value", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--kind",
-          "opt_out_set",
-          "--kind-not",
-          "opt_out_set",
-        ),
+        parsed("retention", "history", "--kind", "opt_out_set", "--kind-not", "opt_out_set"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -15132,14 +13648,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
     it("exits 2 when --actor-id X + --actor-id-not X share value", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--actor-id",
-          ACTOR_ALICE,
-          "--actor-id-not",
-          ACTOR_ALICE,
-        ),
+        parsed("retention", "history", "--actor-id", ACTOR_ALICE, "--actor-id-not", ACTOR_ALICE),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -15178,14 +13687,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
     it("does NOT error when --kind and --kind-not are disjoint", async () => {
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--kind",
-          "opt_out_set",
-          "--kind-not",
-          "policy_deleted",
-        ),
+        parsed("retention", "history", "--kind", "opt_out_set", "--kind-not", "policy_deleted"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -15198,14 +13700,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
       const capture: ListOptOutHistoryInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--kind",
-          "opt_out_set",
-          "--kind-not",
-          "opt_out_set",
-        ),
+        parsed("retention", "history", "--kind", "opt_out_set", "--kind-not", "opt_out_set"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -15237,9 +13732,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-timeline: --kind and --kind-not share value(s)",
-      );
+      expect(err()).toContain("retention diff-timeline: --kind and --kind-not share value(s)");
       expect(err()).toContain("'opt_out_set'");
     });
 
@@ -15339,9 +13832,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --kind / --kind-not share value(s)",
-      );
+      expect(err()).toContain("retention diff-history: --kind / --kind-not share value(s)");
     });
 
     it("exits 2 when global --actor-id X + --actor-id-not X share value", async () => {
@@ -15363,9 +13854,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --actor-id / --actor-id-not share value(s)",
-      );
+      expect(err()).toContain("retention diff-history: --actor-id / --actor-id-not share value(s)");
     });
 
     it("exits 2 when per-side --kind-a X + --kind-not-a X share value", async () => {
@@ -15387,9 +13876,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --kind-a / --kind-not-a share value(s)",
-      );
+      expect(err()).toContain("retention diff-history: --kind-a / --kind-not-a share value(s)");
     });
 
     it("exits 2 when per-side --kind-b X + --kind-not-b X share value", async () => {
@@ -15411,9 +13898,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --kind-b / --kind-not-b share value(s)",
-      );
+      expect(err()).toContain("retention diff-history: --kind-b / --kind-not-b share value(s)");
     });
 
     it("exits 2 when per-side --actor-id-a X + --actor-id-not-a X share value", async () => {
@@ -15510,13 +13995,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
     it("history: exits 2 when --system-only + --actor-id together", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--system-only",
-          "--actor-id",
-          ACTOR_ALICE,
-        ),
+        parsed("retention", "history", "--system-only", "--actor-id", ACTOR_ALICE),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -15531,13 +14010,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
     it("history: --no-system + --actor-id is NOT a contradiction (valid composition)", async () => {
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--no-system",
-          "--actor-id",
-          ACTOR_ALICE,
-        ),
+        parsed("retention", "history", "--no-system", "--actor-id", ACTOR_ALICE),
         {
           ...ctx,
           retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -15548,13 +14021,10 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
 
     it("history: --system-only alone (without --actor-id) is valid", async () => {
       const { ctx } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--system-only"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--system-only"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(0);
     });
 
@@ -15577,32 +14047,20 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-timeline: --system-only requires actor_id IS NULL",
-      );
+      expect(err()).toContain("retention diff-timeline: --system-only requires actor_id IS NULL");
     });
 
     it("diff-history: exits 2 when global --system-only + --actor-id together", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-history",
-          ID_A,
-          ID_B,
-          "--system-only",
-          "--actor-id",
-          ACTOR_ALICE,
-        ),
+        parsed("retention", "diff-history", ID_A, ID_B, "--system-only", "--actor-id", ACTOR_ALICE),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --system-only + --actor-id",
-      );
+      expect(err()).toContain("retention diff-history: --system-only + --actor-id");
     });
 
     it("diff-history: exits 2 when per-side --system-only-a + --actor-id-a together", async () => {
@@ -15623,9 +14081,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --system-only-a + --actor-id-a",
-      );
+      expect(err()).toContain("retention diff-history: --system-only-a + --actor-id-a");
     });
 
     it("diff-history: exits 2 when per-side --system-only-b + --actor-id-b together", async () => {
@@ -15646,9 +14102,7 @@ describe("retention cross-flag contradiction detection (M6.7.zz.tenant.opt-out.c
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "retention diff-history: --system-only-b + --actor-id-b",
-      );
+      expect(err()).toContain("retention diff-history: --system-only-b + --actor-id-b");
     });
 
     it("diff-history: --system-only-a + --actor-id-b is NOT a contradiction (cross-side allowed)", async () => {
@@ -15708,15 +14162,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
       const capture: ListOptOutHistoryInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--tenant",
-          TENANT_A,
-          "--kind",
-          "opt_out_set",
-          "--explain",
-        ),
+        parsed("retention", "history", "--tenant", TENANT_A, "--kind", "opt_out_set", "--explain"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ historyCapture: capture }),
@@ -15728,13 +14174,10 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
 
     it("emits query plan (human format) with action + NOT executed indicator", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--explain"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--explain"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       expect(code).toBe(0);
       expect(out()).toContain("Query plan: retention history");
       expect(out()).toContain("NOT executed");
@@ -15743,14 +14186,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
     it("emits query plan (JSON format) with explain=true + executed=false", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--kind",
-          "opt_out_set",
-          "--explain",
-          "--format=json",
-        ),
+        parsed("retention", "history", "--kind", "opt_out_set", "--explain", "--format=json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -15810,15 +14246,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
       const capture: DiffHistoryEntriesInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-history",
-          ID_A,
-          ID_B,
-          "--kind",
-          "opt_out_set",
-          "--explain",
-        ),
+        parsed("retention", "diff-history", ID_A, ID_B, "--kind", "opt_out_set", "--explain"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ diffCapture: capture }),
@@ -15941,13 +14369,10 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
   describe("--explain composes with other flags", () => {
     it("--explain + --format=csv still emits JSON plan (not CSV plan)", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--explain", "--format=csv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--explain", "--format=csv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       expect(code).toBe(0);
       const plan = JSON.parse(out());
       expect(plan.explain).toBe(true);
@@ -15979,12 +14404,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
     it("history --explain plan includes sql + params from buildListOptOutHistoryQuery", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--explain",
-          "--format=json",
-        ),
+        parsed("retention", "history", "--explain", "--format=json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -16000,14 +14420,7 @@ describe("retention --explain flag (M6.7.zz.tenant.opt-out.cli.explain-flag)", (
     it("diff-history --explain plan includes sql + params + sqlNote about post-fetch expectations", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-history",
-          ID_A,
-          ID_B,
-          "--explain",
-          "--format=json",
-        ),
+        parsed("retention", "diff-history", ID_A, ID_B, "--explain", "--format=json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -16103,27 +14516,24 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
   describe("retention history --format=csv", () => {
     it("emits CSV header + rows for history entries", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=csv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            historyEntries: [
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_set",
-                actorId: ACTOR_ALICE,
-                occurredAt: "2026-05-20T12:00:00.000Z",
-                prevState: null,
-                nextState: { opt_out: true },
-                attributes: {},
-              },
-            ],
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=csv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: "10000000-0000-4000-8000-000000000001",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: ACTOR_ALICE,
+              occurredAt: "2026-05-20T12:00:00.000Z",
+              prevState: null,
+              nextState: { opt_out: true },
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const lines = out().split("\n");
       expect(lines[0]).toBe(
@@ -16137,27 +14547,24 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
 
     it("renders null actor_id as empty CSV cell", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=csv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            historyEntries: [
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_set",
-                actorId: null,
-                occurredAt: "2026-05-20T12:00:00.000Z",
-                prevState: null,
-                nextState: null,
-                attributes: {},
-              },
-            ],
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=csv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: "10000000-0000-4000-8000-000000000001",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: null,
+              occurredAt: "2026-05-20T12:00:00.000Z",
+              prevState: null,
+              nextState: null,
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const lines = out().split("\n");
       // null actor_id renders as empty cell; check the actor_id column
@@ -16167,27 +14574,24 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
 
     it("escapes commas + quotes in JSON state columns", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=csv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            historyEntries: [
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_set",
-                actorId: ACTOR_ALICE,
-                occurredAt: "2026-05-20T12:00:00.000Z",
-                prevState: null,
-                nextState: { reason: 'oops, "test"' },
-                attributes: {},
-              },
-            ],
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=csv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: "10000000-0000-4000-8000-000000000001",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: ACTOR_ALICE,
+              occurredAt: "2026-05-20T12:00:00.000Z",
+              prevState: null,
+              nextState: { reason: 'oops, "test"' },
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const lineOut = out();
       // JSON-encoded nextState gets quoted + double-escaped quotes
@@ -16197,12 +14601,7 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
     it("--format=csv with --with-actor-names extends headers", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--with-actor-names",
-          "--format=csv",
-        ),
+        parsed("retention", "history", "--with-actor-names", "--format=csv"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -16216,15 +14615,14 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
 
     it("emits header row only when no entries match", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=csv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=csv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(0);
-      const lines = out().split("\n").filter((l) => l.length > 0);
+      const lines = out()
+        .split("\n")
+        .filter((l) => l.length > 0);
       expect(lines).toHaveLength(1);
       expect(lines[0]).toBe(
         "id,tenant_id,table_name,event_kind,actor_id,occurred_at,prev_state,next_state,attributes",
@@ -16236,14 +14634,7 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
     it("pair-wise: emits tenant_side column", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-timeline",
-          TENANT_A,
-          TENANT_B,
-          "workflow_traces",
-          "--format=csv",
-        ),
+        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--format=csv"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -16338,13 +14729,7 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
     it("emits field-diff rows (field, value_a, value_b)", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-history",
-          ID_A,
-          ID_B,
-          "--format=csv",
-        ),
+        parsed("retention", "diff-history", ID_A, ID_B, "--format=csv"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -16377,13 +14762,7 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
     it("emits header only when no field diffs", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-history",
-          ID_A,
-          ID_B,
-          "--format=csv",
-        ),
+        parsed("retention", "diff-history", ID_A, ID_B, "--format=csv"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -16404,7 +14783,9 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
         } as RetentionContext,
       );
       expect(code).toBe(0);
-      const lines = out().split("\n").filter((l) => l.length > 0);
+      const lines = out()
+        .split("\n")
+        .filter((l) => l.length > 0);
       expect(lines).toHaveLength(1);
       expect(lines[0]).toBe("field,value_a,value_b");
     });
@@ -16413,13 +14794,10 @@ describe("retention CSV output format (M6.7.zz.tenant.opt-out.cli.csv-format)", 
   describe("--format=csv validation", () => {
     it("CLI accepts --format=csv (no parse error)", async () => {
       const { ctx } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=csv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=csv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(0);
     });
   });
@@ -16435,27 +14813,24 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
   describe("--format=tsv across retention surfaces", () => {
     it("history --format=tsv emits header + rows with tab separators", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=tsv"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            historyEntries: [
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_set",
-                actorId: ACTOR_ALICE,
-                occurredAt: "2026-05-20T12:00:00.000Z",
-                prevState: null,
-                nextState: { opt_out: true },
-                attributes: {},
-              },
-            ],
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=tsv"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: "10000000-0000-4000-8000-000000000001",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: ACTOR_ALICE,
+              occurredAt: "2026-05-20T12:00:00.000Z",
+              prevState: null,
+              nextState: { opt_out: true },
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const lines = out().split("\n");
       expect(lines[0]).toContain("\t");
@@ -16481,9 +14856,7 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
               eventKindB: "opt_out_cleared",
               actorIdA: ACTOR_ALICE,
               actorIdB: ACTOR_ALICE,
-              fieldDiffs: [
-                { field: "opt_out", valueA: true, valueB: false },
-              ],
+              fieldDiffs: [{ field: "opt_out", valueA: true, valueB: false }],
             },
           }),
         } as RetentionContext,
@@ -16497,14 +14870,7 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
     it("diff-timeline pair-wise --format=tsv emits tenant_side column", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "diff-timeline",
-          TENANT_A,
-          TENANT_B,
-          "workflow_traces",
-          "--format=tsv",
-        ),
+        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--format=tsv"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -16519,40 +14885,39 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
   describe("--format=ndjson across retention surfaces", () => {
     it("history --format=ndjson emits one JSON object per entry, no envelope", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=ndjson"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            historyEntries: [
-              {
-                id: "10000000-0000-4000-8000-000000000001",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_set",
-                actorId: ACTOR_ALICE,
-                occurredAt: "2026-05-20T12:00:00.000Z",
-                prevState: null,
-                nextState: { opt_out: true },
-                attributes: {},
-              },
-              {
-                id: "10000000-0000-4000-8000-000000000002",
-                tenantId: TENANT_A,
-                tableName: "workflow_traces",
-                eventKind: "opt_out_cleared",
-                actorId: null,
-                occurredAt: "2026-05-21T12:00:00.000Z",
-                prevState: { opt_out: true },
-                nextState: null,
-                attributes: {},
-              },
-            ],
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=ndjson"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          historyEntries: [
+            {
+              id: "10000000-0000-4000-8000-000000000001",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_set",
+              actorId: ACTOR_ALICE,
+              occurredAt: "2026-05-20T12:00:00.000Z",
+              prevState: null,
+              nextState: { opt_out: true },
+              attributes: {},
+            },
+            {
+              id: "10000000-0000-4000-8000-000000000002",
+              tenantId: TENANT_A,
+              tableName: "workflow_traces",
+              eventKind: "opt_out_cleared",
+              actorId: null,
+              occurredAt: "2026-05-21T12:00:00.000Z",
+              prevState: { opt_out: true },
+              nextState: null,
+              attributes: {},
+            },
+          ],
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
-      const lines = out().split("\n").filter((l) => l.length > 0);
+      const lines = out()
+        .split("\n")
+        .filter((l) => l.length > 0);
       expect(lines).toHaveLength(2);
       const e1 = JSON.parse(lines[0]!);
       expect(e1.id).toBe("10000000-0000-4000-8000-000000000001");
@@ -16562,13 +14927,10 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
 
     it("history --format=ndjson with empty entries emits just trailing newline", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--format=ndjson"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--format=ndjson"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(0);
       expect(out()).toBe("\n");
     });
@@ -16600,7 +14962,9 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
         } as RetentionContext,
       );
       expect(code).toBe(0);
-      const lines = out().split("\n").filter((l) => l.length > 0);
+      const lines = out()
+        .split("\n")
+        .filter((l) => l.length > 0);
       expect(lines).toHaveLength(2);
       const d1 = JSON.parse(lines[0]!);
       expect(d1.field).toBe("opt_out");
@@ -16612,13 +14976,7 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
     it("history --format=csv --csv-separator=';' uses semicolon as separator", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--format=csv",
-          "--csv-separator",
-          ";",
-        ),
+        parsed("retention", "history", "--format=csv", "--csv-separator", ";"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ historyEntries: [] }),
@@ -16632,36 +14990,20 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
 
     it("history exits 2 when --csv-separator is double quote", async () => {
       const { ctx, err } = buffers();
-      const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--csv-separator",
-          '"',
-        ),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--csv-separator", '"'), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(2);
       expect(err()).toContain("--csv-separator cannot be");
     });
 
     it("history exits 2 when --csv-separator is newline", async () => {
       const { ctx, err } = buffers();
-      const code = await runRetention(
-        parsed(
-          "retention",
-          "history",
-          "--csv-separator",
-          "\n",
-        ),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({ historyEntries: [] }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--csv-separator", "\n"), {
+        ...ctx,
+        retentionOverride: fakeRetention({ historyEntries: [] }),
+      } as RetentionContext);
       expect(code).toBe(2);
       expect(err()).toContain("--csv-separator cannot be");
     });
@@ -16689,7 +15031,6 @@ describe("retention --format=tsv + --format=ndjson + --csv-separator (M6.7.zz.te
       expect(lines[0]).toContain(";");
     });
   });
-
 });
 
 describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
@@ -16714,16 +15055,13 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
   it("threads default groupBy=kind to adapter", async () => {
     const capture: SummarizeOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          summaryCapture: capture,
-          summaryResult: summaryResult(),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        summaryCapture: capture,
+        summaryResult: summaryResult(),
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.groupBy).toBe("kind");
   });
@@ -16731,16 +15069,13 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
   it("threads --group-by tenant to adapter", async () => {
     const capture: SummarizeOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--group-by", "tenant"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          summaryCapture: capture,
-          summaryResult: summaryResult({ groupBy: "tenant", buckets: [] }),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--group-by", "tenant"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        summaryCapture: capture,
+        summaryResult: summaryResult({ groupBy: "tenant", buckets: [] }),
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.groupBy).toBe("tenant");
   });
@@ -16748,23 +15083,20 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
   it("threads --group-by day (temporal) to adapter", async () => {
     const capture: SummarizeOptOutHistoryInput[] = [];
     const { ctx } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--group-by", "day"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          summaryCapture: capture,
-          summaryResult: {
-            groupBy: "day",
-            totalCount: 13,
-            buckets: [
-              { key: "2026-05-20 00:00:00", count: 8 },
-              { key: "2026-05-21 00:00:00", count: 5 },
-            ],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--group-by", "day"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        summaryCapture: capture,
+        summaryResult: {
+          groupBy: "day",
+          totalCount: 13,
+          buckets: [
+            { key: "2026-05-20 00:00:00", count: 8 },
+            { key: "2026-05-21 00:00:00", count: 5 },
+          ],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(capture[0]?.groupBy).toBe("day");
   });
@@ -16773,16 +15105,13 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     for (const unit of ["day", "hour", "week", "month"] as const) {
       const capture: SummarizeOptOutHistoryInput[] = [];
       const { ctx } = buffers();
-      const code = await runRetention(
-        parsed("retention", "summary", "--group-by", unit),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            summaryCapture: capture,
-            summaryResult: { groupBy: unit, totalCount: 0, buckets: [] },
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "summary", "--group-by", unit), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryCapture: capture,
+          summaryResult: { groupBy: unit, totalCount: 0, buckets: [] },
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       expect(capture[0]?.groupBy).toBe(unit);
     }
@@ -16790,22 +15119,19 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("human format renders time-bucket summary by day", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--group-by", "day"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          summaryResult: {
-            groupBy: "day",
-            totalCount: 13,
-            buckets: [
-              { key: "2026-05-20 00:00:00", count: 8 },
-              { key: "2026-05-21 00:00:00", count: 5 },
-            ],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--group-by", "day"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        summaryResult: {
+          groupBy: "day",
+          totalCount: 13,
+          buckets: [
+            { key: "2026-05-20 00:00:00", count: 8 },
+            { key: "2026-05-21 00:00:00", count: 5 },
+          ],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Summary by day (total: 13 events)");
     expect(out()).toContain("2026-05-20 00:00:00");
@@ -16814,13 +15140,10 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("exits 2 on invalid --group-by", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--group-by", "bogus"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({}),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--group-by", "bogus"), {
+      ...ctx,
+      retentionOverride: fakeRetention({}),
+    } as RetentionContext);
     expect(code).toBe(2);
     expect(err()).toContain("invalid --group-by 'bogus'");
   });
@@ -16858,13 +15181,10 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("human format renders bucket table + total", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("Summary by kind (total: 16 events)");
     expect(out()).toContain("opt_out_set");
@@ -16873,32 +15193,26 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("human format renders <system> for null key + (no events) when empty", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--group-by", "actor"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          summaryResult: {
-            groupBy: "actor",
-            totalCount: 0,
-            buckets: [],
-          },
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--group-by", "actor"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        summaryResult: {
+          groupBy: "actor",
+          totalCount: 0,
+          buckets: [],
+        },
+      }),
+    } as RetentionContext);
     expect(code).toBe(0);
     expect(out()).toContain("(no events match the given filters)");
   });
 
   it("JSON format emits action + groupBy + totalCount + buckets", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--format=json"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--format=json"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const parsed_ = JSON.parse(out());
     expect(parsed_.action).toBe("summary");
@@ -16909,13 +15223,10 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("CSV format emits group-by column header + count rows", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--format=csv"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--format=csv"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+    } as RetentionContext);
     expect(code).toBe(0);
     const lines = out().split("\n");
     expect(lines[0]).toBe("kind,count");
@@ -16924,15 +15235,14 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("NDJSON format emits one bucket per line", async () => {
     const { ctx, out } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary", "--format=ndjson"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary", "--format=ndjson"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ summaryResult: summaryResult() }),
+    } as RetentionContext);
     expect(code).toBe(0);
-    const lines = out().split("\n").filter((l) => l.length > 0);
+    const lines = out()
+      .split("\n")
+      .filter((l) => l.length > 0);
     expect(lines).toHaveLength(3);
     expect(JSON.parse(lines[0]!)).toEqual({ key: "opt_out_set", count: 12 });
   });
@@ -16959,14 +15269,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
   it("exits 2 on contradictory --kind + --kind-not", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "summary",
-        "--kind",
-        "opt_out_set",
-        "--kind-not",
-        "opt_out_set",
-      ),
+      parsed("retention", "summary", "--kind", "opt_out_set", "--kind-not", "opt_out_set"),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -16979,13 +15282,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
   it("exits 2 on --system-only + --actor-id semantic contradiction", async () => {
     const { ctx, err } = buffers();
     const code = await runRetention(
-      parsed(
-        "retention",
-        "summary",
-        "--system-only",
-        "--actor-id",
-        ACTOR_ALICE,
-      ),
+      parsed("retention", "summary", "--system-only", "--actor-id", ACTOR_ALICE),
       {
         ...ctx,
         retentionOverride: fakeRetention({}),
@@ -16997,15 +15294,12 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
   it("adapter error propagates as exit 1", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "summary"),
-      {
-        ...ctx,
-        retentionOverride: fakeRetention({
-          throws: new Error("summarizeOptOutHistory: connection lost"),
-        }),
-      } as RetentionContext,
-    );
+    const code = await runRetention(parsed("retention", "summary"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        throws: new Error("summarizeOptOutHistory: connection lost"),
+      }),
+    } as RetentionContext);
     expect(code).toBe(1);
     expect(err()).toContain("retention summary:");
     expect(err()).toContain("connection lost");
@@ -17029,14 +15323,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       const capture: SummarizeOptOutHistoryInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--then-by",
-          "kind",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--then-by", "kind"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -17052,13 +15339,10 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
     it("exits 2 on invalid --then-by", async () => {
       const { ctx, err } = buffers();
-      const code = await runRetention(
-        parsed("retention", "summary", "--then-by", "bogus"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "summary", "--then-by", "bogus"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       expect(code).toBe(2);
       expect(err()).toContain("invalid --then-by 'bogus'");
     });
@@ -17066,14 +15350,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("exits 2 when --then-by equals --group-by", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "kind",
-          "--then-by",
-          "kind",
-        ),
+        parsed("retention", "summary", "--group-by", "kind", "--then-by", "kind"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -17086,14 +15363,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("human format renders 2-key grid + cross-tab title", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--then-by",
-          "kind",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--then-by", "kind"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ summaryResult: crossTabResult() }),
@@ -17108,15 +15378,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("JSON format includes thenBy + buckets with subKey", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--then-by",
-          "kind",
-          "--format=json",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--then-by", "kind", "--format=json"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ summaryResult: crossTabResult() }),
@@ -17132,15 +15394,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("CSV format emits 3-column header (primary, secondary, count)", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--then-by",
-          "kind",
-          "--format=csv",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--then-by", "kind", "--format=csv"),
         {
           ...ctx,
           retentionOverride: fakeRetention({ summaryResult: crossTabResult() }),
@@ -17225,30 +15479,20 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--fill-gaps requires a temporal --group-by",
-      );
+      expect(err()).toContain("--fill-gaps requires a temporal --group-by");
     });
 
     it("exits 2 when --fill-gaps used without --since/--until", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--fill-gaps",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--fill-gaps"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--fill-gaps requires both --since and --until",
-      );
+      expect(err()).toContain("--fill-gaps requires both --since and --until");
     });
 
     it("exits 2 when --fill-gaps combined with --then-by", async () => {
@@ -17345,14 +15589,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       const capture: SummarizeOptOutHistoryInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--timezone",
-          "America/New_York",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--timezone", "America/New_York"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -17368,14 +15605,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("exits 2 on invalid timezone format (injection-ish chars)", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--timezone",
-          "'; DROP TABLE--",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--timezone", "'; DROP TABLE--"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
@@ -17388,37 +15618,21 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("exits 2 when --timezone used with categorical --group-by", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "kind",
-          "--timezone",
-          "America/New_York",
-        ),
+        parsed("retention", "summary", "--group-by", "kind", "--timezone", "America/New_York"),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--timezone only applies to temporal",
-      );
+      expect(err()).toContain("--timezone only applies to temporal");
     });
 
     it("accepts UTC explicitly", async () => {
       const capture: SummarizeOptOutHistoryInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "hour",
-          "--timezone",
-          "UTC",
-        ),
+        parsed("retention", "summary", "--group-by", "hour", "--timezone", "UTC"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -17507,42 +15721,33 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("threads minCount to adapter", async () => {
       const capture: SummarizeOptOutHistoryInput[] = [];
       const { ctx } = buffers();
-      const code = await runRetention(
-        parsed("retention", "summary", "--min-count", "3"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            summaryCapture: capture,
-            summaryResult: { groupBy: "kind", totalCount: 0, buckets: [] },
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "summary", "--min-count", "3"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryCapture: capture,
+          summaryResult: { groupBy: "kind", totalCount: 0, buckets: [] },
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       expect(capture[0]?.minCount).toBe(3);
     });
 
     it("exits 2 on invalid --top (non-positive)", async () => {
       const { ctx, err } = buffers();
-      const code = await runRetention(
-        parsed("retention", "summary", "--top", "0"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "summary", "--top", "0"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       expect(code).toBe(2);
       expect(err()).toContain("invalid --top '0'");
     });
 
     it("exits 2 on invalid --min-count (negative)", async () => {
       const { ctx, err } = buffers();
-      const code = await runRetention(
-        parsed("retention", "summary", "--min-count", "-1"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "summary", "--min-count", "-1"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       expect(code).toBe(2);
       expect(err()).toContain("invalid --min-count '-1'");
     });
@@ -17551,16 +15756,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       const capture: SummarizeOptOutHistoryInput[] = [];
       const { ctx } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "tenant",
-          "--min-count",
-          "2",
-          "--top",
-          "10",
-        ),
+        parsed("retention", "summary", "--group-by", "tenant", "--min-count", "2", "--top", "10"),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -17596,9 +15792,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--fill-gaps cannot be combined with --top or --min-count",
-      );
+      expect(err()).toContain("--fill-gaps cannot be combined with --top or --min-count");
     });
 
     it("exits 2 when --min-count >= 1 combined with --fill-gaps", async () => {
@@ -17623,9 +15817,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--fill-gaps cannot be combined with --top or --min-count",
-      );
+      expect(err()).toContain("--fill-gaps cannot be combined with --top or --min-count");
     });
 
     it("--explain plan echoes top + minCount", async () => {
@@ -17709,14 +15901,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("exits 2 when --top-per-group used without --then-by", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--top-per-group",
-          "3",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--top-per-group", "3"),
         { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
       );
       expect(code).toBe(2);
@@ -17741,9 +15926,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--top and --top-per-group are mutually exclusive",
-      );
+      expect(err()).toContain("--top and --top-per-group are mutually exclusive");
     });
 
     it("composes with --min-count, both threaded", async () => {
@@ -17859,14 +16042,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("exits 2 when --bottom-per-group used without --then-by", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed(
-          "retention",
-          "summary",
-          "--group-by",
-          "day",
-          "--bottom-per-group",
-          "3",
-        ),
+        parsed("retention", "summary", "--group-by", "day", "--bottom-per-group", "3"),
         { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
       );
       expect(code).toBe(2);
@@ -17891,9 +16067,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--top and --bottom-per-group are mutually exclusive",
-      );
+      expect(err()).toContain("--top and --bottom-per-group are mutually exclusive");
     });
 
     it("exits 2 when --bottom-per-group combined with --top-per-group", async () => {
@@ -17914,9 +16088,7 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         { ...ctx, retentionOverride: fakeRetention({}) } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--top-per-group and --bottom-per-group are mutually exclusive",
-      );
+      expect(err()).toContain("--top-per-group and --bottom-per-group are mutually exclusive");
     });
 
     it("composes with --min-count, both threaded", async () => {
@@ -17987,7 +16159,14 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       const capture: { sql: string; params: ReadonlyArray<unknown> }[] = [];
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed("retention", "history", "--kind", "opt_out_set", "--explain-analyze", "--format=json"),
+        parsed(
+          "retention",
+          "history",
+          "--kind",
+          "opt_out_set",
+          "--explain-analyze",
+          "--format=json",
+        ),
         {
           ...ctx,
           retentionOverride: fakeRetention({
@@ -18007,13 +16186,10 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
     it("history: human format prints plan with header", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--explain-analyze"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({}),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--explain-analyze"), {
+        ...ctx,
+        retentionOverride: fakeRetention({}),
+      } as RetentionContext);
       expect(code).toBe(0);
       expect(out()).toContain("EXPLAIN ANALYZE plan for retention history");
       expect(out()).toContain("Node Type");
@@ -18029,22 +16205,17 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--explain and --explain-analyze are mutually exclusive",
-      );
+      expect(err()).toContain("--explain and --explain-analyze are mutually exclusive");
     });
 
     it("history: adapter error propagates as exit 1", async () => {
       const { ctx, err } = buffers();
-      const code = await runRetention(
-        parsed("retention", "history", "--explain-analyze"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            throws: new Error("EXPLAIN failed: relation missing"),
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "history", "--explain-analyze"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          throws: new Error("EXPLAIN failed: relation missing"),
+        }),
+      } as RetentionContext);
       expect(code).toBe(1);
       expect(err()).toContain("retention history:");
       expect(err()).toContain("EXPLAIN failed");
@@ -18087,7 +16258,15 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       const capture: { sql: string; params: ReadonlyArray<unknown> }[] = [];
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--explain-analyze", "--format=json"),
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--explain-analyze",
+          "--format=json",
+        ),
         {
           ...ctx,
           retentionOverride: fakeRetention({ explainAnalyzeCapture: capture }),
@@ -18102,16 +16281,22 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("diff-timeline: exits 2 when both --explain and --explain-analyze set", async () => {
       const { ctx, err } = buffers();
       const code = await runRetention(
-        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--explain", "--explain-analyze"),
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--explain",
+          "--explain-analyze",
+        ),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),
         } as RetentionContext,
       );
       expect(code).toBe(2);
-      expect(err()).toContain(
-        "--explain and --explain-analyze are mutually exclusive",
-      );
+      expect(err()).toContain("--explain and --explain-analyze are mutually exclusive");
     });
   });
 
@@ -18141,22 +16326,19 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
 
     it("summary --format=yaml emits buckets as a YAML sequence", async () => {
       const { ctx, out } = buffers();
-      const code = await runRetention(
-        parsed("retention", "summary", "--format=yaml"),
-        {
-          ...ctx,
-          retentionOverride: fakeRetention({
-            summaryResult: {
-              groupBy: "kind",
-              totalCount: 16,
-              buckets: [
-                { key: "opt_out_set", count: 12 },
-                { key: "policy_deleted", count: 1 },
-              ],
-            },
-          }),
-        } as RetentionContext,
-      );
+      const code = await runRetention(parsed("retention", "summary", "--format=yaml"), {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          summaryResult: {
+            groupBy: "kind",
+            totalCount: 16,
+            buckets: [
+              { key: "opt_out_set", count: 12 },
+              { key: "policy_deleted", count: 1 },
+            ],
+          },
+        }),
+      } as RetentionContext);
       expect(code).toBe(0);
       const text = out();
       expect(text).toContain("action: summary");
@@ -18181,7 +16363,14 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
     it("diff-timeline --format=yaml emits the envelope as YAML", async () => {
       const { ctx, out } = buffers();
       const code = await runRetention(
-        parsed("retention", "diff-timeline", TENANT_A, TENANT_B, "workflow_traces", "--format=yaml"),
+        parsed(
+          "retention",
+          "diff-timeline",
+          TENANT_A,
+          TENANT_B,
+          "workflow_traces",
+          "--format=yaml",
+        ),
         {
           ...ctx,
           retentionOverride: fakeRetention({}),

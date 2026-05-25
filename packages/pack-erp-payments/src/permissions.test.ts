@@ -1,10 +1,7 @@
 import { EntityPermissionsSchema } from "@crossengin/auth";
 import { describe, expect, it } from "vitest";
 
-import {
-  ERP_PAYMENTS_PERMISSIONS,
-  PAYMENT_PERMISSIONS,
-} from "./permissions.js";
+import { ERP_PAYMENTS_PERMISSIONS, PAYMENT_PERMISSIONS } from "./permissions.js";
 
 describe("PAYMENT_PERMISSIONS", () => {
   it("parses against EntityPermissionsSchema", () => {
@@ -12,9 +9,7 @@ describe("PAYMENT_PERMISSIONS", () => {
   });
 
   it("refund is admin-only", () => {
-    expect(PAYMENT_PERMISSIONS.transitions?.["refund"]?.roles).toEqual([
-      "erp_admin",
-    ]);
+    expect(PAYMENT_PERMISSIONS.transitions?.["refund"]?.roles).toEqual(["erp_admin"]);
   });
 
   it("delete is admin-only", () => {

@@ -15,12 +15,7 @@ import {
 
 describe("constants", () => {
   it("POSTMORTEM_STATUSES has 4 entries", () => {
-    expect(POSTMORTEM_STATUSES).toEqual([
-      "drafting",
-      "review",
-      "published",
-      "amended",
-    ]);
+    expect(POSTMORTEM_STATUSES).toEqual(["drafting", "review", "published", "amended"]);
   });
 
   it("ACTION_ITEM_PRIORITIES has 4 entries", () => {
@@ -69,27 +64,21 @@ describe("ActionItemSchema", () => {
   });
 
   it("rejects dueAt <= createdAt", () => {
-    expect(() =>
-      ActionItemSchema.parse({ ...base, dueAt: "2026-05-14T12:00:00Z" }),
-    ).toThrow(/after createdAt/);
+    expect(() => ActionItemSchema.parse({ ...base, dueAt: "2026-05-14T12:00:00Z" })).toThrow(
+      /after createdAt/,
+    );
   });
 
   it("rejects completed without completedAt", () => {
-    expect(() =>
-      ActionItemSchema.parse({ ...base, status: "completed" }),
-    ).toThrow(/completedAt/);
+    expect(() => ActionItemSchema.parse({ ...base, status: "completed" })).toThrow(/completedAt/);
   });
 
   it("rejects blocked without blockedReason", () => {
-    expect(() =>
-      ActionItemSchema.parse({ ...base, status: "blocked" }),
-    ).toThrow(/blockedReason/);
+    expect(() => ActionItemSchema.parse({ ...base, status: "blocked" })).toThrow(/blockedReason/);
   });
 
   it("rejects won_t_fix without wontFixReason", () => {
-    expect(() =>
-      ActionItemSchema.parse({ ...base, status: "won_t_fix" }),
-    ).toThrow(/wontFixReason/);
+    expect(() => ActionItemSchema.parse({ ...base, status: "won_t_fix" })).toThrow(/wontFixReason/);
   });
 
   it("rejects critical without preventsRecurrence", () => {
@@ -135,15 +124,15 @@ describe("PostmortemSchema", () => {
   });
 
   it("rejects without blameless attestation", () => {
-    expect(() =>
-      PostmortemSchema.parse({ ...base, blamelessAttested: false }),
-    ).toThrow(/blameless/);
+    expect(() => PostmortemSchema.parse({ ...base, blamelessAttested: false })).toThrow(
+      /blameless/,
+    );
   });
 
   it("rejects published with < 2 reviewers", () => {
-    expect(() =>
-      PostmortemSchema.parse({ ...base, reviewers: ["u-rev1"] }),
-    ).toThrow(/at least 2 reviewers/);
+    expect(() => PostmortemSchema.parse({ ...base, reviewers: ["u-rev1"] })).toThrow(
+      /at least 2 reviewers/,
+    );
   });
 
   it("rejects author as their own reviewer", () => {
@@ -165,9 +154,7 @@ describe("PostmortemSchema", () => {
   });
 
   it("rejects amended without amendedAt", () => {
-    expect(() =>
-      PostmortemSchema.parse({ ...base, status: "amended" }),
-    ).toThrow(/amendedAt/);
+    expect(() => PostmortemSchema.parse({ ...base, status: "amended" })).toThrow(/amendedAt/);
   });
 
   it("rejects duplicate reviewers", () => {
@@ -180,14 +167,17 @@ describe("PostmortemSchema", () => {
   });
 
   it("rejects malformed postmortem id", () => {
-    expect(() =>
-      PostmortemSchema.parse({ ...base, id: "PM-42" }),
-    ).toThrow();
+    expect(() => PostmortemSchema.parse({ ...base, id: "PM-42" })).toThrow();
   });
 });
 
 describe("helpers", () => {
-  const item = (id: string, status: ActionItem["status"], dueAt: string, prevent: boolean = false): ActionItem => ({
+  const item = (
+    id: string,
+    status: ActionItem["status"],
+    dueAt: string,
+    prevent: boolean = false,
+  ): ActionItem => ({
     id,
     title: "x",
     description: "x",
@@ -242,9 +232,9 @@ describe("helpers", () => {
   });
 
   it("overdueActionItems filters past-due open items", () => {
-    expect(
-      overdueActionItems(pm, new Date("2026-06-01T00:00:00Z")).map((a) => a.id),
-    ).toEqual(["ai-2026-0003"]);
+    expect(overdueActionItems(pm, new Date("2026-06-01T00:00:00Z")).map((a) => a.id)).toEqual([
+      "ai-2026-0003",
+    ]);
   });
 
   it("preventsRecurrenceItems filters preventive items", () => {

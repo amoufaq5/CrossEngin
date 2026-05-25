@@ -70,39 +70,37 @@ describe("FailoverRecordSchema", () => {
   });
 
   it("rejects same fromRegion and toRegion", () => {
-    expect(() =>
-      FailoverRecordSchema.parse({ ...base, toRegion: "eu-central" }),
-    ).toThrow(/must differ/);
+    expect(() => FailoverRecordSchema.parse({ ...base, toRegion: "eu-central" })).toThrow(
+      /must differ/,
+    );
   });
 
   it("rejects succeeded without completedAt", () => {
-    expect(() =>
-      FailoverRecordSchema.parse({ ...base, completedAt: null }),
-    ).toThrow(/completedAt/);
+    expect(() => FailoverRecordSchema.parse({ ...base, completedAt: null })).toThrow(/completedAt/);
   });
 
   it("rejects succeeded without actualRpoSeconds", () => {
-    expect(() =>
-      FailoverRecordSchema.parse({ ...base, actualRpoSeconds: null }),
-    ).toThrow(/actualRpoSeconds/);
+    expect(() => FailoverRecordSchema.parse({ ...base, actualRpoSeconds: null })).toThrow(
+      /actualRpoSeconds/,
+    );
   });
 
   it("rejects succeeded without actualRtoSeconds", () => {
-    expect(() =>
-      FailoverRecordSchema.parse({ ...base, actualRtoSeconds: null }),
-    ).toThrow(/actualRtoSeconds/);
+    expect(() => FailoverRecordSchema.parse({ ...base, actualRtoSeconds: null })).toThrow(
+      /actualRtoSeconds/,
+    );
   });
 
   it("rejects primary_outage without incidentTicketId", () => {
-    expect(() =>
-      FailoverRecordSchema.parse({ ...base, trigger: "primary_outage" }),
-    ).toThrow(/incidentTicketId/);
+    expect(() => FailoverRecordSchema.parse({ ...base, trigger: "primary_outage" })).toThrow(
+      /incidentTicketId/,
+    );
   });
 
   it("rejects regional_failure without incidentTicketId", () => {
-    expect(() =>
-      FailoverRecordSchema.parse({ ...base, trigger: "regional_failure" }),
-    ).toThrow(/incidentTicketId/);
+    expect(() => FailoverRecordSchema.parse({ ...base, trigger: "regional_failure" })).toThrow(
+      /incidentTicketId/,
+    );
   });
 
   it("rejects reverted without revertedAt", () => {
@@ -147,7 +145,9 @@ describe("helpers", () => {
   };
 
   it("exceededRpo returns true when actualRpoSeconds > spec.maxRpoSeconds", () => {
-    expect(exceededRpo({ ...base, actualRpoSeconds: 120 }, DEFAULT_DR_TIERS.tier_1_business_critical)).toBe(true);
+    expect(
+      exceededRpo({ ...base, actualRpoSeconds: 120 }, DEFAULT_DR_TIERS.tier_1_business_critical),
+    ).toBe(true);
   });
 
   it("exceededRpo returns false within target", () => {
@@ -155,7 +155,9 @@ describe("helpers", () => {
   });
 
   it("exceededRto returns true when actualRtoSeconds > spec.maxRtoSeconds", () => {
-    expect(exceededRto({ ...base, actualRtoSeconds: 1800 }, DEFAULT_DR_TIERS.tier_1_business_critical)).toBe(true);
+    expect(
+      exceededRto({ ...base, actualRtoSeconds: 1800 }, DEFAULT_DR_TIERS.tier_1_business_critical),
+    ).toBe(true);
   });
 
   it("exceededRto returns false within target", () => {

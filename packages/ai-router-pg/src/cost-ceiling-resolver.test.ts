@@ -155,7 +155,12 @@ describe("PostgresCostCeilingResolver — drop-in for router getTenantCostCeilin
     const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
     const resolver = new PostgresCostCeilingResolver({ conn });
     const fn: (tenantId: string) => Promise<
-      { readonly maxUsdPerRequest?: number; readonly maxUsdPerWindow?: number; readonly windowSeconds?: number } | undefined
+      | {
+          readonly maxUsdPerRequest?: number;
+          readonly maxUsdPerWindow?: number;
+          readonly windowSeconds?: number;
+        }
+      | undefined
     > = resolver.resolve;
     expect(typeof fn).toBe("function");
   });
@@ -216,9 +221,7 @@ describe("PostgresCostCeilingResolver — tier fallback (M6.8)", () => {
     const resolver = new PostgresCostCeilingResolver({ conn });
     const ceiling = await resolver.resolve(TENANT);
     expect(ceiling).toEqual({ maxUsdPerRequest: 1.0 });
-    const tierQueries = capture.filter((c) =>
-      c.sql.includes("llm_tenant_tier_memberships"),
-    );
+    const tierQueries = capture.filter((c) => c.sql.includes("llm_tenant_tier_memberships"));
     expect(tierQueries).toHaveLength(0);
   });
 
@@ -236,9 +239,7 @@ describe("PostgresCostCeilingResolver — tier fallback (M6.8)", () => {
     });
     const resolver = new PostgresCostCeilingResolver({ conn });
     await resolver.resolve(TENANT);
-    const tierQuery = capture.find((c) =>
-      c.sql.includes("llm_tenant_tier_memberships"),
-    );
+    const tierQuery = capture.find((c) => c.sql.includes("llm_tenant_tier_memberships"));
     expect(tierQuery?.sql).toContain("INNER JOIN meta.llm_cost_tiers");
     expect(tierQuery?.sql).toContain("ON t.tier_id = m.tier_id");
     expect(tierQuery?.sql).toContain("WHERE m.tenant_id = $1");
@@ -294,9 +295,7 @@ describe("PostgresCostCeilingResolver — tier fallback (M6.8)", () => {
       capture.push({ sql, params: undefined });
       if (sql.includes("FROM meta.llm_cost_ceilings")) {
         return {
-          rows: [
-            { max_usd_per_request: "1.0", max_usd_per_window: null, window_seconds: null },
-          ],
+          rows: [{ max_usd_per_request: "1.0", max_usd_per_window: null, window_seconds: null }],
           rowCount: 1,
         };
       }
@@ -418,9 +417,7 @@ describe("PostgresCostCeilingResolver.resolveDetailed (M6.8.x)", () => {
       capture.push({ sql, params: undefined });
       if (sql.includes("FROM meta.llm_cost_ceilings")) {
         return {
-          rows: [
-            { max_usd_per_request: "2.0", max_usd_per_window: null, window_seconds: null },
-          ],
+          rows: [{ max_usd_per_request: "2.0", max_usd_per_window: null, window_seconds: null }],
           rowCount: 1,
         };
       }
@@ -428,9 +425,7 @@ describe("PostgresCostCeilingResolver.resolveDetailed (M6.8.x)", () => {
     });
     const resolver = new PostgresCostCeilingResolver({ conn });
     await resolver.resolveDetailed(TENANT);
-    expect(
-      capture.filter((c) => c.sql.includes("llm_tenant_tier_memberships")),
-    ).toHaveLength(0);
+    expect(capture.filter((c) => c.sql.includes("llm_tenant_tier_memberships"))).toHaveLength(0);
   });
 
   it("tier query selects tier_id alongside the policy columns", async () => {
@@ -441,9 +436,7 @@ describe("PostgresCostCeilingResolver.resolveDetailed (M6.8.x)", () => {
     });
     const resolver = new PostgresCostCeilingResolver({ conn });
     await resolver.resolveDetailed(TENANT);
-    const tierQuery = capture.find((c) =>
-      c.sql.includes("llm_tenant_tier_memberships"),
-    );
+    const tierQuery = capture.find((c) => c.sql.includes("llm_tenant_tier_memberships"));
     expect(tierQuery?.sql).toContain("t.tier_id");
     expect(tierQuery?.sql).toContain("INNER JOIN meta.llm_cost_tiers");
   });

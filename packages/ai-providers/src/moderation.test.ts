@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  MODERATION_ERROR_KINDS,
-  isModerationError,
-  isModerationErrorKind,
-} from "./moderation.js";
+import { MODERATION_ERROR_KINDS, isModerationError, isModerationErrorKind } from "./moderation.js";
 
 describe("MODERATION_ERROR_KINDS", () => {
   it("includes guardrail_intervened (Bedrock guardrail input/output block)", () => {

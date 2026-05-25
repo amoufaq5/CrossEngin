@@ -89,9 +89,9 @@ describe("BackupPolicySchema", () => {
   });
 
   it("rejects malformed cron", () => {
-    expect(() =>
-      BackupPolicySchema.parse({ ...base, cron: "0 2" }),
-    ).toThrow(/5 whitespace-separated fields/);
+    expect(() => BackupPolicySchema.parse({ ...base, cron: "0 2" })).toThrow(
+      /5 whitespace-separated fields/,
+    );
   });
 });
 
@@ -118,15 +118,11 @@ describe("BackupRecordSchema", () => {
   });
 
   it("rejects succeeded without sha256", () => {
-    expect(() =>
-      BackupRecordSchema.parse({ ...base, sha256: null }),
-    ).toThrow(/sha256/);
+    expect(() => BackupRecordSchema.parse({ ...base, sha256: null })).toThrow(/sha256/);
   });
 
   it("rejects succeeded without sizeBytes", () => {
-    expect(() =>
-      BackupRecordSchema.parse({ ...base, sizeBytes: null }),
-    ).toThrow(/sizeBytes/);
+    expect(() => BackupRecordSchema.parse({ ...base, sizeBytes: null })).toThrow(/sizeBytes/);
   });
 
   it("rejects verified without verifiedAt", () => {
@@ -150,9 +146,7 @@ describe("BackupRecordSchema", () => {
   });
 
   it("rejects failed without errorMessage", () => {
-    expect(() =>
-      BackupRecordSchema.parse({ ...base, status: "failed" }),
-    ).toThrow(/errorMessage/);
+    expect(() => BackupRecordSchema.parse({ ...base, status: "failed" })).toThrow(/errorMessage/);
   });
 
   it("rejects expiresAt <= startedAt", () => {
@@ -196,12 +190,10 @@ describe("helpers", () => {
   });
 
   it("expiredBackups filters expired records", () => {
-    expect(
-      expiredBackups([verified], new Date("2027-05-15T00:00:00Z")).map((r) => r.id),
-    ).toEqual(["br-1"]);
-    expect(
-      expiredBackups([verified], new Date("2027-05-13T00:00:00Z")),
-    ).toEqual([]);
+    expect(expiredBackups([verified], new Date("2027-05-15T00:00:00Z")).map((r) => r.id)).toEqual([
+      "br-1",
+    ]);
+    expect(expiredBackups([verified], new Date("2027-05-13T00:00:00Z"))).toEqual([]);
   });
 
   it("backupSatisfiesTier returns true when policy meets tier", () => {

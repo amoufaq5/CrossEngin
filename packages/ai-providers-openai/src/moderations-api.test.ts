@@ -123,9 +123,7 @@ describe("buildModerationRequest", () => {
 });
 
 describe("normalizeModerationResponse", () => {
-  function fixtureResponse(
-    results: readonly OpenAIModerationResult[],
-  ): OpenAIModerationResponse {
+  function fixtureResponse(results: readonly OpenAIModerationResult[]): OpenAIModerationResponse {
     return {
       id: "modr_1",
       model: "omni-moderation-latest",
@@ -176,10 +174,7 @@ describe("normalizeModerationResponse", () => {
         },
       ]),
     );
-    expect(normalized.flaggedCategoriesPerResult[0]).toEqual([
-      "harassment",
-      "violence",
-    ]);
+    expect(normalized.flaggedCategoriesPerResult[0]).toEqual(["harassment", "violence"]);
   });
 
   it("aggregates across multiple results", () => {

@@ -5,28 +5,19 @@ const Iso8601 = z.string().datetime({ offset: true });
 const SHA256_REGEX = /^[0-9a-f]{64}$/;
 const DATASET_ID_REGEX = /^ds_[a-z0-9-]{4,40}$/;
 
-export const DATASET_STATUSES = [
-  "drafting",
-  "frozen",
-  "deprecated",
-  "purged",
-] as const;
+export const DATASET_STATUSES = ["drafting", "frozen", "deprecated", "purged"] as const;
 export type DatasetStatus = (typeof DATASET_STATUSES)[number];
 export const DatasetStatusSchema = z.enum(DATASET_STATUSES);
 
-export const DATASET_TRANSITIONS: Readonly<
-  Record<DatasetStatus, readonly DatasetStatus[]>
-> = Object.freeze({
-  drafting: ["frozen", "purged"],
-  frozen: ["deprecated", "purged"],
-  deprecated: ["purged"],
-  purged: [],
-});
+export const DATASET_TRANSITIONS: Readonly<Record<DatasetStatus, readonly DatasetStatus[]>> =
+  Object.freeze({
+    drafting: ["frozen", "purged"],
+    frozen: ["deprecated", "purged"],
+    deprecated: ["purged"],
+    purged: [],
+  });
 
-export function canTransitionDataset(
-  from: DatasetStatus,
-  to: DatasetStatus,
-): boolean {
+export function canTransitionDataset(from: DatasetStatus, to: DatasetStatus): boolean {
   return DATASET_TRANSITIONS[from].includes(to);
 }
 
@@ -128,8 +119,7 @@ export const DatasetSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["minimumKAnonymity"],
-        message:
-          "PII + differential_privacy redaction requires minimumKAnonymity >= 10",
+        message: "PII + differential_privacy redaction requires minimumKAnonymity >= 10",
       });
     }
     if (v.status === "frozen") {
@@ -205,10 +195,7 @@ export function splitSampleCount(dataset: Dataset, name: DatasetSplit["name"]): 
   return dataset.splits.find((s) => s.name === name)?.sampleCount ?? 0;
 }
 
-export function splitRatio(
-  dataset: Dataset,
-  name: DatasetSplit["name"],
-): number {
+export function splitRatio(dataset: Dataset, name: DatasetSplit["name"]): number {
   if (dataset.totalSampleCount === 0) return 0;
   return splitSampleCount(dataset, name) / dataset.totalSampleCount;
 }

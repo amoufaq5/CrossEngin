@@ -112,10 +112,7 @@ export const ConfirmationRecordSchema = z.object({
 });
 export type ConfirmationRecord = z.infer<typeof ConfirmationRecordSchema>;
 
-export function validateConfirmation(
-  gate: ConfirmationGate,
-  record: ConfirmationRecord,
-): void {
+export function validateConfirmation(gate: ConfirmationGate, record: ConfirmationRecord): void {
   if (record.gate !== gate) {
     throw new Error(`confirmation gate mismatch: expected '${gate}', got '${record.gate}'`);
   }

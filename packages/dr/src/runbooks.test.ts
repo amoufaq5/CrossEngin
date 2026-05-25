@@ -54,9 +54,9 @@ describe("RunbookSpecSchema", () => {
   });
 
   it("rejects failover runbook without requiresIncidentCommander", () => {
-    expect(() =>
-      RunbookSpecSchema.parse({ ...base, requiresIncidentCommander: false }),
-    ).toThrow(/incident commander/);
+    expect(() => RunbookSpecSchema.parse({ ...base, requiresIncidentCommander: false })).toThrow(
+      /incident commander/,
+    );
   });
 
   it("rejects regional_evacuation without incident commander", () => {
@@ -99,9 +99,7 @@ describe("RunbookSpecSchema", () => {
   });
 
   it("rejects an invalid semver version", () => {
-    expect(() =>
-      RunbookSpecSchema.parse({ ...base, version: "1.0" }),
-    ).toThrow();
+    expect(() => RunbookSpecSchema.parse({ ...base, version: "1.0" })).toThrow();
   });
 });
 
@@ -194,18 +192,11 @@ describe("staleRunbooks / approvedRunbooksFor", () => {
   };
 
   it("staleRunbooks returns runbooks past their freshness window", () => {
-    const result = staleRunbooks(
-      [fresh, stale, draft],
-      365,
-      365,
-      new Date("2026-05-15T00:00:00Z"),
-    );
+    const result = staleRunbooks([fresh, stale, draft], 365, 365, new Date("2026-05-15T00:00:00Z"));
     expect(result.map((r) => r.id).sort()).toEqual(["RB-0002", "RB-0003"]);
   });
 
   it("approvedRunbooksFor filters by kind + status", () => {
-    expect(approvedRunbooksFor([fresh, draft], "failover").map((r) => r.id)).toEqual([
-      "RB-0001",
-    ]);
+    expect(approvedRunbooksFor([fresh, draft], "failover").map((r) => r.id)).toEqual(["RB-0001"]);
   });
 });

@@ -14,11 +14,11 @@ export interface CreateSignalBridgeHandlerOptions {
 
 const DEFAULT_IDEMPOTENCY_HEADER = "idempotency-key";
 
-export function createSignalBridgeHandler(
-  opts: CreateSignalBridgeHandlerOptions,
-): Handler {
+export function createSignalBridgeHandler(opts: CreateSignalBridgeHandlerOptions): Handler {
   const signatureHeader = (opts.signatureHeaderName ?? SIGNATURE_HEADER_NAME).toLowerCase();
-  const idempotencyHeader = (opts.idempotencyHeaderName ?? DEFAULT_IDEMPOTENCY_HEADER).toLowerCase();
+  const idempotencyHeader = (
+    opts.idempotencyHeaderName ?? DEFAULT_IDEMPOTENCY_HEADER
+  ).toLowerCase();
   const clock = opts.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
 
   return async (input: HandlerInput): Promise<HandlerOutput> => {
@@ -70,10 +70,7 @@ export function createSignalBridgeHandler(
   };
 }
 
-function pickHeader(
-  headers: Readonly<Record<string, string>>,
-  name: string,
-): string | null {
+function pickHeader(headers: Readonly<Record<string, string>>, name: string): string | null {
   const direct = headers[name];
   if (typeof direct === "string") return direct;
   const lower = headers[name.toLowerCase()];

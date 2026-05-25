@@ -15,12 +15,16 @@ describe("BUILTIN_TRAITS", () => {
 });
 
 describe("isBuiltinTrait", () => {
-  it.each(["auditable", "soft_deletable", "versioned", "tenant_owned", "gxp_signed", "part_11_compliant"])(
-    "returns true for %s",
-    (name) => {
-      expect(isBuiltinTrait(name)).toBe(true);
-    },
-  );
+  it.each([
+    "auditable",
+    "soft_deletable",
+    "versioned",
+    "tenant_owned",
+    "gxp_signed",
+    "part_11_compliant",
+  ])("returns true for %s", (name) => {
+    expect(isBuiltinTrait(name)).toBe(true);
+  });
 
   it("returns false for unknown trait names", () => {
     expect(isBuiltinTrait("geocoded")).toBe(false);
@@ -31,7 +35,13 @@ describe("isBuiltinTrait", () => {
   it("narrows the type for builtin names", () => {
     const candidate: string = "auditable";
     if (isBuiltinTrait(candidate)) {
-      const _check: "auditable" | "soft_deletable" | "versioned" | "tenant_owned" | "gxp_signed" | "part_11_compliant" = candidate;
+      const _check:
+        | "auditable"
+        | "soft_deletable"
+        | "versioned"
+        | "tenant_owned"
+        | "gxp_signed"
+        | "part_11_compliant" = candidate;
       expect(_check).toBe("auditable");
     }
   });

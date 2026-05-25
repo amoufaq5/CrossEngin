@@ -44,23 +44,16 @@ describe("computeFieldRedaction", () => {
   });
 
   it("redacts a field a role cannot read", () => {
-    const r = computeFieldRedaction(
-      principal("technician"),
-      PERMS,
-      ROLES,
-      ["internal_notes", "narcotic_schedule"],
-    );
+    const r = computeFieldRedaction(principal("technician"), PERMS, ROLES, [
+      "internal_notes",
+      "narcotic_schedule",
+    ]);
     expect(r.readable).toEqual(["internal_notes"]);
     expect(r.redacted).toEqual(["narcotic_schedule"]);
   });
 
   it("respects inheritance (manager can read pharmacist-restricted fields)", () => {
-    const r = computeFieldRedaction(
-      principal("manager"),
-      PERMS,
-      ROLES,
-      ["narcotic_schedule"],
-    );
+    const r = computeFieldRedaction(principal("manager"), PERMS, ROLES, ["narcotic_schedule"]);
     expect(r.readable).toEqual(["narcotic_schedule"]);
     expect(r.redacted).toEqual([]);
   });
@@ -79,34 +72,25 @@ describe("validateWriteMask", () => {
   });
 
   it("rejects a patch touching a forbidden field (technician cannot update narcotic_schedule)", () => {
-    const r = validateWriteMask(
-      principal("technician"),
-      PERMS,
-      ROLES,
-      ["narcotic_schedule"],
-    );
+    const r = validateWriteMask(principal("technician"), PERMS, ROLES, ["narcotic_schedule"]);
     expect(r.ok).toBe(false);
     expect(r.rejectedField).toBe("narcotic_schedule");
   });
 
   it("rejects on the first forbidden field encountered", () => {
-    const r = validateWriteMask(
-      principal("technician"),
-      PERMS,
-      ROLES,
-      ["internal_notes", "narcotic_schedule"],
-    );
+    const r = validateWriteMask(principal("technician"), PERMS, ROLES, [
+      "internal_notes",
+      "narcotic_schedule",
+    ]);
     expect(r.ok).toBe(false);
     expect(r.rejectedField).toBe("internal_notes");
   });
 
   it("accepts when all touched fields are permitted", () => {
-    const r = validateWriteMask(
-      principal("pharmacist"),
-      PERMS,
-      ROLES,
-      ["internal_notes", "narcotic_schedule"],
-    );
+    const r = validateWriteMask(principal("pharmacist"), PERMS, ROLES, [
+      "internal_notes",
+      "narcotic_schedule",
+    ]);
     expect(r.ok).toBe(true);
   });
 });

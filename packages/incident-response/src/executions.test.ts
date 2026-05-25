@@ -65,9 +65,9 @@ describe("RunbookExecutionSchema", () => {
   });
 
   it("rejects succeeded without steps", () => {
-    expect(() =>
-      RunbookExecutionSchema.parse({ ...base, steps: [] }),
-    ).toThrow(/must record step results/);
+    expect(() => RunbookExecutionSchema.parse({ ...base, steps: [] })).toThrow(
+      /must record step results/,
+    );
   });
 
   it("rejects aborted without abortedAt + reason", () => {

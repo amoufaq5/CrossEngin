@@ -9,8 +9,7 @@ export const ROLE_ADMIN: RoleDefinition = {
 export const ROLE_ACCOUNTANT: RoleDefinition = {
   name: "erp_accountant",
   label: { en: "Accountant" },
-  description:
-    "Creates and sends invoices, marks them paid, reads accounts and contacts.",
+  description: "Creates and sends invoices, marks them paid, reads accounts and contacts.",
 };
 
 export const ROLE_VIEWER: RoleDefinition = {

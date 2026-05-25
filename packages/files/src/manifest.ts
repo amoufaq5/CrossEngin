@@ -87,7 +87,10 @@ export const FileTypeDeclarationSchema = z
     ocr: FileOcrConfigSchema.default({}),
     embedding: FileEmbeddingConfigSchema.default({}),
     retention: FileRetentionPolicySchema.default({}),
-    lifecycle: z.array(FileLifecyclePhaseSchema).min(1).default([{ phase: "hot", durationDays: 180 }]),
+    lifecycle: z
+      .array(FileLifecyclePhaseSchema)
+      .min(1)
+      .default([{ phase: "hot", durationDays: 180 }]),
     signedUrl: FileSignedUrlPolicySchema.default({}),
     dataClass: z.enum(DATA_CLASSES),
     generatedOnly: z.boolean().default(false),

@@ -42,9 +42,7 @@ export const ID_TOKEN_SIGN_ALGORITHMS = [
 ] as const;
 export type IdTokenSignAlgorithm = (typeof ID_TOKEN_SIGN_ALGORITHMS)[number];
 
-export const WEAK_ID_TOKEN_SIGN_ALGORITHMS: ReadonlySet<string> = new Set([
-  "HS256",
-]);
+export const WEAK_ID_TOKEN_SIGN_ALGORITHMS: ReadonlySet<string> = new Set(["HS256"]);
 
 export const STANDARD_OIDC_SCOPES = [
   "openid",
@@ -72,9 +70,7 @@ export const OidcDiscoveryDocSchema = z.object({
   subject_types_supported: z.array(z.enum(["public", "pairwise"])).min(1),
   claims_supported: z.array(z.string()).optional(),
   code_challenge_methods_supported: z.array(z.enum(PKCE_METHODS)).optional(),
-  token_endpoint_auth_methods_supported: z
-    .array(z.enum(OIDC_TOKEN_AUTH_METHODS))
-    .optional(),
+  token_endpoint_auth_methods_supported: z.array(z.enum(OIDC_TOKEN_AUTH_METHODS)).optional(),
 });
 export type OidcDiscoveryDoc = z.infer<typeof OidcDiscoveryDocSchema>;
 
@@ -88,16 +84,13 @@ export const OidcAuthorizeRequestSchema = z
     nonce: z.string().min(8).max(512).optional(),
     codeChallenge: z.string().min(43).max(128).optional(),
     codeChallengeMethod: z.enum(PKCE_METHODS).optional(),
-    prompt: z
-      .enum(["none", "login", "consent", "select_account"])
-      .optional(),
+    prompt: z.enum(["none", "login", "consent", "select_account"]).optional(),
     loginHint: z.string().max(256).optional(),
     maxAge: z.number().int().min(0).optional(),
     acrValues: z.array(z.string()).optional(),
   })
   .superRefine((r, ctx) => {
-    const requiresNonce =
-      r.responseType.includes("id_token") || r.responseType === "code";
+    const requiresNonce = r.responseType.includes("id_token") || r.responseType === "code";
     if (requiresNonce && !r.nonce) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -122,15 +115,14 @@ export const OidcAuthorizeRequestSchema = z
   });
 export type OidcAuthorizeRequest = z.infer<typeof OidcAuthorizeRequestSchema>;
 
-export const OidcTokenResponseSchema = z
-  .object({
-    accessToken: z.string().min(1),
-    tokenType: z.enum(["Bearer", "DPoP"]),
-    expiresIn: z.number().int().min(1),
-    idToken: z.string().min(1).optional(),
-    refreshToken: z.string().min(1).optional(),
-    scope: z.string().optional(),
-  });
+export const OidcTokenResponseSchema = z.object({
+  accessToken: z.string().min(1),
+  tokenType: z.enum(["Bearer", "DPoP"]),
+  expiresIn: z.number().int().min(1),
+  idToken: z.string().min(1).optional(),
+  refreshToken: z.string().min(1).optional(),
+  scope: z.string().optional(),
+});
 export type OidcTokenResponse = z.infer<typeof OidcTokenResponseSchema>;
 
 export const OidcIdTokenClaimsSchema = z
@@ -153,14 +145,13 @@ export type OidcIdTokenClaims = z.infer<typeof OidcIdTokenClaimsSchema>;
 export const isWeakIdTokenSignAlgorithm = (algorithm: string): boolean =>
   WEAK_ID_TOKEN_SIGN_ALGORITHMS.has(algorithm);
 
-export const isPublicClient = (
-  config: { isPublicClient: boolean; clientSecretSha256: string | null },
-): boolean => config.isPublicClient && config.clientSecretSha256 === null;
+export const isPublicClient = (config: {
+  isPublicClient: boolean;
+  clientSecretSha256: string | null;
+}): boolean => config.isPublicClient && config.clientSecretSha256 === null;
 
-export const isValidRedirectUri = (
-  uri: string,
-  allowed: readonly string[],
-): boolean => allowed.includes(uri);
+export const isValidRedirectUri = (uri: string, allowed: readonly string[]): boolean =>
+  allowed.includes(uri);
 
 export interface IdTokenValidationOptions {
   readonly expectedIssuer: string;
@@ -180,9 +171,7 @@ export interface IdTokenValidationSuccess {
   readonly ok: true;
 }
 
-export type IdTokenValidationResult =
-  | IdTokenValidationSuccess
-  | IdTokenValidationFailure;
+export type IdTokenValidationResult = IdTokenValidationSuccess | IdTokenValidationFailure;
 
 export const validateIdTokenClaims = (
   claims: OidcIdTokenClaims,

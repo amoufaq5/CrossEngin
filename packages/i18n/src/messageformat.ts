@@ -60,11 +60,7 @@ function extractCaseLabels(body: string): readonly string[] {
     while (i < body.length && /\s/.test(body[i] ?? "")) i++;
     if (i >= body.length) break;
     let labelEnd = i;
-    while (
-      labelEnd < body.length &&
-      body[labelEnd] !== "{" &&
-      !/\s/.test(body[labelEnd] ?? "")
-    ) {
+    while (labelEnd < body.length && body[labelEnd] !== "{" && !/\s/.test(body[labelEnd] ?? "")) {
       labelEnd++;
     }
     const label = body.slice(i, labelEnd);
@@ -152,9 +148,7 @@ export function validateIcuMessage(message: string): void {
       }
       for (const required of PLURAL_CASES_REQUIRED) {
         if (!ph.cases.includes(required)) {
-          throw new Error(
-            `'${ph.name}, ${ph.kind}, ...' is missing the required 'other' case`,
-          );
+          throw new Error(`'${ph.name}, ${ph.kind}, ...' is missing the required 'other' case`);
         }
       }
     }

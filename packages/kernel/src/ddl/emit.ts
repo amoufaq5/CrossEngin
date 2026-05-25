@@ -10,8 +10,7 @@ import {
   type ResolvedIndex,
 } from "./resolution.js";
 
-const TENANT_RLS_USING =
-  "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+const TENANT_RLS_USING = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
 
 const META_TENANTS_SCHEMA = "meta";
 const META_TENANTS_TABLE = "tenants";
@@ -84,10 +83,7 @@ export function emitTenantRls(entity: Entity, context: EmitContext): string[] {
 }
 
 export function emitEntity(entity: Entity, context: EmitContext): string[] {
-  const statements: string[] = [
-    emitCreateTable(entity, context),
-    ...emitIndexes(entity, context),
-  ];
+  const statements: string[] = [emitCreateTable(entity, context), ...emitIndexes(entity, context)];
   if (isTenantOwned(entity)) {
     statements.push(emitTenantFk(entity, context));
     statements.push(...emitTenantRls(entity, context));

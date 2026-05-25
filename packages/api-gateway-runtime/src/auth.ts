@@ -5,11 +5,7 @@ import {
   type ParsedAuthCredential,
   type ResolvedPrincipal,
 } from "@crossengin/api-gateway";
-import {
-  constantTimeEqualHex,
-  sha256,
-  verifyEd25519,
-} from "@crossengin/crypto";
+import { constantTimeEqualHex, sha256, verifyEd25519 } from "@crossengin/crypto";
 
 import type { PrincipalResolver } from "./stores.js";
 
@@ -33,10 +29,10 @@ export interface ParsedJwt {
 }
 
 function base64UrlDecode(value: string): Uint8Array {
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(
-    value.length + ((4 - (value.length % 4)) % 4),
-    "=",
-  );
+  const padded = value
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
   return new Uint8Array(Buffer.from(padded, "base64"));
 }
 
@@ -133,14 +129,23 @@ export async function verifyBearerJwt(input: {
   if (!verifyEd25519(publicKey, signatureBase64, signedPayload)) {
     return { outcome: "invalid_signature", reason: "ed25519 signature did not verify" };
   }
-  if (typeof jwt.payload.exp === "number" && jwt.payload.exp + input.opts.clockSkewSeconds < input.opts.nowSeconds) {
+  if (
+    typeof jwt.payload.exp === "number" &&
+    jwt.payload.exp + input.opts.clockSkewSeconds < input.opts.nowSeconds
+  ) {
     return { outcome: "expired_token", reason: "exp is in the past" };
   }
-  if (typeof jwt.payload.nbf === "number" && jwt.payload.nbf - input.opts.clockSkewSeconds > input.opts.nowSeconds) {
+  if (
+    typeof jwt.payload.nbf === "number" &&
+    jwt.payload.nbf - input.opts.clockSkewSeconds > input.opts.nowSeconds
+  ) {
     return { outcome: "not_yet_valid_token", reason: "nbf is in the future" };
   }
   if (typeof jwt.payload.iss === "string" && jwt.payload.iss !== input.opts.expectedIssuer) {
-    return { outcome: "issuer_mismatch", reason: `iss ${jwt.payload.iss} does not match expected ${input.opts.expectedIssuer}` };
+    return {
+      outcome: "issuer_mismatch",
+      reason: `iss ${jwt.payload.iss} does not match expected ${input.opts.expectedIssuer}`,
+    };
   }
   const aud = jwt.payload.aud;
   const audOk =
@@ -208,7 +213,9 @@ export async function resolvePrincipalForCredential(
   };
 }
 
-export function buildOpaqueCredentialMatcher(opaqueTokenSha256: string): (presented: string) => boolean {
+export function buildOpaqueCredentialMatcher(
+  opaqueTokenSha256: string,
+): (presented: string) => boolean {
   return (presented: string) => constantTimeEqualHex(sha256(presented), opaqueTokenSha256);
 }
 

@@ -17,19 +17,12 @@ import {
 
 describe("BEDROCK_MODEL_IMPORT_JOB constants", () => {
   it("statuses cover the 3 documented mixed-case values", () => {
-    expect(BEDROCK_MODEL_IMPORT_JOB_STATUSES).toEqual([
-      "InProgress",
-      "Completed",
-      "Failed",
-    ]);
+    expect(BEDROCK_MODEL_IMPORT_JOB_STATUSES).toEqual(["InProgress", "Completed", "Failed"]);
   });
 
   it("documents AWS-supported sort dimensions", () => {
     expect(BEDROCK_MODEL_IMPORT_JOB_SORT_BY_VALUES).toEqual(["CreationTime"]);
-    expect(BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES).toEqual([
-      "Ascending",
-      "Descending",
-    ]);
+    expect(BEDROCK_MODEL_IMPORT_JOB_SORT_ORDER_VALUES).toEqual(["Ascending", "Descending"]);
   });
 
   it("isBedrockModelImportJobStatus is case-sensitive", () => {
@@ -58,21 +51,19 @@ describe("buildModelImportJobListQuery", () => {
   });
 
   it("rejects unparseable creation-time values", () => {
-    expect(() =>
-      buildModelImportJobListQuery({ creationTimeAfter: "yesterday" }),
-    ).toThrow(/creationTimeAfter/);
-    expect(() =>
-      buildModelImportJobListQuery({ creationTimeBefore: "tomorrow" }),
-    ).toThrow(/creationTimeBefore/);
+    expect(() => buildModelImportJobListQuery({ creationTimeAfter: "yesterday" })).toThrow(
+      /creationTimeAfter/,
+    );
+    expect(() => buildModelImportJobListQuery({ creationTimeBefore: "tomorrow" })).toThrow(
+      /creationTimeBefore/,
+    );
   });
 
   it("threads + validates nameContains length", () => {
     expect(buildModelImportJobListQuery({ nameContains: "tenant-x" })).toEqual({
       nameContains: "tenant-x",
     });
-    expect(() => buildModelImportJobListQuery({ nameContains: "" })).toThrow(
-      /nameContains/,
-    );
+    expect(() => buildModelImportJobListQuery({ nameContains: "" })).toThrow(/nameContains/);
     expect(() =>
       buildModelImportJobListQuery({
         nameContains: "x".repeat(BEDROCK_MODEL_IMPORT_JOB_NAME_CONTAINS_MAX_LEN + 1),
@@ -81,12 +72,12 @@ describe("buildModelImportJobListQuery", () => {
   });
 
   it("threads + validates statusEquals", () => {
-    expect(
-      buildModelImportJobListQuery({ statusEquals: "Completed" }),
-    ).toEqual({ statusEquals: "Completed" });
-    expect(() =>
-      buildModelImportJobListQuery({ statusEquals: "RUNNING" as never }),
-    ).toThrow(/statusEquals/);
+    expect(buildModelImportJobListQuery({ statusEquals: "Completed" })).toEqual({
+      statusEquals: "Completed",
+    });
+    expect(() => buildModelImportJobListQuery({ statusEquals: "RUNNING" as never })).toThrow(
+      /statusEquals/,
+    );
   });
 
   it("threads valid maxResults at bounds", () => {
@@ -117,18 +108,14 @@ describe("buildModelImportJobListQuery", () => {
         maxResults: BEDROCK_MODEL_IMPORT_JOB_LIST_MAX_RESULTS_MAX + 1,
       }),
     ).toThrow(/maxResults/);
-    expect(() => buildModelImportJobListQuery({ maxResults: 1.5 })).toThrow(
-      /maxResults/,
-    );
+    expect(() => buildModelImportJobListQuery({ maxResults: 1.5 })).toThrow(/maxResults/);
   });
 
   it("threads + validates nextToken", () => {
     expect(buildModelImportJobListQuery({ nextToken: "page-2" })).toEqual({
       nextToken: "page-2",
     });
-    expect(() => buildModelImportJobListQuery({ nextToken: "" })).toThrow(
-      /nextToken/,
-    );
+    expect(() => buildModelImportJobListQuery({ nextToken: "" })).toThrow(/nextToken/);
   });
 
   it("threads sortBy + sortOrder", () => {
@@ -141,12 +128,8 @@ describe("buildModelImportJobListQuery", () => {
   });
 
   it("rejects unknown sortBy / sortOrder", () => {
-    expect(() =>
-      buildModelImportJobListQuery({ sortBy: "Name" as never }),
-    ).toThrow(/sortBy/);
-    expect(() =>
-      buildModelImportJobListQuery({ sortOrder: "asc" as never }),
-    ).toThrow(/sortOrder/);
+    expect(() => buildModelImportJobListQuery({ sortBy: "Name" as never })).toThrow(/sortBy/);
+    expect(() => buildModelImportJobListQuery({ sortOrder: "asc" as never })).toThrow(/sortOrder/);
   });
 
   it("composes all parameters together", () => {
@@ -174,24 +157,20 @@ describe("buildModelImportJobListQuery", () => {
   });
 
   it("throws BedrockError on invalid input", () => {
-    expect(() => buildModelImportJobListQuery({ maxResults: -1 })).toThrow(
-      BedrockError,
-    );
+    expect(() => buildModelImportJobListQuery({ maxResults: -1 })).toThrow(BedrockError);
   });
 });
 
 describe("parseModelImportJobSummary", () => {
   function sample(): unknown {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
       jobName: "import-tenant-x-2026-04-15",
       status: "Completed",
       creationTime: "2026-04-15T12:00:00Z",
       lastModifiedTime: "2026-04-15T13:00:00Z",
       endTime: "2026-04-15T13:00:00Z",
-      importedModelArn:
-        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc",
+      importedModelArn: "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc",
       importedModelName: "tenant-x-llama3-finetune",
     };
   }
@@ -264,9 +243,9 @@ describe("parseModelImportJobListResponse", () => {
     expect(parseModelImportJobListResponse({})).toEqual({
       modelImportJobSummaries: [],
     });
-    expect(
-      parseModelImportJobListResponse({ modelImportJobSummaries: [] }),
-    ).toEqual({ modelImportJobSummaries: [] });
+    expect(parseModelImportJobListResponse({ modelImportJobSummaries: [] })).toEqual({
+      modelImportJobSummaries: [],
+    });
   });
 
   it("preserves nextToken when present", () => {
@@ -297,23 +276,20 @@ describe("parseModelImportJobListResponse", () => {
   });
 
   it("rejects non-object response", () => {
-    expect(() => parseModelImportJobListResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseModelImportJobListResponse(null)).toThrow(/not a JSON object/);
   });
 
   it("rejects non-array summaries field", () => {
-    expect(() =>
-      parseModelImportJobListResponse({ modelImportJobSummaries: "oops" }),
-    ).toThrow(/not an array/);
+    expect(() => parseModelImportJobListResponse({ modelImportJobSummaries: "oops" })).toThrow(
+      /not an array/,
+    );
   });
 });
 
 describe("parseModelImportJobDetail", () => {
   function minimal(): Record<string, unknown> {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
       jobName: "import-tenant-x-2026-04-15",
       roleArn: "arn:aws:iam::123456789012:role/BedrockImportRole",
       status: "InProgress",
@@ -329,9 +305,7 @@ describe("parseModelImportJobDetail", () => {
     expect(d.jobArn).toMatch(/abc123def456$/);
     expect(d.status).toBe("InProgress");
     expect(d.roleArn).toMatch(/^arn:aws:iam::/);
-    expect(d.modelDataSource.s3DataSource.s3Uri).toBe(
-      "s3://tenant-x-artifacts/llama3/",
-    );
+    expect(d.modelDataSource.s3DataSource.s3Uri).toBe("s3://tenant-x-artifacts/llama3/");
     expect(d.importedModelArn).toBeUndefined();
     expect(d.failureMessage).toBeUndefined();
   });
@@ -341,8 +315,7 @@ describe("parseModelImportJobDetail", () => {
       ...minimal(),
       status: "Completed",
       importedModelName: "tenant-x-llama3-finetune",
-      importedModelArn:
-        "arn:aws:bedrock:us-east-1:123:imported-model/xyz789",
+      importedModelArn: "arn:aws:bedrock:us-east-1:123:imported-model/xyz789",
       lastModifiedTime: "2026-04-15T13:00:00Z",
       endTime: "2026-04-15T13:00:00Z",
       importedModelKmsKeyArn: "arn:aws:kms:us-east-1:123:key/k1",
@@ -386,9 +359,9 @@ describe("parseModelImportJobDetail", () => {
   });
 
   it("rejects unknown status", () => {
-    expect(() =>
-      parseModelImportJobDetail({ ...minimal(), status: "Stopped" }),
-    ).toThrow(/unknown job status/);
+    expect(() => parseModelImportJobDetail({ ...minimal(), status: "Stopped" })).toThrow(
+      /unknown job status/,
+    );
   });
 
   it("rejects missing modelDataSource", () => {
@@ -398,9 +371,9 @@ describe("parseModelImportJobDetail", () => {
   });
 
   it("rejects modelDataSource without s3DataSource", () => {
-    expect(() =>
-      parseModelImportJobDetail({ ...minimal(), modelDataSource: {} }),
-    ).toThrow(/s3DataSource/);
+    expect(() => parseModelImportJobDetail({ ...minimal(), modelDataSource: {} })).toThrow(
+      /s3DataSource/,
+    );
   });
 
   it("rejects s3DataSource without s3Uri", () => {

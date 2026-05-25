@@ -67,15 +67,17 @@ describe("canonicalArticle15BundleBytes", () => {
 
   it("prefixes the article15 domain tag", () => {
     const bytes = canonicalArticle15BundleBytes({ pack: fixturePack(), bundleBytes: "x" });
-    expect(new TextDecoder().decode(bytes).startsWith("crossengin.article15.bundle.v1\n")).toBe(true);
+    expect(new TextDecoder().decode(bytes).startsWith("crossengin.article15.bundle.v1\n")).toBe(
+      true,
+    );
   });
 });
 
 describe("computeArticle15SealSha256", () => {
   it("returns 64-char hex", () => {
-    expect(
-      computeArticle15SealSha256({ pack: fixturePack(), bundleBytes: "x" }),
-    ).toMatch(/^[0-9a-f]{64}$/);
+    expect(computeArticle15SealSha256({ pack: fixturePack(), bundleBytes: "x" })).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
   });
 
   it("differs for differently-redacted packs", () => {
@@ -109,7 +111,14 @@ describe("sealArticle15Pack", () => {
   it("rejects sealing from a non-compiling status", () => {
     expect(() =>
       sealArticle15Pack({
-        pack: fixturePack({ status: "delivered", sealedAt: "2026-05-15T00:00:00.000Z", sealedSha256: "a".repeat(64), storageUri: "s3://x", encryptionKeyFingerprint: VALID_KEY_FP, deliveredAt: "2026-05-15T01:00:00.000Z" }),
+        pack: fixturePack({
+          status: "delivered",
+          sealedAt: "2026-05-15T00:00:00.000Z",
+          sealedSha256: "a".repeat(64),
+          storageUri: "s3://x",
+          encryptionKeyFingerprint: VALID_KEY_FP,
+          deliveredAt: "2026-05-15T01:00:00.000Z",
+        }),
         bundleBytes: "x",
         storageUri: "s3://y",
         encryptionKeyFingerprint: VALID_KEY_FP,

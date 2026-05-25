@@ -70,8 +70,7 @@ export const TenantUnitEconomicsSchema = z
       });
     }
     if (v.netRevenueCents > 0) {
-      const computedPct =
-        Math.round((v.grossMarginCents / v.netRevenueCents) * 1000) / 10;
+      const computedPct = Math.round((v.grossMarginCents / v.netRevenueCents) * 1000) / 10;
       if (Math.abs(computedPct - v.grossMarginPercent) > 0.5) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -108,8 +107,7 @@ export const TenantUnitEconomicsSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["health"],
-        message:
-          "negative grossMargin requires health='negative' or 'loss_leader_approved'",
+        message: "negative grossMargin requires health='negative' or 'loss_leader_approved'",
       });
     }
   });
@@ -132,9 +130,7 @@ export function classifyMargin(grossMarginPercent: number): MarginHealth {
   return "thin";
 }
 
-export function paybackPeriodMonths(
-  economics: TenantUnitEconomics,
-): number | null {
+export function paybackPeriodMonths(economics: TenantUnitEconomics): number | null {
   if (
     economics.cacEstimateCents === undefined ||
     economics.cacEstimateCents === 0 ||

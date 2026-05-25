@@ -26,10 +26,7 @@ export function blake2b512Hex(input: Uint8Array | string): string {
   return createHash("blake2b512").update(toBytes(input)).digest("hex");
 }
 
-export function hashWith(
-  algorithm: HashAlgorithm,
-  input: Uint8Array | string,
-): string {
+export function hashWith(algorithm: HashAlgorithm, input: Uint8Array | string): string {
   switch (algorithm) {
     case "sha256":
       return sha256(input);

@@ -27,8 +27,7 @@ interface RouteRow {
   readonly source_pack: string | null;
 }
 
-const SELECT_COLUMNS =
-  `route_id, operation_id, method, path_segments, api_version,
+const SELECT_COLUMNS = `route_id, operation_id, method, path_segments, api_version,
    is_deprecated, deprecated_since, sunset_at, successor_operation_id,
    required_scopes, rate_limit_policy_id, idempotency_required,
    request_schema_sha256, response_schema_sha256, source_pack`;
@@ -108,7 +107,10 @@ export class PostgresRouteRegistry implements RouteRegistry {
   private readonly conn: PgConnection;
   private readonly cacheTtlMs: number;
   private readonly clock: () => number;
-  private cache: { readonly loadedAtMs: number; readonly compiled: readonly CompiledRoute[] } | null = null;
+  private cache: {
+    readonly loadedAtMs: number;
+    readonly compiled: readonly CompiledRoute[];
+  } | null = null;
   private pendingLoad: Promise<readonly CompiledRoute[]> | null = null;
 
   constructor(opts: PostgresRouteRegistryOptions) {
@@ -225,19 +227,17 @@ export class PostgresRouteRegistry implements RouteRegistry {
   }
 
   async deleteByRouteId(routeId: string): Promise<boolean> {
-    const result = await this.conn.query(
-      `DELETE FROM ${SCHEMA}.${TABLE} WHERE route_id = $1`,
-      [routeId],
-    );
+    const result = await this.conn.query(`DELETE FROM ${SCHEMA}.${TABLE} WHERE route_id = $1`, [
+      routeId,
+    ]);
     this.cache = null;
     return result.rowCount > 0;
   }
 
   async deleteByPackSlug(packSlug: string): Promise<number> {
-    const result = await this.conn.query(
-      `DELETE FROM ${SCHEMA}.${TABLE} WHERE source_pack = $1`,
-      [packSlug],
-    );
+    const result = await this.conn.query(`DELETE FROM ${SCHEMA}.${TABLE} WHERE source_pack = $1`, [
+      packSlug,
+    ]);
     this.cache = null;
     return result.rowCount;
   }

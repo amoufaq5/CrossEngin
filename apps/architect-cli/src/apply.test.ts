@@ -4,7 +4,11 @@ import { parseArgs, type ParsedCommand } from "./cli.js";
 import { runApply } from "./apply.js";
 import type { RunContext } from "./commands.js";
 
-function buffers(env: NodeJS.ProcessEnv = {}): { ctx: RunContext; out: () => string; err: () => string } {
+function buffers(env: NodeJS.ProcessEnv = {}): {
+  ctx: RunContext;
+  out: () => string;
+  err: () => string;
+} {
   const out: string[] = [];
   const err: string[] = [];
   const ctx: RunContext = {
@@ -53,31 +57,23 @@ describe("runApply --dry-run", () => {
 describe("runApply --dry-run --pack", () => {
   it("emits pack DDL after the meta-schema in human mode", async () => {
     const { ctx, out } = buffers();
-    const code = await runApply(
-      parsed("apply", "--dry-run", "--pack=operate-erp/core"),
-      ctx,
-    );
+    const code = await runApply(parsed("apply", "--dry-run", "--pack=operate-erp/core"), ctx);
     expect(code).toBe(0);
     const output = out();
     expect(output).toContain("CREATE SCHEMA");
-    expect(output).toContain("CREATE TABLE \"public\".\"account\"");
-    expect(output).toContain("CREATE TABLE \"public\".\"invoice\"");
+    expect(output).toContain('CREATE TABLE "public"."account"');
+    expect(output).toContain('CREATE TABLE "public"."invoice"');
     expect(output).toContain("pack 'operate-erp/core'");
   });
 
   it("respects --pack-schema for entity table placement", async () => {
     const { ctx, out } = buffers();
     const code = await runApply(
-      parsed(
-        "apply",
-        "--dry-run",
-        "--pack=operate-erp/core",
-        "--pack-schema=tenant_data",
-      ),
+      parsed("apply", "--dry-run", "--pack=operate-erp/core", "--pack-schema=tenant_data"),
       ctx,
     );
     expect(code).toBe(0);
-    expect(out()).toContain("CREATE TABLE \"tenant_data\".\"account\"");
+    expect(out()).toContain('CREATE TABLE "tenant_data"."account"');
   });
 
   it("returns exit 2 for an unknown --pack slug", async () => {
@@ -105,9 +101,7 @@ describe("runApply --dry-run --pack", () => {
     expect(result.pack?.slug).toBe("operate-erp/core");
     expect(result.pack?.schema).toBe("public");
     expect(result.packStatementCount).toBeGreaterThan(0);
-    expect(result.statementCount).toBe(
-      result.metaStatementCount + result.packStatementCount,
-    );
+    expect(result.statementCount).toBe(result.metaStatementCount + result.packStatementCount);
     expect(result.availablePacks).toContain("operate-erp/core");
   });
 

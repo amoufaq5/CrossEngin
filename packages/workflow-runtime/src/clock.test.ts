@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  CountingIdGenerator,
-  FixedClock,
-  RandomIdGenerator,
-  SystemClock,
-} from "./clock.js";
+import { CountingIdGenerator, FixedClock, RandomIdGenerator, SystemClock } from "./clock.js";
 
 describe("SystemClock", () => {
   it("returns a recent Date from now()", () => {

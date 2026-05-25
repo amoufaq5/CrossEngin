@@ -117,5 +117,7 @@ export interface AnomalyAlertInput {
 export const HOURLY_RUNAWAY_THRESHOLD_DOLLARS = 1_000;
 
 export function isCostRunaway(input: AnomalyAlertInput): boolean {
-  return input.hourlyDollarsUsed >= (input.hourlyThresholdDollars ?? HOURLY_RUNAWAY_THRESHOLD_DOLLARS);
+  return (
+    input.hourlyDollarsUsed >= (input.hourlyThresholdDollars ?? HOURLY_RUNAWAY_THRESHOLD_DOLLARS)
+  );
 }

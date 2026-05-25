@@ -209,9 +209,9 @@ describe("BedrockProvider — guardrailConfig threading (M2.9.8)", () => {
       tenantId: "ten-1",
       sessionId: "ses-1",
     });
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as {
+      guardrailConfig?: { guardrailIdentifier: string };
+    };
     expect(body.guardrailConfig).toEqual({
       guardrailIdentifier: "gr12345",
       guardrailVersion: "DRAFT",
@@ -242,9 +242,10 @@ describe("BedrockProvider — guardrailConfig threading (M2.9.8)", () => {
       tenantId: "ten-1",
       sessionId: "ses-1",
     });
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<
+      string,
+      unknown
+    >;
     expect("guardrailConfig" in body).toBe(false);
   });
 });
@@ -295,9 +296,9 @@ describe("BedrockProvider — completeNonStreamingWithGuardrail per-request over
       guardrailIdentifier: "override01",
       guardrailVersion: "2",
     });
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as { guardrailConfig?: { guardrailIdentifier: string; guardrailVersion: string } };
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as {
+      guardrailConfig?: { guardrailIdentifier: string; guardrailVersion: string };
+    };
     expect(body.guardrailConfig).toEqual({
       guardrailIdentifier: "override01",
       guardrailVersion: "2",
@@ -317,9 +318,10 @@ describe("BedrockProvider — completeNonStreamingWithGuardrail per-request over
       clock: () => FIXED_DATE,
     });
     await provider.completeNonStreamingWithGuardrail(baseReq(), null);
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<
+      string,
+      unknown
+    >;
     expect("guardrailConfig" in body).toBe(false);
   });
 
@@ -336,9 +338,9 @@ describe("BedrockProvider — completeNonStreamingWithGuardrail per-request over
       clock: () => FIXED_DATE,
     });
     await provider.completeNonStreamingWithGuardrail(baseReq(), undefined);
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as {
+      guardrailConfig?: { guardrailIdentifier: string };
+    };
     expect(body.guardrailConfig?.guardrailIdentifier).toBe("default01");
   });
 
@@ -355,9 +357,9 @@ describe("BedrockProvider — completeNonStreamingWithGuardrail per-request over
       clock: () => FIXED_DATE,
     });
     await provider.completeNonStreamingWithGuardrail(baseReq());
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as {
+      guardrailConfig?: { guardrailIdentifier: string };
+    };
     expect(body.guardrailConfig?.guardrailIdentifier).toBe("default01");
   });
 
@@ -390,9 +392,9 @@ describe("BedrockProvider — completeNonStreamingWithGuardrail per-request over
       guardrailIdentifier: "perreq01",
       guardrailVersion: "DRAFT",
     });
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as {
+      guardrailConfig?: { guardrailIdentifier: string };
+    };
     expect(body.guardrailConfig?.guardrailIdentifier).toBe("perreq01");
   });
 
@@ -409,9 +411,9 @@ describe("BedrockProvider — completeNonStreamingWithGuardrail per-request over
       clock: () => FIXED_DATE,
     });
     await provider.completeNonStreaming(baseReq());
-    const body = JSON.parse(
-      new TextDecoder().decode(captures[0]!.init!.body),
-    ) as { guardrailConfig?: { guardrailIdentifier: string } };
+    const body = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as {
+      guardrailConfig?: { guardrailIdentifier: string };
+    };
     expect(body.guardrailConfig?.guardrailIdentifier).toBe("default01");
   });
 });
@@ -455,9 +457,7 @@ describe("BedrockProvider — embed (Titan path)", () => {
     });
     expect(captures).toHaveLength(2);
     for (const c of captures) {
-      expect(c.url).toContain(
-        "/model/amazon.titan-embed-text-v2%3A0/invoke",
-      );
+      expect(c.url).toContain("/model/amazon.titan-embed-text-v2%3A0/invoke");
       expect(c.init?.headers["accept"]).toBe("application/json");
     }
     expect(result.vectors).toHaveLength(2);
@@ -467,15 +467,11 @@ describe("BedrockProvider — embed (Titan path)", () => {
     expect(result.model).toBe("amazon.titan-embed-text-v2:0");
     expect(result.usage.inputTokens).toBe(9);
     expect(result.usage.outputTokens).toBe(0);
-    expect(result.usage.cost).toBe(
-      Number(((9 * 0.02) / 1_000_000).toFixed(6)),
-    );
+    expect(result.usage.cost).toBe(Number(((9 * 0.02) / 1_000_000).toFixed(6)));
   });
 
   it("sends inputText + dimensions + normalize for titan-embed-text-v2", async () => {
-    const { fetch, captures } = buildTitanFetch([
-      { embedding: [0.1], inputTextTokenCount: 1 },
-    ]);
+    const { fetch, captures } = buildTitanFetch([{ embedding: [0.1], inputTextTokenCount: 1 }]);
     const provider = new BedrockProvider({
       accessKeyId: "AKIDEXAMPLE",
       secretAccessKey: "secret/secret",
@@ -489,7 +485,10 @@ describe("BedrockProvider — embed (Titan path)", () => {
       sessionId: "s",
       texts: ["just one"],
     });
-    const sentBody = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<string, unknown>;
+    const sentBody = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<
+      string,
+      unknown
+    >;
     expect(sentBody["inputText"]).toBe("just one");
     expect(sentBody["dimensions"]).toBe(512);
     expect(sentBody["normalize"]).toBe(true);
@@ -512,7 +511,10 @@ describe("BedrockProvider — embed (Titan path)", () => {
       sessionId: "s",
       texts: ["legacy"],
     });
-    const sentBody = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<string, unknown>;
+    const sentBody = JSON.parse(new TextDecoder().decode(captures[0]!.init!.body)) as Record<
+      string,
+      unknown
+    >;
     expect(sentBody["inputText"]).toBe("legacy");
     expect(sentBody).not.toHaveProperty("dimensions");
     expect(sentBody).not.toHaveProperty("normalize");
@@ -531,7 +533,10 @@ describe("BedrockProvider — embed (Cohere path)", () => {
         capture,
         text: JSON.stringify({
           id: "abc",
-          embeddings: [[0.1, 0.2], [0.3, 0.4]],
+          embeddings: [
+            [0.1, 0.2],
+            [0.3, 0.4],
+          ],
           texts: ["a", "b"],
           response_type: "embeddings_floats",
           meta: { billed_units: { input_tokens: 7 } },
@@ -544,16 +549,17 @@ describe("BedrockProvider — embed (Cohere path)", () => {
       sessionId: "s",
       texts: ["a", "b"],
     });
-    expect(capture.url).toContain(
-      "/model/cohere.embed-english-v3/invoke",
-    );
+    expect(capture.url).toContain("/model/cohere.embed-english-v3/invoke");
     const sentBody = JSON.parse(new TextDecoder().decode(capture.init!.body)) as {
       texts: string[];
       input_type: string;
     };
     expect(sentBody.texts).toEqual(["a", "b"]);
     expect(sentBody.input_type).toBe("search_document");
-    expect(result.vectors).toEqual([[0.1, 0.2], [0.3, 0.4]]);
+    expect(result.vectors).toEqual([
+      [0.1, 0.2],
+      [0.3, 0.4],
+    ]);
     expect(result.dim).toBe(2);
     expect(result.model).toBe("cohere.embed-english-v3");
     expect(result.usage.inputTokens).toBe(7);
@@ -691,8 +697,7 @@ describe("BedrockProvider — titanConcurrency (M2.9.6)", () => {
       return {
         ok: true,
         status: 200,
-        text: async () =>
-          JSON.stringify({ embedding: [0.1], inputTextTokenCount: 1 }),
+        text: async () => JSON.stringify({ embedding: [0.1], inputTextTokenCount: 1 }),
         arrayBuffer: async () => new ArrayBuffer(0),
         body: null,
       };
@@ -848,9 +853,7 @@ describe("BedrockProvider — embedMultimodal (M2.9.7)", () => {
       }),
     });
     const result = await provider.embedMultimodal({ text: "a tabby cat" });
-    expect(capture.url).toContain(
-      "/model/amazon.titan-embed-image-v1/invoke",
-    );
+    expect(capture.url).toContain("/model/amazon.titan-embed-image-v1/invoke");
     expect(capture.init?.headers["accept"]).toBe("application/json");
     expect(result.vector).toEqual([0.1, 0.2, 0.3]);
     expect(result.dim).toBe(3);
@@ -930,9 +933,9 @@ describe("BedrockProvider — embedMultimodal (M2.9.7)", () => {
 
   it("rejects invalid dimensions at request-build time", async () => {
     const provider = build({ fetch: buildFetch({}) });
-    await expect(
-      provider.embedMultimodal({ text: "x", dimensions: 512 }),
-    ).rejects.toThrow(/dimensions must be one of/);
+    await expect(provider.embedMultimodal({ text: "x", dimensions: 512 })).rejects.toThrow(
+      /dimensions must be one of/,
+    );
   });
 
   it("rejects neither-text-nor-image input", async () => {
@@ -952,9 +955,9 @@ describe("BedrockProvider — embedMultimodal (M2.9.7)", () => {
         }),
       }),
     });
-    await expect(
-      provider.embedMultimodal({ imageBase64: "blocked" }),
-    ).rejects.toMatchObject({ kind: "model_stream_error" });
+    await expect(provider.embedMultimodal({ imageBase64: "blocked" })).rejects.toMatchObject({
+      kind: "model_stream_error",
+    });
   });
 
   it("rejects unknown model strings as multimodal", async () => {
@@ -1096,9 +1099,9 @@ describe("BedrockProvider — error handling", () => {
 
   it("rejects unknown model names with invalid_request_error", async () => {
     const provider = build({ fetch: buildFetch({}) });
-    await expect(
-      consumeStream(provider, baseReq({ model: "gpt-4o" })),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(consumeStream(provider, baseReq({ model: "gpt-4o" }))).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
   });
 
   it("throws BedrockError when response body is null", async () => {
@@ -1151,8 +1154,7 @@ describe("BedrockProvider — listBatches (M2.X.5.aa.z.3)", () => {
 
   function sampleJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234",
       jobName: "tenant-x-batch",
       modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
       roleArn: "arn:aws:iam::123456789012:role/BatchRole",
@@ -1235,9 +1237,9 @@ describe("BedrockProvider — listBatches (M2.X.5.aa.z.3)", () => {
         };
       },
     });
-    await expect(
-      provider.listBatches({ maxResults: 9999 }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.listBatches({ maxResults: 9999 })).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -1291,8 +1293,7 @@ describe("BedrockProvider — listBatches (M2.X.5.aa.z.3)", () => {
 describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
   function buildDetailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
       jobName: "tenant-x-detail",
       modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
       roleArn: "arn:aws:iam::123456789012:role/Batch",
@@ -1321,8 +1322,7 @@ describe("BedrockProvider — getBatch (M2.X.5.aa.z.4)", () => {
     const provider = build({
       fetch: buildFetch({ capture, text: buildDetailBody() }),
     });
-    const arn =
-      "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh";
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh";
     await provider.getBatch(arn);
     expect(capture.url).toContain("/model-invocation-jobs/");
     expect(capture.url).toContain("%3A");
@@ -1438,21 +1438,19 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
       fetch: buildFetch({
         capture,
         text: JSON.stringify({
-          jobArn:
-            "arn:aws:bedrock:us-east-1:123:model-customization-job/abc",
+          jobArn: "arn:aws:bedrock:us-east-1:123:model-customization-job/abc",
         }),
       }),
     });
     const out = await provider.createModelCustomizationJob(minimalCreate());
-    expect(capture.url).toBe(
-      "https://bedrock.us-east-1.amazonaws.com/model-customization-jobs",
-    );
+    expect(capture.url).toBe("https://bedrock.us-east-1.amazonaws.com/model-customization-jobs");
     expect(capture.init?.method).toBe("POST");
     expect(capture.init?.headers["content-type"]).toBe("application/json");
     expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
-    const sentBody = JSON.parse(
-      new TextDecoder().decode(capture.init?.body),
-    ) as Record<string, unknown>;
+    const sentBody = JSON.parse(new TextDecoder().decode(capture.init?.body)) as Record<
+      string,
+      unknown
+    >;
     expect(sentBody["jobName"]).toBe("tenant-x-haiku-finetune-001");
     expect(sentBody["customModelName"]).toBe("tenant-x-haiku-v1");
     expect(sentBody["baseModelIdentifier"]).toMatch(/claude-3-haiku/);
@@ -1515,8 +1513,7 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
       fetch: buildFetch({
         capture,
         text: JSON.stringify({
-          jobArn:
-            "arn:aws:bedrock:us-east-1:123:model-customization-job/abc",
+          jobArn: "arn:aws:bedrock:us-east-1:123:model-customization-job/abc",
         }),
       }),
     });
@@ -1528,9 +1525,10 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
       jobTags: [{ key: "purpose", value: "claims" }],
       vpcConfig: { subnetIds: ["s-1"], securityGroupIds: ["sg-1"] },
     });
-    const sent = JSON.parse(
-      new TextDecoder().decode(capture.init?.body),
-    ) as Record<string, unknown>;
+    const sent = JSON.parse(new TextDecoder().decode(capture.init?.body)) as Record<
+      string,
+      unknown
+    >;
     expect(sent["clientRequestToken"]).toBe("req-uuid-abc");
     expect(sent["customizationType"]).toBe("FINE_TUNING");
     expect(sent["customModelKmsKeyId"]).toMatch(/^arn:aws:kms:/);
@@ -1543,8 +1541,7 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
       fetch: buildFetch({
         capture,
         text: JSON.stringify({
-          jobArn:
-            "arn:aws:bedrock:us-east-1:123:model-customization-job/dst",
+          jobArn: "arn:aws:bedrock:us-east-1:123:model-customization-job/dst",
         }),
       }),
     });
@@ -1561,12 +1558,18 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
         },
       },
     });
-    const sent = JSON.parse(
-      new TextDecoder().decode(capture.init?.body),
-    ) as { customizationConfig: { distillationConfig: { teacherModelConfig: { teacherModelIdentifier: string; maxResponseLengthForInference: number } } } };
+    const sent = JSON.parse(new TextDecoder().decode(capture.init?.body)) as {
+      customizationConfig: {
+        distillationConfig: {
+          teacherModelConfig: {
+            teacherModelIdentifier: string;
+            maxResponseLengthForInference: number;
+          };
+        };
+      };
+    };
     expect(
-      sent.customizationConfig.distillationConfig.teacherModelConfig
-        .maxResponseLengthForInference,
+      sent.customizationConfig.distillationConfig.teacherModelConfig.maxResponseLengthForInference,
     ).toBe(4096);
   });
 
@@ -1581,9 +1584,7 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
         }),
       }),
     });
-    await expect(
-      provider.createModelCustomizationJob(minimalCreate()),
-    ).rejects.toMatchObject({
+    await expect(provider.createModelCustomizationJob(minimalCreate())).rejects.toMatchObject({
       kind: "conflict_error",
       status: 409,
     });
@@ -1600,36 +1601,37 @@ describe("BedrockProvider — createModelCustomizationJob (M2.X.5.aa.z.20)", () 
         }),
       }),
     });
-    await expect(
-      provider.createModelCustomizationJob(minimalCreate()),
-    ).rejects.toMatchObject({ kind: "invalid_request_error", status: 400 });
+    await expect(provider.createModelCustomizationJob(minimalCreate())).rejects.toMatchObject({
+      kind: "invalid_request_error",
+      status: 400,
+    });
   });
 
   it("throws api_error when response has no jobArn", async () => {
     const provider = build({
       fetch: buildFetch({ text: JSON.stringify({ ok: true }) }),
     });
-    await expect(
-      provider.createModelCustomizationJob(minimalCreate()),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.createModelCustomizationJob(minimalCreate())).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("throws api_error on non-JSON body", async () => {
     const provider = build({
       fetch: buildFetch({ text: "<html>oops</html>" }),
     });
-    await expect(
-      provider.createModelCustomizationJob(minimalCreate()),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.createModelCustomizationJob(minimalCreate())).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.createModelCustomizationJob(minimalCreate()),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.createModelCustomizationJob(minimalCreate())).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -1649,8 +1651,7 @@ describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () =>
   it("URI-encodes ARN colons in the path", async () => {
     const capture: FetchCapture = { url: null, init: null };
     const provider = build({ fetch: buildFetch({ capture, text: "" }) });
-    const arn =
-      "arn:aws:bedrock:us-east-1:123:model-customization-job/abc";
+    const arn = "arn:aws:bedrock:us-east-1:123:model-customization-job/abc";
     await provider.stopModelCustomizationJob(arn);
     expect(capture.url).toContain("%3A");
     expect(capture.url).toContain("/stop");
@@ -1695,9 +1696,7 @@ describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () =>
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "{}" }),
     });
-    await expect(
-      provider.stopModelCustomizationJob("abc123"),
-    ).resolves.toBeUndefined();
+    await expect(provider.stopModelCustomizationJob("abc123")).resolves.toBeUndefined();
   });
 
   it("propagates 404 as not_found_error", async () => {
@@ -1711,9 +1710,10 @@ describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () =>
         }),
       }),
     });
-    await expect(
-      provider.stopModelCustomizationJob("abc123"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.stopModelCustomizationJob("abc123")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("classifies 409 ConflictException as conflict_error (terminal-state job)", async () => {
@@ -1727,9 +1727,7 @@ describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () =>
         }),
       }),
     });
-    await expect(
-      provider.stopModelCustomizationJob("abc123"),
-    ).rejects.toMatchObject({
+    await expect(provider.stopModelCustomizationJob("abc123")).rejects.toMatchObject({
       kind: "conflict_error",
       status: 409,
       code: "ConflictException",
@@ -1744,9 +1742,10 @@ describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () =>
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.stopModelCustomizationJob("abc123"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.stopModelCustomizationJob("abc123")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 429 as rate_limit_error", async () => {
@@ -1760,26 +1759,26 @@ describe("BedrockProvider — stopModelCustomizationJob (M2.X.5.aa.z.19)", () =>
         }),
       }),
     });
-    await expect(
-      provider.stopModelCustomizationJob("abc123"),
-    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+    await expect(provider.stopModelCustomizationJob("abc123")).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.stopModelCustomizationJob("abc123"),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.stopModelCustomizationJob("abc123")).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
 describe("BedrockProvider — getModelCustomizationJob (M2.X.5.aa.z.18)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
       jobName: "tenant-x-haiku-finetune",
       outputModelName: "tenant-x-haiku-v1",
       roleArn: "arn:aws:iam::123456789012:role/BedrockFineTuneRole",
@@ -1811,8 +1810,7 @@ describe("BedrockProvider — getModelCustomizationJob (M2.X.5.aa.z.18)", () => 
     const provider = build({
       fetch: buildFetch({ capture, text: detailBody() }),
     });
-    const arn =
-      "arn:aws:bedrock:us-east-1:123:model-customization-job/abc";
+    const arn = "arn:aws:bedrock:us-east-1:123:model-customization-job/abc";
     await provider.getModelCustomizationJob(arn);
     expect(capture.url).toContain("%3A");
   });
@@ -1914,9 +1912,10 @@ describe("BedrockProvider — getModelCustomizationJob (M2.X.5.aa.z.18)", () => 
         }),
       }),
     });
-    await expect(
-      provider.getModelCustomizationJob("abc"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getModelCustomizationJob("abc")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -1927,25 +1926,26 @@ describe("BedrockProvider — getModelCustomizationJob (M2.X.5.aa.z.18)", () => 
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.getModelCustomizationJob("abc"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.getModelCustomizationJob("abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("throws api_error on non-JSON body", async () => {
     const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
-    await expect(
-      provider.getModelCustomizationJob("abc"),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.getModelCustomizationJob("abc")).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.getModelCustomizationJob("abc"),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.getModelCustomizationJob("abc")).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -1961,12 +1961,9 @@ describe("BedrockProvider — listModelCustomizationJobs (M2.X.5.aa.z.17)", () =
     return JSON.stringify(body);
   }
 
-  function sampleJob(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sampleJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
       jobName: "tenant-x-haiku-finetune",
       baseModelArn:
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
@@ -2032,12 +2029,8 @@ describe("BedrockProvider — listModelCustomizationJobs (M2.X.5.aa.z.17)", () =
     const out = await provider.listModelCustomizationJobs();
     expect(out.modelCustomizationJobSummaries.length).toBe(1);
     expect(out.modelCustomizationJobSummaries[0]!.status).toBe("Completed");
-    expect(out.modelCustomizationJobSummaries[0]!.customModelName).toBe(
-      "tenant-x-haiku-finetune",
-    );
-    expect(out.modelCustomizationJobSummaries[0]!.customizationType).toBe(
-      "FINE_TUNING",
-    );
+    expect(out.modelCustomizationJobSummaries[0]!.customModelName).toBe("tenant-x-haiku-finetune");
+    expect(out.modelCustomizationJobSummaries[0]!.customizationType).toBe("FINE_TUNING");
     expect(out.nextToken).toBe("page-2");
   });
 
@@ -2071,33 +2064,33 @@ describe("BedrockProvider — listModelCustomizationJobs (M2.X.5.aa.z.17)", () =
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.listModelCustomizationJobs(),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.listModelCustomizationJobs()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("throws api_error on non-JSON body", async () => {
     const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
-    await expect(
-      provider.listModelCustomizationJobs(),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.listModelCustomizationJobs()).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.listModelCustomizationJobs(),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.listModelCustomizationJobs()).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
 describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
       jobName: "import-tenant-x-2026-04-15",
       roleArn: "arn:aws:iam::123456789012:role/BedrockImportRole",
       status: "Completed",
@@ -2106,8 +2099,7 @@ describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
         s3DataSource: { s3Uri: "s3://tenant-x-artifacts/llama3/" },
       },
       importedModelName: "tenant-x-llama3-finetune",
-      importedModelArn:
-        "arn:aws:bedrock:us-east-1:123:imported-model/xyz789",
+      importedModelArn: "arn:aws:bedrock:us-east-1:123:imported-model/xyz789",
       endTime: "2026-04-15T13:00:00Z",
       ...overrides,
     });
@@ -2131,8 +2123,7 @@ describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
     const provider = build({
       fetch: buildFetch({ capture, text: detailBody() }),
     });
-    const arn =
-      "arn:aws:bedrock:us-east-1:123:model-import-job/abc123def456";
+    const arn = "arn:aws:bedrock:us-east-1:123:model-import-job/abc123def456";
     await provider.getModelImportJob(arn);
     expect(capture.url).toContain("%3A");
   });
@@ -2172,9 +2163,7 @@ describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
     const detail = await provider.getModelImportJob("abc123def456");
     expect(detail.status).toBe("Completed");
     expect(detail.importedModelArn).toMatch(/imported-model/);
-    expect(detail.modelDataSource.s3DataSource.s3Uri).toBe(
-      "s3://tenant-x-artifacts/llama3/",
-    );
+    expect(detail.modelDataSource.s3DataSource.s3Uri).toBe("s3://tenant-x-artifacts/llama3/");
     expect(detail.importedModelKmsKeyArn).toMatch(/^arn:aws:kms:/);
     expect(detail.vpcConfig?.subnetIds).toEqual(["subnet-aaa"]);
     expect(detail.vpcConfig?.securityGroupIds.length).toBe(2);
@@ -2205,9 +2194,10 @@ describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
         }),
       }),
     });
-    await expect(
-      provider.getModelImportJob("abc123def456"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getModelImportJob("abc123def456")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -2218,25 +2208,26 @@ describe("BedrockProvider — getModelImportJob (M2.X.5.aa.z.16)", () => {
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.getModelImportJob("abc123def456"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.getModelImportJob("abc123def456")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("throws api_error on non-JSON body", async () => {
     const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
-    await expect(
-      provider.getModelImportJob("abc123def456"),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.getModelImportJob("abc123def456")).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.getModelImportJob("abc123def456"),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.getModelImportJob("abc123def456")).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -2252,19 +2243,15 @@ describe("BedrockProvider — listModelImportJobs (M2.X.5.aa.z.15)", () => {
     return JSON.stringify(body);
   }
 
-  function sampleJob(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sampleJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-import-job/abc123def456",
       jobName: "import-tenant-x-2026-04-15",
       status: "Completed",
       creationTime: "2026-04-15T12:00:00Z",
       lastModifiedTime: "2026-04-15T13:00:00Z",
       endTime: "2026-04-15T13:00:00Z",
-      importedModelArn:
-        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc",
+      importedModelArn: "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc",
       importedModelName: "tenant-x-llama3-finetune",
       ...overrides,
     };
@@ -2320,9 +2307,7 @@ describe("BedrockProvider — listModelImportJobs (M2.X.5.aa.z.15)", () => {
     const out = await provider.listModelImportJobs();
     expect(out.modelImportJobSummaries.length).toBe(1);
     expect(out.modelImportJobSummaries[0]!.status).toBe("Completed");
-    expect(out.modelImportJobSummaries[0]!.importedModelName).toBe(
-      "tenant-x-llama3-finetune",
-    );
+    expect(out.modelImportJobSummaries[0]!.importedModelName).toBe("tenant-x-llama3-finetune");
     expect(out.nextToken).toBe("page-2");
   });
 
@@ -2383,8 +2368,7 @@ describe("BedrockProvider — getCustomModel (M2.X.5.aa.z.14)", () => {
       modelArn:
         "arn:aws:bedrock:us-east-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc",
       modelName: "tenant-x-claude-finetune",
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/xyz",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/xyz",
       baseModelArn:
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
       creationTime: "2026-04-15T12:00:00Z",
@@ -2457,9 +2441,7 @@ describe("BedrockProvider — getCustomModel (M2.X.5.aa.z.14)", () => {
     expect(detail.jobName).toBe("ft-001");
     expect(detail.customizationType).toBe("FINE_TUNING");
     expect(detail.hyperParameters?.["epochCount"]).toBe("10");
-    expect(detail.validationDataConfig?.validators[0]!.s3Uri).toBe(
-      "s3://tenant-x-data/val/",
-    );
+    expect(detail.validationDataConfig?.validators[0]!.s3Uri).toBe("s3://tenant-x-data/val/");
     expect(detail.trainingMetrics?.trainingLoss).toBe(0.42);
     expect(detail.validationMetrics?.[0]!.validationLoss).toBe(0.51);
   });
@@ -2483,8 +2465,7 @@ describe("BedrockProvider — getCustomModel (M2.X.5.aa.z.14)", () => {
     });
     const detail = await provider.getCustomModel("abc");
     expect(
-      detail.customizationConfig?.distillationConfig?.teacherModelConfig
-        .teacherModelIdentifier,
+      detail.customizationConfig?.distillationConfig?.teacherModelConfig.teacherModelIdentifier,
     ).toMatch(/claude-3-5-sonnet/);
     expect(
       detail.customizationConfig?.distillationConfig?.teacherModelConfig
@@ -2503,9 +2484,10 @@ describe("BedrockProvider — getCustomModel (M2.X.5.aa.z.14)", () => {
         }),
       }),
     });
-    await expect(
-      provider.getCustomModel("not-a-real-model"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getCustomModel("not-a-real-model")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -2549,9 +2531,7 @@ describe("BedrockProvider — listCustomModels (M2.X.5.aa.z.13)", () => {
     return JSON.stringify(body);
   }
 
-  function sampleCustom(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sampleCustom(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       modelArn:
         "arn:aws:bedrock:us-east-1:123456789012:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc",
@@ -2678,15 +2658,13 @@ describe("BedrockProvider — listCustomModels (M2.X.5.aa.z.13)", () => {
 describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
   function detailBody(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
-      modelArn:
-        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
+      modelArn: "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
       modelName: "tenant-x-llama3-finetune",
       creationTime: "2026-04-15T12:00:00Z",
       instructSupported: true,
       modelArchitecture: "LLAMA3",
       jobName: "import-tenant-x-2026-04-15",
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-import-job/xyz789",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-import-job/xyz789",
       modelDataSource: {
         s3DataSource: { s3Uri: "s3://tenant-x-artifacts/llama3/" },
       },
@@ -2712,8 +2690,7 @@ describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
     const provider = build({
       fetch: buildFetch({ capture, text: detailBody() }),
     });
-    const arn =
-      "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456";
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456";
     await provider.getImportedModel(arn);
     expect(capture.url).toContain("%3A");
   });
@@ -2751,9 +2728,7 @@ describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
     expect(detail.instructSupported).toBe(true);
     expect(detail.modelArchitecture).toBe("LLAMA3");
     expect(detail.jobName).toBe("import-tenant-x-2026-04-15");
-    expect(detail.modelDataSource.s3DataSource.s3Uri).toBe(
-      "s3://tenant-x-artifacts/llama3/",
-    );
+    expect(detail.modelDataSource.s3DataSource.s3Uri).toBe("s3://tenant-x-artifacts/llama3/");
     expect(detail.modelKmsKeyArn).toMatch(/^arn:aws:kms:/);
   });
 
@@ -2768,9 +2743,10 @@ describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
         }),
       }),
     });
-    await expect(
-      provider.getImportedModel("not-a-real-model"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getImportedModel("not-a-real-model")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -2781,25 +2757,26 @@ describe("BedrockProvider — getImportedModel (M2.X.5.aa.z.12)", () => {
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.getImportedModel("abc123def456"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.getImportedModel("abc123def456")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("throws api_error on non-JSON body", async () => {
     const provider = build({ fetch: buildFetch({ text: "<html>oops</html>" }) });
-    await expect(
-      provider.getImportedModel("abc123def456"),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.getImportedModel("abc123def456")).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.getImportedModel("abc123def456"),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.getImportedModel("abc123def456")).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -2813,12 +2790,9 @@ describe("BedrockProvider — listImportedModels (M2.X.5.aa.z.11)", () => {
     return JSON.stringify(body);
   }
 
-  function sampleImportedModel(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sampleImportedModel(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      modelArn:
-        "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
+      modelArn: "arn:aws:bedrock:us-east-1:123456789012:imported-model/abc123def456",
       modelName: "tenant-x-llama3-finetune",
       creationTime: "2026-04-15T12:00:00Z",
       instructSupported: true,
@@ -2894,9 +2868,9 @@ describe("BedrockProvider — listImportedModels (M2.X.5.aa.z.11)", () => {
         };
       },
     });
-    await expect(
-      provider.listImportedModels({ nameContains: "" }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.listImportedModels({ nameContains: "" })).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -3034,9 +3008,10 @@ describe("BedrockProvider — getInferenceProfile (M2.X.5.aa.z.10)", () => {
         }),
       }),
     });
-    await expect(
-      provider.getInferenceProfile("not.a.real.profile"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getInferenceProfile("not.a.real.profile")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -3081,9 +3056,7 @@ describe("BedrockProvider — listInferenceProfiles (M2.X.5.aa.z.9)", () => {
     return JSON.stringify(body);
   }
 
-  function sampleProfile(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sampleProfile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       inferenceProfileId: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
       inferenceProfileName: "Claude 3.5 Sonnet (US)",
@@ -3147,9 +3120,7 @@ describe("BedrockProvider — listInferenceProfiles (M2.X.5.aa.z.9)", () => {
     const out = await provider.listInferenceProfiles();
     expect(out.inferenceProfileSummaries.length).toBe(1);
     expect(out.inferenceProfileSummaries[0]!.type).toBe("SYSTEM_DEFINED");
-    expect(out.inferenceProfileSummaries[0]!.models[0]!.modelArn).toMatch(
-      /claude-3-5-sonnet/,
-    );
+    expect(out.inferenceProfileSummaries[0]!.models[0]!.modelArn).toMatch(/claude-3-5-sonnet/);
     expect(out.nextToken).toBe("page-2");
   });
 
@@ -3228,9 +3199,7 @@ describe("BedrockProvider — getGuardrail (M2.X.5.aa.z.8)", () => {
       fetch: buildFetch({ capture, text: detailBody() }),
     });
     await provider.getGuardrail("gr12345");
-    expect(capture.url).toBe(
-      "https://bedrock.us-east-1.amazonaws.com/guardrails/gr12345",
-    );
+    expect(capture.url).toBe("https://bedrock.us-east-1.amazonaws.com/guardrails/gr12345");
     expect(capture.init?.method).toBe("GET");
     expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
   });
@@ -3285,9 +3254,7 @@ describe("BedrockProvider — getGuardrail (M2.X.5.aa.z.8)", () => {
           description: "PII redaction policy",
           kmsKeyArn: "arn:aws:kms:us-east-1:123:key/xyz",
           contentPolicy: {
-            filters: [
-              { type: "HATE", inputStrength: "HIGH", outputStrength: "MEDIUM" },
-            ],
+            filters: [{ type: "HATE", inputStrength: "HIGH", outputStrength: "MEDIUM" }],
           },
           sensitiveInformationPolicy: {
             piiEntities: [{ type: "EMAIL", action: "ANONYMIZE" }],
@@ -3302,9 +3269,7 @@ describe("BedrockProvider — getGuardrail (M2.X.5.aa.z.8)", () => {
     expect(detail.description).toBe("PII redaction policy");
     expect(detail.kmsKeyArn).toMatch(/^arn:aws:kms:/);
     expect(detail.contentPolicy?.filters[0]!.type).toBe("HATE");
-    expect(detail.sensitiveInformationPolicy?.piiEntities?.[0]!.action).toBe(
-      "ANONYMIZE",
-    );
+    expect(detail.sensitiveInformationPolicy?.piiEntities?.[0]!.action).toBe("ANONYMIZE");
     expect(detail.contextualGroundingPolicy?.filters[0]!.threshold).toBe(0.7);
   });
 
@@ -3368,9 +3333,7 @@ describe("BedrockProvider — listGuardrails (M2.X.5.aa.z.7)", () => {
     return JSON.stringify(body);
   }
 
-  function sampleGuardrail(
-    overrides: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function sampleGuardrail(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       id: "gr12345",
       arn: "arn:aws:bedrock:us-east-1:123456789012:guardrail/gr12345",
@@ -3445,9 +3408,9 @@ describe("BedrockProvider — listGuardrails (M2.X.5.aa.z.7)", () => {
         };
       },
     });
-    await expect(
-      provider.listGuardrails({ maxResults: 9999 }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.listGuardrails({ maxResults: 9999 })).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -3501,21 +3464,19 @@ describe("BedrockProvider — createBatch (M2.X.5.aa.z.6)", () => {
       fetch: buildFetch({
         capture,
         text: JSON.stringify({
-          jobArn:
-            "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/aaaa1111bbbb",
+          jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/aaaa1111bbbb",
         }),
       }),
     });
     const out = await provider.createBatch(minimalCreate());
-    expect(capture.url).toBe(
-      "https://bedrock.us-east-1.amazonaws.com/model-invocation-jobs",
-    );
+    expect(capture.url).toBe("https://bedrock.us-east-1.amazonaws.com/model-invocation-jobs");
     expect(capture.init?.method).toBe("POST");
     expect(capture.init?.headers["content-type"]).toBe("application/json");
     expect(capture.init?.headers["authorization"]).toMatch(/^AWS4-HMAC-SHA256 /);
-    const sentBody = JSON.parse(
-      new TextDecoder().decode(capture.init?.body),
-    ) as Record<string, unknown>;
+    const sentBody = JSON.parse(new TextDecoder().decode(capture.init?.body)) as Record<
+      string,
+      unknown
+    >;
     expect(sentBody["jobName"]).toBe("tenant-x-batch-0001");
     expect(sentBody["modelId"]).toBe("anthropic.claude-3-5-sonnet-20241022-v2:0");
     expect(out.jobArn).toMatch(/aaaa1111bbbb$/);
@@ -3567,8 +3528,7 @@ describe("BedrockProvider — createBatch (M2.X.5.aa.z.6)", () => {
       fetch: buildFetch({
         capture,
         text: JSON.stringify({
-          jobArn:
-            "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
+          jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh",
         }),
       }),
     });
@@ -3579,9 +3539,10 @@ describe("BedrockProvider — createBatch (M2.X.5.aa.z.6)", () => {
       timeoutDurationInHours: 48,
       vpcConfig: { subnetIds: ["s-1"], securityGroupIds: ["sg-1"] },
     });
-    const sentBody = JSON.parse(
-      new TextDecoder().decode(capture.init?.body),
-    ) as Record<string, unknown>;
+    const sentBody = JSON.parse(new TextDecoder().decode(capture.init?.body)) as Record<
+      string,
+      unknown
+    >;
     expect(sentBody["clientRequestToken"]).toBe("req-001-abc");
     expect(sentBody["tags"]).toEqual([{ key: "tenant", value: "x" }]);
     expect(sentBody["timeoutDurationInHours"]).toBe(48);
@@ -3670,8 +3631,7 @@ describe("BedrockProvider — stopBatch (M2.X.5.aa.z.5)", () => {
     const provider = build({
       fetch: buildFetch({ capture, text: "" }),
     });
-    const arn =
-      "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh";
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/abcd1234efgh";
     await provider.stopBatch(arn);
     expect(capture.url).toContain("%3A");
     expect(capture.url).toContain("/stop");
@@ -4184,9 +4144,7 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
     });
   }
 
-  function systemProfileJson(
-    id: string = "ip-system-1",
-  ): string {
+  function systemProfileJson(id: string = "ip-system-1"): string {
     return JSON.stringify({
       inferenceProfileId: id,
       inferenceProfileName: "anthropic.claude-3-sonnet",
@@ -4246,9 +4204,9 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         onGet: () => ({ ok: true, status: 200, text: systemProfileJson("ip-system-1") }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-system-1"),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.deleteInferenceProfile("ip-system-1")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(calls.length).toBe(1);
     expect(calls[0]?.method).toBe("GET");
   });
@@ -4260,12 +4218,8 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         onGet: () => ({ ok: true, status: 200, text: systemProfileJson("ip-system-1") }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-system-1"),
-    ).rejects.toThrow(/SYSTEM_DEFINED/);
-    await expect(
-      provider.deleteInferenceProfile("ip-system-1"),
-    ).rejects.toThrow(/ip-system-1/);
+    await expect(provider.deleteInferenceProfile("ip-system-1")).rejects.toThrow(/SYSTEM_DEFINED/);
+    await expect(provider.deleteInferenceProfile("ip-system-1")).rejects.toThrow(/ip-system-1/);
   });
 
   it("URI-encodes ARN colons on both GET and DELETE", async () => {
@@ -4327,9 +4281,10 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-missing"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.deleteInferenceProfile("ip-missing")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 from the pre-flight GET (no GetInferenceProfile permission)", async () => {
@@ -4340,9 +4295,10 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-application-1"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.deleteInferenceProfile("ip-application-1")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 404 from the DELETE (race: profile deleted between GET and DELETE)", async () => {
@@ -4361,9 +4317,10 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-application-1"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.deleteInferenceProfile("ip-application-1")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
     expect(calls.length).toBe(2);
   });
 
@@ -4379,9 +4336,10 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-application-1"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.deleteInferenceProfile("ip-application-1")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 429 from the DELETE", async () => {
@@ -4399,9 +4357,10 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-application-1"),
-    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+    await expect(provider.deleteInferenceProfile("ip-application-1")).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
   });
 
   it("classifies 409 ConflictException on DELETE as conflict_error (profile in use)", async () => {
@@ -4419,9 +4378,7 @@ describe("BedrockProvider — deleteInferenceProfile (M2.X.5.aa.z.22)", () => {
         }),
       }),
     });
-    await expect(
-      provider.deleteInferenceProfile("ip-application-1"),
-    ).rejects.toMatchObject({
+    await expect(provider.deleteInferenceProfile("ip-application-1")).rejects.toMatchObject({
       kind: "conflict_error",
       status: 409,
       code: "ConflictException",
@@ -4458,8 +4415,7 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
       ok: true,
       status: 201,
       text: JSON.stringify({
-        inferenceProfileArn:
-          "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc",
+        inferenceProfileArn: "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc",
         status: "ACTIVE",
       }),
     });
@@ -4489,9 +4445,7 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
   it("returns the parsed inferenceProfileArn + status on success", async () => {
     const provider = build({ fetch: buildSuccessFetch() });
     const result = await provider.createInferenceProfile(validInput());
-    expect(result.inferenceProfileArn).toContain(
-      "application-inference-profile/abc",
-    );
+    expect(result.inferenceProfileArn).toContain("application-inference-profile/abc");
     expect(result.status).toBe("ACTIVE");
   });
 
@@ -4559,9 +4513,7 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
         }),
       }),
     });
-    await expect(
-      provider.createInferenceProfile(validInput()),
-    ).rejects.toMatchObject({
+    await expect(provider.createInferenceProfile(validInput())).rejects.toMatchObject({
       kind: "conflict_error",
       status: 409,
       code: "ConflictException",
@@ -4579,9 +4531,10 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
         }),
       }),
     });
-    await expect(
-      provider.createInferenceProfile(validInput()),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.createInferenceProfile(validInput())).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -4592,9 +4545,10 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.createInferenceProfile(validInput()),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.createInferenceProfile(validInput())).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 429 as rate_limit_error", async () => {
@@ -4608,9 +4562,10 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
         }),
       }),
     });
-    await expect(
-      provider.createInferenceProfile(validInput()),
-    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+    await expect(provider.createInferenceProfile(validInput())).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
   });
 
   it("threads description + clientRequestToken + tags into the body when provided", async () => {
@@ -4633,24 +4588,23 @@ describe("BedrockProvider — createInferenceProfile (M2.X.5.aa.z.23)", () => {
     const provider = build({
       fetch: buildFetch({ ok: true, status: 201, text: "not json" }),
     });
-    await expect(
-      provider.createInferenceProfile(validInput()),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.createInferenceProfile(validInput())).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.createInferenceProfile(validInput()),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.createInferenceProfile(validInput())).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
 describe("BedrockProvider — tagResource (M2.X.5.aa.z.24)", () => {
-  const VALID_ARN =
-    "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
+  const VALID_ARN = "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
 
   it("POSTs to /tags with resourceARN in the query string", async () => {
     const capture: FetchCapture = { url: null, init: null };
@@ -4822,9 +4776,9 @@ describe("BedrockProvider — untagResource (M2.X.5.aa.z.24)", () => {
         };
       },
     });
-    await expect(
-      provider.untagResource({ resourceArn: "", tagKeys: ["k"] }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.untagResource({ resourceArn: "", tagKeys: ["k"] })).rejects.toMatchObject(
+      { kind: "invalid_request_error" },
+    );
     expect(called).toBe(0);
   });
 
@@ -4920,9 +4874,9 @@ describe("BedrockProvider — listTagsForResource (M2.X.5.aa.z.24)", () => {
         };
       },
     });
-    await expect(
-      provider.listTagsForResource({ resourceArn: "" }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.listTagsForResource({ resourceArn: "" })).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -4937,27 +4891,28 @@ describe("BedrockProvider — listTagsForResource (M2.X.5.aa.z.24)", () => {
         }),
       }),
     });
-    await expect(
-      provider.listTagsForResource({ resourceArn: VALID_ARN }),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.listTagsForResource({ resourceArn: VALID_ARN })).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates parse failures as api_error", async () => {
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
     });
-    await expect(
-      provider.listTagsForResource({ resourceArn: VALID_ARN }),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.listTagsForResource({ resourceArn: VALID_ARN })).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.listTagsForResource({ resourceArn: VALID_ARN }),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.listTagsForResource({ resourceArn: VALID_ARN })).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -5118,9 +5073,9 @@ describe("BedrockProvider — updateInferenceProfile (M2.X.5.aa.z.25)", () => {
         };
       },
     });
-    await expect(
-      provider.updateInferenceProfile("ip-application-1", {}),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.updateInferenceProfile("ip-application-1", {})).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -5295,9 +5250,7 @@ describe("BedrockProvider — updateInferenceProfile (M2.X.5.aa.z.25)", () => {
 });
 
 describe("BedrockProvider — getProvisionedModelThroughput (M2.X.5.aa.z.26)", () => {
-  function detailJson(
-    overrides: Record<string, unknown> = {},
-  ): string {
+  function detailJson(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
       provisionedModelName: "tenant-a-pt",
       provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
@@ -5359,9 +5312,9 @@ describe("BedrockProvider — getProvisionedModelThroughput (M2.X.5.aa.z.26)", (
         };
       },
     });
-    await expect(
-      provider.getProvisionedModelThroughput(""),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.getProvisionedModelThroughput("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -5418,9 +5371,10 @@ describe("BedrockProvider — getProvisionedModelThroughput (M2.X.5.aa.z.26)", (
         }),
       }),
     });
-    await expect(
-      provider.getProvisionedModelThroughput("abc"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getProvisionedModelThroughput("abc")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -5434,25 +5388,24 @@ describe("BedrockProvider — getProvisionedModelThroughput (M2.X.5.aa.z.26)", (
         }),
       }),
     });
-    await expect(
-      provider.getProvisionedModelThroughput("abc"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.getProvisionedModelThroughput("abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates parse failures as api_error", async () => {
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
     });
-    await expect(
-      provider.getProvisionedModelThroughput("abc"),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.getProvisionedModelThroughput("abc")).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 });
 
 describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)", () => {
-  function listJson(
-    overrides: Record<string, unknown> = {},
-  ): string {
+  function listJson(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
       provisionedModelSummaries: [
         {
@@ -5497,8 +5450,7 @@ describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)",
       fetch: buildFetch({ capture, ok: true, status: 200, text: listJson() }),
     });
     await provider.listProvisionedModelThroughputs({
-      modelArnEquals:
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet",
+      modelArnEquals: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet",
     });
     expect(capture.url).toContain("modelArnEquals=arn%3Aaws%3Abedrock");
   });
@@ -5526,9 +5478,7 @@ describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)",
     });
     const result = await provider.listProvisionedModelThroughputs();
     expect(result.provisionedModelSummaries).toHaveLength(1);
-    expect(result.provisionedModelSummaries[0]?.provisionedModelName).toBe(
-      "pt-1",
-    );
+    expect(result.provisionedModelSummaries[0]?.provisionedModelName).toBe("pt-1");
   });
 
   it("threads nextToken back when present", async () => {
@@ -5557,9 +5507,9 @@ describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)",
         };
       },
     });
-    await expect(
-      provider.listProvisionedModelThroughputs({ maxResults: 0 }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.listProvisionedModelThroughputs({ maxResults: 0 })).rejects.toMatchObject(
+      { kind: "invalid_request_error" },
+    );
     expect(called).toBe(0);
   });
 
@@ -5574,9 +5524,10 @@ describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)",
         }),
       }),
     });
-    await expect(
-      provider.listProvisionedModelThroughputs(),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.listProvisionedModelThroughputs()).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 429 as rate_limit_error", async () => {
@@ -5590,27 +5541,28 @@ describe("BedrockProvider — listProvisionedModelThroughputs (M2.X.5.aa.z.26)",
         }),
       }),
     });
-    await expect(
-      provider.listProvisionedModelThroughputs(),
-    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+    await expect(provider.listProvisionedModelThroughputs()).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
   });
 
   it("propagates parse failures as api_error", async () => {
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
     });
-    await expect(
-      provider.listProvisionedModelThroughputs(),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.listProvisionedModelThroughputs()).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.listProvisionedModelThroughputs(),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.listProvisionedModelThroughputs()).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -5631,8 +5583,7 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
       ok: true,
       status: 200,
       text: JSON.stringify({
-        provisionedModelArn:
-          "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
+        provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/abc",
       }),
     });
   }
@@ -5764,9 +5715,7 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
         }),
       }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toMatchObject({
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toMatchObject({
       kind: "conflict_error",
       status: 409,
       code: "ConflictException",
@@ -5784,9 +5733,10 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
         }),
       }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -5797,9 +5747,10 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 429 as rate_limit_error", async () => {
@@ -5813,9 +5764,10 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
         }),
       }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
   });
 
   it("propagates 402 ServiceQuotaExceeded as quota-style error (over PT capacity)", async () => {
@@ -5830,27 +5782,25 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
         }),
       }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toBeDefined();
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toBeDefined();
   });
 
   it("propagates parse failures as api_error", async () => {
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "not json" }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.createProvisionedModelThroughput(validInput()),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.createProvisionedModelThroughput(validInput())).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 
   it("idempotent retry with same token: substrate makes the API call (AWS handles dedup server-side)", async () => {
@@ -5865,8 +5815,7 @@ describe("BedrockProvider — createProvisionedModelThroughput (M2.X.5.aa.z.27)"
           status: 200,
           text: async () =>
             JSON.stringify({
-              provisionedModelArn:
-                "arn:aws:bedrock:us-east-1:123:provisioned-model/same-arn",
+              provisionedModelArn: "arn:aws:bedrock:us-east-1:123:provisioned-model/same-arn",
             }),
           arrayBuffer: async () => new ArrayBuffer(0),
           body: null,
@@ -5966,9 +5915,9 @@ describe("BedrockProvider — updateProvisionedModelThroughput (M2.X.5.aa.z.28)"
         };
       },
     });
-    await expect(
-      provider.updateProvisionedModelThroughput("", validInput()),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.updateProvisionedModelThroughput("", validInput())).rejects.toMatchObject(
+      { kind: "invalid_request_error" },
+    );
     expect(called).toBe(0);
   });
 
@@ -5986,9 +5935,9 @@ describe("BedrockProvider — updateProvisionedModelThroughput (M2.X.5.aa.z.28)"
         };
       },
     });
-    await expect(
-      provider.updateProvisionedModelThroughput("pt-abc", {}),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.updateProvisionedModelThroughput("pt-abc", {})).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -5996,10 +5945,7 @@ describe("BedrockProvider — updateProvisionedModelThroughput (M2.X.5.aa.z.28)"
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "" }),
     });
-    const result = await provider.updateProvisionedModelThroughput(
-      "pt-abc",
-      validInput(),
-    );
+    const result = await provider.updateProvisionedModelThroughput("pt-abc", validInput());
     expect(result).toBeUndefined();
   });
 
@@ -6120,9 +6066,9 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
         };
       },
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput(""),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.deleteProvisionedModelThroughput("")).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 
@@ -6138,9 +6084,7 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
     const provider = build({
       fetch: buildFetch({ ok: true, status: 204, text: "" }),
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput("pt-abc"),
-    ).resolves.toBeUndefined();
+    await expect(provider.deleteProvisionedModelThroughput("pt-abc")).resolves.toBeUndefined();
   });
 
   it("propagates 404 as not_found_error (PT already gone)", async () => {
@@ -6154,9 +6098,10 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
         }),
       }),
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput("pt-abc"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.deleteProvisionedModelThroughput("pt-abc")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 409 ConflictException as conflict_error (committed PT mid-commitment)", async () => {
@@ -6169,14 +6114,11 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
         status: 409,
         text: JSON.stringify({
           __type: "ConflictException",
-          message:
-            "Cannot delete provisioned model throughput within commitment period",
+          message: "Cannot delete provisioned model throughput within commitment period",
         }),
       }),
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput("pt-abc"),
-    ).rejects.toMatchObject({
+    await expect(provider.deleteProvisionedModelThroughput("pt-abc")).rejects.toMatchObject({
       kind: "conflict_error",
       status: 409,
       code: "ConflictException",
@@ -6191,9 +6133,10 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput("pt-abc"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.deleteProvisionedModelThroughput("pt-abc")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates 429 as rate_limit_error", async () => {
@@ -6207,18 +6150,19 @@ describe("BedrockProvider — deleteProvisionedModelThroughput (M2.X.5.aa.z.29)"
         }),
       }),
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput("pt-abc"),
-    ).rejects.toMatchObject({ kind: "rate_limit_error", status: 429 });
+    await expect(provider.deleteProvisionedModelThroughput("pt-abc")).rejects.toMatchObject({
+      kind: "rate_limit_error",
+      status: 429,
+    });
   });
 
   it("propagates network errors", async () => {
     const provider = build({
       fetch: buildFetch({ throwError: new Error("ECONNRESET") }),
     });
-    await expect(
-      provider.deleteProvisionedModelThroughput("pt-abc"),
-    ).rejects.toMatchObject({ kind: "network_error" });
+    await expect(provider.deleteProvisionedModelThroughput("pt-abc")).rejects.toMatchObject({
+      kind: "network_error",
+    });
   });
 });
 
@@ -6314,9 +6258,10 @@ describe("BedrockProvider — getFoundationModel (M2.X.5.aa.z.30)", () => {
         }),
       }),
     });
-    await expect(
-      provider.getFoundationModel("unknown.model"),
-    ).rejects.toMatchObject({ kind: "not_found_error", status: 404 });
+    await expect(provider.getFoundationModel("unknown.model")).rejects.toMatchObject({
+      kind: "not_found_error",
+      status: 404,
+    });
   });
 
   it("propagates 403 as permission_error", async () => {
@@ -6327,18 +6272,19 @@ describe("BedrockProvider — getFoundationModel (M2.X.5.aa.z.30)", () => {
         text: JSON.stringify({ __type: "AccessDeniedException", message: "no" }),
       }),
     });
-    await expect(
-      provider.getFoundationModel("anthropic.claude-3-5-sonnet"),
-    ).rejects.toMatchObject({ kind: "permission_error", status: 403 });
+    await expect(provider.getFoundationModel("anthropic.claude-3-5-sonnet")).rejects.toMatchObject({
+      kind: "permission_error",
+      status: 403,
+    });
   });
 
   it("propagates parse failures as api_error", async () => {
     const provider = build({
       fetch: buildFetch({ ok: true, status: 200, text: "garbage" }),
     });
-    await expect(
-      provider.getFoundationModel("anthropic.claude-3-5-sonnet"),
-    ).rejects.toMatchObject({ kind: "api_error" });
+    await expect(provider.getFoundationModel("anthropic.claude-3-5-sonnet")).rejects.toMatchObject({
+      kind: "api_error",
+    });
   });
 });
 
@@ -6427,9 +6373,9 @@ describe("BedrockProvider — listFoundationModels (M2.X.5.aa.z.30)", () => {
         };
       },
     });
-    await expect(
-      provider.listFoundationModels({ byProvider: "" }),
-    ).rejects.toMatchObject({ kind: "invalid_request_error" });
+    await expect(provider.listFoundationModels({ byProvider: "" })).rejects.toMatchObject({
+      kind: "invalid_request_error",
+    });
     expect(called).toBe(0);
   });
 

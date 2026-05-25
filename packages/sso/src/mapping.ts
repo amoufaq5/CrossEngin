@@ -51,11 +51,7 @@ export const JIT_USER_POLICIES = [
 ] as const;
 export type JitUserPolicy = (typeof JIT_USER_POLICIES)[number];
 
-export const GROUP_SYNC_MODES = [
-  "replace_all",
-  "merge_add_only",
-  "ignore",
-] as const;
+export const GROUP_SYNC_MODES = ["replace_all", "merge_add_only", "ignore"] as const;
 export type GroupSyncMode = (typeof GROUP_SYNC_MODES)[number];
 
 export const AttributeTransformSchema = z
@@ -80,10 +76,7 @@ export const AttributeTransformSchema = z
         message: "lookup_map requires 'entries' parameter",
       });
     }
-    if (
-      (t.kind === "prefix_strip" || t.kind === "suffix_strip") &&
-      !t.parameters?.value
-    ) {
+    if ((t.kind === "prefix_strip" || t.kind === "suffix_strip") && !t.parameters?.value) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["parameters", "value"],
@@ -132,15 +125,11 @@ export const JitPolicySchema = z
     groupSyncMode: z.enum(GROUP_SYNC_MODES),
   })
   .superRefine((p, ctx) => {
-    if (
-      p.mode === "create_with_group_lookup" &&
-      !p.requireMatchingGroupRule
-    ) {
+    if (p.mode === "create_with_group_lookup" && !p.requireMatchingGroupRule) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["requireMatchingGroupRule"],
-        message:
-          "create_with_group_lookup mode requires requireMatchingGroupRule=true",
+        message: "create_with_group_lookup mode requires requireMatchingGroupRule=true",
       });
     }
   });
@@ -178,25 +167,19 @@ export const MappingSetSchema = z
       seenTargets.add(m.target);
     }
     if (s.jitPolicy.mode !== "disabled") {
-      const hasEmail = s.claimMappings.some(
-        (m) => m.target === "user.email" && m.required,
-      );
+      const hasEmail = s.claimMappings.some((m) => m.target === "user.email" && m.required);
       if (!hasEmail) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["claimMappings"],
-          message:
-            "JIT-enabled mapping requires a required claim mapping for user.email",
+          message: "JIT-enabled mapping requires a required claim mapping for user.email",
         });
       }
     }
   });
 export type MappingSet = z.infer<typeof MappingSetSchema>;
 
-export const applyTransform = (
-  value: string,
-  transform: AttributeTransform,
-): string => {
+export const applyTransform = (value: string, transform: AttributeTransform): string => {
   switch (transform.kind) {
     case "identity":
       return value;
@@ -227,7 +210,7 @@ export const applyTransform = (
       return parts[parts.length - 1] ?? "";
     }
     case "lookup_map": {
-      const entries = (transform.parameters?.entries as unknown) as
+      const entries = transform.parameters?.entries as unknown as
         | Record<string, string>
         | undefined;
       if (!entries) return value;
@@ -251,10 +234,8 @@ export const applyTransform = (
   }
 };
 
-export const applyTransforms = (
-  value: string,
-  transforms: readonly AttributeTransform[],
-): string => transforms.reduce<string>((v, t) => applyTransform(v, t), value);
+export const applyTransforms = (value: string, transforms: readonly AttributeTransform[]): string =>
+  transforms.reduce<string>((v, t) => applyTransform(v, t), value);
 
 export interface JitDecisionInput {
   readonly resolvedClaims: Readonly<Record<string, string>>;
@@ -308,15 +289,9 @@ export const decideJitOutcome = (input: JitDecisionInput): JitDecision => {
     input.idpGroupClaims.includes(rule.idpGroupClaim),
   );
   const resolvedRoles = Array.from(
-    new Set([
-      ...input.policy.defaultRoles,
-      ...matchedRules.map((r) => r.targetRoleSlug),
-    ]),
+    new Set([...input.policy.defaultRoles, ...matchedRules.map((r) => r.targetRoleSlug)]),
   );
-  if (
-    input.policy.mode === "create_with_group_lookup" &&
-    matchedRules.length === 0
-  ) {
+  if (input.policy.mode === "create_with_group_lookup" && matchedRules.length === 0) {
     return {
       outcome: "denied_no_group_match",
       resolvedRoles: [],

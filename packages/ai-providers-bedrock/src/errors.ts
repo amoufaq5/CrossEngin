@@ -83,10 +83,7 @@ const CODE_TO_KIND: Readonly<Record<string, BedrockErrorKind>> = {
   InternalServerException: "api_error",
 };
 
-export function fromHttpResponse(input: {
-  status: number;
-  body: string;
-}): BedrockError {
+export function fromHttpResponse(input: { status: number; body: string }): BedrockError {
   let message = `Bedrock API responded with status ${input.status.toString()}`;
   let kind = classifyHttpStatus(input.status);
   let code: string | null = null;

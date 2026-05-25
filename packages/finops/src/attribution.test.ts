@@ -63,9 +63,9 @@ describe("CostAttributionRecordSchema", () => {
   });
 
   it("rejects tenant-attributable category without tenantId", () => {
-    expect(() =>
-      CostAttributionRecordSchema.parse({ ...base, tenantId: null }),
-    ).toThrow(/attribute to a tenant/);
+    expect(() => CostAttributionRecordSchema.parse({ ...base, tenantId: null })).toThrow(
+      /attribute to a tenant/,
+    );
   });
 
   it("accepts ai_training without tenantId (non-tenant-attributable)", () => {
@@ -82,9 +82,9 @@ describe("CostAttributionRecordSchema", () => {
   });
 
   it("rejects isEstimated without estimatedConfidence", () => {
-    expect(() =>
-      CostAttributionRecordSchema.parse({ ...base, isEstimated: true }),
-    ).toThrow(/estimatedConfidence/);
+    expect(() => CostAttributionRecordSchema.parse({ ...base, isEstimated: true })).toThrow(
+      /estimatedConfidence/,
+    );
   });
 
   it("rejects allocationMethod='estimated' without isEstimated=true", () => {
@@ -97,9 +97,9 @@ describe("CostAttributionRecordSchema", () => {
   });
 
   it("rejects non-zero cost with zero usage", () => {
-    expect(() =>
-      CostAttributionRecordSchema.parse({ ...base, usageQuantity: 0 }),
-    ).toThrow(/zero usage/);
+    expect(() => CostAttributionRecordSchema.parse({ ...base, usageQuantity: 0 })).toThrow(
+      /zero usage/,
+    );
   });
 
   it("rejects provider cost > 2x attributed cost", () => {

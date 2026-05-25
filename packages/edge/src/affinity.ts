@@ -27,7 +27,11 @@ export const AffinityRuleSchema = z
     sessionHeader: z.string().optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.kind === "session_sticky" && v.cookieName === undefined && v.sessionHeader === undefined) {
+    if (
+      v.kind === "session_sticky" &&
+      v.cookieName === undefined &&
+      v.sessionHeader === undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["cookieName"],
@@ -52,14 +56,11 @@ export const AffinityRuleSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["fallbackRegion"],
-        message: "fallbackRegion must not be in candidateRegions (it's a last-resort outside the set)",
+        message:
+          "fallbackRegion must not be in candidateRegions (it's a last-resort outside the set)",
       });
     }
-    if (
-      v.cookieSameSite === "none" &&
-      !v.cookieSecure &&
-      v.cookieName !== undefined
-    ) {
+    if (v.cookieSameSite === "none" && !v.cookieSecure && v.cookieName !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["cookieSecure"],
@@ -87,10 +88,7 @@ export interface AffinityResolutionInput {
   readonly previouslyChosen?: Region;
 }
 
-export function resolveAffinity(
-  rule: AffinityRule,
-  input: AffinityResolutionInput,
-): Region {
+export function resolveAffinity(rule: AffinityRule, input: AffinityResolutionInput): Region {
   switch (rule.kind) {
     case "session_sticky": {
       const candidate = input.cookieValue ?? input.sessionHeaderValue;
@@ -98,7 +96,10 @@ export function resolveAffinity(
         const match = rule.candidateRegions.find((r) => r === candidate);
         if (match !== undefined) return match;
       }
-      if (input.previouslyChosen !== undefined && rule.candidateRegions.includes(input.previouslyChosen)) {
+      if (
+        input.previouslyChosen !== undefined &&
+        rule.candidateRegions.includes(input.previouslyChosen)
+      ) {
         return input.previouslyChosen;
       }
       return rule.candidateRegions[0] ?? rule.fallbackRegion ?? rule.candidateRegions[0]!;

@@ -107,9 +107,7 @@ export function checkPolicyConsistency(policy: BackupPolicy): readonly string[] 
     if (target.kind === "logical-replica") {
       const lagSec = durationToSeconds(target.lagBudget);
       if (lagSec > rpoSec) {
-        issues.push(
-          `logical-replica lagBudget (${target.lagBudget}) exceeds RPO (${policy.rpo})`,
-        );
+        issues.push(`logical-replica lagBudget (${target.lagBudget}) exceeds RPO (${policy.rpo})`);
       }
     }
   }

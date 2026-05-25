@@ -104,15 +104,15 @@ describe("TrainingConsentSchema", () => {
   });
 
   it("rejects withdrawn without withdrawnAt + reason", () => {
-    expect(() =>
-      TrainingConsentSchema.parse({ ...base, status: "withdrawn" }),
-    ).toThrow(/withdrawnAt/);
+    expect(() => TrainingConsentSchema.parse({ ...base, status: "withdrawn" })).toThrow(
+      /withdrawnAt/,
+    );
   });
 
   it("rejects superseded without supersedingConsentId", () => {
-    expect(() =>
-      TrainingConsentSchema.parse({ ...base, status: "superseded" }),
-    ).toThrow(/supersedingConsentId/);
+    expect(() => TrainingConsentSchema.parse({ ...base, status: "superseded" })).toThrow(
+      /supersedingConsentId/,
+    );
   });
 
   it("rejects expiresAt <= grantedAt", () => {

@@ -53,15 +53,15 @@ describe("FlagChangeSchema", () => {
   });
 
   it("rejects without actor user or system", () => {
-    expect(() =>
-      FlagChangeSchema.parse({ ...baseChange, actorUserId: null }),
-    ).toThrow(/either actorUserId or actorSystemId/);
+    expect(() => FlagChangeSchema.parse({ ...baseChange, actorUserId: null })).toThrow(
+      /either actorUserId or actorSystemId/,
+    );
   });
 
   it("rejects requiredFourEyes succeeded without attestation", () => {
-    expect(() =>
-      FlagChangeSchema.parse({ ...baseChange, requiredFourEyes: true }),
-    ).toThrow(/cannot succeed without fourEyesAttested/);
+    expect(() => FlagChangeSchema.parse({ ...baseChange, requiredFourEyes: true })).toThrow(
+      /cannot succeed without fourEyesAttested/,
+    );
   });
 
   it("rejects four-eyes attested with co-actor same as actor", () => {

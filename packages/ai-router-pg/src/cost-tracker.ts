@@ -82,10 +82,7 @@ export class PostgresCostTracker implements CostTracker {
     ceiling: CostCeiling;
   }): Promise<CostCeilingCheck> {
     const { ceiling, estimatedCostUsd, tenantId } = input;
-    if (
-      ceiling.maxUsdPerRequest !== undefined &&
-      estimatedCostUsd > ceiling.maxUsdPerRequest
-    ) {
+    if (ceiling.maxUsdPerRequest !== undefined && estimatedCostUsd > ceiling.maxUsdPerRequest) {
       return {
         allowed: false,
         reason: "per_request_exceeded",

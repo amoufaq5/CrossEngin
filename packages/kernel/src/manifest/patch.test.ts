@@ -64,9 +64,7 @@ describe("ValidationResultSchema", () => {
 
 describe("ValidationErrorSchema", () => {
   it("parses with optional code", () => {
-    expect(() =>
-      ValidationErrorSchema.parse({ path: "a", message: "b", code: "X" }),
-    ).not.toThrow();
+    expect(() => ValidationErrorSchema.parse({ path: "a", message: "b", code: "X" })).not.toThrow();
   });
 
   it("parses without code", () => {

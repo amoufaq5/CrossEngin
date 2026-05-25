@@ -63,9 +63,9 @@ describe("PackageCoordinatesSchema", () => {
   });
 
   it("rejects language/registry mismatch", () => {
-    expect(() =>
-      PackageCoordinatesSchema.parse({ ...tsBase, registry: "pypi" }),
-    ).toThrow(/must use registry/);
+    expect(() => PackageCoordinatesSchema.parse({ ...tsBase, registry: "pypi" })).toThrow(
+      /must use registry/,
+    );
   });
 
   it("rejects Python without moduleName", () => {

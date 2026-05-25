@@ -75,9 +75,7 @@ export const ReplicationTopologySchema = z
       if (edge === undefined) continue;
       const reverseKey = `${edge.target}->${edge.source}`;
       if (pairs.has(reverseKey)) {
-        const reverse = edges.find(
-          (e) => e.source === edge.target && e.target === edge.source,
-        );
+        const reverse = edges.find((e) => e.source === edge.target && e.target === edge.source);
         if (
           reverse !== undefined &&
           reverse.kind === edge.kind &&
@@ -115,31 +113,19 @@ export const ReplicationLagRecordSchema = z
   });
 export type ReplicationLagRecord = z.infer<typeof ReplicationLagRecordSchema>;
 
-export function isLagAcceptable(
-  record: ReplicationLagRecord,
-  edge: ReplicationEdge,
-): boolean {
+export function isLagAcceptable(record: ReplicationLagRecord, edge: ReplicationEdge): boolean {
   if (record.status === "broken" || record.status === "paused") return false;
   return record.lagSeconds <= edge.laggingThresholdSeconds;
 }
 
-export function targetsFor(
-  topology: ReplicationTopology,
-  source: Region,
-): readonly Region[] {
+export function targetsFor(topology: ReplicationTopology, source: Region): readonly Region[] {
   return topology.filter((e) => e.source === source).map((e) => e.target);
 }
 
-export function sourcesFor(
-  topology: ReplicationTopology,
-  target: Region,
-): readonly Region[] {
+export function sourcesFor(topology: ReplicationTopology, target: Region): readonly Region[] {
   return topology.filter((e) => e.target === target).map((e) => e.source);
 }
 
-export function violatesTier(
-  record: ReplicationLagRecord,
-  spec: DrTierSpec,
-): boolean {
+export function violatesTier(record: ReplicationLagRecord, spec: DrTierSpec): boolean {
   return record.lagSeconds > spec.maxRpoSeconds;
 }

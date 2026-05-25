@@ -20,35 +20,32 @@ export const RELEASE_STATUSES = [
 export type ReleaseStatus = (typeof RELEASE_STATUSES)[number];
 export const ReleaseStatusSchema = z.enum(RELEASE_STATUSES);
 
-export const RELEASE_TRANSITIONS: Readonly<
-  Record<ReleaseStatus, readonly ReleaseStatus[]>
-> = Object.freeze({
-  draft: ["in_review", "yanked"],
-  in_review: ["published", "draft", "yanked"],
-  published: ["deprecated", "yanked"],
-  deprecated: ["yanked"],
-  yanked: [],
-});
+export const RELEASE_TRANSITIONS: Readonly<Record<ReleaseStatus, readonly ReleaseStatus[]>> =
+  Object.freeze({
+    draft: ["in_review", "yanked"],
+    in_review: ["published", "draft", "yanked"],
+    published: ["deprecated", "yanked"],
+    deprecated: ["yanked"],
+    yanked: [],
+  });
 
-export function canTransitionRelease(
-  from: ReleaseStatus,
-  to: ReleaseStatus,
-): boolean {
+export function canTransitionRelease(from: ReleaseStatus, to: ReleaseStatus): boolean {
   return RELEASE_TRANSITIONS[from].includes(to);
 }
 
-export const SECURITY_ADVISORY_SEVERITIES = [
-  "low",
-  "moderate",
-  "high",
-  "critical",
-] as const;
+export const SECURITY_ADVISORY_SEVERITIES = ["low", "moderate", "high", "critical"] as const;
 export type SecurityAdvisorySeverity = (typeof SECURITY_ADVISORY_SEVERITIES)[number];
 
 export const SecurityAdvisorySchema = z
   .object({
-    cveId: z.string().regex(/^CVE-\d{4}-\d{4,}$/).optional(),
-    ghsaId: z.string().regex(/^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/).optional(),
+    cveId: z
+      .string()
+      .regex(/^CVE-\d{4}-\d{4,}$/)
+      .optional(),
+    ghsaId: z
+      .string()
+      .regex(/^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/)
+      .optional(),
     severity: z.enum(SECURITY_ADVISORY_SEVERITIES),
     title: z.string().min(1),
     description: z.string().min(1),
@@ -190,9 +187,7 @@ export function isInstallable(release: ClientRelease): boolean {
   return true;
 }
 
-export function highestSeverityAdvisory(
-  release: ClientRelease,
-): SecurityAdvisorySeverity | null {
+export function highestSeverityAdvisory(release: ClientRelease): SecurityAdvisorySeverity | null {
   const ranking: Readonly<Record<SecurityAdvisorySeverity, number>> = {
     low: 0,
     moderate: 1,

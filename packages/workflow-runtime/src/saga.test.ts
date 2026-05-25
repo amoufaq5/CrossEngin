@@ -9,9 +9,7 @@ import {
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
-function definitionFixture(
-  overrides: Partial<WorkflowDefinition> = {},
-): WorkflowDefinition {
+function definitionFixture(overrides: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
   return {
     id: "wfd_def00001",
     tenantId: null,
@@ -21,8 +19,22 @@ function definitionFixture(
     description: "",
     status: "published",
     states: [
-      { name: "start", kind: "initial", label: "S", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "end", kind: "terminal_success", label: "E", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "start",
+        kind: "initial",
+        label: "S",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "end",
+        kind: "terminal_success",
+        label: "E",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
     ],
     transitions: [
       {
@@ -52,7 +64,9 @@ function definitionFixture(
   };
 }
 
-function event(o: Partial<WorkflowEvent> & { kind: WorkflowEvent["kind"]; sequenceNumber: number }): WorkflowEvent {
+function event(
+  o: Partial<WorkflowEvent> & { kind: WorkflowEvent["kind"]; sequenceNumber: number },
+): WorkflowEvent {
   return {
     id: o.id ?? `wfe_${o.sequenceNumber.toString().padStart(8, "0")}`,
     instanceId: o.instanceId ?? "wfi_00000001",
@@ -86,7 +100,11 @@ describe("listCompensatableActivities", () => {
         kind: "activity_scheduled",
         sequenceNumber: 0,
         activityId: "wfa_act00001",
-        payload: { kind: "http_call", definitionActivityKey: "charge_card", compensationActivityKey: "refund_card" },
+        payload: {
+          kind: "http_call",
+          definitionActivityKey: "charge_card",
+          compensationActivityKey: "refund_card",
+        },
       }),
       event({
         kind: "activity_completed",
@@ -134,7 +152,13 @@ describe("listCompensatableActivities", () => {
   });
 
   it("includes side-effect kinds (http_call, db_write, ai_call, send_notification, child_workflow)", () => {
-    const kinds = ["http_call", "db_write", "ai_call", "send_notification", "child_workflow"] as const;
+    const kinds = [
+      "http_call",
+      "db_write",
+      "ai_call",
+      "send_notification",
+      "child_workflow",
+    ] as const;
     const events: WorkflowEvent[] = [];
     let seq = 0;
     for (let i = 0; i < kinds.length; i++) {

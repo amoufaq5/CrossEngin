@@ -28,15 +28,11 @@ describe("TranslationBundleSchema", () => {
   });
 
   it("rejects an invalid ICU message", () => {
-    expect(() =>
-      TranslationBundleSchema.parse({ en: { hello: "Hello {" } }),
-    ).toThrow();
+    expect(() => TranslationBundleSchema.parse({ en: { hello: "Hello {" } })).toThrow();
   });
 
   it("rejects a translation key with uppercase", () => {
-    expect(() =>
-      TranslationBundleSchema.parse({ en: { Hello: "Hi" } }),
-    ).toThrow();
+    expect(() => TranslationBundleSchema.parse({ en: { Hello: "Hi" } })).toThrow();
   });
 });
 

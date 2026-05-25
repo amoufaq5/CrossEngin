@@ -250,8 +250,6 @@ describe("packMatchesPlatform", () => {
   });
 
   it("returns false when platform > max", () => {
-    expect(
-      packMatchesPlatform({ ...minOnly, maxPlatformVersion: "1.5.0" }, "2.0.0"),
-    ).toBe(false);
+    expect(packMatchesPlatform({ ...minOnly, maxPlatformVersion: "1.5.0" }, "2.0.0")).toBe(false);
   });
 });

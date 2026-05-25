@@ -27,7 +27,8 @@ function mockConnection(rows: Array<Record<string, unknown>>): {
       calls.push({ sql, params });
       const row = rows[idx];
       idx += 1;
-      if (row === undefined) return { rows: [], rowCount: 0 } as PgQueryResult<Record<string, unknown>>;
+      if (row === undefined)
+        return { rows: [], rowCount: 0 } as PgQueryResult<Record<string, unknown>>;
       return { rows: [row], rowCount: 1 } as PgQueryResult<Record<string, unknown>>;
     }) as PgConnection["query"],
     transaction: vi.fn() as PgConnection["transaction"],
@@ -81,7 +82,7 @@ describe("PostgresTranscript", () => {
         tool_call_id: "tu_1",
         tool_name: "validate_manifest",
         input: { manifest_json: "{}" },
-        output: "{\"ok\":true}",
+        output: '{"ok":true}',
         is_error: false,
         duration_ms: 5,
         started_at: TS,
@@ -143,7 +144,7 @@ describe("PostgresTranscript", () => {
       toolCallId: "tu_1",
       toolName: "validate_manifest",
       input: { manifest_json: "{}" },
-      output: "{\"ok\":true}",
+      output: '{"ok":true}',
       isError: false,
       durationMs: 5,
     });

@@ -14,12 +14,7 @@ export const TaskKindSchema = z.enum([
 ]);
 export type TaskKind = z.infer<typeof TaskKindSchema>;
 
-export const TenantResidencySchema = z.enum([
-  "unrestricted",
-  "eu-only",
-  "us-only",
-  "me-only",
-]);
+export const TenantResidencySchema = z.enum(["unrestricted", "eu-only", "us-only", "me-only"]);
 export type TenantResidency = z.infer<typeof TenantResidencySchema>;
 
 export const ProviderCapabilitiesSchema = z.object({
@@ -69,9 +64,7 @@ export const ImageAttachmentSchema = z.object({
 });
 export type ImageAttachment = z.infer<typeof ImageAttachmentSchema>;
 
-export const MessageAttachmentSchema = z.discriminatedUnion("kind", [
-  ImageAttachmentSchema,
-]);
+export const MessageAttachmentSchema = z.discriminatedUnion("kind", [ImageAttachmentSchema]);
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 
 export const LLM_CACHE_BREAKPOINT_TYPES = ["ephemeral"] as const;
@@ -123,9 +116,7 @@ export type DocumentFormat = z.infer<typeof DocumentFormatSchema>;
 export const OFFICE_DOCUMENT_FORMATS = ["doc", "docx", "xls", "xlsx", "html"] as const;
 export type OfficeDocumentFormat = (typeof OFFICE_DOCUMENT_FORMATS)[number];
 
-export function isOfficeDocumentFormat(
-  format: DocumentFormat,
-): format is OfficeDocumentFormat {
+export function isOfficeDocumentFormat(format: DocumentFormat): format is OfficeDocumentFormat {
   return (OFFICE_DOCUMENT_FORMATS as readonly string[]).includes(format);
 }
 
@@ -208,10 +199,7 @@ export const LlmContentBlockSchema = z.discriminatedUnion("type", [
 ]);
 export type LlmContentBlock = z.infer<typeof LlmContentBlockSchema>;
 
-export const LlmContentSchema = z.union([
-  z.string(),
-  z.array(LlmContentBlockSchema).min(1),
-]);
+export const LlmContentSchema = z.union([z.string(), z.array(LlmContentBlockSchema).min(1)]);
 export type LlmContent = z.infer<typeof LlmContentSchema>;
 
 export const LLM_MESSAGE_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -242,11 +230,7 @@ export const LlmMessageSchema = z
         message: `attachments only allowed on user messages (got role '${m.role}')`,
       });
     }
-    if (
-      Array.isArray(m.content) &&
-      m.attachments !== undefined &&
-      m.attachments.length > 0
-    ) {
+    if (Array.isArray(m.content) && m.attachments !== undefined && m.attachments.length > 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["attachments"],
@@ -305,9 +289,7 @@ export function isStringContent(content: LlmContent): content is string {
   return typeof content === "string";
 }
 
-export function isBlockContent(
-  content: LlmContent,
-): content is LlmContentBlock[] {
+export function isBlockContent(content: LlmContent): content is LlmContentBlock[] {
   return Array.isArray(content);
 }
 

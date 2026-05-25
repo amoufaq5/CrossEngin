@@ -37,9 +37,7 @@ function makeSession(overrides: Partial<ArchitectSessionRecord> = {}): Architect
   };
 }
 
-function makeMessage(
-  overrides: Partial<ArchitectMessageRecord> = {},
-): ArchitectMessageRecord {
+function makeMessage(overrides: Partial<ArchitectMessageRecord> = {}): ArchitectMessageRecord {
   return {
     id: "msg-1",
     tenantId: TENANT,
@@ -70,7 +68,7 @@ function makeInvocation(
     toolCallId: "tu_1",
     toolName: "validate_manifest",
     input: { manifest_json: "{}" },
-    output: "{\"ok\":true}",
+    output: '{"ok":true}',
     isError: false,
     durationMs: 5,
     startedAt: "2026-05-17T10:00:02.000Z",
@@ -78,9 +76,7 @@ function makeInvocation(
   };
 }
 
-function makeProposal(
-  overrides: Partial<ArchitectProposalRecord> = {},
-): ArchitectProposalRecord {
+function makeProposal(overrides: Partial<ArchitectProposalRecord> = {}): ArchitectProposalRecord {
   return {
     id: "prop-1",
     tenantId: TENANT,
@@ -102,21 +98,21 @@ function makeProposal(
   };
 }
 
-function fakeStores(opts: {
-  sessions?: readonly ArchitectSessionRecord[];
-  messages?: readonly ArchitectMessageRecord[];
-  invocations?: readonly ArchitectToolInvocationRecord[];
-  proposals?: readonly ArchitectProposalRecord[];
-} = {}): SessionsStores {
+function fakeStores(
+  opts: {
+    sessions?: readonly ArchitectSessionRecord[];
+    messages?: readonly ArchitectMessageRecord[];
+    invocations?: readonly ArchitectToolInvocationRecord[];
+    proposals?: readonly ArchitectProposalRecord[];
+  } = {},
+): SessionsStores {
   return {
     sessions: {
       listForTenant: async () => opts.sessions ?? [],
-      getById: async (id: string) =>
-        (opts.sessions ?? []).find((s) => s.id === id) ?? null,
+      getById: async (id: string) => (opts.sessions ?? []).find((s) => s.id === id) ?? null,
       getBySessionId: async ({ tenantId, sessionId }: { tenantId: string; sessionId: string }) =>
-        (opts.sessions ?? []).find(
-          (s) => s.tenantId === tenantId && s.sessionId === sessionId,
-        ) ?? null,
+        (opts.sessions ?? []).find((s) => s.tenantId === tenantId && s.sessionId === sessionId) ??
+        null,
       // unused methods for the show/replay path
       startSession: async () => makeSession(),
       endSession: async () => null,
@@ -190,33 +186,30 @@ describe("runSessions — argument parsing", () => {
 describe("runSessions list", () => {
   it("renders an empty-state message when there are no sessions", async () => {
     const { ctx, out } = buffers();
-    const code = await runSessions(
-      parsed("sessions", "list", "--tenant-id", TENANT),
-      { ...ctx, storesOverride: fakeStores({ sessions: [] }) },
-    );
+    const code = await runSessions(parsed("sessions", "list", "--tenant-id", TENANT), {
+      ...ctx,
+      storesOverride: fakeStores({ sessions: [] }),
+    });
     expect(code).toBe(0);
     expect(out()).toContain("no sessions for tenant");
   });
 
   it("renders a table with one row per session", async () => {
     const { ctx, out } = buffers();
-    const code = await runSessions(
-      parsed("sessions", "list", "--tenant-id", TENANT),
-      {
-        ...ctx,
-        storesOverride: fakeStores({
-          sessions: [
-            makeSession({ sessionId: "cli-a", turnCount: 3, costUsd: 0.001 }),
-            makeSession({
-              sessionId: "cli-b",
-              endedAt: "2026-05-17T11:00:00.000Z",
-              turnCount: 5,
-              costUsd: 0.005,
-            }),
-          ],
-        }),
-      },
-    );
+    const code = await runSessions(parsed("sessions", "list", "--tenant-id", TENANT), {
+      ...ctx,
+      storesOverride: fakeStores({
+        sessions: [
+          makeSession({ sessionId: "cli-a", turnCount: 3, costUsd: 0.001 }),
+          makeSession({
+            sessionId: "cli-b",
+            endedAt: "2026-05-17T11:00:00.000Z",
+            turnCount: 5,
+            costUsd: 0.005,
+          }),
+        ],
+      }),
+    });
     expect(code).toBe(0);
     expect(out()).toContain("cli-a");
     expect(out()).toContain("cli-b");
@@ -226,13 +219,10 @@ describe("runSessions list", () => {
 
   it("emits JSON when --format=json", async () => {
     const { ctx, out } = buffers();
-    await runSessions(
-      parsed("sessions", "list", "--tenant-id", TENANT, "--format=json"),
-      {
-        ...ctx,
-        storesOverride: fakeStores({ sessions: [makeSession()] }),
-      },
-    );
+    await runSessions(parsed("sessions", "list", "--tenant-id", TENANT, "--format=json"), {
+      ...ctx,
+      storesOverride: fakeStores({ sessions: [makeSession()] }),
+    });
     const result = JSON.parse(out()) as {
       tenantId: string;
       count: number;
@@ -245,10 +235,10 @@ describe("runSessions list", () => {
 
   it("returns exit 2 on invalid --limit", async () => {
     const { ctx, err } = buffers();
-    const code = await runSessions(
-      parsed("sessions", "list", "--limit=not-a-number"),
-      { ...ctx, storesOverride: fakeStores() },
-    );
+    const code = await runSessions(parsed("sessions", "list", "--limit=not-a-number"), {
+      ...ctx,
+      storesOverride: fakeStores(),
+    });
     expect(code).toBe(2);
     expect(err()).toContain("--limit");
   });
@@ -267,36 +257,33 @@ describe("runSessions show", () => {
 
   it("returns exit 1 when the session id does not exist", async () => {
     const { ctx, err } = buffers();
-    const code = await runSessions(
-      parsed("sessions", "show", "cli-nope", "--tenant-id", TENANT),
-      { ...ctx, storesOverride: fakeStores({ sessions: [] }) },
-    );
+    const code = await runSessions(parsed("sessions", "show", "cli-nope", "--tenant-id", TENANT), {
+      ...ctx,
+      storesOverride: fakeStores({ sessions: [] }),
+    });
     expect(code).toBe(1);
     expect(err()).toContain("no session");
   });
 
   it("renders the full transcript including messages, tool invocations, proposals", async () => {
     const { ctx, out } = buffers();
-    const code = await runSessions(
-      parsed("sessions", "show", "cli-test", "--tenant-id", TENANT),
-      {
-        ...ctx,
-        storesOverride: fakeStores({
-          sessions: [makeSession({ turnCount: 1, costUsd: 0.001 })],
-          messages: [
-            makeMessage({ messageIndex: 0, role: "user", content: "hi" }),
-            makeMessage({
-              id: "msg-2",
-              messageIndex: 1,
-              role: "assistant",
-              content: "hello back",
-            }),
-          ],
-          invocations: [makeInvocation()],
-          proposals: [makeProposal()],
-        }),
-      },
-    );
+    const code = await runSessions(parsed("sessions", "show", "cli-test", "--tenant-id", TENANT), {
+      ...ctx,
+      storesOverride: fakeStores({
+        sessions: [makeSession({ turnCount: 1, costUsd: 0.001 })],
+        messages: [
+          makeMessage({ messageIndex: 0, role: "user", content: "hi" }),
+          makeMessage({
+            id: "msg-2",
+            messageIndex: 1,
+            role: "assistant",
+            content: "hello back",
+          }),
+        ],
+        invocations: [makeInvocation()],
+        proposals: [makeProposal()],
+      }),
+    });
     expect(code).toBe(0);
     const output = out();
     expect(output).toContain("Session: cli-test");
@@ -374,7 +361,7 @@ describe("runSessions replay", () => {
             }),
             makeMessage({
               role: "tool",
-              content: "{\"ok\":true}",
+              content: '{"ok":true}',
               toolCallId: "tu_1",
               messageIndex: 2,
             }),
@@ -401,14 +388,7 @@ describe("runSessions replay", () => {
   it("emits JSON envelope when --format=json", async () => {
     const { ctx, out } = buffers();
     await runSessions(
-      parsed(
-        "sessions",
-        "replay",
-        "cli-test",
-        "--tenant-id",
-        TENANT,
-        "--format=json",
-      ),
+      parsed("sessions", "replay", "cli-test", "--tenant-id", TENANT, "--format=json"),
       {
         ...ctx,
         storesOverride: fakeStores({

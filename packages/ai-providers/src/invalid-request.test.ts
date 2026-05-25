@@ -93,33 +93,23 @@ describe("isInvalidRequestError — Error-shaped inputs", () => {
   }
 
   it("returns true for invalid_request_error (HTTP 400)", () => {
-    expect(isInvalidRequestError(fakeProviderError("invalid_request_error"))).toBe(
-      true,
-    );
+    expect(isInvalidRequestError(fakeProviderError("invalid_request_error"))).toBe(true);
   });
 
   it("returns false for request_too_large (separate 413 category)", () => {
-    expect(isInvalidRequestError(fakeProviderError("request_too_large"))).toBe(
-      false,
-    );
+    expect(isInvalidRequestError(fakeProviderError("request_too_large"))).toBe(false);
   });
 
   it("returns false for authentication_error", () => {
-    expect(isInvalidRequestError(fakeProviderError("authentication_error"))).toBe(
-      false,
-    );
+    expect(isInvalidRequestError(fakeProviderError("authentication_error"))).toBe(false);
   });
 
   it("returns false for permission_error", () => {
-    expect(isInvalidRequestError(fakeProviderError("permission_error"))).toBe(
-      false,
-    );
+    expect(isInvalidRequestError(fakeProviderError("permission_error"))).toBe(false);
   });
 
   it("returns false for not_found_error", () => {
-    expect(isInvalidRequestError(fakeProviderError("not_found_error"))).toBe(
-      false,
-    );
+    expect(isInvalidRequestError(fakeProviderError("not_found_error"))).toBe(false);
   });
 
   it("returns false for conflict_error", () => {
@@ -127,19 +117,13 @@ describe("isInvalidRequestError — Error-shaped inputs", () => {
   });
 
   it("returns false for retryable kinds", () => {
-    expect(isInvalidRequestError(fakeProviderError("rate_limit_error"))).toBe(
-      false,
-    );
+    expect(isInvalidRequestError(fakeProviderError("rate_limit_error"))).toBe(false);
     expect(isInvalidRequestError(fakeProviderError("network_error"))).toBe(false);
   });
 
   it("returns false for moderation kinds", () => {
-    expect(isInvalidRequestError(fakeProviderError("guardrail_intervened"))).toBe(
-      false,
-    );
-    expect(isInvalidRequestError(fakeProviderError("content_filtered"))).toBe(
-      false,
-    );
+    expect(isInvalidRequestError(fakeProviderError("guardrail_intervened"))).toBe(false);
+    expect(isInvalidRequestError(fakeProviderError("content_filtered"))).toBe(false);
   });
 
   it("returns false for an Error with no kind field", () => {

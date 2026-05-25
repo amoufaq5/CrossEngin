@@ -24,10 +24,7 @@ describe("BEDROCK_INFERENCE_PROFILE enums", () => {
   });
 
   it("types cover the documented values", () => {
-    expect(BEDROCK_INFERENCE_PROFILE_TYPES).toEqual([
-      "SYSTEM_DEFINED",
-      "APPLICATION",
-    ]);
+    expect(BEDROCK_INFERENCE_PROFILE_TYPES).toEqual(["SYSTEM_DEFINED", "APPLICATION"]);
   });
 
   it("isBedrockInferenceProfileStatus accepts known values + rejects others", () => {
@@ -51,18 +48,18 @@ describe("buildInferenceProfileListQuery", () => {
   });
 
   it("threads typeEquals", () => {
-    expect(
-      buildInferenceProfileListQuery({ typeEquals: "SYSTEM_DEFINED" }),
-    ).toEqual({ typeEquals: "SYSTEM_DEFINED" });
-    expect(
-      buildInferenceProfileListQuery({ typeEquals: "APPLICATION" }),
-    ).toEqual({ typeEquals: "APPLICATION" });
+    expect(buildInferenceProfileListQuery({ typeEquals: "SYSTEM_DEFINED" })).toEqual({
+      typeEquals: "SYSTEM_DEFINED",
+    });
+    expect(buildInferenceProfileListQuery({ typeEquals: "APPLICATION" })).toEqual({
+      typeEquals: "APPLICATION",
+    });
   });
 
   it("rejects unknown typeEquals", () => {
-    expect(() =>
-      buildInferenceProfileListQuery({ typeEquals: "CUSTOM" as never }),
-    ).toThrow(/typeEquals/);
+    expect(() => buildInferenceProfileListQuery({ typeEquals: "CUSTOM" as never })).toThrow(
+      /typeEquals/,
+    );
   });
 
   it("threads valid maxResults at the bounds", () => {
@@ -93,18 +90,14 @@ describe("buildInferenceProfileListQuery", () => {
         maxResults: BEDROCK_INFERENCE_PROFILE_LIST_MAX_RESULTS_MAX + 1,
       }),
     ).toThrow(/maxResults/);
-    expect(() => buildInferenceProfileListQuery({ maxResults: 1.5 })).toThrow(
-      /maxResults/,
-    );
+    expect(() => buildInferenceProfileListQuery({ maxResults: 1.5 })).toThrow(/maxResults/);
   });
 
   it("threads + validates nextToken", () => {
     expect(buildInferenceProfileListQuery({ nextToken: "page-2" })).toEqual({
       nextToken: "page-2",
     });
-    expect(() => buildInferenceProfileListQuery({ nextToken: "" })).toThrow(
-      /nextToken/,
-    );
+    expect(() => buildInferenceProfileListQuery({ nextToken: "" })).toThrow(/nextToken/);
   });
 
   it("composes all parameters together", () => {
@@ -122,9 +115,7 @@ describe("buildInferenceProfileListQuery", () => {
   });
 
   it("throws BedrockError (not Error) on invalid input", () => {
-    expect(() => buildInferenceProfileListQuery({ maxResults: -1 })).toThrow(
-      BedrockError,
-    );
+    expect(() => buildInferenceProfileListQuery({ maxResults: -1 })).toThrow(BedrockError);
   });
 });
 
@@ -155,9 +146,7 @@ describe("parseInferenceProfileSummary", () => {
 
   it("parses a complete summary", () => {
     const s = parseInferenceProfileSummary(sample());
-    expect(s.inferenceProfileId).toBe(
-      "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-    );
+    expect(s.inferenceProfileId).toBe("us.anthropic.claude-3-5-sonnet-20241022-v2:0");
     expect(s.status).toBe("ACTIVE");
     expect(s.type).toBe("SYSTEM_DEFINED");
     expect(s.models.length).toBe(2);
@@ -232,9 +221,9 @@ describe("parseInferenceProfileListResponse", () => {
     expect(parseInferenceProfileListResponse({})).toEqual({
       inferenceProfileSummaries: [],
     });
-    expect(
-      parseInferenceProfileListResponse({ inferenceProfileSummaries: [] }),
-    ).toEqual({ inferenceProfileSummaries: [] });
+    expect(parseInferenceProfileListResponse({ inferenceProfileSummaries: [] })).toEqual({
+      inferenceProfileSummaries: [],
+    });
   });
 
   it("preserves nextToken when present", () => {
@@ -260,21 +249,17 @@ describe("parseInferenceProfileListResponse", () => {
       inferenceProfileSummaries: [summary(), second],
     });
     expect(out.inferenceProfileSummaries.length).toBe(2);
-    expect(out.inferenceProfileSummaries[1]!.inferenceProfileId).toMatch(
-      /claude-3-haiku/,
-    );
+    expect(out.inferenceProfileSummaries[1]!.inferenceProfileId).toMatch(/claude-3-haiku/);
   });
 
   it("rejects non-object response", () => {
-    expect(() => parseInferenceProfileListResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseInferenceProfileListResponse(null)).toThrow(/not a JSON object/);
   });
 
   it("rejects non-array summaries field", () => {
-    expect(() =>
-      parseInferenceProfileListResponse({ inferenceProfileSummaries: "oops" }),
-    ).toThrow(/not an array/);
+    expect(() => parseInferenceProfileListResponse({ inferenceProfileSummaries: "oops" })).toThrow(
+      /not an array/,
+    );
   });
 });
 
@@ -301,9 +286,7 @@ describe("parseInferenceProfileDetail", () => {
 
   it("parses a complete detail (same shape as summary)", () => {
     const d = parseInferenceProfileDetail(sample());
-    expect(d.inferenceProfileId).toBe(
-      "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-    );
+    expect(d.inferenceProfileId).toBe("us.anthropic.claude-3-5-sonnet-20241022-v2:0");
     expect(d.type).toBe("SYSTEM_DEFINED");
     expect(d.models.length).toBe(1);
     expect(d.description).toMatch(/Cross-region/);
@@ -311,9 +294,7 @@ describe("parseInferenceProfileDetail", () => {
 
   it("rejects unknown status", () => {
     const bad = { ...(sample() as Record<string, unknown>), status: "INACTIVE" };
-    expect(() => parseInferenceProfileDetail(bad)).toThrow(
-      /unknown profile status/,
-    );
+    expect(() => parseInferenceProfileDetail(bad)).toThrow(/unknown profile status/);
   });
 
   it("rejects non-object input", () => {
@@ -336,10 +317,7 @@ describe("buildCreateInferenceProfileBody (M2.X.5.aa.z.23)", () => {
   }
 
   it("emits required fields verbatim into JSON", () => {
-    const body = JSON.parse(buildCreateInferenceProfileBody(valid())) as Record<
-      string,
-      unknown
-    >;
+    const body = JSON.parse(buildCreateInferenceProfileBody(valid())) as Record<string, unknown>;
     expect(body["inferenceProfileName"]).toBe("my-app-profile");
     expect(body["modelSource"]).toEqual({
       copyFrom:
@@ -348,10 +326,7 @@ describe("buildCreateInferenceProfileBody (M2.X.5.aa.z.23)", () => {
   });
 
   it("omits optional fields when not provided", () => {
-    const body = JSON.parse(buildCreateInferenceProfileBody(valid())) as Record<
-      string,
-      unknown
-    >;
+    const body = JSON.parse(buildCreateInferenceProfileBody(valid())) as Record<string, unknown>;
     expect("description" in body).toBe(false);
     expect("clientRequestToken" in body).toBe(false);
     expect("tags" in body).toBe(false);
@@ -396,29 +371,27 @@ describe("buildCreateInferenceProfileBody (M2.X.5.aa.z.23)", () => {
   });
 
   it("rejects blank modelSource.copyFrom", () => {
-    expect(() =>
-      buildCreateInferenceProfileBody(valid({ modelSource: { copyFrom: "" } })),
-    ).toThrow(/modelSource\.copyFrom/);
+    expect(() => buildCreateInferenceProfileBody(valid({ modelSource: { copyFrom: "" } }))).toThrow(
+      /modelSource\.copyFrom/,
+    );
   });
 
   it("rejects modelSource.copyFrom > 2048 chars", () => {
     expect(() =>
-      buildCreateInferenceProfileBody(
-        valid({ modelSource: { copyFrom: "a".repeat(2049) } }),
-      ),
+      buildCreateInferenceProfileBody(valid({ modelSource: { copyFrom: "a".repeat(2049) } })),
     ).toThrow(/modelSource\.copyFrom/);
   });
 
   it("rejects description > 200 chars", () => {
-    expect(() =>
-      buildCreateInferenceProfileBody(valid({ description: "a".repeat(201) })),
-    ).toThrow(/invalid description/);
+    expect(() => buildCreateInferenceProfileBody(valid({ description: "a".repeat(201) }))).toThrow(
+      /invalid description/,
+    );
   });
 
   it("rejects description violating the pattern (e.g., punctuation)", () => {
-    expect(() =>
-      buildCreateInferenceProfileBody(valid({ description: "has, comma" })),
-    ).toThrow(/invalid description/);
+    expect(() => buildCreateInferenceProfileBody(valid({ description: "has, comma" }))).toThrow(
+      /invalid description/,
+    );
   });
 
   it("rejects clientRequestToken > 256 chars", () => {
@@ -438,24 +411,18 @@ describe("buildCreateInferenceProfileBody (M2.X.5.aa.z.23)", () => {
       key: `k${i.toString()}`,
       value: "v",
     }));
-    expect(() => buildCreateInferenceProfileBody(valid({ tags }))).toThrow(
-      /tags count/,
-    );
+    expect(() => buildCreateInferenceProfileBody(valid({ tags }))).toThrow(/tags count/);
   });
 
   it("rejects a tag with key longer than 128 chars", () => {
     expect(() =>
-      buildCreateInferenceProfileBody(
-        valid({ tags: [{ key: "a".repeat(129), value: "v" }] }),
-      ),
+      buildCreateInferenceProfileBody(valid({ tags: [{ key: "a".repeat(129), value: "v" }] })),
     ).toThrow(/tag key length/);
   });
 
   it("rejects a tag with value longer than 256 chars", () => {
     expect(() =>
-      buildCreateInferenceProfileBody(
-        valid({ tags: [{ key: "k", value: "a".repeat(257) }] }),
-      ),
+      buildCreateInferenceProfileBody(valid({ tags: [{ key: "k", value: "a".repeat(257) }] })),
     ).toThrow(/tag value length/);
   });
 
@@ -469,8 +436,7 @@ describe("buildCreateInferenceProfileBody (M2.X.5.aa.z.23)", () => {
 describe("parseCreateInferenceProfileResponse (M2.X.5.aa.z.23)", () => {
   it("parses inferenceProfileArn + status", () => {
     const r = parseCreateInferenceProfileResponse({
-      inferenceProfileArn:
-        "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc",
+      inferenceProfileArn: "arn:aws:bedrock:us-east-1:123:application-inference-profile/abc",
       status: "ACTIVE",
     });
     expect(r.inferenceProfileArn).toContain("application-inference-profile/abc");
@@ -487,15 +453,13 @@ describe("parseCreateInferenceProfileResponse (M2.X.5.aa.z.23)", () => {
   });
 
   it("rejects missing inferenceProfileArn", () => {
-    expect(() =>
-      parseCreateInferenceProfileResponse({ status: "ACTIVE" }),
-    ).toThrow(/missing required string field/);
+    expect(() => parseCreateInferenceProfileResponse({ status: "ACTIVE" })).toThrow(
+      /missing required string field/,
+    );
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseCreateInferenceProfileResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseCreateInferenceProfileResponse(null)).toThrow(/not a JSON object/);
   });
 });
 
@@ -520,21 +484,22 @@ describe("buildUpdateInferenceProfileBody (M2.X.5.aa.z.25)", () => {
   });
 
   it("rejects description > 200 chars", () => {
-    expect(() =>
-      buildUpdateInferenceProfileBody({ description: "a".repeat(201) }),
-    ).toThrow(/invalid description/);
+    expect(() => buildUpdateInferenceProfileBody({ description: "a".repeat(201) })).toThrow(
+      /invalid description/,
+    );
   });
 
   it("rejects description violating the pattern", () => {
-    expect(() =>
-      buildUpdateInferenceProfileBody({ description: "has, comma" }),
-    ).toThrow(/invalid description/);
+    expect(() => buildUpdateInferenceProfileBody({ description: "has, comma" })).toThrow(
+      /invalid description/,
+    );
   });
 
   it("does NOT emit any field besides description", () => {
-    const body = JSON.parse(
-      buildUpdateInferenceProfileBody({ description: "valid" }),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(buildUpdateInferenceProfileBody({ description: "valid" })) as Record<
+      string,
+      unknown
+    >;
     expect(Object.keys(body)).toEqual(["description"]);
   });
 });

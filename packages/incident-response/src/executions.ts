@@ -15,21 +15,17 @@ export const EXECUTION_STATUSES = [
 export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
 export const ExecutionStatusSchema = z.enum(EXECUTION_STATUSES);
 
-export const EXECUTION_TRANSITIONS: Readonly<
-  Record<ExecutionStatus, readonly ExecutionStatus[]>
-> = Object.freeze({
-  queued: ["running", "aborted"],
-  running: ["paused", "succeeded", "failed", "aborted"],
-  paused: ["running", "aborted"],
-  succeeded: [],
-  failed: ["running"],
-  aborted: [],
-});
+export const EXECUTION_TRANSITIONS: Readonly<Record<ExecutionStatus, readonly ExecutionStatus[]>> =
+  Object.freeze({
+    queued: ["running", "aborted"],
+    running: ["paused", "succeeded", "failed", "aborted"],
+    paused: ["running", "aborted"],
+    succeeded: [],
+    failed: ["running"],
+    aborted: [],
+  });
 
-export function canTransitionExecution(
-  from: ExecutionStatus,
-  to: ExecutionStatus,
-): boolean {
+export function canTransitionExecution(from: ExecutionStatus, to: ExecutionStatus): boolean {
   return EXECUTION_TRANSITIONS[from].includes(to);
 }
 
@@ -172,15 +168,12 @@ export const RunbookExecutionSchema = z
       stepNums.add(s.stepNumber);
     });
     if (v.status === "succeeded") {
-      const allDone = v.steps.every(
-        (s) => s.outcome !== null && s.outcome !== "failed",
-      );
+      const allDone = v.steps.every((s) => s.outcome !== null && s.outcome !== "failed");
       if (!allDone) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["steps"],
-          message:
-            "succeeded execution must have all steps non-failed and with outcomes recorded",
+          message: "succeeded execution must have all steps non-failed and with outcomes recorded",
         });
       }
     }

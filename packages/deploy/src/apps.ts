@@ -106,7 +106,8 @@ export const AppDeployConfigSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["healthCheck"],
-        message: "long_running_service apps must declare a healthCheck (rolling deploys gate on it)",
+        message:
+          "long_running_service apps must declare a healthCheck (rolling deploys gate on it)",
       });
     }
     if (v.kind === "gpu-inference" && v.requiresGpu === false) {
@@ -123,7 +124,10 @@ export const AppDeployConfigSchema = z
         message: "an app cannot depend on itself",
       });
     }
-    if (v.resources?.maxInstances !== undefined && v.resources.minInstances > v.resources.maxInstances) {
+    if (
+      v.resources?.maxInstances !== undefined &&
+      v.resources.minInstances > v.resources.maxInstances
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["resources", "minInstances"],

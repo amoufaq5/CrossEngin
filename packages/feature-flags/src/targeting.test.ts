@@ -33,9 +33,7 @@ describe("constants", () => {
 
 describe("TargetingRuleConditionSchema", () => {
   it("accepts all_users", () => {
-    expect(() =>
-      TargetingRuleConditionSchema.parse({ kind: "all_users" }),
-    ).not.toThrow();
+    expect(() => TargetingRuleConditionSchema.parse({ kind: "all_users" })).not.toThrow();
   });
 
   it("accepts specific_tenants", () => {
@@ -146,9 +144,7 @@ describe("SegmentSchema", () => {
 
 describe("evaluateTargetingCondition", () => {
   it("all_users always matches", () => {
-    expect(
-      evaluateTargetingCondition({ kind: "all_users" }, baseContext),
-    ).toBe(true);
+    expect(evaluateTargetingCondition({ kind: "all_users" }, baseContext)).toBe(true);
   });
 
   it("specific_tenants matches when id in list", () => {

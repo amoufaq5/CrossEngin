@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  durationToSeconds,
-  FileTypeDeclarationSchema,
-  sizeToBytes,
-} from "./manifest.js";
+import { durationToSeconds, FileTypeDeclarationSchema, sizeToBytes } from "./manifest.js";
 
 const baseDecl = {
   allowedMimeTypes: ["application/pdf", "image/jpeg"],
@@ -51,9 +47,7 @@ describe("FileTypeDeclarationSchema", () => {
   });
 
   it("rejects an invalid size shape", () => {
-    expect(() =>
-      FileTypeDeclarationSchema.parse({ ...baseDecl, maxSize: "huge" }),
-    ).toThrow();
+    expect(() => FileTypeDeclarationSchema.parse({ ...baseDecl, maxSize: "huge" })).toThrow();
   });
 
   it("rejects defaultExpiry > maxExpiry", () => {

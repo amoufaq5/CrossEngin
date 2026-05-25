@@ -24,7 +24,10 @@ export class StaticSecretResolver implements SecretResolver {
   private readonly entries: readonly StaticSecretEntry[];
   private readonly defaultTolerance: number;
 
-  constructor(entries: readonly StaticSecretEntry[], opts: { readonly defaultToleranceSeconds?: number } = {}) {
+  constructor(
+    entries: readonly StaticSecretEntry[],
+    opts: { readonly defaultToleranceSeconds?: number } = {},
+  ) {
     this.entries = entries;
     this.defaultTolerance = opts.defaultToleranceSeconds ?? 300;
   }

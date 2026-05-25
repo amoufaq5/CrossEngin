@@ -13,7 +13,10 @@ import {
   hasCycle,
 } from "./graph.js";
 
-const makeNode = (id: string, classification: LineageNode["classification"] = "internal"): LineageNode => ({
+const makeNode = (
+  id: string,
+  classification: LineageNode["classification"] = "internal",
+): LineageNode => ({
   id,
   tenantId: "11111111-1111-1111-1111-111111111111",
   kind: "derived_table",
@@ -38,11 +41,7 @@ const makeNode = (id: string, classification: LineageNode["classification"] = "i
   minimumKAnonymity: null,
 });
 
-const makeEdge = (
-  id: string,
-  source: string,
-  target: string,
-): LineageEdge => ({
+const makeEdge = (id: string, source: string, target: string): LineageEdge => ({
   id,
   tenantId: "11111111-1111-1111-1111-111111111111",
   kind: "derived_from",
@@ -128,26 +127,18 @@ describe("findDescendants", () => {
 describe("findShortestPath", () => {
   it("returns single-node path when from === to", () => {
     const g = buildLineageGraph(nodes, edges);
-    expect(findShortestPath(g, "lng_src_a0001", "lng_src_a0001")).toEqual([
-      "lng_src_a0001",
-    ]);
+    expect(findShortestPath(g, "lng_src_a0001", "lng_src_a0001")).toEqual(["lng_src_a0001"]);
   });
 
   it("returns 3-hop path from src_a to rpt_c", () => {
     const g = buildLineageGraph(nodes, edges);
     const path = findShortestPath(g, "lng_src_a0001", "lng_rpt_c0001");
-    expect(path).toEqual([
-      "lng_src_a0001",
-      "lng_drvd_b0001",
-      "lng_rpt_c0001",
-    ]);
+    expect(path).toEqual(["lng_src_a0001", "lng_drvd_b0001", "lng_rpt_c0001"]);
   });
 
   it("returns null when no path exists", () => {
     const g = buildLineageGraph(nodes, edges);
-    expect(
-      findShortestPath(g, "lng_rpt_c0001", "lng_src_a0001"),
-    ).toBeNull();
+    expect(findShortestPath(g, "lng_rpt_c0001", "lng_src_a0001")).toBeNull();
   });
 });
 
@@ -158,10 +149,7 @@ describe("hasCycle", () => {
   });
 
   it("returns true when a cycle is introduced", () => {
-    const cyclicEdges = [
-      ...edges,
-      makeEdge("lne_cc_aa0001", "lng_rpt_c0001", "lng_src_a0001"),
-    ];
+    const cyclicEdges = [...edges, makeEdge("lne_cc_aa0001", "lng_rpt_c0001", "lng_src_a0001")];
     const g = buildLineageGraph(nodes, cyclicEdges);
     expect(hasCycle(g)).toBe(true);
   });

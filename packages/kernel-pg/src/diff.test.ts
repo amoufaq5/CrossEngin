@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 import { diffSchema, formatSchemaDiff } from "./diff.js";
 import type { LiveSchema, LiveTable } from "./introspection.js";
 
-function liveTable(name: string, columns: LiveTable["columns"], extras: Partial<LiveTable> = {}): LiveTable {
+function liveTable(
+  name: string,
+  columns: LiveTable["columns"],
+  extras: Partial<LiveTable> = {},
+): LiveTable {
   return {
     schema: "meta",
     name,

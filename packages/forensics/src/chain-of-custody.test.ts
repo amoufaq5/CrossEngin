@@ -76,21 +76,17 @@ describe("CustodyEntrySchema", () => {
   });
 
   it("rejects from == to", () => {
-    expect(() =>
-      CustodyEntrySchema.parse({ ...base, toCustodianId: "u-1" }),
-    ).toThrow(/must differ/);
+    expect(() => CustodyEntrySchema.parse({ ...base, toCustodianId: "u-1" })).toThrow(
+      /must differ/,
+    );
   });
 
   it("rejects transferred without witness", () => {
-    expect(() =>
-      CustodyEntrySchema.parse({ ...base, witnessId: null }),
-    ).toThrow(/witness/);
+    expect(() => CustodyEntrySchema.parse({ ...base, witnessId: null })).toThrow(/witness/);
   });
 
   it("rejects witness from from/to custodian", () => {
-    expect(() =>
-      CustodyEntrySchema.parse({ ...base, witnessId: "u-1" }),
-    ).toThrow(/third party/);
+    expect(() => CustodyEntrySchema.parse({ ...base, witnessId: "u-1" })).toThrow(/third party/);
   });
 
   it("rejects destroyed without sealNumber", () => {
@@ -133,14 +129,7 @@ describe("CustodyChainSchema", () => {
     expect(() =>
       CustodyChainSchema.parse([
         entry("COC-2026-0001", "collected", null, "u-1", "2026-05-14T10:00:00Z"),
-        entry(
-          "COC-2026-0002",
-          "transferred",
-          "u-1",
-          "u-2",
-          "2026-05-14T11:00:00Z",
-          "u-w",
-        ),
+        entry("COC-2026-0002", "transferred", "u-1", "u-2", "2026-05-14T11:00:00Z", "u-w"),
       ]),
     ).not.toThrow();
   });
@@ -166,14 +155,7 @@ describe("CustodyChainSchema", () => {
     expect(() =>
       CustodyChainSchema.parse([
         entry("COC-2026-0001", "collected", null, "u-1", "2026-05-14T10:00:00Z"),
-        entry(
-          "COC-2026-0002",
-          "transferred",
-          "u-2",
-          "u-3",
-          "2026-05-14T11:00:00Z",
-          "u-w",
-        ),
+        entry("COC-2026-0002", "transferred", "u-2", "u-3", "2026-05-14T11:00:00Z", "u-w"),
       ]),
     ).toThrow(/custody gap/);
   });
@@ -182,14 +164,7 @@ describe("CustodyChainSchema", () => {
     expect(() =>
       CustodyChainSchema.parse([
         entry("COC-2026-0001", "collected", null, "u-1", "2026-05-14T11:00:00Z"),
-        entry(
-          "COC-2026-0002",
-          "transferred",
-          "u-1",
-          "u-2",
-          "2026-05-14T10:00:00Z",
-          "u-w",
-        ),
+        entry("COC-2026-0002", "transferred", "u-1", "u-2", "2026-05-14T10:00:00Z", "u-w"),
       ]),
     ).toThrow(/chronological order/);
   });
@@ -210,14 +185,7 @@ describe("CustodyChainSchema", () => {
     expect(() =>
       CustodyChainSchema.parse([
         entry("COC-2026-0001", "collected", null, "u-1", "2026-05-14T10:00:00Z"),
-        entry(
-          "COC-2026-0001",
-          "transferred",
-          "u-1",
-          "u-2",
-          "2026-05-14T11:00:00Z",
-          "u-w",
-        ),
+        entry("COC-2026-0001", "transferred", "u-1", "u-2", "2026-05-14T11:00:00Z", "u-w"),
       ]),
     ).toThrow(/duplicate custody entry/);
   });

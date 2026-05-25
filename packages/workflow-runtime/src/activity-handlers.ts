@@ -51,11 +51,7 @@ export class ActivityRegistry {
   private readonly specific: Map<string, ActivityHandler> = new Map();
   private readonly byKind: Map<string, ActivityHandler> = new Map();
 
-  registerForActivity(
-    definitionId: string,
-    activityKey: string,
-    handler: ActivityHandler,
-  ): this {
+  registerForActivity(definitionId: string, activityKey: string, handler: ActivityHandler): this {
     this.specific.set(specificKey(definitionId, activityKey), handler);
     return this;
   }

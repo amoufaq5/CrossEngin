@@ -1,9 +1,6 @@
 import type { EmbeddingResponse, Usage } from "@crossengin/ai-providers";
 
-import {
-  computeEmbeddingCost,
-  type OpenAIEmbeddingModel,
-} from "./pricing.js";
+import { computeEmbeddingCost, type OpenAIEmbeddingModel } from "./pricing.js";
 
 export interface OpenAIEmbeddingsRequest {
   readonly model: string;

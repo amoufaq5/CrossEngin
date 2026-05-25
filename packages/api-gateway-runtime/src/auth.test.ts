@@ -22,7 +22,11 @@ const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000010";
 
 function base64UrlEncode(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return Buffer.from(bytes)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 function buildJwt(opts: {
@@ -108,7 +112,9 @@ describe("verifyBearerJwt", () => {
   const issuer = "https://issuer.example";
   const audience = "https://api.crossengin.io";
 
-  async function makeJwksAndToken(opts: { exp?: number; nbf?: number; aud?: string | readonly string[]; iss?: string } = {}) {
+  async function makeJwksAndToken(
+    opts: { exp?: number; nbf?: number; aud?: string | readonly string[]; iss?: string } = {},
+  ) {
     const kp = generateEd25519Keypair();
     const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
     const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
@@ -145,7 +151,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("expired_token");
   });
@@ -155,7 +166,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("not_yet_valid_token");
   });
@@ -165,7 +181,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("audience_mismatch");
   });
@@ -175,7 +196,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("issuer_mismatch");
   });
@@ -186,7 +212,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token: tampered,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("invalid_signature");
   });
@@ -202,7 +233,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token: fake,
       jwks: new InMemoryJwksProvider({ keys: [] }),
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("credential_malformed");
   });
@@ -212,7 +248,12 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks: new InMemoryJwksProvider({ keys: [] }),
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: {
+        expectedIssuer: issuer,
+        expectedAudience: audience,
+        clockSkewSeconds: 30,
+        nowSeconds: NOW_SECONDS,
+      },
     });
     expect(result.outcome).toBe("credential_not_found");
   });
@@ -220,13 +261,17 @@ describe("verifyBearerJwt", () => {
 
 describe("parseAuthHeader", () => {
   it("recognizes Bearer", () => {
-    const result = parseAuthHeader(fixtureRequest({ headers: { authorization: "Bearer abc.def.ghi" } }));
+    const result = parseAuthHeader(
+      fixtureRequest({ headers: { authorization: "Bearer abc.def.ghi" } }),
+    );
     expect(result.scheme).toBe("bearer_jwt");
     expect(result.token).toBe("abc.def.ghi");
   });
 
   it("recognizes Basic", () => {
-    const result = parseAuthHeader(fixtureRequest({ headers: { authorization: "Basic Zm9vOmJhcg==" } }));
+    const result = parseAuthHeader(
+      fixtureRequest({ headers: { authorization: "Basic Zm9vOmJhcg==" } }),
+    );
     expect(result.scheme).toBe("basic");
     expect(result.token).toBe("Zm9vOmJhcg==");
   });

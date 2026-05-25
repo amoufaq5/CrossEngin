@@ -54,15 +54,13 @@ describe("LifecycleEventSchema", () => {
   });
 
   it("rejects fromState == toState", () => {
-    expect(() =>
-      LifecycleEventSchema.parse({ ...base, toState: "active" }),
-    ).toThrow();
+    expect(() => LifecycleEventSchema.parse({ ...base, toState: "active" })).toThrow();
   });
 
   it("rejects mismatched action and toState", () => {
-    expect(() =>
-      LifecycleEventSchema.parse({ ...base, toState: "archived" }),
-    ).toThrow(/must transition to 'suspended'/);
+    expect(() => LifecycleEventSchema.parse({ ...base, toState: "archived" })).toThrow(
+      /must transition to 'suspended'/,
+    );
   });
 
   it("rejects both actorUserId and actorSystemId", () => {
@@ -189,10 +187,7 @@ describe("eventChain / lastEvent", () => {
   });
 
   it("lastEvent returns the most recent for tenant", () => {
-    const events = [
-      ev("a", "2026-05-14T10:00:00Z"),
-      ev("b", "2026-05-14T09:00:00Z"),
-    ];
+    const events = [ev("a", "2026-05-14T10:00:00Z"), ev("b", "2026-05-14T09:00:00Z")];
     expect(lastEvent(events, "t-1")?.id).toBe("a");
   });
 

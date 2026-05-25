@@ -94,9 +94,7 @@ describe("OidcAuthorizeRequestSchema", () => {
 
   it("rejects code response without nonce", () => {
     const { nonce: _omit, ...withoutNonce } = base;
-    expect(() => OidcAuthorizeRequestSchema.parse(withoutNonce)).toThrow(
-      /nonce required/,
-    );
+    expect(() => OidcAuthorizeRequestSchema.parse(withoutNonce)).toThrow(/nonce required/);
   });
 
   it("rejects codeChallenge without method", () => {
@@ -206,9 +204,7 @@ describe("validateIdTokenClaims", () => {
 
 describe("isPublicClient", () => {
   it("returns true for client without secret + flag set", () => {
-    expect(
-      isPublicClient({ isPublicClient: true, clientSecretSha256: null }),
-    ).toBe(true);
+    expect(isPublicClient({ isPublicClient: true, clientSecretSha256: null })).toBe(true);
   });
   it("returns false for confidential client", () => {
     expect(
@@ -239,11 +235,7 @@ describe("isValidRedirectUri", () => {
 
 describe("parseScopeString and containsOpenidScope", () => {
   it("splits on whitespace", () => {
-    expect(parseScopeString("openid email profile")).toEqual([
-      "openid",
-      "email",
-      "profile",
-    ]);
+    expect(parseScopeString("openid email profile")).toEqual(["openid", "email", "profile"]);
   });
   it("containsOpenidScope returns true when present", () => {
     expect(containsOpenidScope("openid email")).toBe(true);

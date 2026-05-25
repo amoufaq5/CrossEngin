@@ -4,10 +4,7 @@ import { EntityPermissionsSchema, RoleDefinitionSchema } from "@crossengin/auth"
 import { FileTypeDeclarationSchema } from "@crossengin/files";
 import { IntegrationDeclarationSchema } from "@crossengin/integrations";
 import { JobDeclarationSchema } from "@crossengin/jobs";
-import {
-  DashboardDeclarationSchema,
-  ReportDeclarationSchema,
-} from "@crossengin/reporting";
+import { DashboardDeclarationSchema, ReportDeclarationSchema } from "@crossengin/reporting";
 import { SearchManifestSchema } from "@crossengin/search";
 import { TenantI18nConfigSchema } from "@crossengin/i18n";
 import {
@@ -46,9 +43,7 @@ export const ManifestMetaSchema = z.object({
   description: z.string().optional(),
   extends: z.array(z.string().min(1)).optional(),
   compliancePacks: z.array(z.string().min(1)).optional(),
-  compliancePackParameters: z
-    .record(z.string(), z.record(z.string(), z.unknown()))
-    .optional(),
+  compliancePackParameters: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   manifestResolution: ManifestResolutionSchema.optional(),
 });
 

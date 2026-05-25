@@ -21,12 +21,7 @@ export const THROTTLE_ALGORITHMS = [
 ] as const;
 export type ThrottleAlgorithm = (typeof THROTTLE_ALGORITHMS)[number];
 
-export const THROTTLE_VERDICTS = [
-  "allowed",
-  "rate_limited",
-  "queued",
-  "shed",
-] as const;
+export const THROTTLE_VERDICTS = ["allowed", "rate_limited", "queued", "shed"] as const;
 export type ThrottleVerdict = (typeof THROTTLE_VERDICTS)[number];
 
 export const ThrottlePolicySchema = z
@@ -131,10 +126,7 @@ export interface ThrottleDecision {
   readonly remaining: number;
 }
 
-export function evaluateThrottle(
-  policy: ThrottlePolicy,
-  input: ThrottleInput,
-): ThrottleDecision {
+export function evaluateThrottle(policy: ThrottlePolicy, input: ThrottleInput): ThrottleDecision {
   for (const tag of input.apiKeyTags) {
     if (policy.exemptApiKeyTags.includes(tag)) {
       return {

@@ -47,15 +47,11 @@ function deriveExpectedSigningKey(
 
 describe("formatAmzDate", () => {
   it("produces the AWS-canonical ISO basic format", () => {
-    expect(formatAmzDate(new Date("2026-05-18T12:34:56.000Z"))).toBe(
-      "20260518T123456Z",
-    );
+    expect(formatAmzDate(new Date("2026-05-18T12:34:56.000Z"))).toBe("20260518T123456Z");
   });
 
   it("pads single-digit months / days / hours", () => {
-    expect(formatAmzDate(new Date("2026-01-02T03:04:05.000Z"))).toBe(
-      "20260102T030405Z",
-    );
+    expect(formatAmzDate(new Date("2026-01-02T03:04:05.000Z"))).toBe("20260102T030405Z");
   });
 
   it("uses UTC regardless of local timezone", () => {
@@ -87,9 +83,7 @@ describe("signRequest — output shape", () => {
 
   it("includes host, x-amz-date, x-amz-content-sha256 in headers", () => {
     const signed = sign({});
-    expect(signed.headers["host"]).toBe(
-      "bedrock-runtime.us-east-1.amazonaws.com",
-    );
+    expect(signed.headers["host"]).toBe("bedrock-runtime.us-east-1.amazonaws.com");
     expect(signed.headers["x-amz-date"]).toBe("20260518T120000Z");
     expect(signed.headers["x-amz-content-sha256"]).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -121,17 +115,13 @@ describe("signRequest — determinism + sensitivity", () => {
   it("different body → different signature", () => {
     const a = sign({ body: new TextEncoder().encode("hello") });
     const b = sign({ body: new TextEncoder().encode("world") });
-    expect(extractSignature(a.authorization)).not.toBe(
-      extractSignature(b.authorization),
-    );
+    expect(extractSignature(a.authorization)).not.toBe(extractSignature(b.authorization));
   });
 
   it("different path → different signature", () => {
     const a = sign({ path: "/model/a/converse" });
     const b = sign({ path: "/model/b/converse" });
-    expect(extractSignature(a.authorization)).not.toBe(
-      extractSignature(b.authorization),
-    );
+    expect(extractSignature(a.authorization)).not.toBe(extractSignature(b.authorization));
   });
 
   it("different region → different signature", () => {
@@ -157,9 +147,7 @@ describe("signRequest — determinism + sensitivity", () => {
       credentials: CREDS,
       now: FIXED_DATE,
     });
-    expect(extractSignature(a.authorization)).not.toBe(
-      extractSignature(b.authorization),
-    );
+    expect(extractSignature(a.authorization)).not.toBe(extractSignature(b.authorization));
   });
 
   it("includes x-amz-security-token when a session token is supplied", () => {
@@ -181,12 +169,7 @@ describe("signRequest — determinism + sensitivity", () => {
 
 describe("signRequest — signing key derivation matches AWS reference", () => {
   it("HMAC chain: kSecret → kDate → kRegion → kService → aws4_request", () => {
-    const key = deriveExpectedSigningKey(
-      CREDS.secretAccessKey,
-      "20260518",
-      "us-east-1",
-      "bedrock",
-    );
+    const key = deriveExpectedSigningKey(CREDS.secretAccessKey, "20260518", "us-east-1", "bedrock");
     expect(key.byteLength).toBe(32);
     expect(key.toString("hex")).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -215,9 +198,7 @@ describe("signRequest — URI encoding + query canonicalisation", () => {
     const sigZ = sign({ query: { z: "1", a: "2" } });
     const sigA = sign({ query: { a: "2", z: "1" } });
     // Different ordering on input → same canonical query → same signature
-    expect(extractSignature(sigZ.authorization)).toBe(
-      extractSignature(sigA.authorization),
-    );
+    expect(extractSignature(sigZ.authorization)).toBe(extractSignature(sigA.authorization));
   });
 
   it("repeats with the same key produce a multi-value canonical query", () => {

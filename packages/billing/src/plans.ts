@@ -135,13 +135,11 @@ export function computeOverage(input: OverageInput): OverageResult {
   }
   const metered = input.plan.meteredPrices.find((m) => m.meter === input.meter);
   const quotaKey = METER_TO_QUOTA[input.meter];
-  const quotaIncluded =
-    quotaKey !== null ? (input.plan.includedQuotas[quotaKey] ?? 0) : 0;
+  const quotaIncluded = quotaKey !== null ? (input.plan.includedQuotas[quotaKey] ?? 0) : 0;
   const freeTier = metered?.freeTierUnits ?? 0;
   const includedUnits = Math.max(quotaIncluded, freeTier);
   const billableUnits = Math.max(0, input.usedUnits - includedUnits);
-  const overageCents =
-    metered !== undefined ? billableUnits * metered.perUnitCents : 0;
+  const overageCents = metered !== undefined ? billableUnits * metered.perUnitCents : 0;
   return {
     meter: input.meter,
     includedUnits,
@@ -178,9 +176,7 @@ export function prorateUpgrade(input: ProrationInput): ProrationResult {
   const remaining = input.daysInCycle - input.daysIntoCycle;
   const remainingFraction = remaining / input.daysInCycle;
   const creditCents = Math.round(input.oldPlan.basePriceCents * remainingFraction);
-  const newChargeCents = Math.round(
-    input.newPlan.basePriceCents * remainingFraction,
-  );
+  const newChargeCents = Math.round(input.newPlan.basePriceCents * remainingFraction);
   return {
     creditCents,
     newChargeCents,

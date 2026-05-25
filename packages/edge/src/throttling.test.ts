@@ -51,9 +51,7 @@ describe("ThrottlePolicySchema", () => {
   });
 
   it("rejects token_bucket without burst", () => {
-    expect(() =>
-      ThrottlePolicySchema.parse({ ...base, burst: 0 }),
-    ).toThrow(/burst >= 1/);
+    expect(() => ThrottlePolicySchema.parse({ ...base, burst: 0 })).toThrow(/burst >= 1/);
   });
 
   it("rejects leaky_bucket without queueDepth", () => {
@@ -67,9 +65,9 @@ describe("ThrottlePolicySchema", () => {
   });
 
   it("rejects overflowResponse='queue' without queueDepth", () => {
-    expect(() =>
-      ThrottlePolicySchema.parse({ ...base, overflowResponse: "queue" }),
-    ).toThrow(/queueDepth >= 1/);
+    expect(() => ThrottlePolicySchema.parse({ ...base, overflowResponse: "queue" })).toThrow(
+      /queueDepth >= 1/,
+    );
   });
 
   it("rejects queueDepth > 0 without queueTimeoutMs", () => {
@@ -124,17 +122,14 @@ describe("ThrottlePolicySetSchema", () => {
   });
 
   it("rejects duplicate ids", () => {
-    expect(() =>
-      ThrottlePolicySetSchema.parse([policy("a"), policy("a")]),
-    ).toThrow(/duplicate throttle policy/);
+    expect(() => ThrottlePolicySetSchema.parse([policy("a"), policy("a")])).toThrow(
+      /duplicate throttle policy/,
+    );
   });
 
   it("rejects more than one global policy", () => {
     expect(() =>
-      ThrottlePolicySetSchema.parse([
-        policy("a", "global"),
-        policy("b", "global"),
-      ]),
+      ThrottlePolicySetSchema.parse([policy("a", "global"), policy("b", "global")]),
     ).toThrow(/only one global throttle/);
   });
 });

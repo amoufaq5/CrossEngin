@@ -1,14 +1,11 @@
 export const INVALID_REQUEST_ERROR_KINDS = ["invalid_request_error"] as const;
-export type InvalidRequestErrorKind =
-  (typeof INVALID_REQUEST_ERROR_KINDS)[number];
+export type InvalidRequestErrorKind = (typeof INVALID_REQUEST_ERROR_KINDS)[number];
 
 export interface InvalidRequestDiscriminator {
   readonly kind: string;
 }
 
-export function isInvalidRequestErrorKind(
-  value: string,
-): value is InvalidRequestErrorKind {
+export function isInvalidRequestErrorKind(value: string): value is InvalidRequestErrorKind {
   return (INVALID_REQUEST_ERROR_KINDS as readonly string[]).includes(value);
 }
 

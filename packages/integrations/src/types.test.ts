@@ -369,8 +369,6 @@ describe("IntegrationDeclarationSchema — inbound.sftp", () => {
 
 describe("IntegrationDeclarationSchema — discriminator", () => {
   it("rejects an unknown kind", () => {
-    expect(() =>
-      IntegrationDeclarationSchema.parse({ kind: "outbound.morse" }),
-    ).toThrow();
+    expect(() => IntegrationDeclarationSchema.parse({ kind: "outbound.morse" })).toThrow();
   });
 });

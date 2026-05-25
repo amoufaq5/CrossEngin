@@ -50,9 +50,9 @@ describe("WebAppManifestSchema", () => {
   });
 
   it("rejects scope without trailing slash", () => {
-    expect(() =>
-      WebAppManifestSchema.parse({ ...baseManifest, scope: "/app" }),
-    ).toThrow(/scope must end with '\//);
+    expect(() => WebAppManifestSchema.parse({ ...baseManifest, scope: "/app" })).toThrow(
+      /scope must end with '\//,
+    );
   });
 
   it("rejects start_url outside scope", () => {
@@ -75,9 +75,7 @@ describe("WebAppManifestSchema", () => {
   });
 
   it("rejects non-hex theme color", () => {
-    expect(() =>
-      WebAppManifestSchema.parse({ ...baseManifest, theme_color: "green" }),
-    ).toThrow();
+    expect(() => WebAppManifestSchema.parse({ ...baseManifest, theme_color: "green" })).toThrow();
   });
 });
 

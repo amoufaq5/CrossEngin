@@ -6,27 +6,15 @@ export const BEDROCK_CUSTOM_MODEL_NAME_CONTAINS_MIN_LEN = 1;
 export const BEDROCK_CUSTOM_MODEL_NAME_CONTAINS_MAX_LEN = 63;
 
 export const BEDROCK_CUSTOM_MODEL_SORT_BY_VALUES = ["CreationTime"] as const;
-export type BedrockCustomModelSortBy =
-  (typeof BEDROCK_CUSTOM_MODEL_SORT_BY_VALUES)[number];
+export type BedrockCustomModelSortBy = (typeof BEDROCK_CUSTOM_MODEL_SORT_BY_VALUES)[number];
 
-export const BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES = [
-  "Ascending",
-  "Descending",
-] as const;
-export type BedrockCustomModelSortOrder =
-  (typeof BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES)[number];
+export const BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES = ["Ascending", "Descending"] as const;
+export type BedrockCustomModelSortOrder = (typeof BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES)[number];
 
-export const BEDROCK_CUSTOM_MODEL_STATUSES = [
-  "Active",
-  "Creating",
-  "Failed",
-] as const;
-export type BedrockCustomModelStatus =
-  (typeof BEDROCK_CUSTOM_MODEL_STATUSES)[number];
+export const BEDROCK_CUSTOM_MODEL_STATUSES = ["Active", "Creating", "Failed"] as const;
+export type BedrockCustomModelStatus = (typeof BEDROCK_CUSTOM_MODEL_STATUSES)[number];
 
-export function isBedrockCustomModelStatus(
-  value: unknown,
-): value is BedrockCustomModelStatus {
+export function isBedrockCustomModelStatus(value: unknown): value is BedrockCustomModelStatus {
   return (
     typeof value === "string" &&
     (BEDROCK_CUSTOM_MODEL_STATUSES as readonly string[]).includes(value)
@@ -113,10 +101,7 @@ export function parseCustomModelDetail(raw: unknown): BedrockCustomModelDetail {
   const jobArn = expectStringDetail(j, "jobArn");
   const baseModelArn = expectStringDetail(j, "baseModelArn");
   const creationTime = expectStringDetail(j, "creationTime");
-  const trainingDataConfig = parseS3Config(
-    j["trainingDataConfig"],
-    "trainingDataConfig",
-  );
+  const trainingDataConfig = parseS3Config(j["trainingDataConfig"], "trainingDataConfig");
   const outputDataConfig = parseS3Config(j["outputDataConfig"], "outputDataConfig");
   const out: {
     -readonly [K in keyof BedrockCustomModelDetail]: BedrockCustomModelDetail[K];
@@ -132,10 +117,7 @@ export function parseCustomModelDetail(raw: unknown): BedrockCustomModelDetail {
   if (typeof j["jobName"] === "string" && j["jobName"].length > 0) {
     out.jobName = j["jobName"];
   }
-  if (
-    typeof j["customizationType"] === "string" &&
-    j["customizationType"].length > 0
-  ) {
+  if (typeof j["customizationType"] === "string" && j["customizationType"].length > 0) {
     out.customizationType = j["customizationType"];
   }
   if (typeof j["modelKmsKeyArn"] === "string" && j["modelKmsKeyArn"].length > 0) {
@@ -159,10 +141,7 @@ export function parseCustomModelDetail(raw: unknown): BedrockCustomModelDetail {
   return out;
 }
 
-function parseS3Config(
-  raw: unknown,
-  field: string,
-): BedrockCustomModelS3Config {
+function parseS3Config(raw: unknown, field: string): BedrockCustomModelS3Config {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -199,9 +178,7 @@ function parseHyperParameters(raw: unknown): Readonly<Record<string, string>> {
   return out;
 }
 
-function parseValidationDataConfig(
-  raw: unknown,
-): BedrockCustomModelValidationDataConfig {
+function parseValidationDataConfig(raw: unknown): BedrockCustomModelValidationDataConfig {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -259,9 +236,7 @@ function parseTrainingMetrics(raw: unknown): BedrockCustomModelTrainingMetrics {
   return out;
 }
 
-function parseValidationMetrics(
-  raw: unknown,
-): readonly BedrockCustomModelValidationMetric[] {
+function parseValidationMetrics(raw: unknown): readonly BedrockCustomModelValidationMetric[] {
   if (!Array.isArray(raw)) {
     throw new BedrockError({
       kind: "api_error",
@@ -293,9 +268,7 @@ function parseValidationMetrics(
   });
 }
 
-function parseCustomizationConfig(
-  raw: unknown,
-): BedrockCustomModelCustomizationConfig {
+function parseCustomizationConfig(raw: unknown): BedrockCustomModelCustomizationConfig {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -312,9 +285,7 @@ function parseCustomizationConfig(
   return out;
 }
 
-function parseDistillationConfig(
-  raw: unknown,
-): BedrockCustomModelDistillationConfig {
+function parseDistillationConfig(raw: unknown): BedrockCustomModelDistillationConfig {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -325,8 +296,7 @@ function parseDistillationConfig(
   if (o.teacherModelConfig === null || typeof o.teacherModelConfig !== "object") {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "getCustomModel: distillationConfig.teacherModelConfig is missing or not an object",
+      message: "getCustomModel: distillationConfig.teacherModelConfig is missing or not an object",
     });
   }
   const t = o.teacherModelConfig as Record<string, unknown>;
@@ -339,8 +309,7 @@ function parseDistillationConfig(
     if (typeof maxLen !== "number" || !Number.isFinite(maxLen)) {
       throw new BedrockError({
         kind: "api_error",
-        message:
-          "getCustomModel: maxResponseLengthForInference must be a finite number",
+        message: "getCustomModel: maxResponseLengthForInference must be a finite number",
       });
     }
     teacher.maxResponseLengthForInference = maxLen;
@@ -421,8 +390,7 @@ export function buildCustomModelListQuery(
     if (options.foundationModelArnEquals.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "listCustomModels: foundationModelArnEquals must be a non-empty string",
+        message: "listCustomModels: foundationModelArnEquals must be a non-empty string",
       });
     }
     out["foundationModelArnEquals"] = options.foundationModelArnEquals;
@@ -462,11 +430,7 @@ export function buildCustomModelListQuery(
     out["nextToken"] = options.nextToken;
   }
   if (options.sortBy !== undefined) {
-    if (
-      !(BEDROCK_CUSTOM_MODEL_SORT_BY_VALUES as readonly string[]).includes(
-        options.sortBy,
-      )
-    ) {
+    if (!(BEDROCK_CUSTOM_MODEL_SORT_BY_VALUES as readonly string[]).includes(options.sortBy)) {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `listCustomModels: invalid sortBy '${String(options.sortBy)}'`,
@@ -476,9 +440,7 @@ export function buildCustomModelListQuery(
   }
   if (options.sortOrder !== undefined) {
     if (
-      !(BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES as readonly string[]).includes(
-        options.sortOrder,
-      )
+      !(BEDROCK_CUSTOM_MODEL_SORT_ORDER_VALUES as readonly string[]).includes(options.sortOrder)
     ) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -490,9 +452,7 @@ export function buildCustomModelListQuery(
   return out;
 }
 
-export function parseCustomModelListResponse(
-  raw: unknown,
-): BedrockCustomModelListResponse {
+export function parseCustomModelListResponse(raw: unknown): BedrockCustomModelListResponse {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -525,9 +485,7 @@ export function parseCustomModelListResponse(
   return out;
 }
 
-export function parseCustomModelSummary(
-  raw: unknown,
-): BedrockCustomModelSummary {
+export function parseCustomModelSummary(raw: unknown): BedrockCustomModelSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -550,10 +508,7 @@ export function parseCustomModelSummary(
   if (typeof j["baseModelName"] === "string" && j["baseModelName"].length > 0) {
     summary.baseModelName = j["baseModelName"];
   }
-  if (
-    typeof j["customizationType"] === "string" &&
-    j["customizationType"].length > 0
-  ) {
+  if (typeof j["customizationType"] === "string" && j["customizationType"].length > 0) {
     summary.customizationType = j["customizationType"];
   }
   if (typeof j["ownerAccountId"] === "string" && j["ownerAccountId"].length > 0) {

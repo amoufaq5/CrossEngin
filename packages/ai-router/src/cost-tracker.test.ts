@@ -8,20 +8,20 @@ describe("InMemoryCostTracker.recordUsage + getWindow", () => {
   it("starts a new window on first usage", async () => {
     const clock = makeClock(0);
     const tracker = new InMemoryCostTracker({ windowSeconds: 60, clock });
-    await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.10 });
+    await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.1 });
     const w = await tracker.getWindow(TENANT);
-    expect(w?.costUsd).toBe(0.10);
+    expect(w?.costUsd).toBe(0.1);
     expect(w?.windowStartUnixMs).toBe(0);
   });
 
   it("accumulates usage within the same window", async () => {
     const clock = makeClock(0);
     const tracker = new InMemoryCostTracker({ windowSeconds: 60, clock });
-    await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.10 });
+    await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.1 });
     clock.advance(30_000);
-    await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.20 });
+    await tracker.recordUsage({ tenantId: TENANT, costUsd: 0.2 });
     const w = await tracker.getWindow(TENANT);
-    expect(w?.costUsd).toBeCloseTo(0.30, 6);
+    expect(w?.costUsd).toBeCloseTo(0.3, 6);
   });
 
   it("rolls over to a fresh window after expiry", async () => {

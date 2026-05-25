@@ -178,7 +178,9 @@ export function isCourtAdmissible(att: AttestationRecord): boolean {
   if (att.revokedAt !== null) return false;
   if (!att.isUnderOath) return false;
   if (!att.penaltyOfPerjuryAcknowledged) return false;
-  return att.signatureKind === "notarized" || att.signatureKind === "qualified_electronic_signature";
+  return (
+    att.signatureKind === "notarized" || att.signatureKind === "qualified_electronic_signature"
+  );
 }
 
 export function attestationsForEvidence(

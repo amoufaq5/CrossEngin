@@ -64,8 +64,14 @@ export const DecisionAttestationSchema = z
     attestedAt: z.string().datetime({ offset: true }),
     attestedByUserId: z.string().uuid(),
     attestationPhrase: z.string().max(500).optional(),
-    signatureSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-    signingKeyFingerprint: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    signatureSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    signingKeyFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     coAttestingUserId: z.string().uuid().nullable(),
     coAttestedAt: z.string().datetime({ offset: true }).nullable(),
     ipAddress: z.string().min(1).max(45),
@@ -144,20 +150,14 @@ export const AccessReviewDecisionSchema = z
         message: "modify_grant decision requires modifiedGrantAttributes",
       });
     }
-    if (
-      d.kind === "keep" &&
-      REASONS_REQUIRING_REVOKE.has(d.reason)
-    ) {
+    if (d.kind === "keep" && REASONS_REQUIRING_REVOKE.has(d.reason)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["reason"],
         message: `keep decision is inconsistent with reason ${d.reason}`,
       });
     }
-    if (
-      d.kind === "revoke" &&
-      REASONS_REQUIRING_KEEP.has(d.reason)
-    ) {
+    if (d.kind === "revoke" && REASONS_REQUIRING_KEEP.has(d.reason)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["reason"],
@@ -174,10 +174,7 @@ export const AccessReviewDecisionSchema = z
         message: "timeBoundExtendUntil must be after decidedAt",
       });
     }
-    if (
-      d.appliedAt !== null &&
-      Date.parse(d.appliedAt) < Date.parse(d.decidedAt)
-    ) {
+    if (d.appliedAt !== null && Date.parse(d.appliedAt) < Date.parse(d.decidedAt)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["appliedAt"],
@@ -194,14 +191,10 @@ export const AccessReviewDecisionSchema = z
   });
 export type AccessReviewDecision = z.infer<typeof AccessReviewDecisionSchema>;
 
-export const isStrongAttestation = (
-  attestation: DecisionAttestation,
-): boolean => STRONG_ATTESTATION_KINDS.has(attestation.kind);
+export const isStrongAttestation = (attestation: DecisionAttestation): boolean =>
+  STRONG_ATTESTATION_KINDS.has(attestation.kind);
 
-export const requiresStrongAttestation = (
-  kind: DecisionKind,
-  reason: DecisionReason,
-): boolean => {
+export const requiresStrongAttestation = (kind: DecisionKind, reason: DecisionReason): boolean => {
   if (kind === "keep" && reason === "regulatory_requirement") return true;
   if (kind === "time_bound_extend") return true;
   if (reason === "security_concern_revoked") return true;

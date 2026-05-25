@@ -140,9 +140,7 @@ describe("SuppressionRecordSchema", () => {
 
 describe("isSuppressionActive", () => {
   it("returns true for permanent suppression", () => {
-    expect(
-      isSuppressionActive(baseSuppression, new Date("2050-01-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isSuppressionActive(baseSuppression, new Date("2050-01-01T00:00:00Z"))).toBe(true);
   });
 
   it("returns true within expiry window", () => {

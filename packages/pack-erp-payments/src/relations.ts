@@ -8,6 +8,4 @@ export const INVOICE_PAYMENTS_RELATION: Relation = {
   onDelete: "restrict",
 };
 
-export const ERP_PAYMENTS_RELATIONS: readonly Relation[] = [
-  INVOICE_PAYMENTS_RELATION,
-];
+export const ERP_PAYMENTS_RELATIONS: readonly Relation[] = [INVOICE_PAYMENTS_RELATION];

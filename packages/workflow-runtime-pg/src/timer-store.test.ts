@@ -56,9 +56,7 @@ describe("PostgresTimerStore.upsert", () => {
     const resolver = new WorkflowInstanceIdResolver(conn);
     resolver.register("wfi_inst0001", INSTANCE_UUID);
     const store = new PostgresTimerStore({ conn, instanceResolver: resolver });
-    await store.upsert(
-      fixtureTimer({ status: "fired", firedAt: "2026-05-17T12:00:00.000Z" }),
-    );
+    await store.upsert(fixtureTimer({ status: "fired", firedAt: "2026-05-17T12:00:00.000Z" }));
     expect(capture[0]?.sql).toContain("ON CONFLICT (timer_id) DO UPDATE");
     expect(capture[0]?.params?.[4]).toBe("fired");
     expect(capture[0]?.params?.[7]).toBe("2026-05-17T12:00:00.000Z");
@@ -91,10 +89,7 @@ describe("PostgresTimerStore.upsert", () => {
     const resolver = new WorkflowInstanceIdResolver(conn);
     resolver.register("wfi_inst0001", INSTANCE_UUID);
     const store = new PostgresTimerStore({ conn, instanceResolver: resolver });
-    await store.upsertMany([
-      fixtureTimer({ id: "wft_a" }),
-      fixtureTimer({ id: "wft_b" }),
-    ]);
+    await store.upsertMany([fixtureTimer({ id: "wft_a" }), fixtureTimer({ id: "wft_b" })]);
     expect(capture).toHaveLength(2);
   });
 });

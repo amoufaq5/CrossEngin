@@ -39,25 +39,46 @@ export const FlagEvaluationSchema = z
     id: z.string().regex(/^fev_[a-z0-9]{8,40}$/),
     tenantId: z.string().uuid().nullable(),
     flagKey: z.string().regex(/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$/),
-    flagId: z.string().regex(/^ff_[a-z0-9]{8,32}$/).nullable(),
-    flagVersion: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/).nullable(),
+    flagId: z
+      .string()
+      .regex(/^ff_[a-z0-9]{8,32}$/)
+      .nullable(),
+    flagVersion: z
+      .string()
+      .regex(/^[0-9]+\.[0-9]+\.[0-9]+$/)
+      .nullable(),
     environment: z.enum(["preview", "staging", "production", "sandbox"]),
     principalId: z.string().uuid().nullable(),
     sessionId: z.string().max(120).nullable(),
     evaluatedAt: z.string().datetime({ offset: true }),
     evaluationLatencyUs: z.number().int().min(0).max(10_000_000),
     reason: z.enum(EVALUATION_REASONS),
-    matchedRuleId: z.string().regex(/^ftr_[a-z0-9]{8,40}$/).nullable(),
-    matchedSegmentId: z.string().regex(/^fseg_[a-z0-9]{8,40}$/).nullable(),
+    matchedRuleId: z
+      .string()
+      .regex(/^ftr_[a-z0-9]{8,40}$/)
+      .nullable(),
+    matchedSegmentId: z
+      .string()
+      .regex(/^fseg_[a-z0-9]{8,40}$/)
+      .nullable(),
     servedVariantKey: z
       .string()
       .regex(/^[a-z][a-z0-9_]*$/)
       .max(80)
       .nullable(),
     servedValueJson: z.string().min(1).max(10_000),
-    killSwitchId: z.string().regex(/^fks_[a-z0-9]{8,40}$/).nullable(),
-    bucketingValueSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-    requestId: z.string().regex(/^req_[A-Za-z0-9_-]{8,64}$/).nullable(),
+    killSwitchId: z
+      .string()
+      .regex(/^fks_[a-z0-9]{8,40}$/)
+      .nullable(),
+    bucketingValueSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    requestId: z
+      .string()
+      .regex(/^req_[A-Za-z0-9_-]{8,64}$/)
+      .nullable(),
     correlationId: z.string().max(200).nullable(),
     isSampled: z.boolean().default(true),
     errorCode: z.string().max(80).nullable(),
@@ -110,8 +131,7 @@ export const FlagEvaluationSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["errorCode"],
-        message:
-          "error_returned_default reason requires errorCode + errorMessage",
+        message: "error_returned_default reason requires errorCode + errorMessage",
       });
     }
     if (e.reason === "flag_not_found" && e.flagId !== null) {
@@ -152,8 +172,7 @@ export const aggregateEvaluations = (
   for (const e of evaluations) {
     reasonCounts[e.reason] = (reasonCounts[e.reason] ?? 0) + 1;
     if (e.servedVariantKey !== null) {
-      variantCounts[e.servedVariantKey] =
-        (variantCounts[e.servedVariantKey] ?? 0) + 1;
+      variantCounts[e.servedVariantKey] = (variantCounts[e.servedVariantKey] ?? 0) + 1;
     }
     if (e.reason === "error_returned_default") errorCount++;
     if (e.reason === "kill_switch_active") killSwitchHitCount++;
@@ -172,12 +191,9 @@ export const aggregateEvaluations = (
   };
 };
 
-export const isTerminalReason = (reason: EvaluationReason): boolean =>
-  TERMINAL_REASONS.has(reason);
+export const isTerminalReason = (reason: EvaluationReason): boolean => TERMINAL_REASONS.has(reason);
 
-export const isFallbackEvaluation = (
-  evaluation: FlagEvaluation,
-): boolean =>
+export const isFallbackEvaluation = (evaluation: FlagEvaluation): boolean =>
   evaluation.reason === "default_returned" ||
   evaluation.reason === "fallthrough_to_default" ||
   evaluation.reason === "error_returned_default" ||

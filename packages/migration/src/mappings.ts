@@ -180,21 +180,22 @@ export interface TypeCoercionResult {
   readonly reason?: string;
 }
 
-const LOSSLESS_COERCIONS: Readonly<Record<InferredType, ReadonlyArray<InferredType>>> = Object.freeze({
-  string: ["string"],
-  integer: ["integer", "decimal", "string"],
-  decimal: ["decimal", "string"],
-  boolean: ["boolean", "integer", "string"],
-  date: ["date", "datetime", "string"],
-  datetime: ["datetime", "string"],
-  uuid: ["uuid", "string"],
-  email: ["email", "string"],
-  url: ["url", "string"],
-  phone: ["phone", "string"],
-  json: ["json", "string"],
-  binary: ["binary"],
-  unknown: ["string", "json"],
-});
+const LOSSLESS_COERCIONS: Readonly<Record<InferredType, ReadonlyArray<InferredType>>> =
+  Object.freeze({
+    string: ["string"],
+    integer: ["integer", "decimal", "string"],
+    decimal: ["decimal", "string"],
+    boolean: ["boolean", "integer", "string"],
+    date: ["date", "datetime", "string"],
+    datetime: ["datetime", "string"],
+    uuid: ["uuid", "string"],
+    email: ["email", "string"],
+    url: ["url", "string"],
+    phone: ["phone", "string"],
+    json: ["json", "string"],
+    binary: ["binary"],
+    unknown: ["string", "json"],
+  });
 
 export function isTypeCoercionAllowed(
   source: InferredType,

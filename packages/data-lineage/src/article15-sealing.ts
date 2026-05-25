@@ -1,9 +1,6 @@
 import { sha256 } from "@crossengin/crypto";
 
-import {
-  Article15EvidencePackSchema,
-  type Article15EvidencePack,
-} from "./compliance.js";
+import { Article15EvidencePackSchema, type Article15EvidencePack } from "./compliance.js";
 
 const ARTICLE15_BUNDLE_DOMAIN_TAG = "crossengin.article15.bundle.v1\n";
 

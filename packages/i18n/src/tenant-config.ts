@@ -81,9 +81,6 @@ export function isRtlLocale(config: TenantI18nConfig, locale: Bcp47Locale): bool
   return base !== undefined && RTL_LOCALES.has(base);
 }
 
-export function directionForConfigLocale(
-  config: TenantI18nConfig,
-  locale: Bcp47Locale,
-): Direction {
+export function directionForConfigLocale(config: TenantI18nConfig, locale: Bcp47Locale): Direction {
   return isRtlLocale(config, locale) ? "rtl" : "ltr";
 }

@@ -333,9 +333,7 @@ describe("emitEntity — tenant_owned trait", () => {
     const policy = statements.find((s) => s.startsWith("CREATE POLICY"));
     expect(policy).toBeDefined();
     expect(policy).toContain(`invoice_tenant_isolation`);
-    expect(policy).toContain(
-      `tenant_id = current_setting('app.current_tenant_id', true)::UUID`,
-    );
+    expect(policy).toContain(`tenant_id = current_setting('app.current_tenant_id', true)::UUID`);
   });
 
   it("entities without tenant_owned get no RLS / FK / tenant_id", () => {

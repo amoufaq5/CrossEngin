@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  CONFLICT_ERROR_KINDS,
-  isConflictError,
-  isConflictErrorKind,
-} from "./conflict.js";
+import { CONFLICT_ERROR_KINDS, isConflictError, isConflictErrorKind } from "./conflict.js";
 
 describe("CONFLICT_ERROR_KINDS", () => {
   it("includes conflict_error (HTTP 409 across providers that surface state conflicts)", () => {

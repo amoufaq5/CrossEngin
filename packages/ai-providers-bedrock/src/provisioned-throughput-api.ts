@@ -6,8 +6,7 @@ export const BEDROCK_PROVISIONED_MODEL_STATUSES = [
   "Updating",
   "Failed",
 ] as const;
-export type BedrockProvisionedModelStatus =
-  (typeof BEDROCK_PROVISIONED_MODEL_STATUSES)[number];
+export type BedrockProvisionedModelStatus = (typeof BEDROCK_PROVISIONED_MODEL_STATUSES)[number];
 
 export function isBedrockProvisionedModelStatus(
   value: unknown,
@@ -18,10 +17,7 @@ export function isBedrockProvisionedModelStatus(
   );
 }
 
-export const BEDROCK_PROVISIONED_MODEL_COMMITMENT_DURATIONS = [
-  "OneMonth",
-  "SixMonths",
-] as const;
+export const BEDROCK_PROVISIONED_MODEL_COMMITMENT_DURATIONS = ["OneMonth", "SixMonths"] as const;
 export type BedrockProvisionedModelCommitmentDuration =
   (typeof BEDROCK_PROVISIONED_MODEL_COMMITMENT_DURATIONS)[number];
 
@@ -30,18 +26,14 @@ export function isBedrockProvisionedModelCommitmentDuration(
 ): value is BedrockProvisionedModelCommitmentDuration {
   return (
     typeof value === "string" &&
-    (BEDROCK_PROVISIONED_MODEL_COMMITMENT_DURATIONS as readonly string[]).includes(
-      value,
-    )
+    (BEDROCK_PROVISIONED_MODEL_COMMITMENT_DURATIONS as readonly string[]).includes(value)
   );
 }
 
 export const BEDROCK_PROVISIONED_THROUGHPUT_LIST_MAX_RESULTS_MIN = 1;
 export const BEDROCK_PROVISIONED_THROUGHPUT_LIST_MAX_RESULTS_MAX = 1000;
 
-export const BEDROCK_PROVISIONED_THROUGHPUT_SORT_BY_VALUES = [
-  "CreationTime",
-] as const;
+export const BEDROCK_PROVISIONED_THROUGHPUT_SORT_BY_VALUES = ["CreationTime"] as const;
 export type BedrockProvisionedThroughputSortBy =
   (typeof BEDROCK_PROVISIONED_THROUGHPUT_SORT_BY_VALUES)[number];
 
@@ -67,8 +59,7 @@ export interface BedrockProvisionedModelSummary {
   readonly commitmentExpirationTime?: string;
 }
 
-export interface BedrockProvisionedModelDetail
-  extends BedrockProvisionedModelSummary {
+export interface BedrockProvisionedModelDetail extends BedrockProvisionedModelSummary {
   readonly failureMessage?: string;
 }
 
@@ -104,8 +95,7 @@ export function buildProvisionedThroughputListQuery(
     if (options.modelArnEquals.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "listProvisionedModelThroughputs: modelArnEquals must be a non-empty string",
+        message: "listProvisionedModelThroughputs: modelArnEquals must be a non-empty string",
       });
     }
     out["modelArnEquals"] = options.modelArnEquals;
@@ -114,17 +104,14 @@ export function buildProvisionedThroughputListQuery(
     if (options.nameContains.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "listProvisionedModelThroughputs: nameContains must be a non-empty string",
+        message: "listProvisionedModelThroughputs: nameContains must be a non-empty string",
       });
     }
     out["nameContains"] = options.nameContains;
   }
   if (options.sortBy !== undefined) {
     if (
-      !(BEDROCK_PROVISIONED_THROUGHPUT_SORT_BY_VALUES as readonly string[]).includes(
-        options.sortBy,
-      )
+      !(BEDROCK_PROVISIONED_THROUGHPUT_SORT_BY_VALUES as readonly string[]).includes(options.sortBy)
     ) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -163,8 +150,7 @@ export function buildProvisionedThroughputListQuery(
     if (options.nextToken.length === 0) {
       throw new BedrockError({
         kind: "invalid_request_error",
-        message:
-          "listProvisionedModelThroughputs: nextToken must be a non-empty string",
+        message: "listProvisionedModelThroughputs: nextToken must be a non-empty string",
       });
     }
     out["nextToken"] = options.nextToken;
@@ -172,14 +158,11 @@ export function buildProvisionedThroughputListQuery(
   return out;
 }
 
-export function parseProvisionedModelSummary(
-  raw: unknown,
-): BedrockProvisionedModelSummary {
+export function parseProvisionedModelSummary(raw: unknown): BedrockProvisionedModelSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "listProvisionedModelThroughputs: provisioned-model summary is not an object",
+      message: "listProvisionedModelThroughputs: provisioned-model summary is not an object",
     });
   }
   const j = raw as Record<string, unknown>;
@@ -232,9 +215,7 @@ export function parseProvisionedModelSummary(
   return summary;
 }
 
-export function parseProvisionedModelDetail(
-  raw: unknown,
-): BedrockProvisionedModelDetail {
+export function parseProvisionedModelDetail(raw: unknown): BedrockProvisionedModelDetail {
   const summary = parseProvisionedModelSummary(raw);
   const j = raw as Record<string, unknown>;
   const detail: {
@@ -263,8 +244,7 @@ export function parseProvisionedModelListResponse(
   if (summaries !== undefined && !Array.isArray(summaries)) {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "listProvisionedModelThroughputs: provisionedModelSummaries is not an array",
+      message: "listProvisionedModelThroughputs: provisionedModelSummaries is not an array",
     });
   }
   const parsed: BedrockProvisionedModelSummary[] = [];
@@ -288,8 +268,7 @@ export const BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN = 63;
 export const BEDROCK_PROVISIONED_MODEL_NAME_PATTERN = /^([0-9a-zA-Z][_-]?)+$/;
 export const BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN = 2048;
 export const BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN = 256;
-export const BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_PATTERN =
-  /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
+export const BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_PATTERN = /^[a-zA-Z0-9](-*[a-zA-Z0-9])*$/;
 export const BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MIN = 1;
 export const BEDROCK_PROVISIONED_THROUGHPUT_MODEL_UNITS_MAX = 1000;
 export const BEDROCK_PROVISIONED_THROUGHPUT_MAX_TAGS = 200;
@@ -319,11 +298,8 @@ export function buildCreateProvisionedModelThroughputBody(
 ): string {
   if (
     input.clientRequestToken.length < 1 ||
-    input.clientRequestToken.length >
-      BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN ||
-    !BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_PATTERN.test(
-      input.clientRequestToken,
-    )
+    input.clientRequestToken.length > BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_MAX_LEN ||
+    !BEDROCK_PROVISIONED_THROUGHPUT_CLIENT_TOKEN_PATTERN.test(input.clientRequestToken)
   ) {
     throw new BedrockError({
       kind: "invalid_request_error",
@@ -350,10 +326,7 @@ export function buildCreateProvisionedModelThroughputBody(
       message: `createProvisionedModelThroughput: invalid provisionedModelName '${input.provisionedModelName}'`,
     });
   }
-  if (
-    input.modelId.length < 1 ||
-    input.modelId.length > BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN
-  ) {
+  if (input.modelId.length < 1 || input.modelId.length > BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN) {
     throw new BedrockError({
       kind: "invalid_request_error",
       message: `createProvisionedModelThroughput: modelId length must be in [1, ${BEDROCK_PROVISIONED_MODEL_ID_MAX_LEN.toString()}], got ${input.modelId.length.toString()}`,
@@ -376,10 +349,7 @@ export function buildCreateProvisionedModelThroughputBody(
     }
     for (let i = 0; i < input.tags.length; i++) {
       const tag = input.tags[i]!;
-      if (
-        tag.key.length < 1 ||
-        tag.key.length > BEDROCK_PROVISIONED_THROUGHPUT_TAG_KEY_MAX_LEN
-      ) {
+      if (tag.key.length < 1 || tag.key.length > BEDROCK_PROVISIONED_THROUGHPUT_TAG_KEY_MAX_LEN) {
         throw new BedrockError({
           kind: "invalid_request_error",
           message: `createProvisionedModelThroughput: tag key length must be in [1, ${BEDROCK_PROVISIONED_THROUGHPUT_TAG_KEY_MAX_LEN.toString()}] at index ${i.toString()}`,
@@ -414,10 +384,7 @@ export interface BedrockUpdateProvisionedModelThroughputInput {
 export function buildUpdateProvisionedModelThroughputBody(
   input: BedrockUpdateProvisionedModelThroughputInput,
 ): string {
-  if (
-    input.desiredModelId === undefined &&
-    input.desiredProvisionedModelName === undefined
-  ) {
+  if (input.desiredModelId === undefined && input.desiredProvisionedModelName === undefined) {
     throw new BedrockError({
       kind: "invalid_request_error",
       message:
@@ -438,11 +405,8 @@ export function buildUpdateProvisionedModelThroughputBody(
   if (input.desiredProvisionedModelName !== undefined) {
     if (
       input.desiredProvisionedModelName.length < 1 ||
-      input.desiredProvisionedModelName.length >
-        BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN ||
-      !BEDROCK_PROVISIONED_MODEL_NAME_PATTERN.test(
-        input.desiredProvisionedModelName,
-      )
+      input.desiredProvisionedModelName.length > BEDROCK_PROVISIONED_MODEL_NAME_MAX_LEN ||
+      !BEDROCK_PROVISIONED_MODEL_NAME_PATTERN.test(input.desiredProvisionedModelName)
     ) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -466,8 +430,7 @@ export function parseCreateProvisionedModelThroughputResponse(
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "createProvisionedModelThroughput: response is not a JSON object",
+      message: "createProvisionedModelThroughput: response is not a JSON object",
     });
   }
   const j = raw as Record<string, unknown>;

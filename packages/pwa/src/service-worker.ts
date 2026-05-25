@@ -36,14 +36,23 @@ export const ServiceWorkerRouteSchema = z
         });
       }
     }
-    if (v.background_sync_queue !== undefined && v.method !== "POST" && v.method !== "PUT" && v.method !== "PATCH" && v.method !== "DELETE") {
+    if (
+      v.background_sync_queue !== undefined &&
+      v.method !== "POST" &&
+      v.method !== "PUT" &&
+      v.method !== "PATCH" &&
+      v.method !== "DELETE"
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["background_sync_queue"],
         message: "background_sync_queue is only valid for mutating methods",
       });
     }
-    if (v.strategy === "network_only" && (v.maxAgeSeconds !== undefined || v.maxEntries !== undefined)) {
+    if (
+      v.strategy === "network_only" &&
+      (v.maxAgeSeconds !== undefined || v.maxEntries !== undefined)
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["strategy"],

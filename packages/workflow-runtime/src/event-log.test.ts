@@ -72,7 +72,13 @@ describe("InMemoryEventLog.appendBatch", () => {
     const log = new InMemoryEventLog();
     await log.appendBatch([
       event({ id: "wfe_00000001", sequenceNumber: 0 }),
-      event({ id: "wfe_00000002", sequenceNumber: 1, kind: "state_transitioned", previousState: "draft", newState: "approved" }),
+      event({
+        id: "wfe_00000002",
+        sequenceNumber: 1,
+        kind: "state_transitioned",
+        previousState: "draft",
+        newState: "approved",
+      }),
     ]);
     expect(await log.count()).toBe(2);
     expect(await log.latestSequence("wfi_00000001")).toBe(1);
@@ -98,9 +104,7 @@ describe("InMemoryEventLog.listByInstance", () => {
   it("returns events in append order", async () => {
     const log = new InMemoryEventLog();
     await log.append(event({ id: "wfe_00000001", sequenceNumber: 0 }));
-    await log.append(
-      event({ id: "wfe_00000002", sequenceNumber: 1, kind: "instance_completed" }),
-    );
+    await log.append(event({ id: "wfe_00000002", sequenceNumber: 1, kind: "instance_completed" }));
     const events = await log.listByInstance("wfi_00000001");
     expect(events.map((e) => e.id)).toEqual(["wfe_00000001", "wfe_00000002"]);
   });

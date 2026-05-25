@@ -1,8 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type {
-  RouterInstrumentation,
-  RouterInstrumentationEvent,
-} from "@crossengin/ai-router";
+import type { RouterInstrumentation, RouterInstrumentationEvent } from "@crossengin/ai-router";
 
 const SCHEMA = "meta";
 const TABLE = "llm_call_traces";

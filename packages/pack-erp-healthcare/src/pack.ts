@@ -12,19 +12,14 @@ import { ERP_HEALTHCARE_WORKFLOWS } from "./workflows.js";
 export const ERP_HEALTHCARE_PACK_SLUG = "operate-erp/healthcare";
 export const ERP_HEALTHCARE_PACK_VERSION = "0.1.0";
 
-export const ERP_HEALTHCARE_DEFAULT_COMPLIANCE_PACKS: readonly string[] = [
-  "hipaa",
-  "21_cfr_11",
-];
+export const ERP_HEALTHCARE_DEFAULT_COMPLIANCE_PACKS: readonly string[] = ["hipaa", "21_cfr_11"];
 
 export interface BuildErpHealthcarePackOptions {
   readonly description?: string;
   readonly compliancePacks?: readonly string[];
 }
 
-export function buildErpHealthcarePack(
-  opts: BuildErpHealthcarePackOptions = {},
-): Manifest {
+export function buildErpHealthcarePack(opts: BuildErpHealthcarePackOptions = {}): Manifest {
   const compliancePacks =
     opts.compliancePacks !== undefined
       ? [...opts.compliancePacks]

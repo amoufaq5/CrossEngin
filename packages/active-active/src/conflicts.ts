@@ -38,20 +38,16 @@ export const CONFLICT_STATUSES = [
 export type ConflictStatus = (typeof CONFLICT_STATUSES)[number];
 export const ConflictStatusSchema = z.enum(CONFLICT_STATUSES);
 
-export const CONFLICT_TRANSITIONS: Readonly<
-  Record<ConflictStatus, readonly ConflictStatus[]>
-> = Object.freeze({
-  detected: ["auto_resolving", "awaiting_review", "escalated"],
-  auto_resolving: ["resolved", "awaiting_review", "escalated"],
-  awaiting_review: ["resolved", "escalated"],
-  resolved: [],
-  escalated: ["awaiting_review", "resolved"],
-});
+export const CONFLICT_TRANSITIONS: Readonly<Record<ConflictStatus, readonly ConflictStatus[]>> =
+  Object.freeze({
+    detected: ["auto_resolving", "awaiting_review", "escalated"],
+    auto_resolving: ["resolved", "awaiting_review", "escalated"],
+    awaiting_review: ["resolved", "escalated"],
+    resolved: [],
+    escalated: ["awaiting_review", "resolved"],
+  });
 
-export function canTransitionConflict(
-  from: ConflictStatus,
-  to: ConflictStatus,
-): boolean {
+export function canTransitionConflict(from: ConflictStatus, to: ConflictStatus): boolean {
   return CONFLICT_TRANSITIONS[from].includes(to);
 }
 
@@ -81,7 +77,11 @@ export const ConflictRecordSchema = z
     chosenStrategyBy: z.string().min(1).nullable().default(null),
     resolvedAt: Iso8601.nullable().default(null),
     resolvedBy: z.string().min(1).nullable().default(null),
-    resolutionPayloadSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable().default(null),
+    resolutionPayloadSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable()
+      .default(null),
     resolutionNotes: z.string().min(1).optional(),
     requiresAudit: z.boolean().default(false),
     auditRecordedAt: Iso8601.nullable().default(null),
@@ -163,7 +163,11 @@ export const ConflictRecordSchema = z
         });
       }
     }
-    if (v.chosenStrategy === "manual_review" && v.status === "resolved" && v.resolutionNotes === undefined) {
+    if (
+      v.chosenStrategy === "manual_review" &&
+      v.status === "resolved" &&
+      v.resolutionNotes === undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["resolutionNotes"],
@@ -196,9 +200,7 @@ export const ConflictRecordSchema = z
   });
 export type ConflictRecord = z.infer<typeof ConflictRecordSchema>;
 
-export function detectConflictKind(
-  writes: readonly ConflictingWrite[],
-): ConflictKind | null {
+export function detectConflictKind(writes: readonly ConflictingWrite[]): ConflictKind | null {
   if (writes.length < 2) return null;
   for (let i = 0; i < writes.length - 1; i++) {
     for (let j = i + 1; j < writes.length; j++) {

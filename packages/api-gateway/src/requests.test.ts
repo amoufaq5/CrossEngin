@@ -98,9 +98,9 @@ describe("IncomingRequestSchema", () => {
   });
 
   it("rejects weak TLS versions", () => {
-    expect(() =>
-      IncomingRequestSchema.parse({ ...baseRequest, tlsVersion: "tls_1_0" }),
-    ).toThrow(/weak TLS/);
+    expect(() => IncomingRequestSchema.parse({ ...baseRequest, tlsVersion: "tls_1_0" })).toThrow(
+      /weak TLS/,
+    );
   });
 
   it("rejects non-empty body without sha256", () => {
@@ -186,11 +186,7 @@ describe("computeOriginIp", () => {
 
 describe("normalizePathSegments", () => {
   it("splits and filters", () => {
-    expect(normalizePathSegments("/v1/tenants/abc")).toEqual([
-      "v1",
-      "tenants",
-      "abc",
-    ]);
+    expect(normalizePathSegments("/v1/tenants/abc")).toEqual(["v1", "tenants", "abc"]);
   });
   it("returns empty for /", () => {
     expect(normalizePathSegments("/")).toEqual([]);

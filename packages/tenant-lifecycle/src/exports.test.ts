@@ -85,9 +85,9 @@ describe("TenantDataExportSchema", () => {
   });
 
   it("rejects PHI export with customer_request trigger", () => {
-    expect(() =>
-      TenantDataExportSchema.parse({ ...base, includesPhiCategories: true }),
-    ).toThrow(/PHI exports cannot use trigger='customer_request'/);
+    expect(() => TenantDataExportSchema.parse({ ...base, includesPhiCategories: true })).toThrow(
+      /PHI exports cannot use trigger='customer_request'/,
+    );
   });
 
   it("accepts PHI export with regulatory_subpoena trigger", () => {
@@ -101,9 +101,7 @@ describe("TenantDataExportSchema", () => {
   });
 
   it("rejects ready_for_download without sha256", () => {
-    expect(() =>
-      TenantDataExportSchema.parse({ ...base, sha256: null }),
-    ).toThrow(/sha256/);
+    expect(() => TenantDataExportSchema.parse({ ...base, sha256: null })).toThrow(/sha256/);
   });
 
   it("rejects download window < 24h", () => {
@@ -194,10 +192,7 @@ describe("helpers", () => {
 
   it("isExportDownloadable false at max downloads", () => {
     expect(
-      isExportDownloadable(
-        { ...base, downloadCount: 3 },
-        new Date("2026-05-15T00:00:00Z"),
-      ),
+      isExportDownloadable({ ...base, downloadCount: 3 }, new Date("2026-05-15T00:00:00Z")),
     ).toBe(false);
   });
 
@@ -212,10 +207,7 @@ describe("helpers", () => {
 
   it("shouldPurge false if already purged", () => {
     expect(
-      shouldPurge(
-        { ...base, purgedAt: "2026-05-22T01:00:00Z" },
-        new Date("2026-05-23T00:00:00Z"),
-      ),
+      shouldPurge({ ...base, purgedAt: "2026-05-22T01:00:00Z" }, new Date("2026-05-23T00:00:00Z")),
     ).toBe(false);
   });
 });

@@ -1,13 +1,7 @@
 import type { Manifest, ManifestRegistry } from "@crossengin/kernel/manifest";
 import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
-import {
-  buildErpHealthcarePack,
-  ERP_HEALTHCARE_PACK_SLUG,
-} from "@crossengin/pack-erp-healthcare";
-import {
-  buildErpPaymentsPack,
-  ERP_PAYMENTS_PACK_SLUG,
-} from "@crossengin/pack-erp-payments";
+import { buildErpHealthcarePack, ERP_HEALTHCARE_PACK_SLUG } from "@crossengin/pack-erp-healthcare";
+import { buildErpPaymentsPack, ERP_PAYMENTS_PACK_SLUG } from "@crossengin/pack-erp-payments";
 
 export interface PackEntry {
   readonly slug: string;

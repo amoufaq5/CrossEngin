@@ -104,9 +104,9 @@ describe("AppDeployConfigSchema", () => {
   });
 
   it("rejects non-atomic rollout for serverless_edge", () => {
-    expect(() =>
-      AppDeployConfigSchema.parse({ ...baseWeb, rolloutStrategy: "rolling" }),
-    ).toThrow(/atomic/);
+    expect(() => AppDeployConfigSchema.parse({ ...baseWeb, rolloutStrategy: "rolling" })).toThrow(
+      /atomic/,
+    );
   });
 
   it("requires healthCheck on long_running_service", () => {
@@ -180,7 +180,13 @@ describe("helpers", () => {
       appId: "gpu",
       kind: "gpu-inference",
       runtimeProfile: "long_running_service",
-      healthCheck: { kind: "tcp", port: 8080, intervalSeconds: 15, timeoutSeconds: 5, failureThreshold: 3 },
+      healthCheck: {
+        kind: "tcp",
+        port: 8080,
+        intervalSeconds: 15,
+        timeoutSeconds: 5,
+        failureThreshold: 3,
+      },
       dependsOnApps: [],
       publicEntrypoint: false,
       requiresGpu: true,

@@ -1,14 +1,11 @@
 export const AUTHENTICATION_ERROR_KINDS = ["authentication_error"] as const;
-export type AuthenticationErrorKind =
-  (typeof AUTHENTICATION_ERROR_KINDS)[number];
+export type AuthenticationErrorKind = (typeof AUTHENTICATION_ERROR_KINDS)[number];
 
 export interface AuthenticationDiscriminator {
   readonly kind: string;
 }
 
-export function isAuthenticationErrorKind(
-  value: string,
-): value is AuthenticationErrorKind {
+export function isAuthenticationErrorKind(value: string): value is AuthenticationErrorKind {
   return (AUTHENTICATION_ERROR_KINDS as readonly string[]).includes(value);
 }
 

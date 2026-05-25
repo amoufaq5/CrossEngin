@@ -1,10 +1,7 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ProjectedInstance } from "@crossengin/workflow-runtime";
 
-import type {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import type { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 
 const SCHEMA = "meta";
 const TABLE = "workflow_instances";
@@ -56,7 +53,9 @@ export class PostgresInstanceStore {
         p.status,
         p.currentState,
         JSON.stringify(p.variables),
-        input.relatedEntity === null || input.relatedEntity === undefined ? null : JSON.stringify(input.relatedEntity),
+        input.relatedEntity === null || input.relatedEntity === undefined
+          ? null
+          : JSON.stringify(input.relatedEntity),
         p.correlationKey,
         p.startedAt,
         p.startedByUserId,

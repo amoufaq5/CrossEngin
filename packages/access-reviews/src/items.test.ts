@@ -190,14 +190,10 @@ describe("computeRiskLevel", () => {
 
 describe("isItemOverdue", () => {
   it("returns true past dueAt for pending item", () => {
-    expect(
-      isItemOverdue(baseItem, new Date("2026-05-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isItemOverdue(baseItem, new Date("2026-05-01T00:00:00Z"))).toBe(true);
   });
   it("returns false before dueAt", () => {
-    expect(
-      isItemOverdue(baseItem, new Date("2026-04-15T00:00:00Z")),
-    ).toBe(false);
+    expect(isItemOverdue(baseItem, new Date("2026-04-15T00:00:00Z"))).toBe(false);
   });
   it("returns false for already-decided item even past due", () => {
     expect(
@@ -230,21 +226,15 @@ describe("shouldEscalate", () => {
   };
 
   it("returns true when timeout elapsed", () => {
-    expect(
-      shouldEscalate(itemInReview, new Date("2026-04-09T10:00:00Z"), 72),
-    ).toBe(true);
+    expect(shouldEscalate(itemInReview, new Date("2026-04-09T10:00:00Z"), 72)).toBe(true);
   });
 
   it("returns false when within timeout", () => {
-    expect(
-      shouldEscalate(itemInReview, new Date("2026-04-06T10:00:00Z"), 72),
-    ).toBe(false);
+    expect(shouldEscalate(itemInReview, new Date("2026-04-06T10:00:00Z"), 72)).toBe(false);
   });
 
   it("returns false for non-in_review items", () => {
-    expect(
-      shouldEscalate(baseItem, new Date("2026-05-01T00:00:00Z"), 72),
-    ).toBe(false);
+    expect(shouldEscalate(baseItem, new Date("2026-05-01T00:00:00Z"), 72)).toBe(false);
   });
 });
 
@@ -257,9 +247,7 @@ describe("assignReviewer", () => {
       new Date("2026-04-05T10:00:00Z"),
     );
     expect(r.status).toBe("in_review");
-    expect(r.currentReviewer?.reviewerUserId).toBe(
-      "44444444-4444-4444-4444-444444444444",
-    );
+    expect(r.currentReviewer?.reviewerUserId).toBe("44444444-4444-4444-4444-444444444444");
   });
 
   it("throws on four-eyes violation", () => {

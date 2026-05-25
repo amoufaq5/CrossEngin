@@ -41,15 +41,15 @@ describe("parsePgEnvConfig", () => {
   });
 
   it("throws when PGHOST is missing", () => {
-    expect(() =>
-      parsePgEnvConfig({ ...baseEnv, PGHOST: undefined } as NodeJS.ProcessEnv),
-    ).toThrow(/PGHOST/);
+    expect(() => parsePgEnvConfig({ ...baseEnv, PGHOST: undefined } as NodeJS.ProcessEnv)).toThrow(
+      /PGHOST/,
+    );
   });
 
   it("throws when PGUSER is missing", () => {
-    expect(() =>
-      parsePgEnvConfig({ ...baseEnv, PGUSER: undefined } as NodeJS.ProcessEnv),
-    ).toThrow(/PGUSER/);
+    expect(() => parsePgEnvConfig({ ...baseEnv, PGUSER: undefined } as NodeJS.ProcessEnv)).toThrow(
+      /PGUSER/,
+    );
   });
 
   it("throws when PGDATABASE is missing", () => {

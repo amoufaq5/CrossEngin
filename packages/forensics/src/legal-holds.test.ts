@@ -133,9 +133,7 @@ describe("LegalHoldSchema", () => {
   });
 
   it("rejects active without activatedAt", () => {
-    expect(() =>
-      LegalHoldSchema.parse({ ...base, activatedAt: null }),
-    ).toThrow(/activatedAt/);
+    expect(() => LegalHoldSchema.parse({ ...base, activatedAt: null })).toThrow(/activatedAt/);
   });
 
   it("rejects active without notifications sent", () => {
@@ -187,9 +185,7 @@ describe("LegalHoldSchema", () => {
   });
 
   it("rejects malformed hold id", () => {
-    expect(() =>
-      LegalHoldSchema.parse({ ...base, id: "LH-1" }),
-    ).toThrow();
+    expect(() => LegalHoldSchema.parse({ ...base, id: "LH-1" })).toThrow();
   });
 });
 

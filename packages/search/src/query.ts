@@ -107,10 +107,7 @@ export const FacetBucketSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean()]),
   count: z.number().int().nonnegative(),
 });
-export const FacetBucketsSchema = z.record(
-  FieldPathSchema,
-  z.array(FacetBucketSchema),
-);
+export const FacetBucketsSchema = z.record(FieldPathSchema, z.array(FacetBucketSchema));
 export type FacetBuckets = z.infer<typeof FacetBucketsSchema>;
 
 export const SearchResultSchema = z.object({

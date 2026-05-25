@@ -92,17 +92,12 @@ describe("ReindexProgressSchema + helpers", () => {
 
 describe("nextEngineToReindex", () => {
   it("returns the first unfinished engine", () => {
-    expect(
-      nextEngineToReindex(
-        ["postgres_fts", "pgvector", "typesense"],
-        ["postgres_fts"],
-      ),
-    ).toBe("pgvector");
+    expect(nextEngineToReindex(["postgres_fts", "pgvector", "typesense"], ["postgres_fts"])).toBe(
+      "pgvector",
+    );
   });
 
   it("returns null when every engine is finished", () => {
-    expect(
-      nextEngineToReindex(["postgres_fts"], ["postgres_fts"]),
-    ).toBeNull();
+    expect(nextEngineToReindex(["postgres_fts"], ["postgres_fts"])).toBeNull();
   });
 });

@@ -100,9 +100,9 @@ describe("ClientRequestRecordSchema", () => {
   });
 
   it("rejects latencyMs mismatch", () => {
-    expect(() =>
-      ClientRequestRecordSchema.parse({ ...base, latencyMs: 999 }),
-    ).toThrow(/does not match/);
+    expect(() => ClientRequestRecordSchema.parse({ ...base, latencyMs: 999 })).toThrow(
+      /does not match/,
+    );
   });
 
   it("rejects attemptNumber > totalAttempts", () => {
@@ -116,9 +116,9 @@ describe("ClientRequestRecordSchema", () => {
   });
 
   it("rejects success with non-2xx status", () => {
-    expect(() =>
-      ClientRequestRecordSchema.parse({ ...base, responseStatus: 500 }),
-    ).toThrow(/2xx responseStatus/);
+    expect(() => ClientRequestRecordSchema.parse({ ...base, responseStatus: 500 })).toThrow(
+      /2xx responseStatus/,
+    );
   });
 
   it("rejects client_error with non-4xx status", () => {
@@ -189,12 +189,7 @@ describe("aggregateUsage", () => {
       userAgent: "x",
       errorCode: success ? undefined : "INTERNAL",
     });
-    const records = [
-      make(50, true),
-      make(100, true),
-      make(200, true),
-      make(500, false),
-    ];
+    const records = [make(50, true), make(100, true), make(200, true), make(500, false)];
     const agg = aggregateUsage(records);
     expect(agg.totalRequests).toBe(4);
     expect(agg.successfulRequests).toBe(3);

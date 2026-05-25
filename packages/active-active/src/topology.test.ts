@@ -221,16 +221,11 @@ describe("helpers", () => {
   };
 
   it("writerRegionsFor returns writer regions for entity class", () => {
-    expect([...writerRegionsFor(topo, "tenants")].sort()).toEqual([
-      "eu-central",
-      "us-east",
-    ]);
+    expect([...writerRegionsFor(topo, "tenants")].sort()).toEqual(["eu-central", "us-east"]);
   });
 
   it("readerRegionsFor returns all regions that accept the class", () => {
-    expect([...readerRegionsFor(topo, "manifests")].sort()).toEqual([
-      "eu-central",
-    ]);
+    expect([...readerRegionsFor(topo, "manifests")].sort()).toEqual(["eu-central"]);
   });
 
   it("isMultiWriter true when >=2 writers", () => {

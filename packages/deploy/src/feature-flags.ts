@@ -142,18 +142,10 @@ export interface FlagEvaluationResult {
   readonly value: FlagValue;
   readonly variantKey: string | null;
   readonly ruleId: string | null;
-  readonly reason:
-    | "default"
-    | "matched_rule"
-    | "disabled"
-    | "out_of_environment"
-    | "archived";
+  readonly reason: "default" | "matched_rule" | "disabled" | "out_of_environment" | "archived";
 }
 
-export function evaluateFlag(
-  flag: FeatureFlag,
-  context: EvaluationContext,
-): FlagEvaluationResult {
+export function evaluateFlag(flag: FeatureFlag, context: EvaluationContext): FlagEvaluationResult {
   if (flag.archivedAt !== null) {
     return {
       value: flag.defaultValue,
@@ -226,10 +218,7 @@ function matchesTargeting(
   }
 }
 
-function pickVariant(
-  variants: readonly FlagVariant[],
-  bucket: number,
-): FlagVariant {
+function pickVariant(variants: readonly FlagVariant[], bucket: number): FlagVariant {
   let cumulative = 0;
   for (const v of variants) {
     cumulative += v.rolloutPercent;

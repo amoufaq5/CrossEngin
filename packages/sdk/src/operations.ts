@@ -3,17 +3,11 @@ import { ApiVersionSchema } from "./versioning.js";
 import { ScopeKeySchema, type ScopeKey } from "./scopes.js";
 
 const OPERATION_ID_REGEX = /^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/;
-const PATH_REGEX = /^\/(?:[a-zA-Z0-9_\-.]+|:[a-z][a-zA-Z0-9_]*)(?:\/(?:[a-zA-Z0-9_\-.]+|:[a-z][a-zA-Z0-9_]*))*$/;
+const PATH_REGEX =
+  /^\/(?:[a-zA-Z0-9_\-.]+|:[a-z][a-zA-Z0-9_]*)(?:\/(?:[a-zA-Z0-9_\-.]+|:[a-z][a-zA-Z0-9_]*))*$/;
 const Iso8601 = z.string().datetime({ offset: true });
 
-export const HTTP_METHODS = [
-  "GET",
-  "POST",
-  "PUT",
-  "PATCH",
-  "DELETE",
-  "HEAD",
-] as const;
+export const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 export const HttpMethodSchema = z.enum(HTTP_METHODS);
 
@@ -35,8 +29,7 @@ export const SAFE_METHODS: ReadonlySet<HttpMethod> = new Set(["GET", "HEAD"]);
 export const ApiOperationSchema = z
   .object({
     id: z.string().regex(OPERATION_ID_REGEX, {
-      message:
-        "operation id must be 'resource.action' (e.g., 'tenants.list', 'manifests.apply')",
+      message: "operation id must be 'resource.action' (e.g., 'tenants.list', 'manifests.apply')",
     }),
     category: z.enum(OPERATION_CATEGORIES),
     method: HttpMethodSchema,
@@ -95,9 +88,7 @@ export const ApiOperationSchema = z
       });
     }
     if (v.deprecatedAt !== null && v.sunsetAt !== null) {
-      if (
-        new Date(v.sunsetAt).getTime() <= new Date(v.deprecatedAt).getTime()
-      ) {
+      if (new Date(v.sunsetAt).getTime() <= new Date(v.deprecatedAt).getTime()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["sunsetAt"],
@@ -137,45 +128,43 @@ export const ApiOperationSchema = z
   });
 export type ApiOperation = z.infer<typeof ApiOperationSchema>;
 
-export const ApiOperationSetSchema = z
-  .array(ApiOperationSchema)
-  .superRefine((entries, ctx) => {
-    const ids = new Map<string, number>();
-    const routes = new Map<string, number>();
-    entries.forEach((e, i) => {
-      const prior = ids.get(e.id);
-      if (prior !== undefined) {
+export const ApiOperationSetSchema = z.array(ApiOperationSchema).superRefine((entries, ctx) => {
+  const ids = new Map<string, number>();
+  const routes = new Map<string, number>();
+  entries.forEach((e, i) => {
+    const prior = ids.get(e.id);
+    if (prior !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate operation id '${e.id}' (already at index ${prior})`,
+      });
+    }
+    ids.set(e.id, i);
+    for (const version of e.versions) {
+      const routeKey = `${version}|${e.method}|${e.path}`;
+      const priorRoute = routes.get(routeKey);
+      if (priorRoute !== undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate operation id '${e.id}' (already at index ${prior})`,
+          path: [i],
+          message: `duplicate (version, method, path) '${routeKey}' (already at index ${priorRoute})`,
         });
       }
-      ids.set(e.id, i);
-      for (const version of e.versions) {
-        const routeKey = `${version}|${e.method}|${e.path}`;
-        const priorRoute = routes.get(routeKey);
-        if (priorRoute !== undefined) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i],
-            message: `duplicate (version, method, path) '${routeKey}' (already at index ${priorRoute})`,
-          });
-        }
-        routes.set(routeKey, i);
+      routes.set(routeKey, i);
+    }
+    if (e.replacedBy !== undefined && !ids.has(e.replacedBy)) {
+      const future = entries.find((x) => x.id === e.replacedBy);
+      if (future === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i, "replacedBy"],
+          message: `replacedBy '${e.replacedBy}' is not declared in the set`,
+        });
       }
-      if (e.replacedBy !== undefined && !ids.has(e.replacedBy)) {
-        const future = entries.find((x) => x.id === e.replacedBy);
-        if (future === undefined) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "replacedBy"],
-            message: `replacedBy '${e.replacedBy}' is not declared in the set`,
-          });
-        }
-      }
-    });
+    }
   });
+});
 export type ApiOperationSet = z.infer<typeof ApiOperationSetSchema>;
 
 export function operationsRequiringScope(
@@ -197,7 +186,5 @@ export function findOperation(
   method: HttpMethod,
   path: string,
 ): ApiOperation | null {
-  return (
-    set.find((o) => o.method === method && o.path === path) ?? null
-  );
+  return set.find((o) => o.method === method && o.path === path) ?? null;
 }

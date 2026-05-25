@@ -13,16 +13,10 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import { CostCeilingExceededError, InMemoryCostTracker } from "./cost-tracker.js";
-import {
-  ROUTER_INSTRUMENTATION_KINDS,
-  captureRouterInstrumentation,
-} from "./instrumentation.js";
+import { ROUTER_INSTRUMENTATION_KINDS, captureRouterInstrumentation } from "./instrumentation.js";
 import { InMemoryLatencyTracker } from "./latency-tracker.js";
 import { ProviderResolutionError } from "./resolve.js";
-import {
-  AllProvidersExhaustedError,
-  DefaultLlmRouter,
-} from "./router.js";
+import { AllProvidersExhaustedError, DefaultLlmRouter } from "./router.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -118,9 +112,7 @@ function buildRouter(opts: {
   residency?: TenantResidency;
   overrides?: Partial<TaskPolicyMap>;
   costCeiling?: ConstructorParameters<typeof DefaultLlmRouter>[0]["costCeiling"];
-  getTenantCostCeiling?: ConstructorParameters<
-    typeof DefaultLlmRouter
-  >[0]["getTenantCostCeiling"];
+  getTenantCostCeiling?: ConstructorParameters<typeof DefaultLlmRouter>[0]["getTenantCostCeiling"];
   getTenantCostCeilingDetailed?: ConstructorParameters<
     typeof DefaultLlmRouter
   >[0]["getTenantCostCeilingDetailed"];
@@ -156,9 +148,7 @@ describe("DefaultLlmRouter.resolveProvider", () => {
   });
 
   it("skips a missing primary and uses the fallback", async () => {
-    const providers = new Map<string, LlmProvider>([
-      ["openai", new StubProvider("openai", "ok")],
-    ]);
+    const providers = new Map<string, LlmProvider>([["openai", new StubProvider("openai", "ok")]]);
     const router = buildRouter({ providers });
     const resolved = await router.resolveProvider("executor", TENANT);
     expect(resolved.providerId).toBe("openai");
@@ -299,9 +289,9 @@ describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
       providers: new Map<string, LlmProvider>([["openai", openai]]),
       costCeiling: { maxUsdPerRequest: 0.0000001 },
     });
-    await expect(
-      router.embed({ texts: ["hello"], tenantId: TENANT }),
-    ).rejects.toThrow(CostCeilingExceededError);
+    await expect(router.embed({ texts: ["hello"], tenantId: TENANT })).rejects.toThrow(
+      CostCeilingExceededError,
+    );
   });
 
   it("allows the embed when the estimated cost is under the ceiling", async () => {
@@ -320,9 +310,9 @@ describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
       providers: new Map<string, LlmProvider>([["openai", openai]]),
       getTenantCostCeiling: async () => ({ maxUsdPerRequest: 0.0000001 }),
     });
-    await expect(
-      router.embed({ texts: ["hello"], tenantId: TENANT }),
-    ).rejects.toThrow(CostCeilingExceededError);
+    await expect(router.embed({ texts: ["hello"], tenantId: TENANT })).rejects.toThrow(
+      CostCeilingExceededError,
+    );
   });
 
   it("emits ceiling_resolved BEFORE embed_call_started", async () => {
@@ -336,9 +326,7 @@ describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
     await router.embed({ texts: ["hello"], tenantId: TENANT, sessionId: "s1" });
     const kinds = cap.events.map((e) => e.kind);
     expect(kinds[0]).toBe("ceiling_resolved");
-    expect(kinds.indexOf("ceiling_resolved")).toBeLessThan(
-      kinds.indexOf("embed_call_started"),
-    );
+    expect(kinds.indexOf("ceiling_resolved")).toBeLessThan(kinds.indexOf("embed_call_started"));
     const resolved = cap.events.find((e) => e.kind === "ceiling_resolved")!;
     expect(resolved.task).toBe("embedding");
     expect(resolved.providerId).toBe("openai");
@@ -367,9 +355,9 @@ describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
       costCeiling: { maxUsdPerRequest: 0.0000001 },
       instrumentation: cap.instrumentation,
     });
-    await expect(
-      router.embed({ texts: ["hello"], tenantId: TENANT }),
-    ).rejects.toThrow(CostCeilingExceededError);
+    await expect(router.embed({ texts: ["hello"], tenantId: TENANT })).rejects.toThrow(
+      CostCeilingExceededError,
+    );
     const kinds = cap.events.map((e) => e.kind);
     expect(kinds).toContain("ceiling_resolved");
     expect(kinds).not.toContain("embed_call_started");
@@ -378,7 +366,10 @@ describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
 
 describe("DefaultLlmRouter.complete — moderation early-exit (M6.6)", () => {
   class ModerationProvider extends StubProvider {
-    constructor(id: string, private readonly modKind: string) {
+    constructor(
+      id: string,
+      private readonly modKind: string,
+    ) {
       super(id, "ok");
     }
     override async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
@@ -878,11 +869,7 @@ describe("DefaultLlmRouter.complete — RouterInstrumentation (M6.7.z)", () => {
     const router = buildRouter({ providers, instrumentation: cap.instrumentation });
     for await (const _ of router.complete(fakeReq())) void _;
     const kinds = cap.events.map((e) => e.kind);
-    expect(kinds).toEqual([
-      "ceiling_resolved",
-      "llm_call_started",
-      "llm_call_completed",
-    ]);
+    expect(kinds).toEqual(["ceiling_resolved", "llm_call_started", "llm_call_completed"]);
   });
 
   it("threads tenantId + sessionId + task + providerId + modelId on every event", async () => {
@@ -1035,11 +1022,7 @@ describe("DefaultLlmRouter.embed — RouterInstrumentation (M6.7.z.embed)", () =
     const router = buildRouter({ providers, instrumentation: cap.instrumentation });
     await router.embed({ texts: ["hello"], tenantId: TENANT, sessionId: "sess-1" });
     const kinds = cap.events.map((e) => e.kind);
-    expect(kinds).toEqual([
-      "ceiling_resolved",
-      "embed_call_started",
-      "embed_call_completed",
-    ]);
+    expect(kinds).toEqual(["ceiling_resolved", "embed_call_started", "embed_call_completed"]);
   });
 
   it("threads tenantId + sessionId + task='embedding' + providerId + modelId", async () => {

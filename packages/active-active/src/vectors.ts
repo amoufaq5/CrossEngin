@@ -7,32 +7,30 @@ export const VectorClockEntrySchema = z.object({
 });
 export type VectorClockEntry = z.infer<typeof VectorClockEntrySchema>;
 
-export const VectorClockSchema = z
-  .array(VectorClockEntrySchema)
-  .superRefine((entries, ctx) => {
-    const regions = new Set<Region>();
-    entries.forEach((e, i) => {
-      if (regions.has(e.region)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "region"],
-          message: `duplicate region '${e.region}' in vector clock`,
-        });
-      }
-      regions.add(e.region);
-    });
-    for (let i = 1; i < entries.length; i++) {
-      const prev = entries[i - 1];
-      const curr = entries[i];
-      if (prev !== undefined && curr !== undefined && curr.region < prev.region) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "region"],
-          message: "vector clock entries must be sorted by region (lexicographic)",
-        });
-      }
+export const VectorClockSchema = z.array(VectorClockEntrySchema).superRefine((entries, ctx) => {
+  const regions = new Set<Region>();
+  entries.forEach((e, i) => {
+    if (regions.has(e.region)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "region"],
+        message: `duplicate region '${e.region}' in vector clock`,
+      });
     }
+    regions.add(e.region);
   });
+  for (let i = 1; i < entries.length; i++) {
+    const prev = entries[i - 1];
+    const curr = entries[i];
+    if (prev !== undefined && curr !== undefined && curr.region < prev.region) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "region"],
+        message: "vector clock entries must be sorted by region (lexicographic)",
+      });
+    }
+  }
+});
 export type VectorClock = z.infer<typeof VectorClockSchema>;
 
 export const EMPTY_VECTOR_CLOCK: VectorClock = [];
@@ -47,15 +45,10 @@ export function incrementVectorClock(clock: VectorClock, region: Region): Vector
   if (existing === undefined) {
     return [...clock, { region, counter: 1 }].sort((a, b) => a.region.localeCompare(b.region));
   }
-  return clock.map((e) =>
-    e.region === region ? { region, counter: e.counter + 1 } : e,
-  );
+  return clock.map((e) => (e.region === region ? { region, counter: e.counter + 1 } : e));
 }
 
-export function mergeVectorClocks(
-  a: VectorClock,
-  b: VectorClock,
-): VectorClock {
+export function mergeVectorClocks(a: VectorClock, b: VectorClock): VectorClock {
   const regions = new Set<Region>();
   for (const e of a) regions.add(e.region);
   for (const e of b) regions.add(e.region);
@@ -110,9 +103,6 @@ export const StampedEventSchema = z.object({
 });
 export type StampedEvent = z.infer<typeof StampedEventSchema>;
 
-export function tickEvent(
-  prior: VectorClock,
-  region: Region,
-): VectorClock {
+export function tickEvent(prior: VectorClock, region: Region): VectorClock {
   return incrementVectorClock(prior, region);
 }

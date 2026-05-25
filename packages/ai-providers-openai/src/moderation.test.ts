@@ -26,9 +26,7 @@ describe("isContentFilteredResponse", () => {
   it("returns true when any choice has finish_reason='content_filter'", () => {
     expect(
       isContentFilteredResponse({
-        choices: [
-          { finish_reason: "content_filter" } as unknown as never,
-        ],
+        choices: [{ finish_reason: "content_filter" } as unknown as never],
       }),
     ).toBe(true);
   });

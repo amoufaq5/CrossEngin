@@ -107,21 +107,19 @@ describe("WebhookEndpointSchema", () => {
   });
 
   it("rejects disabled endpoint without disabledReason", () => {
-    expect(() =>
-      WebhookEndpointSchema.parse({ ...base, enabled: false }),
-    ).toThrow(/disabledReason/);
+    expect(() => WebhookEndpointSchema.parse({ ...base, enabled: false })).toThrow(
+      /disabledReason/,
+    );
   });
 
   it("rejects consecutiveFailures > 0 without lastFailureAt", () => {
-    expect(() =>
-      WebhookEndpointSchema.parse({ ...base, consecutiveFailures: 3 }),
-    ).toThrow(/lastFailureAt/);
+    expect(() => WebhookEndpointSchema.parse({ ...base, consecutiveFailures: 3 })).toThrow(
+      /lastFailureAt/,
+    );
   });
 
   it("rejects malformed endpoint id", () => {
-    expect(() =>
-      WebhookEndpointSchema.parse({ ...base, id: "whk_short" }),
-    ).toThrow();
+    expect(() => WebhookEndpointSchema.parse({ ...base, id: "whk_short" })).toThrow();
   });
 });
 
@@ -148,15 +146,15 @@ describe("WebhookDeliveryRecordSchema", () => {
   });
 
   it("rejects attempt > maxAttempts", () => {
-    expect(() =>
-      WebhookDeliveryRecordSchema.parse({ ...base, attempt: 10 }),
-    ).toThrow(/attempt cannot exceed/);
+    expect(() => WebhookDeliveryRecordSchema.parse({ ...base, attempt: 10 })).toThrow(
+      /attempt cannot exceed/,
+    );
   });
 
   it("rejects delivered without deliveredAt", () => {
-    expect(() =>
-      WebhookDeliveryRecordSchema.parse({ ...base, deliveredAt: null }),
-    ).toThrow(/deliveredAt/);
+    expect(() => WebhookDeliveryRecordSchema.parse({ ...base, deliveredAt: null })).toThrow(
+      /deliveredAt/,
+    );
   });
 
   it("rejects failed without failureReason", () => {
@@ -193,9 +191,7 @@ describe("WebhookDeliveryRecordSchema", () => {
   });
 
   it("rejects malformed signature", () => {
-    expect(() =>
-      WebhookDeliveryRecordSchema.parse({ ...base, signature: "bogus" }),
-    ).toThrow();
+    expect(() => WebhookDeliveryRecordSchema.parse({ ...base, signature: "bogus" })).toThrow();
   });
 });
 
@@ -257,9 +253,7 @@ describe("shouldRetry", () => {
 
 describe("signature helpers", () => {
   it("canonicalSignaturePayload joins timestamp + body", () => {
-    expect(canonicalSignaturePayload({ timestampSeconds: 100, body: "hello" })).toBe(
-      "100.hello",
-    );
+    expect(canonicalSignaturePayload({ timestampSeconds: 100, body: "hello" })).toBe("100.hello");
   });
 
   it("formatSignatureHeader produces the header string", () => {

@@ -11,9 +11,7 @@ function manifest(entities: Entity[]): Manifest {
 
 describe("computeManifestDiff", () => {
   it("returns an empty diff for identical manifests", () => {
-    const m = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const diff = computeManifestDiff(m, m);
     expect(diff.addedEntities).toEqual([]);
     expect(diff.removedEntities).toEqual([]);
@@ -22,9 +20,7 @@ describe("computeManifestDiff", () => {
   });
 
   it("treats null old as everything-added", () => {
-    const m = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const diff = computeManifestDiff(null, m);
     expect(diff.addedEntities).toHaveLength(1);
     expect(diff.addedEntities[0]?.name).toBe("Patient");
@@ -32,9 +28,7 @@ describe("computeManifestDiff", () => {
   });
 
   it("detects an added entity", () => {
-    const m1 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m1 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const m2 = manifest([
       { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
       { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
@@ -51,9 +45,7 @@ describe("computeManifestDiff", () => {
       { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
       { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
     ]);
-    const m2 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m2 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const diff = computeManifestDiff(m1, m2);
     expect(diff.removedEntities.map((e) => e.name)).toEqual(["Prescription"]);
     expect(diff.destructive).toBe(true);
@@ -85,9 +77,7 @@ describe("computeManifestDiff", () => {
         ],
       },
     ]);
-    const m2 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m2 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const diff = computeManifestDiff(m1, m2);
     expect(diff.modifiedEntities[0]?.diff.destructive).toBe(true);
     expect(diff.destructive).toBe(true);

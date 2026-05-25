@@ -27,18 +27,17 @@ export const FieldErrorSchema = z.object({
 });
 export type FieldError = z.infer<typeof FieldErrorSchema>;
 
-export const HTTP_STATUS_FOR_CATEGORY: Readonly<Record<ErrorCategory, number>> =
-  Object.freeze({
-    validation: 422,
-    authentication: 401,
-    authorization: 403,
-    not_found: 404,
-    conflict: 409,
-    rate_limited: 429,
-    internal: 500,
-    dependency: 502,
-    unsupported: 415,
-  });
+export const HTTP_STATUS_FOR_CATEGORY: Readonly<Record<ErrorCategory, number>> = Object.freeze({
+  validation: 422,
+  authentication: 401,
+  authorization: 403,
+  not_found: 404,
+  conflict: 409,
+  rate_limited: 429,
+  internal: 500,
+  dependency: 502,
+  unsupported: 415,
+});
 
 const TYPE_URI_REGEX = /^https?:\/\/[A-Za-z0-9.-]+\/errors\/[a-z][a-z0-9-]*$/;
 
@@ -48,13 +47,19 @@ export const ProblemDetailsSchema = z
     title: z.string().min(1),
     status: z.number().int().min(400).max(599),
     detail: z.string().min(1),
-    instance: z.string().regex(/^\/[A-Za-z0-9._\-/]*$/).optional(),
+    instance: z
+      .string()
+      .regex(/^\/[A-Za-z0-9._\-/]*$/)
+      .optional(),
     code: ErrorCodeSchema,
     category: ErrorCategorySchema,
     errors: z.array(FieldErrorSchema).default([]),
     retryable: z.boolean().default(false),
     retryAfterSeconds: z.number().int().nonnegative().optional(),
-    traceId: z.string().regex(/^[0-9a-f]{32}$/).optional(),
+    traceId: z
+      .string()
+      .regex(/^[0-9a-f]{32}$/)
+      .optional(),
     documentationUrl: z.string().url().optional(),
   })
   .superRefine((v, ctx) => {

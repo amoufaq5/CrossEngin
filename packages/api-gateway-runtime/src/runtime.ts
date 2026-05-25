@@ -19,12 +19,8 @@ import {
   resolvePrincipalForCredential,
   verifyBearerJwt,
 } from "./auth.js";
-import type {
-  HandlerRegistry} from "./dispatcher.js";
-import {
-  handlerOutputToResponse,
-  type HandlerOutput,
-} from "./dispatcher.js";
+import type { HandlerRegistry } from "./dispatcher.js";
+import { handlerOutputToResponse, type HandlerOutput } from "./dispatcher.js";
 import { PipelineRecorder } from "./pipeline-runner.js";
 import {
   authenticationRequired,
@@ -189,7 +185,10 @@ export class GatewayRuntime {
     return this.clock.now();
   }
 
-  private async stageReceive(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageReceive(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "receive",
@@ -201,7 +200,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageParseRequest(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageParseRequest(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "parse_request",
@@ -213,10 +215,16 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageValidateTls(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageValidateTls(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     if (ctx.request.tlsVersion === "tls_1_0" || ctx.request.tlsVersion === "tls_1_1") {
-      const env = weakTlsRejected({ tlsVersion: ctx.request.tlsVersion, correlationId: ctx.request.correlationId ?? undefined });
+      const env = weakTlsRejected({
+        tlsVersion: ctx.request.tlsVersion,
+        correlationId: ctx.request.correlationId ?? undefined,
+      });
       rec.record({
         stage: "validate_tls",
         outcome: "deny",
@@ -233,12 +241,16 @@ export class GatewayRuntime {
       outcome: "pass",
       startedAt,
       completedAt: this.now(),
-      reason: ctx.request.tlsVersion === null ? "tls_not_reported" : `tls_${ctx.request.tlsVersion}`,
+      reason:
+        ctx.request.tlsVersion === null ? "tls_not_reported" : `tls_${ctx.request.tlsVersion}`,
     });
     return null;
   }
 
-  private async stageParseAuthCredential(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageParseAuthCredential(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const parsed = parseAuthHeader(ctx.request);
     ctx.parsedAuth = parsed;
@@ -252,7 +264,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageAuthenticate(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageAuthenticate(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const parsed = ctx.parsedAuth;
     if (parsed === undefined || parsed.scheme === null || parsed.token === null) {
@@ -269,7 +284,10 @@ export class GatewayRuntime {
     if (parsed.scheme === "bearer_jwt") {
       if (this.jwksProvider === null) {
         ctx.authOutcome = "credential_not_found";
-        const env = authenticationRequired({ reason: "no JWKS provider configured", correlationId: ctx.request.correlationId ?? undefined });
+        const env = authenticationRequired({
+          reason: "no JWKS provider configured",
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
         rec.record({
           stage: "authenticate",
           outcome: "deny",
@@ -336,7 +354,10 @@ export class GatewayRuntime {
     if (parsed.scheme === "api_key_header") {
       if (this.opaqueTokenLookup === null) {
         ctx.authOutcome = "credential_not_found";
-        const env = authenticationRequired({ reason: "no opaque token lookup configured", correlationId: ctx.request.correlationId ?? undefined });
+        const env = authenticationRequired({
+          reason: "no opaque token lookup configured",
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
         rec.record({
           stage: "authenticate",
           outcome: "deny",
@@ -351,7 +372,10 @@ export class GatewayRuntime {
       const lookup = await this.opaqueTokenLookup.lookup(ctx.request, parsed.token);
       if (lookup === null) {
         ctx.authOutcome = "credential_not_found";
-        const env = authenticationRequired({ reason: "api key not recognized", correlationId: ctx.request.correlationId ?? undefined });
+        const env = authenticationRequired({
+          reason: "api key not recognized",
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
         rec.record({
           stage: "authenticate",
           outcome: "deny",
@@ -394,7 +418,10 @@ export class GatewayRuntime {
     return env;
   }
 
-  private async stageResolvePrincipal(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageResolvePrincipal(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     if (ctx.authOutcome !== "authenticated" || ctx.authPrincipalRef === undefined) {
       rec.record({
@@ -443,11 +470,21 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageMatchRoute(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageMatchRoute(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const headerVersion = ctx.request.headers[HEADER_API_VERSION];
-    const apiVersion = typeof headerVersion === "string" && /^v\d+$/.test(headerVersion) ? headerVersion : this.defaultApiVersion;
-    const match = this.routes.lookup({ method: ctx.request.method, path: ctx.request.path, apiVersion });
+    const apiVersion =
+      typeof headerVersion === "string" && /^v\d+$/.test(headerVersion)
+        ? headerVersion
+        : this.defaultApiVersion;
+    const match = this.routes.lookup({
+      method: ctx.request.method,
+      path: ctx.request.path,
+      apiVersion,
+    });
     if (match === null) {
       const versions = this.routes.listVersionsFor(ctx.request.method, ctx.request.path);
       if (versions.length > 0) {
@@ -498,7 +535,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageNegotiateVersion(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageNegotiateVersion(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "negotiate_version",
@@ -510,14 +550,18 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageNegotiateContent(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageNegotiateContent(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     if (ctx.request.method === "OPTIONS") {
       ctx.finalResponse = {
         status: 204,
         headers: {
           "access-control-allow-methods": ctx.routeMatch?.route.method ?? "GET, POST, OPTIONS",
-          "access-control-allow-headers": "authorization, content-type, idempotency-key, x-api-version",
+          "access-control-allow-headers":
+            "authorization, content-type, idempotency-key, x-api-version",
           "content-length": "0",
         },
         bodyBytes: null,
@@ -542,7 +586,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageCheckIdempotency(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageCheckIdempotency(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const route = ctx.routeMatch?.route ?? null;
     const headerKey = ctx.request.headers[HEADER_IDEMPOTENCY_KEY];
@@ -581,7 +628,7 @@ export class GatewayRuntime {
     if (decision.outcome === "no_key_provided") {
       const env = authenticationRequired({
         reason: "operation requires Idempotency-Key header",
-        wwwAuthenticate: 'Idempotency-Key required',
+        wwwAuthenticate: "Idempotency-Key required",
         correlationId: ctx.request.correlationId ?? undefined,
       });
       rec.record({
@@ -645,7 +692,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageCheckRateLimit(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageCheckRateLimit(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const decision = await this.rateLimitChecker.check({
       tenantId: ctx.tenantId,
@@ -688,7 +738,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageValidateRequestSignature(_ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageValidateRequestSignature(
+    _ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "validate_request_signature",
@@ -700,7 +753,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageValidateRequestSchema(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageValidateRequestSchema(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "validate_request_schema",
@@ -712,11 +768,17 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageDispatchHandler(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageDispatchHandler(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const route = ctx.routeMatch?.route ?? null;
     if (route === null) {
-      const env = serviceUnavailable({ reason: "no_route_dispatch_called_without_match", correlationId: ctx.request.correlationId ?? undefined });
+      const env = serviceUnavailable({
+        reason: "no_route_dispatch_called_without_match",
+        correlationId: ctx.request.correlationId ?? undefined,
+      });
       rec.record({
         stage: "dispatch_handler",
         outcome: "error",
@@ -829,10 +891,13 @@ export class GatewayRuntime {
       return;
     }
     const bodyBytes = ctx.finalResponse?.bodyBytes ?? null;
-    const responseSha256 = bodyBytes !== null && bodyBytes.byteLength > 0 ? sha256(bodyBytes) : null;
+    const responseSha256 =
+      bodyBytes !== null && bodyBytes.byteLength > 0 ? sha256(bodyBytes) : null;
     const succeeded = status >= 200 && status < 400;
     const nowIso = this.now().toISOString();
-    const expiresAt = new Date(this.now().getTime() + this.idempotencyTtlSeconds * 1000).toISOString();
+    const expiresAt = new Date(
+      this.now().getTime() + this.idempotencyTtlSeconds * 1000,
+    ).toISOString();
     const record: IdempotencyRecord = {
       id: `idem_${sha256(ctx.idempotencyKey + ctx.tenantId).slice(0, 32)}`,
       tenantId: ctx.tenantId,
@@ -854,7 +919,10 @@ export class GatewayRuntime {
     await this.idempotencyStore.put({ tenantId: ctx.tenantId, record });
   }
 
-  private async stageTransformResponse(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageTransformResponse(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "transform_response",
@@ -866,16 +934,25 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageApplySecurityHeaders(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageApplySecurityHeaders(
+    ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     if (ctx.finalResponse !== null) {
       const merged = { ...ctx.finalResponse.headers };
-      merged["strict-transport-security"] = merged["strict-transport-security"] ?? DEFAULT_SECURITY_HEADERS.strict_transport_security;
-      merged["content-security-policy"] = merged["content-security-policy"] ?? DEFAULT_SECURITY_HEADERS.content_security_policy;
-      merged["x-content-type-options"] = merged["x-content-type-options"] ?? DEFAULT_SECURITY_HEADERS.x_content_type_options;
-      merged["x-frame-options"] = merged["x-frame-options"] ?? DEFAULT_SECURITY_HEADERS.x_frame_options;
-      merged["referrer-policy"] = merged["referrer-policy"] ?? DEFAULT_SECURITY_HEADERS.referrer_policy;
-      merged["permissions-policy"] = merged["permissions-policy"] ?? DEFAULT_SECURITY_HEADERS.permissions_policy;
+      merged["strict-transport-security"] =
+        merged["strict-transport-security"] ?? DEFAULT_SECURITY_HEADERS.strict_transport_security;
+      merged["content-security-policy"] =
+        merged["content-security-policy"] ?? DEFAULT_SECURITY_HEADERS.content_security_policy;
+      merged["x-content-type-options"] =
+        merged["x-content-type-options"] ?? DEFAULT_SECURITY_HEADERS.x_content_type_options;
+      merged["x-frame-options"] =
+        merged["x-frame-options"] ?? DEFAULT_SECURITY_HEADERS.x_frame_options;
+      merged["referrer-policy"] =
+        merged["referrer-policy"] ?? DEFAULT_SECURITY_HEADERS.referrer_policy;
+      merged["permissions-policy"] =
+        merged["permissions-policy"] ?? DEFAULT_SECURITY_HEADERS.permissions_policy;
       ctx.finalResponse = { ...ctx.finalResponse, headers: merged };
     }
     rec.record({
@@ -888,7 +965,10 @@ export class GatewayRuntime {
     return null;
   }
 
-  private async stageEmitAudit(_ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
+  private async stageEmitAudit(
+    _ctx: PipelineState,
+    rec: PipelineRecorder,
+  ): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     rec.record({
       stage: "emit_audit",
@@ -920,6 +1000,9 @@ interface PipelineState {
   rateLimitDecisionId: string | null;
   parsedBody: Record<string, unknown> | null;
   params: Readonly<Record<string, string>>;
-  routeMatch: { readonly route: import("@crossengin/api-gateway").RouteDefinition; readonly params: Readonly<Record<string, string>> } | null;
+  routeMatch: {
+    readonly route: import("@crossengin/api-gateway").RouteDefinition;
+    readonly params: Readonly<Record<string, string>>;
+  } | null;
   finalResponse: OutgoingResponse | null;
 }

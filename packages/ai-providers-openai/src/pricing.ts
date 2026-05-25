@@ -64,10 +64,7 @@ export interface ChatUsageBreakdown {
   readonly outputTokens: number;
 }
 
-export function computeChatUsageCost(
-  model: OpenAIChatModel,
-  usage: ChatUsageBreakdown,
-): number {
+export function computeChatUsageCost(model: OpenAIChatModel, usage: ChatUsageBreakdown): number {
   const p = OPENAI_CHAT_PRICING[model];
   const cached = usage.cachedInputTokens ?? 0;
   const freshInput = Math.max(0, usage.inputTokens - cached);
@@ -77,10 +74,7 @@ export function computeChatUsageCost(
   return roundUsd(inputCost + cachedCost + outputCost);
 }
 
-export function computeEmbeddingCost(
-  model: OpenAIEmbeddingModel,
-  inputTokens: number,
-): number {
+export function computeEmbeddingCost(model: OpenAIEmbeddingModel, inputTokens: number): number {
   const p = OPENAI_EMBEDDING_PRICING[model];
   return roundUsd((inputTokens * p.inputUsdPerMillion) / 1_000_000);
 }

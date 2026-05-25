@@ -64,27 +64,19 @@ describe("PROVIDER_EVENT_SIGNAL_MAP", () => {
     expect(PROVIDER_EVENT_SIGNAL_MAP["payment_intent.payment_failed"]).toBe(
       PAYMENT_SIGNAL_NAMES.FAILED,
     );
-    expect(PROVIDER_EVENT_SIGNAL_MAP["charge.refunded"]).toBe(
-      PAYMENT_SIGNAL_NAMES.REFUNDED,
-    );
+    expect(PROVIDER_EVENT_SIGNAL_MAP["charge.refunded"]).toBe(PAYMENT_SIGNAL_NAMES.REFUNDED);
   });
 
   it("maps the canonical Adyen event types", () => {
-    expect(PROVIDER_EVENT_SIGNAL_MAP["AUTHORISATION"]).toBe(
-      PAYMENT_SIGNAL_NAMES.CAPTURED,
-    );
+    expect(PROVIDER_EVENT_SIGNAL_MAP["AUTHORISATION"]).toBe(PAYMENT_SIGNAL_NAMES.CAPTURED);
     expect(PROVIDER_EVENT_SIGNAL_MAP["REFUND"]).toBe(PAYMENT_SIGNAL_NAMES.REFUNDED);
-    expect(PROVIDER_EVENT_SIGNAL_MAP["CANCELLATION"]).toBe(
-      PAYMENT_SIGNAL_NAMES.CANCELLED,
-    );
+    expect(PROVIDER_EVENT_SIGNAL_MAP["CANCELLATION"]).toBe(PAYMENT_SIGNAL_NAMES.CANCELLED);
   });
 });
 
 describe("resolvePaymentSignalForEvent", () => {
   it("returns the mapped signal for known events", () => {
-    expect(resolvePaymentSignalForEvent("payment_intent.succeeded")).toBe(
-      "payment.captured",
-    );
+    expect(resolvePaymentSignalForEvent("payment_intent.succeeded")).toBe("payment.captured");
   });
 
   it("returns null for unknown events", () => {
@@ -141,10 +133,7 @@ describe("buildPaymentSignalBridge", () => {
       engine: submitter,
       secretResolver: fixedSecret(secretBytes),
     });
-    const wh = makeWebhook(
-      { data: { object: { id: "pi_capture_1" } } },
-      secretBytes,
-    );
+    const wh = makeWebhook({ data: { object: { id: "pi_capture_1" } } }, secretBytes);
     const outcome = await bridge.handle({
       bodyBytes: wh.body,
       signatureHeader: wh.signatureHeader,
@@ -166,10 +155,7 @@ describe("buildPaymentSignalBridge", () => {
       secretResolver: fixedSecret(secretBytes),
       signalName: PAYMENT_SIGNAL_NAMES.REFUNDED,
     });
-    const wh = makeWebhook(
-      { data: { object: { id: "ch_refund_1" } } },
-      secretBytes,
-    );
+    const wh = makeWebhook({ data: { object: { id: "ch_refund_1" } } }, secretBytes);
     await bridge.handle({
       bodyBytes: wh.body,
       signatureHeader: wh.signatureHeader,
@@ -187,10 +173,7 @@ describe("buildPaymentSignalBridge", () => {
       engine: submitter,
       secretResolver: fixedSecret(secretBytes),
     });
-    const wh = makeWebhook(
-      { data: { object: { id: "pi_x" } } },
-      wrongSecret,
-    );
+    const wh = makeWebhook({ data: { object: { id: "pi_x" } } }, wrongSecret);
     const outcome = await bridge.handle({
       bodyBytes: wh.body,
       signatureHeader: wh.signatureHeader,

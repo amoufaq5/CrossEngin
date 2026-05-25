@@ -87,7 +87,8 @@ export const NotificationPayloadSchema = z
   .superRefine((v, ctx) => {
     if (v.containsPhi) {
       const localeStub = LOCALE_STUB_TEMPLATES[v.locale];
-      const titleOk = localeStub !== undefined ? v.title === localeStub : APPROVED_STUBS.has(v.title);
+      const titleOk =
+        localeStub !== undefined ? v.title === localeStub : APPROVED_STUBS.has(v.title);
       const bodyOk = localeStub !== undefined ? v.body === localeStub : APPROVED_STUBS.has(v.body);
       if (!titleOk || !bodyOk) {
         ctx.addIssue({

@@ -7,8 +7,7 @@ export const VERSION_NEGOTIATION_STRATEGIES = [
   "path_prefix",
   "query_param",
 ] as const;
-export type VersionNegotiationStrategy =
-  (typeof VERSION_NEGOTIATION_STRATEGIES)[number];
+export type VersionNegotiationStrategy = (typeof VERSION_NEGOTIATION_STRATEGIES)[number];
 
 export const ROUTE_MATCH_OUTCOMES = [
   "matched",
@@ -20,16 +19,15 @@ export const ROUTE_MATCH_OUTCOMES = [
 ] as const;
 export type RouteMatchOutcome = (typeof ROUTE_MATCH_OUTCOMES)[number];
 
-const PathSegmentSchema = z
-  .union([
-    z.object({ kind: z.literal("literal"), value: z.string().regex(/^[a-zA-Z0-9._-]+$/) }),
-    z.object({
-      kind: z.literal("parameter"),
-      name: z.string().regex(/^[a-z][a-zA-Z0-9_]*$/),
-      pattern: z.string().max(200).nullable(),
-    }),
-    z.object({ kind: z.literal("wildcard") }),
-  ]);
+const PathSegmentSchema = z.union([
+  z.object({ kind: z.literal("literal"), value: z.string().regex(/^[a-zA-Z0-9._-]+$/) }),
+  z.object({
+    kind: z.literal("parameter"),
+    name: z.string().regex(/^[a-z][a-zA-Z0-9_]*$/),
+    pattern: z.string().max(200).nullable(),
+  }),
+  z.object({ kind: z.literal("wildcard") }),
+]);
 export type PathSegment = z.infer<typeof PathSegmentSchema>;
 
 export const RouteDefinitionSchema = z
@@ -47,7 +45,10 @@ export const RouteDefinitionSchema = z
     sunsetAt: z.string().datetime({ offset: true }).nullable(),
     successorOperationId: z.string().max(120).nullable(),
     requiredScopes: z.array(z.string().max(200)).default([]),
-    rateLimitPolicyId: z.string().regex(/^rlp_[a-z0-9]{8,40}$/).nullable(),
+    rateLimitPolicyId: z
+      .string()
+      .regex(/^rlp_[a-z0-9]{8,40}$/)
+      .nullable(),
     idempotencyRequired: z.boolean().default(false),
     requestSchemaSha256: z
       .string()
@@ -252,9 +253,7 @@ export interface VersionNegotiationInput {
   readonly defaultVersion: string;
 }
 
-export const negotiateVersion = (
-  input: VersionNegotiationInput,
-): string => {
+export const negotiateVersion = (input: VersionNegotiationInput): string => {
   switch (input.strategy) {
     case "header_x_api_version":
       if (input.header !== null && /^v[0-9]+$/.test(input.header)) {
@@ -267,27 +266,19 @@ export const negotiateVersion = (
       return match?.[1] ?? input.defaultVersion;
     }
     case "path_prefix":
-      if (
-        input.pathFirstSegment !== null &&
-        /^v[0-9]+$/.test(input.pathFirstSegment)
-      ) {
+      if (input.pathFirstSegment !== null && /^v[0-9]+$/.test(input.pathFirstSegment)) {
         return input.pathFirstSegment;
       }
       return input.defaultVersion;
     case "query_param":
-      if (
-        input.queryVersion !== null &&
-        /^v[0-9]+$/.test(input.queryVersion)
-      ) {
+      if (input.queryVersion !== null && /^v[0-9]+$/.test(input.queryVersion)) {
         return input.queryVersion;
       }
       return input.defaultVersion;
   }
 };
 
-export const compilePathPattern = (
-  template: string,
-): readonly PathSegment[] => {
+export const compilePathPattern = (template: string): readonly PathSegment[] => {
   const segments = normalizePathSegments(template);
   return segments.map<PathSegment>((s) => {
     if (s === "*") return { kind: "wildcard" };

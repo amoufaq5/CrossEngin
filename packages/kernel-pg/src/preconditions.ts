@@ -4,11 +4,7 @@ export const REQUIRED_EXTENSIONS = ["pg_uuidv7"] as const;
 export const MIN_POSTGRES_MAJOR = 14;
 
 export interface PreconditionProblem {
-  readonly code:
-    | "MISSING_EXTENSION"
-    | "POSTGRES_TOO_OLD"
-    | "NO_CREATE_PRIVILEGE"
-    | "QUERY_FAILED";
+  readonly code: "MISSING_EXTENSION" | "POSTGRES_TOO_OLD" | "NO_CREATE_PRIVILEGE" | "QUERY_FAILED";
   readonly message: string;
   readonly remedy: string | null;
 }
@@ -30,8 +26,7 @@ export async function checkPgUuidv7Extension(
   return {
     code: "MISSING_EXTENSION",
     message: "the pg_uuidv7 extension is required but not installed",
-    remedy:
-      "ask a Postgres superuser to run: CREATE EXTENSION IF NOT EXISTS pg_uuidv7;",
+    remedy: "ask a Postgres superuser to run: CREATE EXTENSION IF NOT EXISTS pg_uuidv7;",
   };
 }
 
@@ -39,9 +34,7 @@ export async function checkPostgresVersion(
   conn: PgConnection,
   minMajor: number = MIN_POSTGRES_MAJOR,
 ): Promise<{ problem: PreconditionProblem | null; serverVersionNum: number | null }> {
-  const result = await conn.query<{ server_version_num: string }>(
-    "SHOW server_version_num",
-  );
+  const result = await conn.query<{ server_version_num: string }>("SHOW server_version_num");
   const raw = result.rows[0]?.server_version_num;
   if (raw === undefined) {
     return {
@@ -95,9 +88,7 @@ export async function checkCreatePrivilege(
   };
 }
 
-export async function listInstalledExtensions(
-  conn: PgConnection,
-): Promise<readonly string[]> {
+export async function listInstalledExtensions(conn: PgConnection): Promise<readonly string[]> {
   const result = await conn.query<{ extname: string }>(
     "SELECT extname FROM pg_extension ORDER BY extname",
   );

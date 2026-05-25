@@ -83,10 +83,8 @@ export const DEFINITION_TRANSITIONS: Readonly<
   retired: [],
 };
 
-export const canTransitionDefinition = (
-  from: DefinitionStatus,
-  to: DefinitionStatus,
-): boolean => DEFINITION_TRANSITIONS[from].includes(to);
+export const canTransitionDefinition = (from: DefinitionStatus, to: DefinitionStatus): boolean =>
+  DEFINITION_TRANSITIONS[from].includes(to);
 
 export const COMPENSATION_STRATEGIES = [
   "immediate_reverse_order",
@@ -120,7 +118,10 @@ const ACTIVITY_FAILED_TRIGGER = z.object({
 const MANUAL_TRIGGER = z.object({
   kind: z.literal("manual_action"),
   actionName: z.string().min(1).max(120),
-  requiredRole: z.string().regex(/^[a-z][a-z0-9_-]*$/).optional(),
+  requiredRole: z
+    .string()
+    .regex(/^[a-z][a-z0-9_-]*$/)
+    .optional(),
   requiresFourEyes: z.boolean().default(false),
 });
 
@@ -215,7 +216,10 @@ export const StateActionSchema = z
 export type StateAction = z.infer<typeof StateActionSchema>;
 
 export const StateDefinitionSchema = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+  name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .max(80),
   kind: z.enum(STATE_KINDS),
   label: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
@@ -226,7 +230,10 @@ export const StateDefinitionSchema = z.object({
 export type StateDefinition = z.infer<typeof StateDefinitionSchema>;
 
 export const TransitionDefinitionSchema = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+  name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .max(80),
   fromState: z.string().min(1).max(80),
   toState: z.string().min(1).max(80),
   trigger: TransitionTriggerSchema,
@@ -237,7 +244,10 @@ export const TransitionDefinitionSchema = z.object({
 export type TransitionDefinition = z.infer<typeof TransitionDefinitionSchema>;
 
 export const VariableDefinitionSchema = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+  name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .max(80),
   type: z.enum(VARIABLE_TYPES),
   required: z.boolean().default(false),
   defaultValueJson: z.string().max(5000).nullable(),
@@ -247,7 +257,10 @@ export type VariableDefinition = z.infer<typeof VariableDefinitionSchema>;
 
 export const TimerDefinitionSchema = z
   .object({
-    name: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+    name: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(80),
     kind: z.enum(["absolute_at", "relative_after", "cron_schedule", "business_hours"]),
     relativeSeconds: z.number().int().min(1).max(31_536_000).nullable(),
     absoluteTimestampVariable: z.string().min(1).max(80).nullable(),
@@ -280,14 +293,16 @@ export const TimerDefinitionSchema = z
 export type TimerDefinition = z.infer<typeof TimerDefinitionSchema>;
 
 export const SignalDefinitionSchema = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_.-]*$/).max(120),
+  name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_.-]*$/)
+    .max(120),
   correlationVariable: z.string().min(1).max(80),
-  payloadSchemaSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-  deliveryGuarantee: z.enum([
-    "at_most_once",
-    "at_least_once",
-    "exactly_once_idempotent",
-  ]),
+  payloadSchemaSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  deliveryGuarantee: z.enum(["at_most_once", "at_least_once", "exactly_once_idempotent"]),
   idempotencyKey: z.string().max(80).nullable(),
 });
 export type SignalDefinition = z.infer<typeof SignalDefinitionSchema>;
@@ -296,7 +311,10 @@ export const WorkflowDefinitionSchema = z
   .object({
     id: z.string().regex(/^wfd_[a-z0-9]{8,32}$/),
     tenantId: z.string().uuid().nullable(),
-    definitionKey: z.string().regex(/^[a-z][a-z0-9_.-]*$/).max(120),
+    definitionKey: z
+      .string()
+      .regex(/^[a-z][a-z0-9_.-]*$/)
+      .max(120),
     version: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/),
     label: z.string().min(1).max(200),
     description: z.string().max(2000),
@@ -315,7 +333,10 @@ export const WorkflowDefinitionSchema = z
     publishedBy: z.string().uuid().nullable(),
     deprecatedAt: z.string().datetime({ offset: true }).nullable(),
     supersededByDefinitionId: z.string().nullable(),
-    sourceManifestSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    sourceManifestSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
   })
   .superRefine((d, ctx) => {
     const stateNames = new Set<string>();
@@ -353,9 +374,7 @@ export const WorkflowDefinitionSchema = z
         message: `exactly one state must have kind=initial (found ${initialCount})`,
       });
     }
-    const terminalCount = d.states.filter((s) =>
-      TERMINAL_STATE_KINDS.has(s.kind),
-    ).length;
+    const terminalCount = d.states.filter((s) => TERMINAL_STATE_KINDS.has(s.kind)).length;
     if (terminalCount === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -424,20 +443,14 @@ export const WorkflowDefinitionSchema = z
     const timerNames = new Set(d.timers.map((t) => t.name));
     const variableNames = new Set(d.variables.map((v) => v.name));
     for (const t of d.transitions) {
-      if (
-        t.trigger.kind === "signal_received" &&
-        !signalNames.has(t.trigger.signalName)
-      ) {
+      if (t.trigger.kind === "signal_received" && !signalNames.has(t.trigger.signalName)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["transitions"],
           message: `transition ${t.name} references undeclared signal ${t.trigger.signalName}`,
         });
       }
-      if (
-        t.trigger.kind === "timer_fired" &&
-        !timerNames.has(t.trigger.timerName)
-      ) {
+      if (t.trigger.kind === "timer_fired" && !timerNames.has(t.trigger.timerName)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["transitions"],
@@ -460,9 +473,7 @@ export const WorkflowDefinitionSchema = z
   });
 export type WorkflowDefinition = z.infer<typeof WorkflowDefinitionSchema>;
 
-export const findUnreachableStates = (
-  definition: WorkflowDefinition,
-): readonly string[] => {
+export const findUnreachableStates = (definition: WorkflowDefinition): readonly string[] => {
   const reachable = new Set<string>([definition.initialState]);
   let changed = true;
   while (changed) {
@@ -474,15 +485,10 @@ export const findUnreachableStates = (
       }
     }
   }
-  return definition.states
-    .map((s) => s.name)
-    .filter((n) => !reachable.has(n));
+  return definition.states.map((s) => s.name).filter((n) => !reachable.has(n));
 };
 
-export const isTerminalState = (
-  definition: WorkflowDefinition,
-  stateName: string,
-): boolean => {
+export const isTerminalState = (definition: WorkflowDefinition, stateName: string): boolean => {
   const state = definition.states.find((s) => s.name === stateName);
   return state !== undefined && TERMINAL_STATE_KINDS.has(state.kind);
 };

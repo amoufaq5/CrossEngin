@@ -52,9 +52,7 @@ describe("SearchQuerySchema — entity", () => {
   });
 
   it("rejects entity-name with lowercase first letter", () => {
-    expect(() =>
-      SearchQuerySchema.parse({ kind: "entity", entity: "prescription" }),
-    ).toThrow();
+    expect(() => SearchQuerySchema.parse({ kind: "entity", entity: "prescription" })).toThrow();
   });
 });
 
@@ -107,9 +105,7 @@ describe("selectEngine", () => {
   });
 
   it("global → typesense", () => {
-    expect(selectEngine(SearchQuerySchema.parse({ kind: "global", text: "x" }))).toBe(
-      "typesense",
-    );
+    expect(selectEngine(SearchQuerySchema.parse({ kind: "global", text: "x" }))).toBe("typesense");
   });
 
   it("typeahead → typesense", () => {
@@ -119,9 +115,7 @@ describe("selectEngine", () => {
   });
 
   it("semantic → pgvector", () => {
-    expect(
-      selectEngine(SearchQuerySchema.parse({ kind: "semantic", text: "x" })),
-    ).toBe("pgvector");
+    expect(selectEngine(SearchQuerySchema.parse({ kind: "semantic", text: "x" }))).toBe("pgvector");
   });
 });
 

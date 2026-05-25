@@ -12,7 +12,10 @@ import {
 import { hashStatement } from "./statement-hash.js";
 
 function mockConnection(
-  queryFn: (sql: string, params?: readonly unknown[]) => Promise<PgQueryResult<Record<string, unknown>>>,
+  queryFn: (
+    sql: string,
+    params?: readonly unknown[],
+  ) => Promise<PgQueryResult<Record<string, unknown>>>,
 ): PgConnection {
   return {
     query: vi.fn(queryFn) as PgConnection["query"],
@@ -134,10 +137,7 @@ describe("recordStatement", () => {
 describe("listAppliedHashes", () => {
   it("returns hashes only for succeeded rows", async () => {
     const conn = mockConnection(async () => ({
-      rows: [
-        { statement_hash: "a".repeat(64) },
-        { statement_hash: "b".repeat(64) },
-      ],
+      rows: [{ statement_hash: "a".repeat(64) }, { statement_hash: "b".repeat(64) }],
       rowCount: 2,
     }));
     const hashes = await listAppliedHashes(conn, "meta");

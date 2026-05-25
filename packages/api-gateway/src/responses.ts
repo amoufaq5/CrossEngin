@@ -1,18 +1,14 @@
 import { z } from "zod";
 
 export const PROBLEM_TYPES = {
-  authentication_required:
-    "https://crossengin.io/errors/authentication-required",
+  authentication_required: "https://crossengin.io/errors/authentication-required",
   insufficient_scope: "https://crossengin.io/errors/insufficient-scope",
   forbidden: "https://crossengin.io/errors/forbidden",
   not_found: "https://crossengin.io/errors/not-found",
   method_not_allowed: "https://crossengin.io/errors/method-not-allowed",
-  conflict_idempotency_mismatch:
-    "https://crossengin.io/errors/idempotency-mismatch",
-  unsupported_media_type:
-    "https://crossengin.io/errors/unsupported-media-type",
-  unprocessable_entity:
-    "https://crossengin.io/errors/unprocessable-entity",
+  conflict_idempotency_mismatch: "https://crossengin.io/errors/idempotency-mismatch",
+  unsupported_media_type: "https://crossengin.io/errors/unsupported-media-type",
+  unprocessable_entity: "https://crossengin.io/errors/unprocessable-entity",
   too_many_requests: "https://crossengin.io/errors/too-many-requests",
   quota_exceeded: "https://crossengin.io/errors/quota-exceeded",
   service_unavailable: "https://crossengin.io/errors/service-unavailable",
@@ -37,12 +33,9 @@ export const SECURITY_HEADER_NAMES = [
 ] as const;
 export type SecurityHeaderName = (typeof SECURITY_HEADER_NAMES)[number];
 
-export const DEFAULT_SECURITY_HEADERS: Readonly<
-  Record<SecurityHeaderName, string>
-> = {
+export const DEFAULT_SECURITY_HEADERS: Readonly<Record<SecurityHeaderName, string>> = {
   strict_transport_security: "max-age=31536000; includeSubDomains; preload",
-  content_security_policy:
-    "default-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+  content_security_policy: "default-src 'self'; frame-ancestors 'none'; base-uri 'self'",
   x_content_type_options: "nosniff",
   x_frame_options: "DENY",
   referrer_policy: "strict-origin-when-cross-origin",
@@ -53,10 +46,13 @@ export const ProblemDetailsResponseSchema = z
   .object({
     type: z.string().url(),
     title: z.string().min(1).max(200),
-    status: z.number().int().refine(
-      (n) => (PROBLEM_STATUS_CODES as readonly number[]).includes(n),
-      "status must be a recognized problem status code",
-    ),
+    status: z
+      .number()
+      .int()
+      .refine(
+        (n) => (PROBLEM_STATUS_CODES as readonly number[]).includes(n),
+        "status must be a recognized problem status code",
+      ),
     detail: z.string().min(1).max(2000),
     instance: z.string().min(1).max(500).optional(),
     correlationId: z.string().max(200).optional(),
@@ -68,16 +64,14 @@ export const ProblemDetailsResponseSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["extensions", "retryAfterSeconds"],
-        message:
-          "429 problem details should include retryAfterSeconds extension",
+        message: "429 problem details should include retryAfterSeconds extension",
       });
     }
     if (status === 401 && !p.extensions.wwwAuthenticate) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["extensions", "wwwAuthenticate"],
-        message:
-          "401 problem details should include wwwAuthenticate extension",
+        message: "401 problem details should include wwwAuthenticate extension",
       });
     }
     if (status === 410 && !p.extensions.sunsetAt) {
@@ -88,9 +82,7 @@ export const ProblemDetailsResponseSchema = z
       });
     }
   });
-export type ProblemDetailsResponse = z.infer<
-  typeof ProblemDetailsResponseSchema
->;
+export type ProblemDetailsResponse = z.infer<typeof ProblemDetailsResponseSchema>;
 
 export const CORS_MODES = [
   "disabled",
@@ -119,21 +111,14 @@ export const CorsPolicySchema = z
         message: "allowlist mode requires non-empty allowedOrigins",
       });
     }
-    if (
-      p.mode === "wildcard_credentialed" &&
-      !p.allowCredentials
-    ) {
+    if (p.mode === "wildcard_credentialed" && !p.allowCredentials) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["allowCredentials"],
-        message:
-          "wildcard_credentialed mode requires allowCredentials=true",
+        message: "wildcard_credentialed mode requires allowCredentials=true",
       });
     }
-    if (
-      p.allowCredentials &&
-      p.mode === "wildcard_anonymous"
-    ) {
+    if (p.allowCredentials && p.mode === "wildcard_anonymous") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["allowCredentials"],
@@ -200,23 +185,19 @@ export const evaluateCors = (input: {
     };
   }
   const headers: Record<string, string> = {
-    "Access-Control-Allow-Origin":
-      input.policy.mode === "wildcard_anonymous" ? "*" : input.origin,
+    "Access-Control-Allow-Origin": input.policy.mode === "wildcard_anonymous" ? "*" : input.origin,
     Vary: "Origin",
   };
   if (input.policy.allowCredentials) {
     headers["Access-Control-Allow-Credentials"] = "true";
   }
   if (input.requestMethod === "OPTIONS") {
-    headers["Access-Control-Allow-Methods"] =
-      input.policy.allowedMethods.join(", ");
-    headers["Access-Control-Allow-Headers"] =
-      input.policy.allowedHeaders.join(", ");
+    headers["Access-Control-Allow-Methods"] = input.policy.allowedMethods.join(", ");
+    headers["Access-Control-Allow-Headers"] = input.policy.allowedHeaders.join(", ");
     headers["Access-Control-Max-Age"] = String(input.policy.maxAgeSeconds);
   }
   if (input.policy.exposedHeaders.length > 0) {
-    headers["Access-Control-Expose-Headers"] =
-      input.policy.exposedHeaders.join(", ");
+    headers["Access-Control-Expose-Headers"] = input.policy.exposedHeaders.join(", ");
   }
   return {
     allowed: true,

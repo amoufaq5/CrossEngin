@@ -58,12 +58,12 @@ describe("buildGuardrailListQuery", () => {
 
   it("threads valid maxResults", () => {
     expect(buildGuardrailListQuery({ maxResults: 50 })).toEqual({ maxResults: "50" });
-    expect(
-      buildGuardrailListQuery({ maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MIN }),
-    ).toEqual({ maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MIN.toString() });
-    expect(
-      buildGuardrailListQuery({ maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MAX }),
-    ).toEqual({ maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MAX.toString() });
+    expect(buildGuardrailListQuery({ maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MIN })).toEqual(
+      { maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MIN.toString() },
+    );
+    expect(buildGuardrailListQuery({ maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MAX })).toEqual(
+      { maxResults: BEDROCK_GUARDRAIL_LIST_MAX_RESULTS_MAX.toString() },
+    );
   });
 
   it("rejects maxResults out of range or non-integer", () => {
@@ -190,20 +190,13 @@ describe("parseGuardrailListResponse", () => {
   });
 
   it("rejects non-array guardrails", () => {
-    expect(() => parseGuardrailListResponse({ guardrails: "oops" })).toThrow(
-      /not an array/,
-    );
+    expect(() => parseGuardrailListResponse({ guardrails: "oops" })).toThrow(/not an array/);
   });
 });
 
 describe("BEDROCK_GUARDRAIL detail enum tuples", () => {
   it("filter strengths cover the 4 documented values", () => {
-    expect(BEDROCK_GUARDRAIL_FILTER_STRENGTHS).toEqual([
-      "NONE",
-      "LOW",
-      "MEDIUM",
-      "HIGH",
-    ]);
+    expect(BEDROCK_GUARDRAIL_FILTER_STRENGTHS).toEqual(["NONE", "LOW", "MEDIUM", "HIGH"]);
   });
 
   it("content filter types cover the 6 documented values", () => {
@@ -218,10 +211,7 @@ describe("BEDROCK_GUARDRAIL detail enum tuples", () => {
   });
 
   it("contextual grounding filter types cover the 2 documented values", () => {
-    expect(BEDROCK_GUARDRAIL_CONTEXTUAL_GROUNDING_FILTER_TYPES).toEqual([
-      "GROUNDING",
-      "RELEVANCE",
-    ]);
+    expect(BEDROCK_GUARDRAIL_CONTEXTUAL_GROUNDING_FILTER_TYPES).toEqual(["GROUNDING", "RELEVANCE"]);
   });
 
   it("PII actions cover the 2 documented values", () => {
@@ -357,9 +347,7 @@ describe("parseGuardrailDetail", () => {
     });
     expect(d.sensitiveInformationPolicy?.piiEntities?.length).toBe(2);
     expect(d.sensitiveInformationPolicy?.piiEntities?.[0]!.action).toBe("ANONYMIZE");
-    expect(d.sensitiveInformationPolicy?.regexes?.[0]!.description).toBe(
-      "internal tracking id",
-    );
+    expect(d.sensitiveInformationPolicy?.regexes?.[0]!.description).toBe("internal tracking id");
   });
 
   it("rejects unknown PII action", () => {
@@ -405,9 +393,9 @@ describe("parseGuardrailDetail", () => {
   });
 
   it("rejects unknown status", () => {
-    expect(() =>
-      parseGuardrailDetail({ ...minimal(), status: "PENDING" }),
-    ).toThrow(/unknown guardrail status/);
+    expect(() => parseGuardrailDetail({ ...minimal(), status: "PENDING" })).toThrow(
+      /unknown guardrail status/,
+    );
   });
 
   it("rejects non-object response", () => {

@@ -28,16 +28,15 @@ export const EXPORT_STATUSES = [
 export type ExportStatus = (typeof EXPORT_STATUSES)[number];
 export const ExportStatusSchema = z.enum(EXPORT_STATUSES);
 
-export const EXPORT_TRANSITIONS: Readonly<
-  Record<ExportStatus, readonly ExportStatus[]>
-> = Object.freeze({
-  queued: ["running", "failed"],
-  running: ["ready_for_download", "failed"],
-  ready_for_download: ["delivered", "expired"],
-  delivered: ["expired"],
-  failed: [],
-  expired: [],
-});
+export const EXPORT_TRANSITIONS: Readonly<Record<ExportStatus, readonly ExportStatus[]>> =
+  Object.freeze({
+    queued: ["running", "failed"],
+    running: ["ready_for_download", "failed"],
+    ready_for_download: ["delivered", "expired"],
+    delivered: ["expired"],
+    failed: [],
+    expired: [],
+  });
 
 export function canTransitionExport(from: ExportStatus, to: ExportStatus): boolean {
   return EXPORT_TRANSITIONS[from].includes(to);
@@ -88,11 +87,7 @@ export const TenantDataExportSchema = z
         message: "running status requires startedAt",
       });
     }
-    if (
-      v.status === "ready_for_download" ||
-      v.status === "delivered" ||
-      v.status === "expired"
-    ) {
+    if (v.status === "ready_for_download" || v.status === "delivered" || v.status === "expired") {
       if (v.readyAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

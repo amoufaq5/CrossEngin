@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  DeliveryChannelSchema,
-  EXPORT_FORMATS,
-  ReportScheduleSchema,
-} from "./schedule.js";
+import { DeliveryChannelSchema, EXPORT_FORMATS, ReportScheduleSchema } from "./schedule.js";
 
 describe("DeliveryChannelSchema", () => {
   it("parses an email channel", () => {

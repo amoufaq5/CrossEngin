@@ -95,9 +95,7 @@ describe("computeCompensationPlan", () => {
       executedActivities,
       strategy: "immediate_reverse_order",
     });
-    expect(plan.map((s) => s.executedActivityId)).not.toContain(
-      "wfa_step3a001",
-    );
+    expect(plan.map((s) => s.executedActivityId)).not.toContain("wfa_step3a001");
   });
 });
 
@@ -233,17 +231,13 @@ describe("isCompensationComplete", () => {
     ).toBe(true);
   });
   it("returns false for executing plan", () => {
-    expect(
-      isCompensationComplete({ ...basePlan, status: "executing" }),
-    ).toBe(false);
+    expect(isCompensationComplete({ ...basePlan, status: "executing" })).toBe(false);
   });
 });
 
 describe("compensationSuccessRate", () => {
   it("returns 1.0 for zero steps", () => {
-    expect(
-      compensationSuccessRate({ ...basePlan, totalSteps: 0, steps: [] }),
-    ).toBe(1);
+    expect(compensationSuccessRate({ ...basePlan, totalSteps: 0, steps: [] })).toBe(1);
   });
   it("returns success ratio", () => {
     expect(

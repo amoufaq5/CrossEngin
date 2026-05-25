@@ -24,28 +24,15 @@ export const STAGE_ORDER: Readonly<Record<OnboardingStage, number>> = Object.fre
   go_live: 6,
 });
 
-export const STAGE_STATUSES = [
-  "pending",
-  "in_progress",
-  "completed",
-  "skipped",
-  "failed",
-] as const;
+export const STAGE_STATUSES = ["pending", "in_progress", "completed", "skipped", "failed"] as const;
 export type StageStatus = (typeof STAGE_STATUSES)[number];
 export const StageStatusSchema = z.enum(STAGE_STATUSES);
 
-export const ONBOARDING_PATHS = [
-  "bring_my_data",
-  "vertical_template",
-  "blank_workspace",
-] as const;
+export const ONBOARDING_PATHS = ["bring_my_data", "vertical_template", "blank_workspace"] as const;
 export type OnboardingPath = (typeof ONBOARDING_PATHS)[number];
 export const OnboardingPathSchema = z.enum(ONBOARDING_PATHS);
 
-const SKIPPABLE_STAGES: ReadonlySet<OnboardingStage> = new Set([
-  "user_invites",
-  "first_import",
-]);
+const SKIPPABLE_STAGES: ReadonlySet<OnboardingStage> = new Set(["user_invites", "first_import"]);
 
 export const StageRecordSchema = z
   .object({
@@ -162,7 +149,8 @@ export const OnboardingRunSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["sourceImportId"],
-          message: "path='bring_my_data' with first_import in progress/completed requires sourceImportId",
+          message:
+            "path='bring_my_data' with first_import in progress/completed requires sourceImportId",
         });
       }
     }
@@ -197,9 +185,7 @@ export const OnboardingRunSchema = z
   });
 export type OnboardingRun = z.infer<typeof OnboardingRunSchema>;
 
-export function nextStage(
-  current: OnboardingStage,
-): OnboardingStage | null {
+export function nextStage(current: OnboardingStage): OnboardingStage | null {
   const idx = STAGE_ORDER[current];
   const stages = [...ONBOARDING_STAGES];
   const next = stages.find((s) => STAGE_ORDER[s] === idx + 1);

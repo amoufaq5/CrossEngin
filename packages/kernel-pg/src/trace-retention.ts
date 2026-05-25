@@ -11,15 +11,11 @@ export const OPT_OUT_HISTORY_EVENT_KINDS = [
   "retention_set",
   "policy_deleted",
 ] as const;
-export type OptOutHistoryEventKind =
-  (typeof OPT_OUT_HISTORY_EVENT_KINDS)[number];
+export type OptOutHistoryEventKind = (typeof OPT_OUT_HISTORY_EVENT_KINDS)[number];
 
-export function isOptOutHistoryEventKind(
-  value: unknown,
-): value is OptOutHistoryEventKind {
+export function isOptOutHistoryEventKind(value: unknown): value is OptOutHistoryEventKind {
   return (
-    typeof value === "string" &&
-    (OPT_OUT_HISTORY_EVENT_KINDS as readonly string[]).includes(value)
+    typeof value === "string" && (OPT_OUT_HISTORY_EVENT_KINDS as readonly string[]).includes(value)
   );
 }
 
@@ -260,10 +256,7 @@ export interface EffectiveRetentionBatchInput {
   readonly pairs: ReadonlyArray<EffectiveRetentionBatchPair>;
 }
 
-export function effectiveRetentionKey(
-  tenantId: string,
-  tableName: string,
-): string {
+export function effectiveRetentionKey(tenantId: string, tableName: string): string {
   return `${tenantId}:${tableName}`;
 }
 
@@ -944,8 +937,7 @@ export class PostgresTraceRetention {
     if (tenantRow !== undefined) {
       if (tenantRow.opt_out) {
         const active =
-          tenantRow.opt_out_until === null ||
-          Date.parse(tenantRow.opt_out_until) > this.clock();
+          tenantRow.opt_out_until === null || Date.parse(tenantRow.opt_out_until) > this.clock();
         if (active) {
           return {
             source: "tenant_opt_out",
@@ -994,10 +986,7 @@ export class PostgresTraceRetention {
   ): Promise<ReadonlyMap<string, EffectiveRetentionResolution>> {
     const uniquePairs = new Map<string, EffectiveRetentionBatchPair>();
     for (const pair of input.pairs) {
-      uniquePairs.set(
-        effectiveRetentionKey(pair.tenantId, pair.tableName),
-        pair,
-      );
+      uniquePairs.set(effectiveRetentionKey(pair.tenantId, pair.tableName), pair);
     }
     if (uniquePairs.size === 0) {
       return new Map();
@@ -1016,9 +1005,7 @@ export class PostgresTraceRetention {
        FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
        WHERE (tenant_id, table_name) IN (${tenantPairTuples.join(", ")})`;
 
-    const platformPlaceholders = tableNames
-      .map((_, i) => `$${i + 1}`)
-      .join(", ");
+    const platformPlaceholders = tableNames.map((_, i) => `$${i + 1}`).join(", ");
     const platformQuery = `SELECT table_name, retention_days, enabled, last_pruned_at
        FROM ${SCHEMA}.${POLICIES_TABLE}
        WHERE table_name IN (${platformPlaceholders})`;
@@ -1030,10 +1017,7 @@ export class PostgresTraceRetention {
 
     const tenantPolicyByKey = new Map<string, RawTenantPolicyRow>();
     for (const row of tenantResult.rows) {
-      tenantPolicyByKey.set(
-        effectiveRetentionKey(row.tenant_id, row.table_name),
-        row,
-      );
+      tenantPolicyByKey.set(effectiveRetentionKey(row.tenant_id, row.table_name), row);
     }
     const platformPolicyByTable = new Map<string, RawPolicyRow>();
     for (const row of platformResult.rows) {
@@ -1048,8 +1032,7 @@ export class PostgresTraceRetention {
       if (tenantRow !== undefined) {
         if (tenantRow.opt_out) {
           const active =
-            tenantRow.opt_out_until === null ||
-            Date.parse(tenantRow.opt_out_until) > now;
+            tenantRow.opt_out_until === null || Date.parse(tenantRow.opt_out_until) > now;
           if (active) {
             result.set(key, {
               source: "tenant_opt_out",
@@ -1090,13 +1073,9 @@ export class PostgresTraceRetention {
     return result;
   }
 
-  async expiringOptOuts(
-    input: ExpiringOptOutsInput,
-  ): Promise<ReadonlyArray<ExpiringOptOut>> {
+  async expiringOptOuts(input: ExpiringOptOutsInput): Promise<ReadonlyArray<ExpiringOptOut>> {
     if (!Number.isFinite(input.withinDays) || input.withinDays < 0) {
-      throw new Error(
-        `withinDays must be a finite number >= 0, got ${input.withinDays}`,
-      );
+      throw new Error(`withinDays must be a finite number >= 0, got ${input.withinDays}`);
     }
     const includeExpired = input.includeExpired ?? false;
     const now = this.clock();
@@ -1130,19 +1109,14 @@ export class PostgresTraceRetention {
       tableName: r.table_name,
       optOutUntil: r.opt_out_until,
       optOutReason: r.opt_out_reason,
-      daysUntilExpiry:
-        (Date.parse(r.opt_out_until) - now) / (86_400 * 1_000),
+      daysUntilExpiry: (Date.parse(r.opt_out_until) - now) / (86_400 * 1_000),
     }));
   }
 
-  async setTenantOptOut(
-    input: SetTenantOptOutInput,
-  ): Promise<TenantRetentionPolicyRow> {
+  async setTenantOptOut(input: SetTenantOptOutInput): Promise<TenantRetentionPolicyRow> {
     const retentionDays = input.retentionDays ?? 365;
     if (!Number.isInteger(retentionDays) || retentionDays < 1) {
-      throw new Error(
-        `retentionDays must be an integer >= 1, got ${retentionDays}`,
-      );
+      throw new Error(`retentionDays must be an integer >= 1, got ${retentionDays}`);
     }
     const optOutUntil = input.optOutUntil ?? null;
     const optOutReason = input.optOutReason ?? null;
@@ -1206,9 +1180,7 @@ export class PostgresTraceRetention {
     };
   }
 
-  async clearTenantOptOut(
-    input: ClearTenantOptOutInput,
-  ): Promise<TenantRetentionPolicyRow | null> {
+  async clearTenantOptOut(input: ClearTenantOptOutInput): Promise<TenantRetentionPolicyRow | null> {
     const actorId = input.actorId ?? null;
     const attributes = JSON.stringify(input.attributes ?? {});
     const result = await this.conn.query<RawTenantPolicyRow>(
@@ -1281,13 +1253,9 @@ export class PostgresTraceRetention {
     return count > 0;
   }
 
-  async setTenantRetention(
-    input: SetTenantRetentionInput,
-  ): Promise<TenantRetentionPolicyRow> {
+  async setTenantRetention(input: SetTenantRetentionInput): Promise<TenantRetentionPolicyRow> {
     if (!Number.isInteger(input.retentionDays) || input.retentionDays < 1) {
-      throw new Error(
-        `retentionDays must be an integer >= 1, got ${input.retentionDays}`,
-      );
+      throw new Error(`retentionDays must be an integer >= 1, got ${input.retentionDays}`);
     }
     const enabled = input.enabled ?? true;
     const actorId = input.actorId ?? null;
@@ -1324,14 +1292,7 @@ export class PostgresTraceRetention {
          FROM mutation m
        )
        SELECT * FROM mutation`,
-      [
-        input.tenantId,
-        input.tableName,
-        input.retentionDays,
-        enabled,
-        actorId,
-        attributes,
-      ],
+      [input.tenantId, input.tableName, input.retentionDays, enabled, actorId, attributes],
     );
     const r = result.rows[0];
     if (r === undefined) {
@@ -1372,10 +1333,7 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const kindNotPlaceholders = input.eventKindsNot
         .map((kind) => {
           params.push(kind);
@@ -1400,9 +1358,7 @@ export class PostgresTraceRetention {
           return `$${params.length}`;
         })
         .join(", ");
-      conditions.push(
-        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
-      );
+      conditions.push(`(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`);
     }
     if (input.actorPresence === "system_only") {
       conditions.push(`h.actor_id IS NULL`);
@@ -1442,15 +1398,12 @@ export class PostgresTraceRetention {
       throw new Error(`limit must be an integer >= 1, got ${limit}`);
     }
     params.push(limit);
-    const where =
-      conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
     const joinActor = input.joinActor === true;
     const selectActorCols = joinActor
       ? ", u.display_name AS actor_display_name, u.email AS actor_email"
       : "";
-    const joinClause = joinActor
-      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
-      : "";
+    const joinClause = joinActor ? `LEFT JOIN meta.users u ON u.id = h.actor_id` : "";
     const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at,
               h.prev_state, h.next_state, h.attributes${selectActorCols}
        FROM ${SCHEMA}.${HISTORY_TABLE} h
@@ -1481,9 +1434,7 @@ export class PostgresTraceRetention {
     }>(sql, params);
     return result.rows.map((r) => {
       if (!isOptOutHistoryEventKind(r.event_kind)) {
-        throw new Error(
-          `listOptOutHistory: unknown event_kind '${r.event_kind}'`,
-        );
+        throw new Error(`listOptOutHistory: unknown event_kind '${r.event_kind}'`);
       }
       const entry: OptOutHistoryEntry = {
         id: r.id,
@@ -1523,9 +1474,7 @@ export class PostgresTraceRetention {
       );
     }
     if (input.thenBy !== undefined) {
-      throw new Error(
-        "summarizeOptOutHistory: fillGaps is not supported with thenBy (cross-tab)",
-      );
+      throw new Error("summarizeOptOutHistory: fillGaps is not supported with thenBy (cross-tab)");
     }
     // since=$1, until=$2 (used for both generate_series bounds AND
     // the LEFT JOIN occurred_at range); timezone (if custom) is $3;
@@ -1558,10 +1507,7 @@ export class PostgresTraceRetention {
         .join(", ");
       joinConditions.push(`h.event_kind IN (${placeholders})`);
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const placeholders = input.eventKindsNot
         .map((kind) => {
           params.push(kind);
@@ -1586,9 +1532,7 @@ export class PostgresTraceRetention {
           return `$${params.length}`;
         })
         .join(", ");
-      joinConditions.push(
-        `(h.actor_id IS NULL OR h.actor_id NOT IN (${placeholders}))`,
-      );
+      joinConditions.push(`(h.actor_id IS NULL OR h.actor_id NOT IN (${placeholders}))`);
     }
     if (input.actorPresence === "system_only") {
       joinConditions.push(`h.actor_id IS NULL`);
@@ -1611,10 +1555,7 @@ export class PostgresTraceRetention {
   // the buildXxxQuery helpers. ANALYZE executes the query (read-only
   // SELECT — output discarded) and returns PG's execution plan with
   // actual timing + row counts as a JSON structure.
-  async explainAnalyzeQuery(
-    sql: string,
-    params: ReadonlyArray<unknown>,
-  ): Promise<unknown> {
+  async explainAnalyzeQuery(sql: string, params: ReadonlyArray<unknown>): Promise<unknown> {
     const result = await this.conn.query<{ "QUERY PLAN": unknown }>(
       `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`,
       params,
@@ -1626,9 +1567,7 @@ export class PostgresTraceRetention {
     sql: string;
     params: unknown[];
   } {
-    const temporalUnit: Partial<
-      Record<OptOutHistorySummaryGroupBy, string>
-    > = {
+    const temporalUnit: Partial<Record<OptOutHistorySummaryGroupBy, string>> = {
       day: "day",
       hour: "hour",
       week: "week",
@@ -1644,8 +1583,7 @@ export class PostgresTraceRetention {
     // defaults to literal 'UTC' when not provided (preserves prior SQL).
     const anyTemporal =
       temporalUnit[input.groupBy] !== undefined ||
-      (input.thenBy !== undefined &&
-        temporalUnit[input.thenBy] !== undefined);
+      (input.thenBy !== undefined && temporalUnit[input.thenBy] !== undefined);
     let tzExpr = "'UTC'";
     if (input.timezone !== undefined && anyTemporal) {
       params.push(input.timezone);
@@ -1654,9 +1592,7 @@ export class PostgresTraceRetention {
     const resolveDimension = (
       dim: OptOutHistorySummaryGroupBy,
     ): { col: string; keyExpr: string; isTemporal: boolean } => {
-      const categoricalColumn: Partial<
-        Record<OptOutHistorySummaryGroupBy, string>
-      > = {
+      const categoricalColumn: Partial<Record<OptOutHistorySummaryGroupBy, string>> = {
         kind: "h.event_kind",
         tenant: "h.tenant_id",
         actor: "h.actor_id",
@@ -1675,8 +1611,7 @@ export class PostgresTraceRetention {
     const col = primary.col;
     const keyExpr = primary.keyExpr;
     const isTemporal = primary.isTemporal;
-    const secondary =
-      input.thenBy !== undefined ? resolveDimension(input.thenBy) : undefined;
+    const secondary = input.thenBy !== undefined ? resolveDimension(input.thenBy) : undefined;
     const conditions: string[] = [];
     if (input.tenantId !== undefined) {
       params.push(input.tenantId);
@@ -1695,10 +1630,7 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.event_kind IN (${placeholders})`);
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const placeholders = input.eventKindsNot
         .map((kind) => {
           params.push(kind);
@@ -1723,9 +1655,7 @@ export class PostgresTraceRetention {
           return `$${params.length}`;
         })
         .join(", ");
-      conditions.push(
-        `(h.actor_id IS NULL OR h.actor_id NOT IN (${placeholders}))`,
-      );
+      conditions.push(`(h.actor_id IS NULL OR h.actor_id NOT IN (${placeholders}))`);
     }
     if (input.actorPresence === "system_only") {
       conditions.push(`h.actor_id IS NULL`);
@@ -1740,8 +1670,7 @@ export class PostgresTraceRetention {
       params.push(input.until);
       conditions.push(`h.occurred_at <= $${params.length}`);
     }
-    const where =
-      conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
+    const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
     // HAVING (minCount) + LIMIT (top) are shared across single-dimension
     // and cross-tab. --top forces count-DESC ordering to select the
     // highest-count buckets.
@@ -1758,10 +1687,7 @@ export class PostgresTraceRetention {
       topOrder = true;
     }
     if (secondary === undefined) {
-      const orderBy =
-        topOrder || !isTemporal
-          ? `COUNT(*) DESC, ${col} ASC`
-          : `${col} ASC`;
+      const orderBy = topOrder || !isTemporal ? `COUNT(*) DESC, ${col} ASC` : `${col} ASC`;
       const sql = `SELECT ${keyExpr} AS key, COUNT(*)::bigint AS count
        FROM ${SCHEMA}.${HISTORY_TABLE} h
        ${where}
@@ -1822,12 +1748,9 @@ export class PostgresTraceRetention {
     }>(sql, params);
     let totalCount = 0;
     const buckets = result.rows.map((r) => {
-      const count =
-        typeof r.count === "string" ? Number.parseInt(r.count, 10) : r.count;
+      const count = typeof r.count === "string" ? Number.parseInt(r.count, 10) : r.count;
       totalCount += count;
-      return hasThenBy
-        ? { key: r.key, subKey: r.sub_key ?? null, count }
-        : { key: r.key, count };
+      return hasThenBy ? { key: r.key, subKey: r.sub_key ?? null, count } : { key: r.key, count };
     });
     return {
       groupBy: input.groupBy,
@@ -1837,9 +1760,7 @@ export class PostgresTraceRetention {
     };
   }
 
-  async restoreTenantPolicy(
-    input: RestoreTenantPolicyInput,
-  ): Promise<RestoreTenantPolicyResult> {
+  async restoreTenantPolicy(input: RestoreTenantPolicyInput): Promise<RestoreTenantPolicyResult> {
     const sourceResult = await this.conn.query<{
       tenant_id: string;
       table_name: string;
@@ -1852,9 +1773,7 @@ export class PostgresTraceRetention {
     );
     const source = sourceResult.rows[0];
     if (source === undefined) {
-      throw new Error(
-        `restoreTenantPolicy: history id '${input.historyId}' not found`,
-      );
+      throw new Error(`restoreTenantPolicy: history id '${input.historyId}' not found`);
     }
     const restoreAttrs: Record<string, unknown> = {
       ...(input.attributes ?? {}),
@@ -1884,10 +1803,8 @@ export class PostgresTraceRetention {
       );
     }
     const optOut = prev.opt_out === true;
-    const optOutReason =
-      typeof prev.opt_out_reason === "string" ? prev.opt_out_reason : null;
-    const optOutUntil =
-      typeof prev.opt_out_until === "string" ? prev.opt_out_until : null;
+    const optOutReason = typeof prev.opt_out_reason === "string" ? prev.opt_out_reason : null;
+    const optOutUntil = typeof prev.opt_out_until === "string" ? prev.opt_out_until : null;
     const enabled = prev.enabled === true;
 
     if (optOut) {
@@ -1929,9 +1846,7 @@ export class PostgresTraceRetention {
     );
     const source = sourceResult.rows[0];
     if (source === undefined) {
-      throw new Error(
-        `previewRestoreTenantPolicy: history id '${input.historyId}' not found`,
-      );
+      throw new Error(`previewRestoreTenantPolicy: history id '${input.historyId}' not found`);
     }
 
     if (source.prev_state === null) {
@@ -1957,10 +1872,8 @@ export class PostgresTraceRetention {
         tenantId: source.tenant_id,
         tableName: source.table_name,
         retentionDays,
-        optOutUntil:
-          typeof prev.opt_out_until === "string" ? prev.opt_out_until : null,
-        optOutReason:
-          typeof prev.opt_out_reason === "string" ? prev.opt_out_reason : null,
+        optOutUntil: typeof prev.opt_out_until === "string" ? prev.opt_out_until : null,
+        optOutReason: typeof prev.opt_out_reason === "string" ? prev.opt_out_reason : null,
         sourceHistoryId: input.historyId,
       };
     }
@@ -1983,9 +1896,7 @@ export class PostgresTraceRetention {
     const selectCols = joinActor
       ? "h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at, h.next_state, u.display_name AS actor_display_name, u.email AS actor_email"
       : "h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id, h.occurred_at, h.next_state";
-    const joinClause = joinActor
-      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
-      : "";
+    const joinClause = joinActor ? `LEFT JOIN meta.users u ON u.id = h.actor_id` : "";
     const sql = `SELECT ${selectCols}
        FROM ${SCHEMA}.${HISTORY_TABLE} h
        ${joinClause}
@@ -1993,9 +1904,7 @@ export class PostgresTraceRetention {
     return { sql, params: [input.idA, input.idB] };
   }
 
-  async diffHistoryEntries(
-    input: DiffHistoryEntriesInput,
-  ): Promise<DiffHistoryEntriesResult> {
+  async diffHistoryEntries(input: DiffHistoryEntriesInput): Promise<DiffHistoryEntriesResult> {
     const { sql, params } = this.buildDiffHistoryEntriesQuery(input);
     const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
@@ -2012,9 +1921,7 @@ export class PostgresTraceRetention {
     const found = new Map(result.rows.map((r) => [r.id, r]));
     const missing = [input.idA, input.idB].filter((id) => !found.has(id));
     if (missing.length > 0) {
-      throw new Error(
-        `diffHistoryEntries: history id(s) not found: ${missing.join(", ")}`,
-      );
+      throw new Error(`diffHistoryEntries: history id(s) not found: ${missing.join(", ")}`);
     }
     const entryA = found.get(input.idA)!;
     const entryB = found.get(input.idB)!;
@@ -2029,14 +1936,10 @@ export class PostgresTraceRetention {
       );
     }
     if (!isOptOutHistoryEventKind(entryA.event_kind)) {
-      throw new Error(
-        `diffHistoryEntries: event A has unknown event_kind '${entryA.event_kind}'`,
-      );
+      throw new Error(`diffHistoryEntries: event A has unknown event_kind '${entryA.event_kind}'`);
     }
     if (!isOptOutHistoryEventKind(entryB.event_kind)) {
-      throw new Error(
-        `diffHistoryEntries: event B has unknown event_kind '${entryB.event_kind}'`,
-      );
+      throw new Error(`diffHistoryEntries: event B has unknown event_kind '${entryB.event_kind}'`);
     }
     if (input.eventKinds !== undefined && input.eventKinds.length > 0) {
       const expectedSet = new Set<string>(input.eventKinds);
@@ -2048,86 +1951,56 @@ export class PostgresTraceRetention {
         mismatches.push(`B is '${entryB.event_kind}'`);
       }
       if (mismatches.length > 0) {
-        const kindList = input.eventKinds
-          .map((k) => `'${k}'`)
-          .join(", ");
+        const kindList = input.eventKinds.map((k) => `'${k}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected both events to have event_kind in [${kindList}] but ${mismatches.join(" and ")}`,
         );
       }
     }
-    if (
-      input.eventKindsA !== undefined &&
-      input.eventKindsA.length > 0
-    ) {
+    if (input.eventKindsA !== undefined && input.eventKindsA.length > 0) {
       const expectedSet = new Set<string>(input.eventKindsA);
       if (!expectedSet.has(entryA.event_kind)) {
-        const kindList = input.eventKindsA
-          .map((k) => `'${k}'`)
-          .join(", ");
+        const kindList = input.eventKindsA.map((k) => `'${k}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event A to have event_kind in [${kindList}] but A is '${entryA.event_kind}'`,
         );
       }
     }
-    if (
-      input.eventKindsB !== undefined &&
-      input.eventKindsB.length > 0
-    ) {
+    if (input.eventKindsB !== undefined && input.eventKindsB.length > 0) {
       const expectedSet = new Set<string>(input.eventKindsB);
       if (!expectedSet.has(entryB.event_kind)) {
-        const kindList = input.eventKindsB
-          .map((k) => `'${k}'`)
-          .join(", ");
+        const kindList = input.eventKindsB.map((k) => `'${k}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event B to have event_kind in [${kindList}] but B is '${entryB.event_kind}'`,
         );
       }
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const excludedSet = new Set<string>(input.eventKindsNot);
       const matches: string[] = [];
       if (excludedSet.has(entryA.event_kind)) matches.push("A");
       if (excludedSet.has(entryB.event_kind)) matches.push("B");
       if (matches.length > 0) {
-        const suffix =
-          matches.length === 1
-            ? `${matches[0]} matches`
-            : "both A and B match";
-        const kindList = input.eventKindsNot
-          .map((k) => `'${k}'`)
-          .join(", ");
+        const suffix = matches.length === 1 ? `${matches[0]} matches` : "both A and B match";
+        const kindList = input.eventKindsNot.map((k) => `'${k}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected neither event to have event_kind in [${kindList}] but ${suffix}`,
         );
       }
     }
-    if (
-      input.eventKindsNotA !== undefined &&
-      input.eventKindsNotA.length > 0
-    ) {
+    if (input.eventKindsNotA !== undefined && input.eventKindsNotA.length > 0) {
       const excludedSet = new Set<string>(input.eventKindsNotA);
       if (excludedSet.has(entryA.event_kind)) {
-        const kindList = input.eventKindsNotA
-          .map((k) => `'${k}'`)
-          .join(", ");
+        const kindList = input.eventKindsNotA.map((k) => `'${k}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event A to have event_kind NOT in [${kindList}] but A is '${entryA.event_kind}'`,
         );
       }
     }
-    if (
-      input.eventKindsNotB !== undefined &&
-      input.eventKindsNotB.length > 0
-    ) {
+    if (input.eventKindsNotB !== undefined && input.eventKindsNotB.length > 0) {
       const excludedSet = new Set<string>(input.eventKindsNotB);
       if (excludedSet.has(entryB.event_kind)) {
-        const kindList = input.eventKindsNotB
-          .map((k) => `'${k}'`)
-          .join(", ");
+        const kindList = input.eventKindsNotB.map((k) => `'${k}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event B to have event_kind NOT in [${kindList}] but B is '${entryB.event_kind}'`,
         );
@@ -2137,14 +2010,10 @@ export class PostgresTraceRetention {
       const expectedSet = new Set<string>(input.actorIds);
       const mismatches: string[] = [];
       if (entryA.actor_id === null || !expectedSet.has(entryA.actor_id)) {
-        mismatches.push(
-          `A is ${entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`}`,
-        );
+        mismatches.push(`A is ${entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`}`);
       }
       if (entryB.actor_id === null || !expectedSet.has(entryB.actor_id)) {
-        mismatches.push(
-          `B is ${entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`}`,
-        );
+        mismatches.push(`B is ${entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`}`);
       }
       if (mismatches.length > 0) {
         const actorList = input.actorIds.map((a) => `'${a}'`).join(", ");
@@ -2153,28 +2022,20 @@ export class PostgresTraceRetention {
         );
       }
     }
-    if (
-      input.actorIdsA !== undefined &&
-      input.actorIdsA.length > 0
-    ) {
+    if (input.actorIdsA !== undefined && input.actorIdsA.length > 0) {
       const expectedSet = new Set<string>(input.actorIdsA);
       if (entryA.actor_id === null || !expectedSet.has(entryA.actor_id)) {
-        const actual =
-          entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`;
+        const actual = entryA.actor_id === null ? "<system>" : `'${entryA.actor_id}'`;
         const actorList = input.actorIdsA.map((a) => `'${a}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event A to have actor_id in [${actorList}] but A is ${actual}`,
         );
       }
     }
-    if (
-      input.actorIdsB !== undefined &&
-      input.actorIdsB.length > 0
-    ) {
+    if (input.actorIdsB !== undefined && input.actorIdsB.length > 0) {
       const expectedSet = new Set<string>(input.actorIdsB);
       if (entryB.actor_id === null || !expectedSet.has(entryB.actor_id)) {
-        const actual =
-          entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`;
+        const actual = entryB.actor_id === null ? "<system>" : `'${entryB.actor_id}'`;
         const actorList = input.actorIdsB.map((a) => `'${a}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event B to have actor_id in [${actorList}] but B is ${actual}`,
@@ -2191,39 +2052,26 @@ export class PostgresTraceRetention {
         matches.push("B");
       }
       if (matches.length > 0) {
-        const suffix =
-          matches.length === 1
-            ? `${matches[0]} matches`
-            : "both A and B match";
+        const suffix = matches.length === 1 ? `${matches[0]} matches` : "both A and B match";
         const actorList = input.actorIdsNot.map((a) => `'${a}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected neither event to have actor_id in [${actorList}] but ${suffix}`,
         );
       }
     }
-    if (
-      input.actorIdsNotA !== undefined &&
-      input.actorIdsNotA.length > 0
-    ) {
+    if (input.actorIdsNotA !== undefined && input.actorIdsNotA.length > 0) {
       const excludedSet = new Set<string>(input.actorIdsNotA);
       if (entryA.actor_id !== null && excludedSet.has(entryA.actor_id)) {
-        const actorList = input.actorIdsNotA
-          .map((a) => `'${a}'`)
-          .join(", ");
+        const actorList = input.actorIdsNotA.map((a) => `'${a}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event A to have actor_id NOT in [${actorList}] but A matches`,
         );
       }
     }
-    if (
-      input.actorIdsNotB !== undefined &&
-      input.actorIdsNotB.length > 0
-    ) {
+    if (input.actorIdsNotB !== undefined && input.actorIdsNotB.length > 0) {
       const excludedSet = new Set<string>(input.actorIdsNotB);
       if (entryB.actor_id !== null && excludedSet.has(entryB.actor_id)) {
-        const actorList = input.actorIdsNotB
-          .map((a) => `'${a}'`)
-          .join(", ");
+        const actorList = input.actorIdsNotB.map((a) => `'${a}'`).join(", ");
         throw new Error(
           `diffHistoryEntries: expected event B to have actor_id NOT in [${actorList}] but B matches`,
         );
@@ -2248,9 +2096,7 @@ export class PostgresTraceRetention {
       if (entryB.actor_id === null) matches.push("B");
       if (matches.length > 0) {
         const suffix =
-          matches.length === 1
-            ? `${matches[0]} is <system>`
-            : "both A and B are <system>";
+          matches.length === 1 ? `${matches[0]} is <system>` : "both A and B are <system>";
         throw new Error(
           `diffHistoryEntries: expected neither event to be system-authored (actor_id IS NULL) but ${suffix}`,
         );
@@ -2315,10 +2161,7 @@ export class PostgresTraceRetention {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error(`limit must be an integer >= 1, got ${limit}`);
     }
-    const conditions: string[] = [
-      "(h.tenant_id = $1 OR h.tenant_id = $2)",
-      "h.table_name = $3",
-    ];
+    const conditions: string[] = ["(h.tenant_id = $1 OR h.tenant_id = $2)", "h.table_name = $3"];
     const params: unknown[] = [input.tenantIdA, input.tenantIdB, input.tableName];
     if (input.actorIds !== undefined && input.actorIds.length > 0) {
       const actorPlaceholders = input.actorIds
@@ -2336,9 +2179,7 @@ export class PostgresTraceRetention {
           return `$${params.length}`;
         })
         .join(", ");
-      conditions.push(
-        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
-      );
+      conditions.push(`(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`);
     }
     if (input.actorPresence === "system_only") {
       conditions.push(`h.actor_id IS NULL`);
@@ -2354,10 +2195,7 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const kindNotPlaceholders = input.eventKindsNot
         .map((kind) => {
           params.push(kind);
@@ -2399,9 +2237,7 @@ export class PostgresTraceRetention {
     const selectActorCols = joinActor
       ? ", u.display_name AS actor_display_name, u.email AS actor_email"
       : "";
-    const joinClause = joinActor
-      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
-      : "";
+    const joinClause = joinActor ? `LEFT JOIN meta.users u ON u.id = h.actor_id` : "";
     const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
               h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
        FROM ${SCHEMA}.${HISTORY_TABLE} h
@@ -2412,9 +2248,7 @@ export class PostgresTraceRetention {
     return { sql, params };
   }
 
-  async diffHistoryTimeline(
-    input: DiffHistoryTimelineInput,
-  ): Promise<DiffHistoryTimelineResult> {
+  async diffHistoryTimeline(input: DiffHistoryTimelineInput): Promise<DiffHistoryTimelineResult> {
     const { sql, params } = this.buildDiffHistoryTimelineQuery(input);
     const joinActor = input.joinActor === true;
     const result = await this.conn.query<{
@@ -2432,9 +2266,7 @@ export class PostgresTraceRetention {
     }>(sql, params);
     const entries: TimelineEntry[] = result.rows.map((r) => {
       if (!isOptOutHistoryEventKind(r.event_kind)) {
-        throw new Error(
-          `diffHistoryTimeline: unknown event_kind '${r.event_kind}'`,
-        );
+        throw new Error(`diffHistoryTimeline: unknown event_kind '${r.event_kind}'`);
       }
       const entry: TimelineEntry = {
         id: r.id,
@@ -2479,9 +2311,7 @@ export class PostgresTraceRetention {
       throw new Error(`limit must be an integer >= 1, got ${limit}`);
     }
     const params: unknown[] = [...input.tenantIds];
-    const tenantPlaceholders = input.tenantIds
-      .map((_, i) => `$${i + 1}`)
-      .join(", ");
+    const tenantPlaceholders = input.tenantIds.map((_, i) => `$${i + 1}`).join(", ");
     params.push(input.tableName);
     const tableParamIdx = params.length;
     const conditions: string[] = [
@@ -2504,9 +2334,7 @@ export class PostgresTraceRetention {
           return `$${params.length}`;
         })
         .join(", ");
-      conditions.push(
-        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
-      );
+      conditions.push(`(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`);
     }
     if (input.actorPresence === "system_only") {
       conditions.push(`h.actor_id IS NULL`);
@@ -2522,10 +2350,7 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const kindNotPlaceholders = input.eventKindsNot
         .map((kind) => {
           params.push(kind);
@@ -2567,9 +2392,7 @@ export class PostgresTraceRetention {
     const selectActorCols = joinActor
       ? ", u.display_name AS actor_display_name, u.email AS actor_email"
       : "";
-    const joinClause = joinActor
-      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
-      : "";
+    const joinClause = joinActor ? `LEFT JOIN meta.users u ON u.id = h.actor_id` : "";
     const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
               h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
        FROM ${SCHEMA}.${HISTORY_TABLE} h
@@ -2606,9 +2429,7 @@ export class PostgresTraceRetention {
     });
     const entries: NwayTimelineEntry[] = result.rows.map((r) => {
       if (!isOptOutHistoryEventKind(r.event_kind)) {
-        throw new Error(
-          `diffHistoryTimelineNway: unknown event_kind '${r.event_kind}'`,
-        );
+        throw new Error(`diffHistoryTimelineNway: unknown event_kind '${r.event_kind}'`);
       }
       const tenantLabel = labelByTenantId.get(r.tenant_id) ?? "?";
       const entry: NwayTimelineEntry = {
@@ -2639,9 +2460,10 @@ export class PostgresTraceRetention {
     };
   }
 
-  buildDiffHistoryTimelineCrossTableQuery(
-    input: DiffHistoryTimelineCrossTableInput,
-  ): { sql: string; params: unknown[] } {
+  buildDiffHistoryTimelineCrossTableQuery(input: DiffHistoryTimelineCrossTableInput): {
+    sql: string;
+    params: unknown[];
+  } {
     if (input.tableNames.length < 2) {
       throw new Error(
         `diffHistoryTimelineCrossTable: at least 2 tableNames required, got ${input.tableNames.length}`,
@@ -2654,13 +2476,8 @@ export class PostgresTraceRetention {
     const params: unknown[] = [input.tenantId];
     const tableStartIdx = params.length + 1;
     input.tableNames.forEach((t) => params.push(t));
-    const tablePlaceholders = input.tableNames
-      .map((_, i) => `$${tableStartIdx + i}`)
-      .join(", ");
-    const conditions: string[] = [
-      `h.tenant_id = $1`,
-      `h.table_name IN (${tablePlaceholders})`,
-    ];
+    const tablePlaceholders = input.tableNames.map((_, i) => `$${tableStartIdx + i}`).join(", ");
+    const conditions: string[] = [`h.tenant_id = $1`, `h.table_name IN (${tablePlaceholders})`];
     if (input.actorIds !== undefined && input.actorIds.length > 0) {
       const actorPlaceholders = input.actorIds
         .map((actorId) => {
@@ -2677,9 +2494,7 @@ export class PostgresTraceRetention {
           return `$${params.length}`;
         })
         .join(", ");
-      conditions.push(
-        `(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`,
-      );
+      conditions.push(`(h.actor_id IS NULL OR h.actor_id NOT IN (${actorNotPlaceholders}))`);
     }
     if (input.actorPresence === "system_only") {
       conditions.push(`h.actor_id IS NULL`);
@@ -2695,10 +2510,7 @@ export class PostgresTraceRetention {
         .join(", ");
       conditions.push(`h.event_kind IN (${kindPlaceholders})`);
     }
-    if (
-      input.eventKindsNot !== undefined &&
-      input.eventKindsNot.length > 0
-    ) {
+    if (input.eventKindsNot !== undefined && input.eventKindsNot.length > 0) {
       const kindNotPlaceholders = input.eventKindsNot
         .map((kind) => {
           params.push(kind);
@@ -2740,9 +2552,7 @@ export class PostgresTraceRetention {
     const selectActorCols = joinActor
       ? ", u.display_name AS actor_display_name, u.email AS actor_email"
       : "";
-    const joinClause = joinActor
-      ? `LEFT JOIN meta.users u ON u.id = h.actor_id`
-      : "";
+    const joinClause = joinActor ? `LEFT JOIN meta.users u ON u.id = h.actor_id` : "";
     const sql = `SELECT h.id, h.tenant_id, h.table_name, h.event_kind, h.actor_id,
               h.occurred_at, h.prev_state, h.next_state, h.attributes${selectActorCols}
        FROM ${SCHEMA}.${HISTORY_TABLE} h
@@ -2779,9 +2589,7 @@ export class PostgresTraceRetention {
     });
     const entries: CrossTableTimelineEntry[] = result.rows.map((r) => {
       if (!isOptOutHistoryEventKind(r.event_kind)) {
-        throw new Error(
-          `diffHistoryTimelineCrossTable: unknown event_kind '${r.event_kind}'`,
-        );
+        throw new Error(`diffHistoryTimelineCrossTable: unknown event_kind '${r.event_kind}'`);
       }
       const tableLabel = labelByTableName.get(r.table_name) ?? "?";
       const entry: CrossTableTimelineEntry = {
@@ -2812,9 +2620,7 @@ export class PostgresTraceRetention {
     };
   }
 
-  async diffTenantPolicies(
-    input: DiffTenantPoliciesInput,
-  ): Promise<DiffTenantPoliciesResult> {
+  async diffTenantPolicies(input: DiffTenantPoliciesInput): Promise<DiffTenantPoliciesResult> {
     const resolutions = await this.effectiveRetentionBatch({
       pairs: [
         { tenantId: input.tenantIdA, tableName: input.tableName },
@@ -2843,9 +2649,7 @@ export class PostgresTraceRetention {
     };
   }
 
-  async diffTenantTables(
-    input: DiffTenantTablesInput,
-  ): Promise<DiffTenantTablesResult> {
+  async diffTenantTables(input: DiffTenantTablesInput): Promise<DiffTenantTablesResult> {
     const resolutions = await this.effectiveRetentionBatch({
       pairs: [
         { tenantId: input.tenantId, tableName: input.tableNameA },
@@ -2888,19 +2692,13 @@ export class PostgresTraceRetention {
         tableName,
       })),
     });
-    const resolutions: TableResolutionEntry[] = input.tableNames.map(
-      (tableName) => {
-        const resolution = resolutionsMap.get(
-          effectiveRetentionKey(input.tenantId, tableName),
-        );
-        if (resolution === undefined) {
-          throw new Error(
-            `diffTenantTablesNway: failed to resolve table ${tableName}`,
-          );
-        }
-        return { tableName, resolution };
-      },
-    );
+    const resolutions: TableResolutionEntry[] = input.tableNames.map((tableName) => {
+      const resolution = resolutionsMap.get(effectiveRetentionKey(input.tenantId, tableName));
+      if (resolution === undefined) {
+        throw new Error(`diffTenantTablesNway: failed to resolve table ${tableName}`);
+      }
+      return { tableName, resolution };
+    });
     const fieldVariations = computeFieldVariations(
       resolutions.map((entry) => ({
         label: entry.tableName,
@@ -2929,19 +2727,13 @@ export class PostgresTraceRetention {
         tableName: input.tableName,
       })),
     });
-    const resolutions: TenantResolutionEntry[] = input.tenantIds.map(
-      (tenantId) => {
-        const resolution = resolutionsMap.get(
-          effectiveRetentionKey(tenantId, input.tableName),
-        );
-        if (resolution === undefined) {
-          throw new Error(
-            `diffTenantPoliciesNway: failed to resolve tenant ${tenantId}`,
-          );
-        }
-        return { tenantId, resolution };
-      },
-    );
+    const resolutions: TenantResolutionEntry[] = input.tenantIds.map((tenantId) => {
+      const resolution = resolutionsMap.get(effectiveRetentionKey(tenantId, input.tableName));
+      if (resolution === undefined) {
+        throw new Error(`diffTenantPoliciesNway: failed to resolve tenant ${tenantId}`);
+      }
+      return { tenantId, resolution };
+    });
     const fieldVariations = computeFieldVariations(
       resolutions.map((entry) => ({
         label: entry.tenantId,
@@ -2989,8 +2781,7 @@ export class PostgresTraceRetention {
     if (tenantRow !== undefined) {
       if (tenantRow.opt_out) {
         const active =
-          tenantRow.opt_out_until === null ||
-          Date.parse(tenantRow.opt_out_until) > this.clock();
+          tenantRow.opt_out_until === null || Date.parse(tenantRow.opt_out_until) > this.clock();
         if (active) {
           tenantResolution = {
             source: "tenant_opt_out",

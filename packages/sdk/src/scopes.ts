@@ -39,64 +39,62 @@ export const ScopeSpecSchema = z
   });
 export type ScopeSpec = z.infer<typeof ScopeSpecSchema>;
 
-export const ScopeCatalogSchema = z
-  .array(ScopeSpecSchema)
-  .superRefine((entries, ctx) => {
-    const keys = new Map<ScopeKey, number>();
-    entries.forEach((e, i) => {
-      const prior = keys.get(e.key);
-      if (prior !== undefined) {
+export const ScopeCatalogSchema = z.array(ScopeSpecSchema).superRefine((entries, ctx) => {
+  const keys = new Map<ScopeKey, number>();
+  entries.forEach((e, i) => {
+    const prior = keys.get(e.key);
+    if (prior !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "key"],
+        message: `duplicate scope key '${e.key}' (already at index ${prior})`,
+      });
+    }
+    keys.set(e.key, i);
+  });
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e === undefined) continue;
+    for (let j = 0; j < e.implies.length; j++) {
+      const implied = e.implies[j];
+      if (implied === undefined) continue;
+      if (implied === ROOT_SCOPE) continue;
+      if (!keys.has(implied) && implied !== "*:read" && implied !== "*:write") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: [i, "key"],
-          message: `duplicate scope key '${e.key}' (already at index ${prior})`,
+          path: [i, "implies", j],
+          message: `implied scope '${implied}' is not declared in the catalog`,
         });
-      }
-      keys.set(e.key, i);
-    });
-    for (let i = 0; i < entries.length; i++) {
-      const e = entries[i];
-      if (e === undefined) continue;
-      for (let j = 0; j < e.implies.length; j++) {
-        const implied = e.implies[j];
-        if (implied === undefined) continue;
-        if (implied === ROOT_SCOPE) continue;
-        if (!keys.has(implied) && implied !== "*:read" && implied !== "*:write") {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [i, "implies", j],
-            message: `implied scope '${implied}' is not declared in the catalog`,
-          });
-        }
       }
     }
-    const visiting = new Set<ScopeKey>();
-    const visited = new Set<ScopeKey>();
-    const byKey = new Map<ScopeKey, ScopeSpec>();
-    for (const e of entries) byKey.set(e.key, e);
-    const dfs = (key: ScopeKey, path: ScopeKey[]): boolean => {
-      if (visiting.has(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [],
-          message: `cycle in scope 'implies' graph: ${[...path, key].join(" -> ")}`,
-        });
-        return true;
+  }
+  const visiting = new Set<ScopeKey>();
+  const visited = new Set<ScopeKey>();
+  const byKey = new Map<ScopeKey, ScopeSpec>();
+  for (const e of entries) byKey.set(e.key, e);
+  const dfs = (key: ScopeKey, path: ScopeKey[]): boolean => {
+    if (visiting.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: `cycle in scope 'implies' graph: ${[...path, key].join(" -> ")}`,
+      });
+      return true;
+    }
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    const spec = byKey.get(key);
+    if (spec !== undefined) {
+      for (const next of spec.implies) {
+        if (dfs(next, [...path, key])) return true;
       }
-      if (visited.has(key)) return false;
-      visiting.add(key);
-      const spec = byKey.get(key);
-      if (spec !== undefined) {
-        for (const next of spec.implies) {
-          if (dfs(next, [...path, key])) return true;
-        }
-      }
-      visiting.delete(key);
-      visited.add(key);
-      return false;
-    };
-    for (const e of entries) dfs(e.key, []);
-  });
+    }
+    visiting.delete(key);
+    visited.add(key);
+    return false;
+  };
+  for (const e of entries) dfs(e.key, []);
+});
 export type ScopeCatalog = z.infer<typeof ScopeCatalogSchema>;
 
 export function expandScopes(
@@ -134,8 +132,6 @@ export function hasScope(
   return false;
 }
 
-export function normalizeScopes(
-  scopes: readonly ScopeKey[],
-): readonly ScopeKey[] {
+export function normalizeScopes(scopes: readonly ScopeKey[]): readonly ScopeKey[] {
   return [...new Set(scopes)].sort();
 }

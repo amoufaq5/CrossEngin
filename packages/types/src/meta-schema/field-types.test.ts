@@ -43,9 +43,7 @@ describe("FieldTypeSchema — primitives", () => {
   });
 
   it("rejects decimal field where scale > precision", () => {
-    expect(() =>
-      FieldTypeSchema.parse({ kind: "decimal", precision: 5, scale: 10 }),
-    ).toThrow();
+    expect(() => FieldTypeSchema.parse({ kind: "decimal", precision: 5, scale: 10 })).toThrow();
   });
 
   it("rejects decimal field where min > max", () => {

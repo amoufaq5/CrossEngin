@@ -158,9 +158,9 @@ describe("SplitBrainEventSchema", () => {
   });
 
   it("rejects healed without durationSeconds", () => {
-    expect(() =>
-      SplitBrainEventSchema.parse({ ...base, durationSeconds: null }),
-    ).toThrow(/durationSeconds/);
+    expect(() => SplitBrainEventSchema.parse({ ...base, durationSeconds: null })).toThrow(
+      /durationSeconds/,
+    );
   });
 
   it("rejects permanent_partition without reason", () => {
@@ -233,11 +233,7 @@ describe("helpers", () => {
   };
 
   it("affectedRegions returns union of all groups", () => {
-    expect([...affectedRegions(event)].sort()).toEqual([
-      "apac-sg",
-      "eu-central",
-      "us-east",
-    ]);
+    expect([...affectedRegions(event)].sort()).toEqual(["apac-sg", "eu-central", "us-east"]);
   });
 
   it("quorumGroup returns the quorum-holding group", () => {
@@ -257,10 +253,7 @@ describe("helpers", () => {
   });
 
   it("meanTimeToHealSeconds averages healed events", () => {
-    const events = [
-      event,
-      { ...event, id: "SB-2026-0002", durationSeconds: 600 },
-    ];
+    const events = [event, { ...event, id: "SB-2026-0002", durationSeconds: 600 }];
     expect(meanTimeToHealSeconds(events)).toBe(1200);
   });
 

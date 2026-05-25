@@ -16,13 +16,10 @@ import {
   type BedrockUntagResourceInput,
 } from "./tagging-api.js";
 
-const VALID_ARN =
-  "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
+const VALID_ARN = "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
 
 describe("buildTagResourceBody (M2.X.5.aa.z.24)", () => {
-  function valid(
-    overrides: Partial<BedrockTagResourceInput> = {},
-  ): BedrockTagResourceInput {
+  function valid(overrides: Partial<BedrockTagResourceInput> = {}): BedrockTagResourceInput {
     return {
       resourceArn: VALID_ARN,
       tags: [{ key: "env", value: "prod" }],
@@ -31,18 +28,12 @@ describe("buildTagResourceBody (M2.X.5.aa.z.24)", () => {
   }
 
   it("emits the tags array as JSON", () => {
-    const body = JSON.parse(buildTagResourceBody(valid())) as Record<
-      string,
-      unknown
-    >;
+    const body = JSON.parse(buildTagResourceBody(valid())) as Record<string, unknown>;
     expect(body["tags"]).toEqual([{ key: "env", value: "prod" }]);
   });
 
   it("does NOT include resourceArn in the body (it goes in the query)", () => {
-    const body = JSON.parse(buildTagResourceBody(valid())) as Record<
-      string,
-      unknown
-    >;
+    const body = JSON.parse(buildTagResourceBody(valid())) as Record<string, unknown>;
     expect("resourceArn" in body).toBe(false);
     expect("resourceARN" in body).toBe(false);
   });
@@ -62,21 +53,19 @@ describe("buildTagResourceBody (M2.X.5.aa.z.24)", () => {
   });
 
   it("rejects blank resourceArn", () => {
-    expect(() => buildTagResourceBody(valid({ resourceArn: "" }))).toThrow(
+    expect(() => buildTagResourceBody(valid({ resourceArn: "" }))).toThrow(/invalid resourceArn/);
+  });
+
+  it("rejects resourceArn not starting with arn:aws", () => {
+    expect(() => buildTagResourceBody(valid({ resourceArn: "not-an-arn" }))).toThrow(
       /invalid resourceArn/,
     );
   });
 
-  it("rejects resourceArn not starting with arn:aws", () => {
-    expect(() =>
-      buildTagResourceBody(valid({ resourceArn: "not-an-arn" })),
-    ).toThrow(/invalid resourceArn/);
-  });
-
   it("rejects empty tag key", () => {
-    expect(() =>
-      buildTagResourceBody(valid({ tags: [{ key: "", value: "v" }] })),
-    ).toThrow(/invalid tag key at index 0/);
+    expect(() => buildTagResourceBody(valid({ tags: [{ key: "", value: "v" }] }))).toThrow(
+      /invalid tag key at index 0/,
+    );
   });
 
   it("rejects tag key > 128 chars", () => {
@@ -96,15 +85,13 @@ describe("buildTagResourceBody (M2.X.5.aa.z.24)", () => {
   });
 
   it("accepts empty tag value (valid per AWS contract)", () => {
-    expect(() =>
-      buildTagResourceBody(valid({ tags: [{ key: "k", value: "" }] })),
-    ).not.toThrow();
+    expect(() => buildTagResourceBody(valid({ tags: [{ key: "k", value: "" }] }))).not.toThrow();
   });
 
   it("rejects tag key violating the pattern (e.g., comma)", () => {
-    expect(() =>
-      buildTagResourceBody(valid({ tags: [{ key: "has,comma", value: "v" }] })),
-    ).toThrow(/invalid tag key/);
+    expect(() => buildTagResourceBody(valid({ tags: [{ key: "has,comma", value: "v" }] }))).toThrow(
+      /invalid tag key/,
+    );
   });
 
   it("reports the index of the bad tag in the error message", () => {
@@ -122,18 +109,16 @@ describe("buildTagResourceBody (M2.X.5.aa.z.24)", () => {
   });
 
   it(`accepts exactly ${BEDROCK_MAX_TAGS_PER_REQUEST.toString()} tags (boundary)`, () => {
-    const tags: BedrockTag[] = Array.from(
-      { length: BEDROCK_MAX_TAGS_PER_REQUEST },
-      (_, i) => ({ key: `k${i.toString()}`, value: "v" }),
-    );
+    const tags: BedrockTag[] = Array.from({ length: BEDROCK_MAX_TAGS_PER_REQUEST }, (_, i) => ({
+      key: `k${i.toString()}`,
+      value: "v",
+    }));
     expect(() => buildTagResourceBody(valid({ tags }))).not.toThrow();
   });
 });
 
 describe("buildUntagResourceBody (M2.X.5.aa.z.24)", () => {
-  function valid(
-    overrides: Partial<BedrockUntagResourceInput> = {},
-  ): BedrockUntagResourceInput {
+  function valid(overrides: Partial<BedrockUntagResourceInput> = {}): BedrockUntagResourceInput {
     return {
       resourceArn: VALID_ARN,
       tagKeys: ["env"],
@@ -142,18 +127,12 @@ describe("buildUntagResourceBody (M2.X.5.aa.z.24)", () => {
   }
 
   it("emits the tagKeys array as JSON", () => {
-    const body = JSON.parse(buildUntagResourceBody(valid())) as Record<
-      string,
-      unknown
-    >;
+    const body = JSON.parse(buildUntagResourceBody(valid())) as Record<string, unknown>;
     expect(body["tagKeys"]).toEqual(["env"]);
   });
 
   it("does NOT include resourceArn in the body (it goes in the query)", () => {
-    const body = JSON.parse(buildUntagResourceBody(valid())) as Record<
-      string,
-      unknown
-    >;
+    const body = JSON.parse(buildUntagResourceBody(valid())) as Record<string, unknown>;
     expect("resourceArn" in body).toBe(false);
   });
 
@@ -165,9 +144,7 @@ describe("buildUntagResourceBody (M2.X.5.aa.z.24)", () => {
 
   it("rejects more than 200 tag keys", () => {
     const tagKeys = Array.from({ length: 201 }, (_, i) => `k${i.toString()}`);
-    expect(() => buildUntagResourceBody(valid({ tagKeys }))).toThrow(
-      /tagKeys count/,
-    );
+    expect(() => buildUntagResourceBody(valid({ tagKeys }))).toThrow(/tagKeys count/);
   });
 
   it("rejects empty tag key in the array", () => {
@@ -177,9 +154,7 @@ describe("buildUntagResourceBody (M2.X.5.aa.z.24)", () => {
   });
 
   it("rejects blank resourceArn", () => {
-    expect(() => buildUntagResourceBody(valid({ resourceArn: "" }))).toThrow(
-      BedrockError,
-    );
+    expect(() => buildUntagResourceBody(valid({ resourceArn: "" }))).toThrow(BedrockError);
   });
 
   it("rejects tag key violating the pattern", () => {
@@ -191,16 +166,15 @@ describe("buildUntagResourceBody (M2.X.5.aa.z.24)", () => {
 
 describe("buildListTagsForResourceBody (M2.X.5.aa.z.24)", () => {
   it("emits resourceARN in the body (AWS uses uppercase ARN here)", () => {
-    const body = JSON.parse(
-      buildListTagsForResourceBody({ resourceArn: VALID_ARN }),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(buildListTagsForResourceBody({ resourceArn: VALID_ARN })) as Record<
+      string,
+      unknown
+    >;
     expect(body["resourceARN"]).toBe(VALID_ARN);
   });
 
   it("rejects blank resourceArn", () => {
-    expect(() => buildListTagsForResourceBody({ resourceArn: "" })).toThrow(
-      /invalid resourceArn/,
-    );
+    expect(() => buildListTagsForResourceBody({ resourceArn: "" })).toThrow(/invalid resourceArn/);
   });
 
   it("rejects resourceArn not starting with arn:aws", () => {
@@ -253,9 +227,7 @@ describe("parseListTagsForResourceResponse (M2.X.5.aa.z.24)", () => {
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseListTagsForResourceResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseListTagsForResourceResponse(null)).toThrow(/not a JSON object/);
   });
 
   it("rejects non-array tags", () => {
@@ -265,14 +237,12 @@ describe("parseListTagsForResourceResponse (M2.X.5.aa.z.24)", () => {
   });
 
   it("rejects tag entry missing key/value strings", () => {
-    expect(() =>
-      parseListTagsForResourceResponse({ tags: [{ key: "k" }] }),
-    ).toThrow(/missing key\/value strings/);
+    expect(() => parseListTagsForResourceResponse({ tags: [{ key: "k" }] })).toThrow(
+      /missing key\/value strings/,
+    );
   });
 
   it("rejects non-object tag entries", () => {
-    expect(() => parseListTagsForResourceResponse({ tags: ["nope"] })).toThrow(
-      /is not an object/,
-    );
+    expect(() => parseListTagsForResourceResponse({ tags: ["nope"] })).toThrow(/is not an object/);
   });
 });

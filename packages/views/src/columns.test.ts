@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  COLUMN_RENDER_HINTS,
-  ColumnDefinitionSchema,
-  ColumnGroupSchema,
-} from "./columns.js";
+import { COLUMN_RENDER_HINTS, ColumnDefinitionSchema, ColumnGroupSchema } from "./columns.js";
 
 describe("ColumnDefinitionSchema", () => {
   it("parses a minimal column", () => {
@@ -26,9 +22,7 @@ describe("ColumnDefinitionSchema", () => {
   });
 
   it("rejects an unknown render hint", () => {
-    expect(() =>
-      ColumnDefinitionSchema.parse({ field: "x", render: "fancy" }),
-    ).toThrow();
+    expect(() => ColumnDefinitionSchema.parse({ field: "x", render: "fancy" })).toThrow();
   });
 
   it("rejects width outside [40, 2000]", () => {
@@ -47,9 +41,7 @@ describe("ColumnDefinitionSchema", () => {
   });
 
   it("accepts a sticky-end column", () => {
-    expect(() =>
-      ColumnDefinitionSchema.parse({ field: "actions", sticky: "end" }),
-    ).not.toThrow();
+    expect(() => ColumnDefinitionSchema.parse({ field: "actions", sticky: "end" })).not.toThrow();
   });
 
   it("COLUMN_RENDER_HINTS covers the documented hints", () => {
@@ -69,8 +61,6 @@ describe("ColumnGroupSchema", () => {
   });
 
   it("rejects an empty group", () => {
-    expect(() =>
-      ColumnGroupSchema.parse({ label: { en: "x" }, columns: [] }),
-    ).toThrow();
+    expect(() => ColumnGroupSchema.parse({ label: { en: "x" }, columns: [] })).toThrow();
   });
 });

@@ -1,10 +1,5 @@
 import { qualifyTable, quoteIdent } from "../ddl/identifiers.js";
-import type {
-  ColumnDefinition,
-  IndexSpec,
-  RlsPolicy,
-  TableDefinition,
-} from "./types.js";
+import type { ColumnDefinition, IndexSpec, RlsPolicy, TableDefinition } from "./types.js";
 
 export function emitSchemaCreate(schemaName: string): string {
   return `CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schemaName)};`;
@@ -23,9 +18,7 @@ export function emitColumn(col: ColumnDefinition): string {
         ? qualifyTable(col.references.schema, col.references.table)
         : quoteIdent(col.references.table);
     const onDelete = col.references.onDelete ?? "RESTRICT";
-    parts.push(
-      `REFERENCES ${target}(${quoteIdent(col.references.column)}) ON DELETE ${onDelete}`,
-    );
+    parts.push(`REFERENCES ${target}(${quoteIdent(col.references.column)}) ON DELETE ${onDelete}`);
   }
   return parts.join(" ");
 }
@@ -59,7 +52,8 @@ export function emitCreateTable(def: TableDefinition): string {
 
 export function emitIndex(table: TableDefinition, idx: IndexSpec): string {
   const tableName = qualifyTable(table.schema, table.name);
-  const using = idx.kind !== undefined && idx.kind !== "btree" ? ` USING ${idx.kind.toUpperCase()}` : "";
+  const using =
+    idx.kind !== undefined && idx.kind !== "btree" ? ` USING ${idx.kind.toUpperCase()}` : "";
   const uniqueKw = idx.unique === true ? "UNIQUE " : "";
   const cols = idx.columns.map(quoteIdent).join(", ");
   return `CREATE ${uniqueKw}INDEX ${quoteIdent(idx.name)} ON ${tableName}${using} (${cols});`;
@@ -96,10 +90,7 @@ export function emitTable(def: TableDefinition): string[] {
   return statements;
 }
 
-export function emitBootstrapSql(
-  schemaName: string,
-  tables: readonly TableDefinition[],
-): string[] {
+export function emitBootstrapSql(schemaName: string, tables: readonly TableDefinition[]): string[] {
   const statements: string[] = [emitSchemaCreate(schemaName)];
   for (const table of tables) {
     statements.push(...emitTable(table));

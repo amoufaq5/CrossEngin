@@ -1,11 +1,6 @@
 import { z } from "zod";
 
-import {
-  KEY_ALGORITHMS,
-  KEY_PURPOSES,
-  type KeyAlgorithm,
-  type KeyPurpose,
-} from "./algorithms.js";
+import { KEY_ALGORITHMS, KEY_PURPOSES, type KeyAlgorithm, type KeyPurpose } from "./algorithms.js";
 
 export const CRYPTO_OPERATIONS = [
   "sign",
@@ -30,8 +25,7 @@ export function isCryptoOperation(value: unknown): value is CryptoOperation {
   return typeof value === "string" && (CRYPTO_OPERATIONS as readonly string[]).includes(value);
 }
 
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEY_ID_REGEX = /^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 export const CryptoAuditRecordSchema = z

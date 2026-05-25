@@ -47,9 +47,7 @@ describe("tryValidateManifest", () => {
     const m: Manifest = {
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       roles: { pharmacist: { name: "pharmacist" } },
       permissions: {
         Prescription: { read: { roles: ["mystery"] } },
@@ -66,9 +64,7 @@ describe("tryValidateManifest", () => {
     const m: Manifest = {
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",

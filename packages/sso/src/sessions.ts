@@ -1,11 +1,6 @@
 import { z } from "zod";
 
-export const SSO_SESSION_STATUSES = [
-  "active",
-  "expired",
-  "revoked",
-  "logged_out",
-] as const;
+export const SSO_SESSION_STATUSES = ["active", "expired", "revoked", "logged_out"] as const;
 export type SsoSessionStatus = (typeof SSO_SESSION_STATUSES)[number];
 
 export const SSO_SESSION_TRANSITIONS: Readonly<
@@ -17,10 +12,8 @@ export const SSO_SESSION_TRANSITIONS: Readonly<
   revoked: [],
 };
 
-export const canTransitionSession = (
-  from: SsoSessionStatus,
-  to: SsoSessionStatus,
-): boolean => SSO_SESSION_TRANSITIONS[from].includes(to);
+export const canTransitionSession = (from: SsoSessionStatus, to: SsoSessionStatus): boolean =>
+  SSO_SESSION_TRANSITIONS[from].includes(to);
 
 export const SLO_KINDS = [
   "sp_initiated",
@@ -33,12 +26,7 @@ export const SLO_KINDS = [
 ] as const;
 export type SloKind = (typeof SLO_KINDS)[number];
 
-export const SESSION_BINDINGS = [
-  "cookie",
-  "jwt_bearer",
-  "opaque_token",
-  "ldap_kerberos",
-] as const;
+export const SESSION_BINDINGS = ["cookie", "jwt_bearer", "opaque_token", "ldap_kerberos"] as const;
 export type SessionBinding = (typeof SESSION_BINDINGS)[number];
 
 export const SsoSessionSchema = z
@@ -50,7 +38,10 @@ export const SsoSessionSchema = z
     federatedSubjectId: z.string().min(1).max(512),
     binding: z.enum(SESSION_BINDINGS),
     idpSessionIndex: z.string().min(1).max(512).nullable(),
-    idpRefreshTokenSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    idpRefreshTokenSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     startedAt: z.string().datetime({ offset: true }),
     lastActivityAt: z.string().datetime({ offset: true }),
     expiresAt: z.string().datetime({ offset: true }),
@@ -144,11 +135,7 @@ export const computeIdleTimeoutReached = (
   return nowMs - lastActivityMs >= idleTimeoutSeconds * 1000;
 };
 
-export const extendSession = (
-  session: SsoSession,
-  now: Date,
-  ttlSeconds: number,
-): SsoSession => {
+export const extendSession = (session: SsoSession, now: Date, ttlSeconds: number): SsoSession => {
   const nowIso = now.toISOString();
   const newExpiresMs = now.getTime() + ttlSeconds * 1000;
   const absoluteMs = Date.parse(session.absoluteExpiresAt);
@@ -173,9 +160,7 @@ export const terminateSession = (
         ? "revoked"
         : "logged_out";
   if (!canTransitionSession(session.status, newStatus)) {
-    throw new Error(
-      `cannot transition session from ${session.status} to ${newStatus}`,
-    );
+    throw new Error(`cannot transition session from ${session.status} to ${newStatus}`);
   }
   return {
     ...session,
@@ -186,11 +171,7 @@ export const terminateSession = (
   };
 };
 
-export const isMfaStillFresh = (
-  session: SsoSession,
-  now: Date,
-  mfaTtlSeconds: number,
-): boolean => {
+export const isMfaStillFresh = (session: SsoSession, now: Date, mfaTtlSeconds: number): boolean => {
   if (session.mfaSatisfiedAt === null) return false;
   const mfaMs = Date.parse(session.mfaSatisfiedAt);
   const nowMs = now.getTime();

@@ -11,9 +11,7 @@ interface Capture {
   params: readonly unknown[] | undefined;
 }
 
-function mockConnection(
-  capture?: Capture[],
-): PgConnection {
+function mockConnection(capture?: Capture[]): PgConnection {
   return {
     query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       if (capture !== undefined) capture.push({ sql, params });
@@ -25,9 +23,7 @@ function mockConnection(
   };
 }
 
-function event(
-  overrides: Partial<RouterInstrumentationEvent> = {},
-): RouterInstrumentationEvent {
+function event(overrides: Partial<RouterInstrumentationEvent> = {}): RouterInstrumentationEvent {
   return {
     kind: "llm_call_started",
     tenantId: TENANT,
@@ -179,8 +175,7 @@ describe("PostgresRouterInstrumentation — RouterInstrumentation contract compa
   it("satisfies the @crossengin/ai-router RouterInstrumentation shape", () => {
     const conn = mockConnection();
     const inst = new PostgresRouterInstrumentation({ conn });
-    const onEvent: (event: RouterInstrumentationEvent) => Promise<void> =
-      inst.onEvent.bind(inst);
+    const onEvent: (event: RouterInstrumentationEvent) => Promise<void> = inst.onEvent.bind(inst);
     expect(typeof onEvent).toBe("function");
   });
 });

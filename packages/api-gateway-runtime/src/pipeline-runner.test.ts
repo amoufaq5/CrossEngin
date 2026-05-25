@@ -67,7 +67,10 @@ describe("buildStageResult", () => {
 
 describe("PipelineRecorder", () => {
   function recorder() {
-    return new PipelineRecorder({ requestId: REQUEST_ID, startedAt: new Date("2026-05-16T12:00:00.000Z") });
+    return new PipelineRecorder({
+      requestId: REQUEST_ID,
+      startedAt: new Date("2026-05-16T12:00:00.000Z"),
+    });
   }
 
   it("starts empty", () => {

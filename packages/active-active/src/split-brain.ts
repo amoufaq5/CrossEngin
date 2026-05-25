@@ -34,10 +34,7 @@ export const SPLIT_BRAIN_TRANSITIONS: Readonly<
   permanent_partition: ["healing"],
 });
 
-export function canTransitionSplitBrain(
-  from: SplitBrainStatus,
-  to: SplitBrainStatus,
-): boolean {
+export function canTransitionSplitBrain(from: SplitBrainStatus, to: SplitBrainStatus): boolean {
   return SPLIT_BRAIN_TRANSITIONS[from].includes(to);
 }
 
@@ -132,7 +129,8 @@ export const SplitBrainEventSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["partitionGroups"],
-        message: "at most one partition group can claim quorum (otherwise true split brain — both sides shouldn't have proceeded)",
+        message:
+          "at most one partition group can claim quorum (otherwise true split brain — both sides shouldn't have proceeded)",
       });
     }
     if (v.status === "isolating" && v.isolatedAt === null) {
@@ -191,13 +189,13 @@ export const SplitBrainEventSchema = z
       }
     }
     if (v.requiresIncidentResponse && v.incidentRecordId === undefined) {
-      const isActive =
-        v.status !== "healed" && v.status !== "permanent_partition";
+      const isActive = v.status !== "healed" && v.status !== "permanent_partition";
       if (isActive) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["incidentRecordId"],
-          message: "active split-brain events with requiresIncidentResponse=true must reference incidentRecordId",
+          message:
+            "active split-brain events with requiresIncidentResponse=true must reference incidentRecordId",
         });
       }
     }
@@ -214,7 +212,8 @@ export const SplitBrainEventSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["conflictRecordIds"],
-          message: "minority partitions that accepted writes must produce conflict records during healing",
+          message:
+            "minority partitions that accepted writes must produce conflict records during healing",
         });
       }
     }
@@ -241,12 +240,8 @@ export function isActive(event: SplitBrainEvent): boolean {
   return event.status !== "healed" && event.status !== "permanent_partition";
 }
 
-export function meanTimeToHealSeconds(
-  events: readonly SplitBrainEvent[],
-): number | null {
-  const healed = events.filter(
-    (e) => e.status === "healed" && e.durationSeconds !== null,
-  );
+export function meanTimeToHealSeconds(events: readonly SplitBrainEvent[]): number | null {
+  const healed = events.filter((e) => e.status === "healed" && e.durationSeconds !== null);
   if (healed.length === 0) return null;
   const total = healed.reduce((acc, e) => acc + (e.durationSeconds ?? 0), 0);
   return Math.round(total / healed.length);

@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  OPENAI_FILES_PURPOSES,
-  buildMultipartUpload,
-  isOpenAIFilesPurpose,
-} from "./files-api.js";
+import { OPENAI_FILES_PURPOSES, buildMultipartUpload, isOpenAIFilesPurpose } from "./files-api.js";
 
 describe("OPENAI_FILES_PURPOSES", () => {
   it("includes the 5 documented purposes", () => {
@@ -61,9 +57,7 @@ describe("buildMultipartUpload", () => {
       filename: "x.bin",
       purpose: "user_data",
     });
-    expect(decodeBody(result.body)).toContain(
-      "Content-Type: application/octet-stream",
-    );
+    expect(decodeBody(result.body)).toContain("Content-Type: application/octet-stream");
   });
 
   it("escapes quotes in filename", () => {
@@ -72,9 +66,7 @@ describe("buildMultipartUpload", () => {
       filename: 'file"name".pdf',
       purpose: "user_data",
     });
-    expect(decodeBody(result.body)).toContain(
-      'filename="file\\"name\\".pdf"',
-    );
+    expect(decodeBody(result.body)).toContain('filename="file\\"name\\".pdf"');
   });
 
   it("rejects empty filename", () => {
@@ -114,9 +106,7 @@ describe("buildMultipartUpload", () => {
       purpose: "user_data",
     });
     const text = decodeBody(result.body);
-    const boundaryMatch = /boundary=(-+CrossEnginFormBoundary[a-z0-9]+)/.exec(
-      result.contentType,
-    );
+    const boundaryMatch = /boundary=(-+CrossEnginFormBoundary[a-z0-9]+)/.exec(result.contentType);
     expect(boundaryMatch).not.toBeNull();
     expect(text).toMatch(new RegExp(`--${boundaryMatch![1]}--\\r\\n$`));
   });

@@ -31,9 +31,9 @@ describe("AffinityRuleSchema", () => {
   });
 
   it("rejects session_sticky without cookieName or sessionHeader", () => {
-    expect(() =>
-      AffinityRuleSchema.parse({ ...base, cookieName: undefined }),
-    ).toThrow(/cookieName or sessionHeader/);
+    expect(() => AffinityRuleSchema.parse({ ...base, cookieName: undefined })).toThrow(
+      /cookieName or sessionHeader/,
+    );
   });
 
   it("rejects write_region_pinned with more than one candidate", () => {
@@ -58,9 +58,9 @@ describe("AffinityRuleSchema", () => {
   });
 
   it("rejects fallbackRegion that's also in candidateRegions", () => {
-    expect(() =>
-      AffinityRuleSchema.parse({ ...base, fallbackRegion: "eu-central" }),
-    ).toThrow(/must not be in candidateRegions/);
+    expect(() => AffinityRuleSchema.parse({ ...base, fallbackRegion: "eu-central" })).toThrow(
+      /must not be in candidateRegions/,
+    );
   });
 
   it("rejects SameSite=None without Secure", () => {
@@ -103,9 +103,7 @@ describe("resolveAffinity — session_sticky", () => {
   });
 
   it("falls back to previouslyChosen when valid", () => {
-    expect(
-      resolveAffinity(rule, { previouslyChosen: "eu-west" }),
-    ).toBe("eu-west");
+    expect(resolveAffinity(rule, { previouslyChosen: "eu-west" })).toBe("eu-west");
   });
 
   it("falls back to first candidate when no signal", () => {

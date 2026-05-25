@@ -13,9 +13,7 @@ export const DISPATCH_STATUSES = [
 ] as const;
 export type DispatchStatus = (typeof DISPATCH_STATUSES)[number];
 
-export const DISPATCH_TRANSITIONS: Readonly<
-  Record<DispatchStatus, readonly DispatchStatus[]>
-> = {
+export const DISPATCH_TRANSITIONS: Readonly<Record<DispatchStatus, readonly DispatchStatus[]>> = {
   queued: ["rendering", "cancelled"],
   rendering: ["rendered", "failed", "cancelled"],
   rendered: ["sending", "failed", "cancelled"],
@@ -25,10 +23,8 @@ export const DISPATCH_TRANSITIONS: Readonly<
   cancelled: [],
 };
 
-export const canTransitionDispatch = (
-  from: DispatchStatus,
-  to: DispatchStatus,
-): boolean => DISPATCH_TRANSITIONS[from].includes(to);
+export const canTransitionDispatch = (from: DispatchStatus, to: DispatchStatus): boolean =>
+  DISPATCH_TRANSITIONS[from].includes(to);
 
 export const DELIVERY_OUTCOMES = [
   "queued",
@@ -52,25 +48,20 @@ export const TERMINAL_DELIVERY_OUTCOMES: ReadonlySet<DeliveryOutcome> = new Set(
   "suppressed",
 ]);
 
-export const RETRYABLE_DELIVERY_OUTCOMES: ReadonlySet<DeliveryOutcome> = new Set(
-  ["deferred", "bounced_soft", "failed", "rate_limited"],
-);
+export const RETRYABLE_DELIVERY_OUTCOMES: ReadonlySet<DeliveryOutcome> = new Set([
+  "deferred",
+  "bounced_soft",
+  "failed",
+  "rate_limited",
+]);
 
 export const ATTEMPT_KINDS = ["initial", "retry", "escalation"] as const;
 export type AttemptKind = (typeof ATTEMPT_KINDS)[number];
 
-export const PRIORITY_LEVELS = [
-  "critical",
-  "high",
-  "normal",
-  "low",
-  "background",
-] as const;
+export const PRIORITY_LEVELS = ["critical", "high", "normal", "low", "background"] as const;
 export type PriorityLevel = (typeof PRIORITY_LEVELS)[number];
 
-export const PRIORITY_MAX_LATENCY_SECONDS: Readonly<
-  Record<PriorityLevel, number>
-> = {
+export const PRIORITY_MAX_LATENCY_SECONDS: Readonly<Record<PriorityLevel, number>> = {
   critical: 60,
   high: 300,
   normal: 1800,
@@ -119,15 +110,11 @@ export const NotificationDispatchSchema = z
         message: "cancelled dispatch requires cancelledReason",
       });
     }
-    if (
-      d.deliveredCount + d.failedCount + d.suppressedCount >
-      d.recipientCount
-    ) {
+    if (d.deliveredCount + d.failedCount + d.suppressedCount > d.recipientCount) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["recipientCount"],
-        message:
-          "delivered + failed + suppressed cannot exceed recipientCount",
+        message: "delivered + failed + suppressed cannot exceed recipientCount",
       });
     }
     if (d.startedAt !== null && d.completedAt !== null) {
@@ -195,9 +182,7 @@ export const DeliveryAttemptSchema = z
       });
     }
     if (
-      (a.outcome === "bounced_hard" ||
-        a.outcome === "bounced_soft" ||
-        a.outcome === "failed") &&
+      (a.outcome === "bounced_hard" || a.outcome === "bounced_soft" || a.outcome === "failed") &&
       a.errorCode === null
     ) {
       ctx.addIssue({
@@ -266,8 +251,7 @@ export const decideRetry = (input: RetryDecisionInput): RetryDecision => {
       reason: "max_attempts_exhausted",
     };
   }
-  const backoffSec =
-    input.initialBackoffSeconds * Math.pow(2, input.attemptNumber - 1);
+  const backoffSec = input.initialBackoffSeconds * Math.pow(2, input.attemptNumber - 1);
   const cappedSec = Math.min(backoffSec, 3600);
   const nextRetry = new Date(input.now.getTime() + cappedSec * 1000);
   return {
@@ -310,19 +294,10 @@ export const summarizeDispatches = (
       p99LatencyMs: 0,
     };
   }
-  const totalRecipients = dispatches.reduce(
-    (sum, d) => sum + d.recipientCount,
-    0,
-  );
-  const totalDelivered = dispatches.reduce(
-    (sum, d) => sum + d.deliveredCount,
-    0,
-  );
+  const totalRecipients = dispatches.reduce((sum, d) => sum + d.recipientCount, 0);
+  const totalDelivered = dispatches.reduce((sum, d) => sum + d.deliveredCount, 0);
   const totalFailed = dispatches.reduce((sum, d) => sum + d.failedCount, 0);
-  const totalSuppressed = dispatches.reduce(
-    (sum, d) => sum + d.suppressedCount,
-    0,
-  );
+  const totalSuppressed = dispatches.reduce((sum, d) => sum + d.suppressedCount, 0);
   const latencies = attempts
     .filter((a) => a.latencyMs !== null)
     .map((a) => a.latencyMs as number)

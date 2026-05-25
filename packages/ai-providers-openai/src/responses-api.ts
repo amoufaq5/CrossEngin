@@ -6,11 +6,7 @@ import type {
   LlmTool,
   Usage,
 } from "@crossengin/ai-providers";
-import {
-  contentToText,
-  documentMediaType,
-  isOfficeDocumentFormat,
-} from "@crossengin/ai-providers";
+import { contentToText, documentMediaType, isOfficeDocumentFormat } from "@crossengin/ai-providers";
 
 import { computeChatUsageCost, type OpenAIChatModel } from "./pricing.js";
 
@@ -149,7 +145,8 @@ export function buildOpenAIResponsesRequest(
   const request: Record<string, unknown> = {
     model,
     input,
-    max_output_tokens: req.maxTokens ?? opts.defaultMaxTokens ?? RESPONSES_DEFAULT_MAX_OUTPUT_TOKENS,
+    max_output_tokens:
+      req.maxTokens ?? opts.defaultMaxTokens ?? RESPONSES_DEFAULT_MAX_OUTPUT_TOKENS,
   };
   if (instructions !== undefined) request["instructions"] = instructions;
   if (tools !== undefined && tools.length > 0) request["tools"] = tools;

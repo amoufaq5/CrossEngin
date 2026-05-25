@@ -37,17 +37,28 @@ export const PaymentMethodSchema = z
     kind: z.enum(PAYMENT_METHOD_KINDS),
     stripePaymentMethodId: z.string().regex(STRIPE_PM_REGEX),
     isDefault: z.boolean().default(false),
-    last4: z.string().regex(/^\d{4}$/).optional(),
+    last4: z
+      .string()
+      .regex(/^\d{4}$/)
+      .optional(),
     brand: z.enum(CARD_BRANDS).optional(),
     expMonth: z.number().int().min(1).max(12).optional(),
     expYear: z.number().int().min(2024).max(2100).optional(),
-    billingAddressCountry: z.string().regex(/^[A-Z]{2}$/).optional(),
+    billingAddressCountry: z
+      .string()
+      .regex(/^[A-Z]{2}$/)
+      .optional(),
     createdAt: Iso8601,
     deletedAt: Iso8601.nullable().default(null),
   })
   .superRefine((v, ctx) => {
     if (v.kind === "card") {
-      if (v.last4 === undefined || v.brand === undefined || v.expMonth === undefined || v.expYear === undefined) {
+      if (
+        v.last4 === undefined ||
+        v.brand === undefined ||
+        v.expMonth === undefined ||
+        v.expYear === undefined
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["kind"],
@@ -91,7 +102,11 @@ export const RefundSchema = z.object({
   issuedBy: Uuid,
   issuedAt: Iso8601,
   succeededAt: Iso8601.nullable().default(null),
-  stripeRefundId: z.string().regex(/^re_[A-Za-z0-9]+$/).nullable().default(null),
+  stripeRefundId: z
+    .string()
+    .regex(/^re_[A-Za-z0-9]+$/)
+    .nullable()
+    .default(null),
 });
 export type Refund = z.infer<typeof RefundSchema>;
 

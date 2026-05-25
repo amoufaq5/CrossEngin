@@ -119,9 +119,7 @@ export interface InvoiceTotals {
   readonly totalCents: number;
 }
 
-export function computeInvoiceTotals(
-  lineItems: readonly InvoiceLineItem[],
-): InvoiceTotals {
+export function computeInvoiceTotals(lineItems: readonly InvoiceLineItem[]): InvoiceTotals {
   let subtotal = 0;
   let tax = 0;
   let discount = 0;

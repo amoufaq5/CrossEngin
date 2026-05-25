@@ -37,9 +37,7 @@ export const READ_ONLY_STATES: ReadonlySet<TenantLifecycleState> = new Set([
   "pending_deletion",
 ]);
 
-export const TERMINAL_STATES: ReadonlySet<TenantLifecycleState> = new Set([
-  "deleted",
-]);
+export const TERMINAL_STATES: ReadonlySet<TenantLifecycleState> = new Set(["deleted"]);
 
 export const RESTORABLE_STATES: ReadonlySet<TenantLifecycleState> = new Set([
   "suspended",

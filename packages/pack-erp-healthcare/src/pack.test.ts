@@ -67,11 +67,7 @@ describe("buildErpHealthcarePack — manifest shape (child-only)", () => {
   it("child manifest carries only healthcare additions (3 entities, 3 relations)", () => {
     const m = buildErpHealthcarePack();
     expect(m.entities).toHaveLength(3);
-    expect(m.entities?.map((e) => e.name)).toEqual([
-      "Patient",
-      "Encounter",
-      "Observation",
-    ]);
+    expect(m.entities?.map((e) => e.name)).toEqual(["Patient", "Encounter", "Observation"]);
     expect(m.relations).toHaveLength(3);
   });
 });
@@ -81,9 +77,7 @@ describe("buildErpHealthcarePack — full kernel cross-validation (resolved)", (
     const m = await buildResolvedHealthcare();
     const result = tryValidateManifest(m);
     if (!result.ok) {
-      throw new Error(
-        `tryValidateManifest failed: ${JSON.stringify(result.errors)}`,
-      );
+      throw new Error(`tryValidateManifest failed: ${JSON.stringify(result.errors)}`);
     }
     expect(result.ok).toBe(true);
   });
@@ -101,10 +95,7 @@ describe("buildErpHealthcarePack — full kernel cross-validation (resolved)", (
   });
 
   it("diff from core to resolved healthcare adds exactly Patient + Encounter + Observation", async () => {
-    const diff = computeManifestDiff(
-      buildErpCorePack(),
-      await buildResolvedHealthcare(),
-    );
+    const diff = computeManifestDiff(buildErpCorePack(), await buildResolvedHealthcare());
     expect(diff.addedEntities.map((e) => e.name).sort()).toEqual([
       "Encounter",
       "Observation",

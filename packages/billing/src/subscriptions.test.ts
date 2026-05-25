@@ -42,21 +42,21 @@ describe("SubscriptionSchema", () => {
   });
 
   it("requires trialEnd when status is trialing", () => {
-    expect(() =>
-      SubscriptionSchema.parse({ ...baseSub, status: "trialing" }),
-    ).toThrow(/trialing subscriptions must declare trialEnd/);
+    expect(() => SubscriptionSchema.parse({ ...baseSub, status: "trialing" })).toThrow(
+      /trialing subscriptions must declare trialEnd/,
+    );
   });
 
   it("requires canceledAt when status is canceled", () => {
-    expect(() =>
-      SubscriptionSchema.parse({ ...baseSub, status: "canceled" }),
-    ).toThrow(/canceled subscriptions must declare canceledAt/);
+    expect(() => SubscriptionSchema.parse({ ...baseSub, status: "canceled" })).toThrow(
+      /canceled subscriptions must declare canceledAt/,
+    );
   });
 
   it("requires pausedAt when status is paused", () => {
-    expect(() =>
-      SubscriptionSchema.parse({ ...baseSub, status: "paused" }),
-    ).toThrow(/paused subscriptions must declare pausedAt/);
+    expect(() => SubscriptionSchema.parse({ ...baseSub, status: "paused" })).toThrow(
+      /paused subscriptions must declare pausedAt/,
+    );
   });
 });
 

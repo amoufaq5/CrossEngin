@@ -18,12 +18,7 @@ describe("constants", () => {
   });
 
   it("BUDGET_ACTIONS has 4 entries", () => {
-    expect(BUDGET_ACTIONS).toEqual([
-      "alert_only",
-      "throttle",
-      "block_new_usage",
-      "page_oncall",
-    ]);
+    expect(BUDGET_ACTIONS).toEqual(["alert_only", "throttle", "block_new_usage", "page_oncall"]);
   });
 });
 
@@ -222,15 +217,8 @@ describe("helpers", () => {
   });
 
   it("thresholdsCrossed returns all triggered thresholds in order", () => {
-    expect(thresholdsCrossed(budget, 850).map((t) => t.percentOfBudget)).toEqual([
-      50,
-      80,
-    ]);
-    expect(thresholdsCrossed(budget, 1200).map((t) => t.percentOfBudget)).toEqual([
-      50,
-      80,
-      100,
-    ]);
+    expect(thresholdsCrossed(budget, 850).map((t) => t.percentOfBudget)).toEqual([50, 80]);
+    expect(thresholdsCrossed(budget, 1200).map((t) => t.percentOfBudget)).toEqual([50, 80, 100]);
   });
 
   it("highestSeverityAction returns most severe action", () => {

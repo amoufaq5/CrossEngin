@@ -35,13 +35,8 @@ describe("BEDROCK_MODEL_CUSTOMIZATION_JOB constants", () => {
   });
 
   it("documents AWS-supported sort dimensions", () => {
-    expect(BEDROCK_MODEL_CUSTOMIZATION_JOB_SORT_BY_VALUES).toEqual([
-      "CreationTime",
-    ]);
-    expect(BEDROCK_MODEL_CUSTOMIZATION_JOB_SORT_ORDER_VALUES).toEqual([
-      "Ascending",
-      "Descending",
-    ]);
+    expect(BEDROCK_MODEL_CUSTOMIZATION_JOB_SORT_BY_VALUES).toEqual(["CreationTime"]);
+    expect(BEDROCK_MODEL_CUSTOMIZATION_JOB_SORT_ORDER_VALUES).toEqual(["Ascending", "Descending"]);
   });
 
   it("isBedrockModelCustomizationJobStatus is case-sensitive", () => {
@@ -69,39 +64,33 @@ describe("buildModelCustomizationJobListQuery", () => {
   });
 
   it("rejects unparseable creation-time values", () => {
-    expect(() =>
-      buildModelCustomizationJobListQuery({ creationTimeAfter: "yesterday" }),
-    ).toThrow(/creationTimeAfter/);
-    expect(() =>
-      buildModelCustomizationJobListQuery({ creationTimeBefore: "soon" }),
-    ).toThrow(/creationTimeBefore/);
+    expect(() => buildModelCustomizationJobListQuery({ creationTimeAfter: "yesterday" })).toThrow(
+      /creationTimeAfter/,
+    );
+    expect(() => buildModelCustomizationJobListQuery({ creationTimeBefore: "soon" })).toThrow(
+      /creationTimeBefore/,
+    );
   });
 
   it("threads + validates nameContains length", () => {
-    expect(
-      buildModelCustomizationJobListQuery({ nameContains: "tenant-x" }),
-    ).toEqual({ nameContains: "tenant-x" });
-    expect(() =>
-      buildModelCustomizationJobListQuery({ nameContains: "" }),
-    ).toThrow(/nameContains/);
+    expect(buildModelCustomizationJobListQuery({ nameContains: "tenant-x" })).toEqual({
+      nameContains: "tenant-x",
+    });
+    expect(() => buildModelCustomizationJobListQuery({ nameContains: "" })).toThrow(/nameContains/);
     expect(() =>
       buildModelCustomizationJobListQuery({
-        nameContains: "x".repeat(
-          BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_CONTAINS_MAX_LEN + 1,
-        ),
+        nameContains: "x".repeat(BEDROCK_MODEL_CUSTOMIZATION_JOB_NAME_CONTAINS_MAX_LEN + 1),
       }),
     ).toThrow(/nameContains/);
   });
 
   it("threads + validates all 5 statusEquals values", () => {
     for (const s of BEDROCK_MODEL_CUSTOMIZATION_JOB_STATUSES) {
-      expect(
-        buildModelCustomizationJobListQuery({ statusEquals: s }),
-      ).toEqual({ statusEquals: s });
+      expect(buildModelCustomizationJobListQuery({ statusEquals: s })).toEqual({ statusEquals: s });
     }
-    expect(() =>
-      buildModelCustomizationJobListQuery({ statusEquals: "Pending" as never }),
-    ).toThrow(/statusEquals/);
+    expect(() => buildModelCustomizationJobListQuery({ statusEquals: "Pending" as never })).toThrow(
+      /statusEquals/,
+    );
   });
 
   it("threads valid maxResults at bounds", () => {
@@ -110,16 +99,14 @@ describe("buildModelCustomizationJobListQuery", () => {
         maxResults: BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MIN,
       }),
     ).toEqual({
-      maxResults:
-        BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MIN.toString(),
+      maxResults: BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MIN.toString(),
     });
     expect(
       buildModelCustomizationJobListQuery({
         maxResults: BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MAX,
       }),
     ).toEqual({
-      maxResults:
-        BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MAX.toString(),
+      maxResults: BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MAX.toString(),
     });
   });
 
@@ -134,18 +121,14 @@ describe("buildModelCustomizationJobListQuery", () => {
         maxResults: BEDROCK_MODEL_CUSTOMIZATION_JOB_LIST_MAX_RESULTS_MAX + 1,
       }),
     ).toThrow(/maxResults/);
-    expect(() =>
-      buildModelCustomizationJobListQuery({ maxResults: 1.5 }),
-    ).toThrow(/maxResults/);
+    expect(() => buildModelCustomizationJobListQuery({ maxResults: 1.5 })).toThrow(/maxResults/);
   });
 
   it("threads + validates nextToken", () => {
-    expect(
-      buildModelCustomizationJobListQuery({ nextToken: "page-2" }),
-    ).toEqual({ nextToken: "page-2" });
-    expect(() =>
-      buildModelCustomizationJobListQuery({ nextToken: "" }),
-    ).toThrow(/nextToken/);
+    expect(buildModelCustomizationJobListQuery({ nextToken: "page-2" })).toEqual({
+      nextToken: "page-2",
+    });
+    expect(() => buildModelCustomizationJobListQuery({ nextToken: "" })).toThrow(/nextToken/);
   });
 
   it("threads sortBy + sortOrder", () => {
@@ -158,12 +141,12 @@ describe("buildModelCustomizationJobListQuery", () => {
   });
 
   it("rejects unknown sortBy / sortOrder", () => {
-    expect(() =>
-      buildModelCustomizationJobListQuery({ sortBy: "Name" as never }),
-    ).toThrow(/sortBy/);
-    expect(() =>
-      buildModelCustomizationJobListQuery({ sortOrder: "asc" as never }),
-    ).toThrow(/sortOrder/);
+    expect(() => buildModelCustomizationJobListQuery({ sortBy: "Name" as never })).toThrow(
+      /sortBy/,
+    );
+    expect(() => buildModelCustomizationJobListQuery({ sortOrder: "asc" as never })).toThrow(
+      /sortOrder/,
+    );
   });
 
   it("composes all parameters together", () => {
@@ -191,17 +174,14 @@ describe("buildModelCustomizationJobListQuery", () => {
   });
 
   it("throws BedrockError on invalid input", () => {
-    expect(() =>
-      buildModelCustomizationJobListQuery({ maxResults: -1 }),
-    ).toThrow(BedrockError);
+    expect(() => buildModelCustomizationJobListQuery({ maxResults: -1 })).toThrow(BedrockError);
   });
 });
 
 describe("parseModelCustomizationJobSummary", () => {
   function sample(): unknown {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
       jobName: "tenant-x-haiku-finetune",
       baseModelArn:
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0:200k",
@@ -266,15 +246,11 @@ describe("parseModelCustomizationJobSummary", () => {
   it("rejects missing required field", () => {
     const bad = sample() as Record<string, unknown>;
     delete bad["baseModelArn"];
-    expect(() => parseModelCustomizationJobSummary(bad)).toThrow(
-      /baseModelArn/,
-    );
+    expect(() => parseModelCustomizationJobSummary(bad)).toThrow(/baseModelArn/);
   });
 
   it("rejects non-object input", () => {
-    expect(() => parseModelCustomizationJobSummary(null)).toThrow(
-      /not an object/,
-    );
+    expect(() => parseModelCustomizationJobSummary(null)).toThrow(/not an object/);
   });
 });
 
@@ -328,9 +304,7 @@ describe("parseModelCustomizationJobListResponse", () => {
   });
 
   it("rejects non-object response", () => {
-    expect(() => parseModelCustomizationJobListResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseModelCustomizationJobListResponse(null)).toThrow(/not a JSON object/);
   });
 
   it("rejects non-array summaries field", () => {
@@ -345,8 +319,7 @@ describe("parseModelCustomizationJobListResponse", () => {
 describe("parseModelCustomizationJobDetail", () => {
   function minimal(): Record<string, unknown> {
     return {
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
       jobName: "tenant-x-haiku-finetune",
       outputModelName: "tenant-x-haiku-v1",
       roleArn: "arn:aws:iam::123456789012:role/BedrockFineTuneRole",
@@ -440,35 +413,29 @@ describe("parseModelCustomizationJobDetail", () => {
     });
     expect(d.vpcConfig?.subnetIds).toEqual(["subnet-1"]);
     expect(
-      d.customizationConfig?.distillationConfig?.teacherModelConfig
-        .teacherModelIdentifier,
+      d.customizationConfig?.distillationConfig?.teacherModelConfig.teacherModelIdentifier,
     ).toMatch(/claude-3-5-sonnet/);
     expect(
-      d.customizationConfig?.distillationConfig?.teacherModelConfig
-        .maxResponseLengthForInference,
+      d.customizationConfig?.distillationConfig?.teacherModelConfig.maxResponseLengthForInference,
     ).toBe(4096);
   });
 
   it("rejects missing required field", () => {
     const bad = minimal();
     delete bad["outputModelName"];
-    expect(() => parseModelCustomizationJobDetail(bad)).toThrow(
-      /outputModelName/,
-    );
+    expect(() => parseModelCustomizationJobDetail(bad)).toThrow(/outputModelName/);
   });
 
   it("rejects unknown status", () => {
-    expect(() =>
-      parseModelCustomizationJobDetail({ ...minimal(), status: "Pending" }),
-    ).toThrow(/unknown job status/);
+    expect(() => parseModelCustomizationJobDetail({ ...minimal(), status: "Pending" })).toThrow(
+      /unknown job status/,
+    );
   });
 
   it("rejects missing trainingDataConfig", () => {
     const bad = minimal();
     delete bad["trainingDataConfig"];
-    expect(() => parseModelCustomizationJobDetail(bad)).toThrow(
-      /trainingDataConfig/,
-    );
+    expect(() => parseModelCustomizationJobDetail(bad)).toThrow(/trainingDataConfig/);
   });
 
   it("rejects trainingDataConfig without s3Uri", () => {
@@ -535,9 +502,7 @@ describe("parseModelCustomizationJobDetail", () => {
   });
 
   it("rejects non-object response", () => {
-    expect(() => parseModelCustomizationJobDetail(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseModelCustomizationJobDetail(null)).toThrow(/not a JSON object/);
   });
 });
 
@@ -559,9 +524,10 @@ describe("buildCreateModelCustomizationJobBody", () => {
   }
 
   it("emits minimal required body without optional fields", () => {
-    const body = JSON.parse(
-      buildCreateModelCustomizationJobBody(minimalInput()),
-    ) as Record<string, unknown>;
+    const body = JSON.parse(buildCreateModelCustomizationJobBody(minimalInput())) as Record<
+      string,
+      unknown
+    >;
     expect(body["jobName"]).toBe("tenant-x-haiku-finetune-001");
     expect(body["customModelName"]).toBe("tenant-x-haiku-v1");
     expect(body["baseModelIdentifier"]).toMatch(/claude-3-haiku/);
@@ -630,9 +596,9 @@ describe("buildCreateModelCustomizationJobBody", () => {
   });
 
   it("rejects jobName pattern violations", () => {
-    expect(() =>
-      buildCreateModelCustomizationJobBody(minimalInput({ jobName: "" })),
-    ).toThrow(/jobName/);
+    expect(() => buildCreateModelCustomizationJobBody(minimalInput({ jobName: "" }))).toThrow(
+      /jobName/,
+    );
     expect(() =>
       buildCreateModelCustomizationJobBody(
         minimalInput({
@@ -641,30 +607,22 @@ describe("buildCreateModelCustomizationJobBody", () => {
       ),
     ).toThrow(/jobName/);
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ jobName: "bad name" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ jobName: "bad name" })),
     ).toThrow(/jobName/);
   });
 
   it("rejects customModelName pattern violations", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ customModelName: "" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ customModelName: "" })),
     ).toThrow(/customModelName/);
   });
 
   it("rejects malformed roleArn (including non-IAM ARNs)", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ roleArn: "not-an-arn" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ roleArn: "not-an-arn" })),
     ).toThrow(/roleArn/);
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ roleArn: "arn:aws:s3:::my-bucket" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ roleArn: "arn:aws:s3:::my-bucket" })),
     ).toThrow(/roleArn/);
   });
 
@@ -687,16 +645,12 @@ describe("buildCreateModelCustomizationJobBody", () => {
 
   it("rejects out-of-range baseModelIdentifier", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ baseModelIdentifier: "" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ baseModelIdentifier: "" })),
     ).toThrow(/baseModelIdentifier/);
     expect(() =>
       buildCreateModelCustomizationJobBody(
         minimalInput({
-          baseModelIdentifier: "x".repeat(
-            BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN + 1,
-          ),
+          baseModelIdentifier: "x".repeat(BEDROCK_MODEL_CUSTOMIZATION_BASE_MODEL_ID_MAX_LEN + 1),
         }),
       ),
     ).toThrow(/baseModelIdentifier/);
@@ -731,60 +685,44 @@ describe("buildCreateModelCustomizationJobBody", () => {
 
   it("rejects non-object hyperParameters (array, null)", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ hyperParameters: [] as never }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ hyperParameters: [] as never })),
     ).toThrow(/hyperParameters/);
   });
 
   it("rejects clientRequestToken length / pattern violations", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ clientRequestToken: "" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ clientRequestToken: "" })),
     ).toThrow(/clientRequestToken/);
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ clientRequestToken: "bad token" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ clientRequestToken: "bad token" })),
     ).toThrow(/clientRequestToken/);
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ clientRequestToken: "x".repeat(257) }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ clientRequestToken: "x".repeat(257) })),
     ).toThrow(/clientRequestToken/);
   });
 
   it("rejects empty customModelKmsKeyId when provided", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ customModelKmsKeyId: "" }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ customModelKmsKeyId: "" })),
     ).toThrow(/customModelKmsKeyId/);
   });
 
   it("rejects too many tags on either jobTags or customModelTags", () => {
-    const tooMany = Array.from(
-      { length: BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS + 1 },
-      (_, i) => ({ key: `k${i.toString()}`, value: "v" }),
+    const tooMany = Array.from({ length: BEDROCK_MODEL_CUSTOMIZATION_MAX_TAGS + 1 }, (_, i) => ({
+      key: `k${i.toString()}`,
+      value: "v",
+    }));
+    expect(() => buildCreateModelCustomizationJobBody(minimalInput({ jobTags: tooMany }))).toThrow(
+      /jobTags/,
     );
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ jobTags: tooMany }),
-      ),
-    ).toThrow(/jobTags/);
-    expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ customModelTags: tooMany }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ customModelTags: tooMany })),
     ).toThrow(/customModelTags/);
   });
 
   it("rejects tag key/value length violations", () => {
     expect(() =>
-      buildCreateModelCustomizationJobBody(
-        minimalInput({ jobTags: [{ key: "", value: "v" }] }),
-      ),
+      buildCreateModelCustomizationJobBody(minimalInput({ jobTags: [{ key: "", value: "v" }] })),
     ).toThrow(/jobTags key/);
     expect(() =>
       buildCreateModelCustomizationJobBody(
@@ -796,10 +734,9 @@ describe("buildCreateModelCustomizationJobBody", () => {
   });
 
   it("rejects too many validators", () => {
-    const tooMany = Array.from(
-      { length: BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS + 1 },
-      () => ({ s3Uri: "s3://b/v/" }),
-    );
+    const tooMany = Array.from({ length: BEDROCK_MODEL_CUSTOMIZATION_MAX_VALIDATORS + 1 }, () => ({
+      s3Uri: "s3://b/v/",
+    }));
     expect(() =>
       buildCreateModelCustomizationJobBody(
         minimalInput({ validationDataConfig: { validators: tooMany } }),
@@ -851,27 +788,18 @@ describe("buildCreateModelCustomizationJobBody", () => {
 describe("parseCreateModelCustomizationJobResponse", () => {
   it("parses a {jobArn} response", () => {
     const out = parseCreateModelCustomizationJobResponse({
-      jobArn:
-        "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
+      jobArn: "arn:aws:bedrock:us-east-1:123456789012:model-customization-job/abc",
     });
     expect(out.jobArn).toMatch(/abc$/);
   });
 
   it("rejects missing or non-string jobArn", () => {
-    expect(() => parseCreateModelCustomizationJobResponse({})).toThrow(
-      /jobArn/,
-    );
-    expect(() =>
-      parseCreateModelCustomizationJobResponse({ jobArn: 42 }),
-    ).toThrow(/jobArn/);
-    expect(() =>
-      parseCreateModelCustomizationJobResponse({ jobArn: "" }),
-    ).toThrow(/jobArn/);
+    expect(() => parseCreateModelCustomizationJobResponse({})).toThrow(/jobArn/);
+    expect(() => parseCreateModelCustomizationJobResponse({ jobArn: 42 })).toThrow(/jobArn/);
+    expect(() => parseCreateModelCustomizationJobResponse({ jobArn: "" })).toThrow(/jobArn/);
   });
 
   it("rejects non-object response", () => {
-    expect(() => parseCreateModelCustomizationJobResponse(null)).toThrow(
-      /not a JSON object/,
-    );
+    expect(() => parseCreateModelCustomizationJobResponse(null)).toThrow(/not a JSON object/);
   });
 });

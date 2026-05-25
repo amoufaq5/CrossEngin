@@ -39,12 +39,7 @@ export function canTransitionInstallation(
   return INSTALLATION_TRANSITIONS[from].includes(to);
 }
 
-export const UPDATE_POLICIES = [
-  "manual",
-  "patch_auto",
-  "minor_auto",
-  "track_latest",
-] as const;
+export const UPDATE_POLICIES = ["manual", "patch_auto", "minor_auto", "track_latest"] as const;
 export type UpdatePolicy = (typeof UPDATE_POLICIES)[number];
 export const UpdatePolicySchema = z.enum(UPDATE_POLICIES);
 
@@ -116,10 +111,7 @@ export const PackInstallationSchema = z
         message: "failed status requires failureReason",
       });
     }
-    if (
-      v.pinnedVersion !== null &&
-      v.updatePolicy !== "manual"
-    ) {
+    if (v.pinnedVersion !== null && v.updatePolicy !== "manual") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["updatePolicy"],
@@ -164,10 +156,7 @@ export function activeInstallations(
   tenantId: string,
 ): readonly PackInstallation[] {
   return set.filter(
-    (i) =>
-      i.tenantId === tenantId &&
-      i.status !== "uninstalled" &&
-      i.status !== "failed",
+    (i) => i.tenantId === tenantId && i.status !== "uninstalled" && i.status !== "failed",
   );
 }
 
@@ -177,25 +166,26 @@ export function installationFor(
   packId: string,
 ): PackInstallation | null {
   return (
-    set.find(
-      (i) =>
-        i.tenantId === tenantId &&
-        i.packId === packId &&
-        i.status !== "uninstalled",
-    ) ?? null
+    set.find((i) => i.tenantId === tenantId && i.packId === packId && i.status !== "uninstalled") ??
+    null
   );
 }
 
-export function shouldAutoUpdate(
-  installation: PackInstallation,
-  newVersion: string,
-): boolean {
+export function shouldAutoUpdate(installation: PackInstallation, newVersion: string): boolean {
   if (installation.updatePolicy === "manual") return false;
   if (installation.pinnedVersion !== null) return false;
   if (installation.installedVersion === null) return false;
   if (installation.updatePolicy === "track_latest") return true;
-  const cur = installation.installedVersion.split("-")[0]?.split(".").map((n) => Number.parseInt(n, 10) || 0) ?? [];
-  const next = newVersion.split("-")[0]?.split(".").map((n) => Number.parseInt(n, 10) || 0) ?? [];
+  const cur =
+    installation.installedVersion
+      .split("-")[0]
+      ?.split(".")
+      .map((n) => Number.parseInt(n, 10) || 0) ?? [];
+  const next =
+    newVersion
+      .split("-")[0]
+      ?.split(".")
+      .map((n) => Number.parseInt(n, 10) || 0) ?? [];
   if (installation.updatePolicy === "patch_auto") {
     return cur[0] === next[0] && cur[1] === next[1];
   }

@@ -51,7 +51,10 @@ const BulkActionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("export"),
     label: LocalizedTextSchema,
-    formats: z.array(z.enum(["csv", "xlsx", "json"])).min(1).default(["csv"]),
+    formats: z
+      .array(z.enum(["csv", "xlsx", "json"]))
+      .min(1)
+      .default(["csv"]),
   }),
   z.object({
     kind: z.literal("delete"),

@@ -1,12 +1,7 @@
 import { BedrockError } from "./errors.js";
 
-export const BEDROCK_FOUNDATION_MODEL_MODALITIES = [
-  "TEXT",
-  "IMAGE",
-  "EMBEDDING",
-] as const;
-export type BedrockFoundationModelModality =
-  (typeof BEDROCK_FOUNDATION_MODEL_MODALITIES)[number];
+export const BEDROCK_FOUNDATION_MODEL_MODALITIES = ["TEXT", "IMAGE", "EMBEDDING"] as const;
+export type BedrockFoundationModelModality = (typeof BEDROCK_FOUNDATION_MODEL_MODALITIES)[number];
 
 export function isBedrockFoundationModelModality(
   value: unknown,
@@ -30,16 +25,11 @@ export function isBedrockFoundationModelCustomization(
 ): value is BedrockFoundationModelCustomization {
   return (
     typeof value === "string" &&
-    (BEDROCK_FOUNDATION_MODEL_CUSTOMIZATIONS as readonly string[]).includes(
-      value,
-    )
+    (BEDROCK_FOUNDATION_MODEL_CUSTOMIZATIONS as readonly string[]).includes(value)
   );
 }
 
-export const BEDROCK_FOUNDATION_MODEL_INFERENCE_TYPES = [
-  "ON_DEMAND",
-  "PROVISIONED",
-] as const;
+export const BEDROCK_FOUNDATION_MODEL_INFERENCE_TYPES = ["ON_DEMAND", "PROVISIONED"] as const;
 export type BedrockFoundationModelInferenceType =
   (typeof BEDROCK_FOUNDATION_MODEL_INFERENCE_TYPES)[number];
 
@@ -48,16 +38,11 @@ export function isBedrockFoundationModelInferenceType(
 ): value is BedrockFoundationModelInferenceType {
   return (
     typeof value === "string" &&
-    (BEDROCK_FOUNDATION_MODEL_INFERENCE_TYPES as readonly string[]).includes(
-      value,
-    )
+    (BEDROCK_FOUNDATION_MODEL_INFERENCE_TYPES as readonly string[]).includes(value)
   );
 }
 
-export const BEDROCK_FOUNDATION_MODEL_LIFECYCLE_STATUSES = [
-  "ACTIVE",
-  "LEGACY",
-] as const;
+export const BEDROCK_FOUNDATION_MODEL_LIFECYCLE_STATUSES = ["ACTIVE", "LEGACY"] as const;
 export type BedrockFoundationModelLifecycleStatus =
   (typeof BEDROCK_FOUNDATION_MODEL_LIFECYCLE_STATUSES)[number];
 
@@ -66,9 +51,7 @@ export function isBedrockFoundationModelLifecycleStatus(
 ): value is BedrockFoundationModelLifecycleStatus {
   return (
     typeof value === "string" &&
-    (BEDROCK_FOUNDATION_MODEL_LIFECYCLE_STATUSES as readonly string[]).includes(
-      value,
-    )
+    (BEDROCK_FOUNDATION_MODEL_LIFECYCLE_STATUSES as readonly string[]).includes(value)
   );
 }
 
@@ -148,9 +131,7 @@ export function buildFoundationModelListQuery(
   return out;
 }
 
-export function parseFoundationModelSummary(
-  raw: unknown,
-): BedrockFoundationModelSummary {
+export function parseFoundationModelSummary(raw: unknown): BedrockFoundationModelSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -162,16 +143,8 @@ export function parseFoundationModelSummary(
   const modelArn = expectString(j, "modelArn");
   const modelName = expectString(j, "modelName");
   const providerName = expectString(j, "providerName");
-  const inputModalities = parseModalityArray(
-    j["inputModalities"],
-    "inputModalities",
-    modelArn,
-  );
-  const outputModalities = parseModalityArray(
-    j["outputModalities"],
-    "outputModalities",
-    modelArn,
-  );
+  const inputModalities = parseModalityArray(j["inputModalities"], "inputModalities", modelArn);
+  const outputModalities = parseModalityArray(j["outputModalities"], "outputModalities", modelArn);
   const summary: {
     -readonly [K in keyof BedrockFoundationModelSummary]: BedrockFoundationModelSummary[K];
   } = {
@@ -224,10 +197,7 @@ export function parseFoundationModelSummary(
     summary.inferenceTypesSupported = out;
   }
   if (j["modelLifecycle"] !== undefined) {
-    if (
-      j["modelLifecycle"] === null ||
-      typeof j["modelLifecycle"] !== "object"
-    ) {
+    if (j["modelLifecycle"] === null || typeof j["modelLifecycle"] !== "object") {
       throw new BedrockError({
         kind: "api_error",
         message: `listFoundationModels: modelLifecycle is not an object on '${modelArn}'`,
@@ -246,9 +216,7 @@ export function parseFoundationModelSummary(
   return summary;
 }
 
-export function parseFoundationModelDetail(
-  raw: unknown,
-): BedrockFoundationModelDetail {
+export function parseFoundationModelDetail(raw: unknown): BedrockFoundationModelDetail {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -263,9 +231,7 @@ export function parseFoundationModelDetail(
   return parseFoundationModelSummary(modelDetails);
 }
 
-export function parseFoundationModelListResponse(
-  raw: unknown,
-): BedrockFoundationModelListResponse {
+export function parseFoundationModelListResponse(raw: unknown): BedrockFoundationModelListResponse {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",

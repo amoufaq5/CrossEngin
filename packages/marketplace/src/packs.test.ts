@@ -128,9 +128,7 @@ describe("PackManifestSchema", () => {
   });
 
   it("rejects malformed pack id", () => {
-    expect(() =>
-      PackManifestSchema.parse({ ...base, id: "Pharmacy" }),
-    ).toThrow();
+    expect(() => PackManifestSchema.parse({ ...base, id: "Pharmacy" })).toThrow();
   });
 
   it("rejects duplicate scopes within required", () => {
@@ -155,9 +153,7 @@ describe("PackManifestSchema", () => {
     expect(() =>
       PackManifestSchema.parse({
         ...base,
-        dependencies: [
-          { packId: base.id, versionRange: "1.0.0", optional: false },
-        ],
+        dependencies: [{ packId: base.id, versionRange: "1.0.0", optional: false }],
       }),
     ).toThrow(/cannot depend on itself/);
   });

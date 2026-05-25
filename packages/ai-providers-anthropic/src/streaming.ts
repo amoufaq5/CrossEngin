@@ -180,10 +180,7 @@ function applyUsageDelta(delta: Partial<AnthropicUsage>, state: StreamState): vo
     state.outputTokens = Math.max(state.outputTokens, delta.output_tokens);
   }
   if (typeof delta.cache_read_input_tokens === "number") {
-    state.cachedInputTokens = Math.max(
-      state.cachedInputTokens,
-      delta.cache_read_input_tokens,
-    );
+    state.cachedInputTokens = Math.max(state.cachedInputTokens, delta.cache_read_input_tokens);
   }
   if (typeof delta.cache_creation_input_tokens === "number") {
     state.cacheCreationInputTokens = Math.max(

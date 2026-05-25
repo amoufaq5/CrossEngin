@@ -5,12 +5,7 @@ const Iso8601 = z.string().datetime({ offset: true });
 const INCIDENT_ID_REGEX = /^INC-\d{4}-\d{4,8}$/;
 const POSTMORTEM_ID_REGEX = /^PM-\d{4}-\d{4,8}$/;
 
-export const POSTMORTEM_STATUSES = [
-  "drafting",
-  "review",
-  "published",
-  "amended",
-] as const;
+export const POSTMORTEM_STATUSES = ["drafting", "review", "published", "amended"] as const;
 export type PostmortemStatus = (typeof POSTMORTEM_STATUSES)[number];
 export const PostmortemStatusSchema = z.enum(POSTMORTEM_STATUSES);
 
@@ -23,10 +18,7 @@ export const POSTMORTEM_TRANSITIONS: Readonly<
   amended: ["published"],
 });
 
-export function canTransitionPostmortem(
-  from: PostmortemStatus,
-  to: PostmortemStatus,
-): boolean {
+export function canTransitionPostmortem(from: PostmortemStatus, to: PostmortemStatus): boolean {
   return POSTMORTEM_TRANSITIONS[from].includes(to);
 }
 
@@ -132,15 +124,17 @@ export const PostmortemSchema = z
       "security_restricted",
     ]),
     storageUri: z.string().url().optional(),
-    storageSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    storageSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   })
   .superRefine((v, ctx) => {
     if (!v.blamelessAttested) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["blamelessAttested"],
-        message:
-          "postmortems must be attested blameless before publishing (culture invariant)",
+        message: "postmortems must be attested blameless before publishing (culture invariant)",
       });
     }
     if (v.status === "published" || v.status === "amended") {
@@ -211,13 +205,8 @@ export function openActionItems(pm: Postmortem): readonly ActionItem[] {
   );
 }
 
-export function overdueActionItems(
-  pm: Postmortem,
-  now: Date = new Date(),
-): readonly ActionItem[] {
-  return openActionItems(pm).filter(
-    (a) => new Date(a.dueAt).getTime() < now.getTime(),
-  );
+export function overdueActionItems(pm: Postmortem, now: Date = new Date()): readonly ActionItem[] {
+  return openActionItems(pm).filter((a) => new Date(a.dueAt).getTime() < now.getTime());
 }
 
 export function preventsRecurrenceItems(pm: Postmortem): readonly ActionItem[] {

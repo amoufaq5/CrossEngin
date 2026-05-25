@@ -13,7 +13,10 @@ function fixtureRoute(): RouteDefinition {
     id: "rt_route0001",
     operationId: "tenants.create",
     method: "POST",
-    pathSegments: [{ kind: "literal", value: "v1" }, { kind: "literal", value: "tenants" }],
+    pathSegments: [
+      { kind: "literal", value: "v1" },
+      { kind: "literal", value: "tenants" },
+    ],
     apiVersion: "v1",
     isDeprecated: false,
     deprecatedSince: null,
@@ -44,11 +47,15 @@ function mockConnection(
 
 describe("PostgresRateLimitChecker — constructor validation", () => {
   it("rejects limit < 1", () => {
-    expect(() => new PostgresRateLimitChecker({ conn: mockConnection(), limit: 0, windowSeconds: 60 })).toThrow(/limit/);
+    expect(
+      () => new PostgresRateLimitChecker({ conn: mockConnection(), limit: 0, windowSeconds: 60 }),
+    ).toThrow(/limit/);
   });
 
   it("rejects windowSeconds < 1", () => {
-    expect(() => new PostgresRateLimitChecker({ conn: mockConnection(), limit: 1, windowSeconds: 0 })).toThrow(/windowSeconds/);
+    expect(
+      () => new PostgresRateLimitChecker({ conn: mockConnection(), limit: 1, windowSeconds: 0 }),
+    ).toThrow(/windowSeconds/);
   });
 });
 
@@ -64,7 +71,13 @@ describe("PostgresRateLimitChecker.check — allow vs deny", () => {
     const req = {} as IncomingRequest;
     const now = new Date("2026-05-16T12:00:00.000Z");
     for (let i = 0; i < 3; i++) {
-      const d = await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now });
+      const d = await checker.check({
+        tenantId: TENANT,
+        principalId: USER,
+        route,
+        request: req,
+        now,
+      });
       expect(d.allowed).toBe(true);
     }
   });
@@ -79,7 +92,13 @@ describe("PostgresRateLimitChecker.check — allow vs deny", () => {
     const req = {} as IncomingRequest;
     const now = new Date("2026-05-16T12:00:00.000Z");
     await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now });
-    const d = await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now });
+    const d = await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route,
+      request: req,
+      now,
+    });
     expect(d.allowed).toBe(false);
     expect(d.retryAfterSeconds).toBeGreaterThan(0);
     expect(d.decisionId).toMatch(/^rld_[0-9a-z]{20}$/);
@@ -95,9 +114,27 @@ describe("PostgresRateLimitChecker.check — allow vs deny", () => {
     const req = {} as IncomingRequest;
     const firstWindow = new Date("2026-05-16T12:00:00.000Z");
     const nextWindow = new Date("2026-05-16T12:02:00.000Z");
-    const a = await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now: firstWindow });
-    const b = await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now: firstWindow });
-    const c = await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now: nextWindow });
+    const a = await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route,
+      request: req,
+      now: firstWindow,
+    });
+    const b = await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route,
+      request: req,
+      now: firstWindow,
+    });
+    const c = await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route,
+      request: req,
+      now: nextWindow,
+    });
     expect(a.allowed).toBe(true);
     expect(b.allowed).toBe(false);
     expect(c.allowed).toBe(true);
@@ -113,8 +150,20 @@ describe("PostgresRateLimitChecker.check — allow vs deny", () => {
     const r2: RouteDefinition = { ...r1, id: "rt_route0002", operationId: "tenants.list" };
     const req = {} as IncomingRequest;
     const now = new Date("2026-05-16T12:00:00.000Z");
-    const a = await checker.check({ tenantId: TENANT, principalId: USER, route: r1, request: req, now });
-    const b = await checker.check({ tenantId: TENANT, principalId: USER, route: r2, request: req, now });
+    const a = await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route: r1,
+      request: req,
+      now,
+    });
+    const b = await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route: r2,
+      request: req,
+      now,
+    });
     expect(a.allowed).toBe(true);
     expect(b.allowed).toBe(true);
   });
@@ -152,9 +201,21 @@ describe("PostgresRateLimitChecker — decision persistence", () => {
     });
     const route = fixtureRoute();
     const req = {} as IncomingRequest;
-    await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now: new Date("2026-05-16T12:00:00.000Z") });
+    await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route,
+      request: req,
+      now: new Date("2026-05-16T12:00:00.000Z"),
+    });
     capture.length = 0;
-    await checker.check({ tenantId: TENANT, principalId: USER, route, request: req, now: new Date("2026-05-16T12:00:01.000Z") });
+    await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route,
+      request: req,
+      now: new Date("2026-05-16T12:00:01.000Z"),
+    });
     const insert = capture.find((c) => c.sql.includes("INSERT INTO meta.rate_limit_decisions"));
     expect(insert?.params?.[6]).toBe("denied_rate_limit_exceeded");
   });

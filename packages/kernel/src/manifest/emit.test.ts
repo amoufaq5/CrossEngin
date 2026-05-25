@@ -13,9 +13,7 @@ function manifest(entities: Entity[]): Manifest {
 
 describe("emitManifestCreate", () => {
   it("emits CREATE TABLE statements", () => {
-    const m = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const statements = emitManifestCreate(m, { schema });
     expect(statements[0]).toContain(`CREATE TABLE "t_acme"."patient"`);
   });
@@ -31,9 +29,7 @@ describe("emitManifestCreate", () => {
     const statements = emitManifestCreate(m, { schema });
     const createStatements = statements.filter((s) => s.startsWith("CREATE TABLE"));
     const patientIdx = createStatements.findIndex((s) => s.includes(`."patient" (`));
-    const prescriptionIdx = createStatements.findIndex((s) =>
-      s.includes(`."prescription" (`),
-    );
+    const prescriptionIdx = createStatements.findIndex((s) => s.includes(`."prescription" (`));
     expect(patientIdx).toBeLessThan(prescriptionIdx);
   });
 
@@ -56,9 +52,7 @@ describe("emitManifestCreate", () => {
       traits: [
         {
           name: "geocoded",
-          fields: [
-            { name: "latitude", type: { kind: "decimal", precision: 10, scale: 6 } },
-          ],
+          fields: [{ name: "latitude", type: { kind: "decimal", precision: 10, scale: 6 } }],
         },
       ],
     };
@@ -73,18 +67,14 @@ describe("emitManifestDiff", () => {
       { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
       { name: "Old", fields: [{ name: "x", type: { kind: "text" } }] },
     ]);
-    const m2 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m2 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const diff = computeManifestDiff(m1, m2);
     const statements = emitManifestDiff(m2, diff, { schema });
     expect(statements).toContain(`DROP TABLE "t_acme"."old" CASCADE;`);
   });
 
   it("emits CREATE TABLE for added entities", () => {
-    const m1 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m1 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const m2 = manifest([
       { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
       { name: "Address", fields: [{ name: "line1", type: { kind: "text" } }] },
@@ -95,9 +85,7 @@ describe("emitManifestDiff", () => {
   });
 
   it("emits ALTER statements for modified entities", () => {
-    const m1 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m1 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const m2 = manifest([
       {
         name: "Patient",
@@ -109,9 +97,7 @@ describe("emitManifestDiff", () => {
     ]);
     const diff = computeManifestDiff(m1, m2);
     const statements = emitManifestDiff(m2, diff, { schema });
-    expect(statements).toContain(
-      `ALTER TABLE "t_acme"."patient" ADD COLUMN "email" VARCHAR(320);`,
-    );
+    expect(statements).toContain(`ALTER TABLE "t_acme"."patient" ADD COLUMN "email" VARCHAR(320);`);
   });
 
   it("emits drops before modifies before adds", () => {
@@ -144,17 +130,13 @@ describe("emitManifestDiff", () => {
 
 describe("applyManifest", () => {
   it("with null old, emits the full CREATE pipeline", () => {
-    const m = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const statements = applyManifest(null, m, { schema });
     expect(statements[0]).toContain(`CREATE TABLE "t_acme"."patient"`);
   });
 
   it("with non-null old, emits diff-based pipeline", () => {
-    const m1 = manifest([
-      { name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] },
-    ]);
+    const m1 = manifest([{ name: "Patient", fields: [{ name: "name", type: { kind: "text" } }] }]);
     const m2 = manifest([
       {
         name: "Patient",
@@ -165,8 +147,6 @@ describe("applyManifest", () => {
       },
     ]);
     const statements = applyManifest(m1, m2, { schema });
-    expect(statements).toEqual([
-      `ALTER TABLE "t_acme"."patient" ADD COLUMN "email" VARCHAR(320);`,
-    ]);
+    expect(statements).toEqual([`ALTER TABLE "t_acme"."patient" ADD COLUMN "email" VARCHAR(320);`]);
   });
 });

@@ -88,10 +88,7 @@ export const FlakeQuarantineTicketSchema = z
   });
 export type FlakeQuarantineTicket = z.infer<typeof FlakeQuarantineTicketSchema>;
 
-export function isTicketOverdue(
-  ticket: FlakeQuarantineTicket,
-  now: Date = new Date(),
-): boolean {
+export function isTicketOverdue(ticket: FlakeQuarantineTicket, now: Date = new Date()): boolean {
   const slaMs = ticket.quarantineSlaDays * 86_400_000;
   return now.getTime() - new Date(ticket.quarantinedAt).getTime() > slaMs;
 }

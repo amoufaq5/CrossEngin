@@ -118,15 +118,13 @@ describe("EvaluationRunSchema", () => {
   });
 
   it("rejects counter sum mismatch", () => {
-    expect(() =>
-      EvaluationRunSchema.parse({ ...base, examplesEvaluated: 200 }),
-    ).toThrow(/must equal examplesEvaluated/);
+    expect(() => EvaluationRunSchema.parse({ ...base, examplesEvaluated: 200 })).toThrow(
+      /must equal examplesEvaluated/,
+    );
   });
 
   it("rejects passRate not matching passed/evaluated", () => {
-    expect(() =>
-      EvaluationRunSchema.parse({ ...base, passRate: 0.5 }),
-    ).toThrow(/does not match/);
+    expect(() => EvaluationRunSchema.parse({ ...base, passRate: 0.5 })).toThrow(/does not match/);
   });
 
   it("rejects p99 < p50", () => {
@@ -189,9 +187,9 @@ describe("EvaluationRunSchema", () => {
   });
 
   it("rejects completedAt without durationSeconds", () => {
-    expect(() =>
-      EvaluationRunSchema.parse({ ...base, durationSeconds: null }),
-    ).toThrow(/durationSeconds/);
+    expect(() => EvaluationRunSchema.parse({ ...base, durationSeconds: null })).toThrow(
+      /durationSeconds/,
+    );
   });
 });
 
@@ -241,17 +239,36 @@ describe("helpers", () => {
   };
 
   it("isRegression compares pass rate vs baseline", () => {
-    const baseline: EvaluationRun = { ...base, id: "evalrun_b", passRate: 0.95, examplesPassed: 95, examplesFailed: 5 };
+    const baseline: EvaluationRun = {
+      ...base,
+      id: "evalrun_b",
+      passRate: 0.95,
+      examplesPassed: 95,
+      examplesFailed: 5,
+    };
     expect(isRegression(base, baseline)).toBe(true);
   });
 
   it("isRegression false for different eval set", () => {
-    const other: EvaluationRun = { ...base, id: "evalrun_b", evalSetId: "eval_b", passRate: 0.95, examplesPassed: 95, examplesFailed: 5 };
+    const other: EvaluationRun = {
+      ...base,
+      id: "evalrun_b",
+      evalSetId: "eval_b",
+      passRate: 0.95,
+      examplesPassed: 95,
+      examplesFailed: 5,
+    };
     expect(isRegression(base, other)).toBe(false);
   });
 
   it("passRateDelta computes signed delta", () => {
-    const baseline: EvaluationRun = { ...base, id: "evalrun_b", passRate: 0.85, examplesPassed: 85, examplesFailed: 15 };
+    const baseline: EvaluationRun = {
+      ...base,
+      id: "evalrun_b",
+      passRate: 0.85,
+      examplesPassed: 85,
+      examplesFailed: 15,
+    };
     expect(passRateDelta(base, baseline)).toBeCloseTo(0.05);
   });
 
@@ -261,7 +278,14 @@ describe("helpers", () => {
 
   it("blocksPromotion true when failed + blocks=true", () => {
     expect(
-      blocksPromotion({ ...base, verdict: "failed", blocksPromotion: true, examplesPassed: 50, examplesFailed: 50, passRate: 0.5 }),
+      blocksPromotion({
+        ...base,
+        verdict: "failed",
+        blocksPromotion: true,
+        examplesPassed: 50,
+        examplesFailed: 50,
+        passRate: 0.5,
+      }),
     ).toBe(true);
   });
 

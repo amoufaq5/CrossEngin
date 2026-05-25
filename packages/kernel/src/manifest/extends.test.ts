@@ -365,11 +365,7 @@ describe("resolveManifest — transitive", () => {
       entities: [{ name: "FromA", fields: [{ name: "x", type: { kind: "text" } }] }],
     };
     const resolved = await resolveManifest(a, { registry: registryFrom({ b, c }) });
-    expect(resolved.entities?.map((e) => e.name).sort()).toEqual([
-      "FromA",
-      "FromB",
-      "FromC",
-    ]);
+    expect(resolved.entities?.map((e) => e.name).sort()).toEqual(["FromA", "FromB", "FromC"]);
   });
 });
 
@@ -383,9 +379,9 @@ describe("resolveManifest — errors", () => {
       manifestVersion: "1.0",
       meta: { name: "B", slug: "b", version: v, extends: ["a"] },
     };
-    await expect(
-      resolveManifest(a, { registry: registryFrom({ a, b }) }),
-    ).rejects.toBeInstanceOf(ExtendsCycleError);
+    await expect(resolveManifest(a, { registry: registryFrom({ a, b }) })).rejects.toBeInstanceOf(
+      ExtendsCycleError,
+    );
   });
 
   it("throws ExtendsCycleError on a longer cycle", async () => {
@@ -411,9 +407,9 @@ describe("resolveManifest — errors", () => {
       manifestVersion: "1.0",
       meta: { name: "M", slug: "m", version: v, extends: ["nonexistent"] },
     };
-    await expect(
-      resolveManifest(m, { registry: registryFrom({}) }),
-    ).rejects.toBeInstanceOf(UnknownParentManifestError);
+    await expect(resolveManifest(m, { registry: registryFrom({}) })).rejects.toBeInstanceOf(
+      UnknownParentManifestError,
+    );
   });
 });
 
@@ -506,10 +502,7 @@ describe("resolveManifest — manifestResolution provenance", () => {
     const resolved = await resolveManifest(child, {
       registry: registryFrom({ p: parent, gp: grandparent }),
     });
-    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual([
-      "p",
-      "gp",
-    ]);
+    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual(["p", "gp"]);
   });
 
   it("records multiple parents in left-to-right order", async () => {
@@ -528,9 +521,6 @@ describe("resolveManifest — manifestResolution provenance", () => {
     const resolved = await resolveManifest(child, {
       registry: registryFrom({ p1, p2 }),
     });
-    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual([
-      "p1",
-      "p2",
-    ]);
+    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual(["p1", "p2"]);
   });
 });

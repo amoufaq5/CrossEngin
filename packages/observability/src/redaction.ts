@@ -62,7 +62,13 @@ function redactNode(
   if (node === null || typeof node !== "object") return node;
   if (Array.isArray(node)) {
     return node.map((item, i) =>
-      redactNode(item, path === "" ? `[${i}]` : `${path}[${i}]`, fieldClasses, policy, redactedPaths),
+      redactNode(
+        item,
+        path === "" ? `[${i}]` : `${path}[${i}]`,
+        fieldClasses,
+        policy,
+        redactedPaths,
+      ),
     );
   }
   const out: Record<string, unknown> = {};

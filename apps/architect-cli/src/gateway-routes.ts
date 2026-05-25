@@ -1,29 +1,15 @@
 import { readFile } from "node:fs/promises";
 
-import {
-  RouteDefinitionSchema,
-  type RouteDefinition,
-} from "@crossengin/api-gateway";
+import { RouteDefinitionSchema, type RouteDefinition } from "@crossengin/api-gateway";
 import { PostgresRouteRegistry } from "@crossengin/api-gateway-pg";
-import {
-  resolveManifest,
-  tryValidateManifest,
-  type Manifest,
-} from "@crossengin/kernel/manifest";
-import {
-  createNodePgConnection,
-  parsePgEnvConfig,
-  type PgConnection,
-} from "@crossengin/kernel-pg";
+import { resolveManifest, tryValidateManifest, type Manifest } from "@crossengin/kernel/manifest";
+import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson, printSuccess } from "./format.js";
-import {
-  generatePackRoutes,
-  type PackRouteRecord,
-} from "./gateway-pack-routes.js";
+import { generatePackRoutes, type PackRouteRecord } from "./gateway-pack-routes.js";
 import {
   listAvailablePacks,
   packManifestRegistry,
@@ -96,9 +82,7 @@ interface ResolvedRegistry {
   readonly close: () => Promise<void>;
 }
 
-async function resolveRegistry(
-  ctx: GatewayRoutesContext,
-): Promise<ResolvedRegistry | null> {
+async function resolveRegistry(ctx: GatewayRoutesContext): Promise<ResolvedRegistry | null> {
   if (ctx.registryOverride !== undefined) {
     return { registry: ctx.registryOverride, close: async () => undefined };
   }
@@ -239,9 +223,7 @@ export function formatRoutesTable(routes: readonly RouteDefinition[]): string {
     r.requiredScopes.length === 0 ? "-" : r.requiredScopes.join(","),
     r.isDeprecated ? "yes" : "no",
   ]);
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((row) => row[i]!.length)),
-  );
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i]!.length)));
   const pad = (cells: readonly string[]): string =>
     cells.map((c, i) => c.padEnd(widths[i]!)).join("  ");
   const sep = widths.map((w) => "-".repeat(w)).join("  ");
@@ -277,10 +259,7 @@ async function runRoutesRegisterPack(
     resolved = resolvePack(slug);
   } catch (err) {
     if (err instanceof UnknownPackError) {
-      printError(
-        ctx.io,
-        `gateway routes register-pack: ${err.message}`,
-      );
+      printError(ctx.io, `gateway routes register-pack: ${err.message}`);
       return 2;
     }
     throw err;
@@ -358,10 +337,7 @@ async function runRoutesRegisterPack(
       routes: records.map((r) => r.route),
     });
   } else {
-    printSuccess(
-      ctx.io,
-      `registered ${records.length.toString()} route(s) for pack '${slug}'.`,
-    );
+    printSuccess(ctx.io, `registered ${records.length.toString()} route(s) for pack '${slug}'.`);
     for (const r of records) {
       const path = formatPath(r.route);
       ctx.io.stdout.write(
@@ -414,10 +390,7 @@ async function runRoutesUnregisterPack(
     resolved = resolvePack(slug);
   } catch (err) {
     if (err instanceof UnknownPackError) {
-      printError(
-        ctx.io,
-        `gateway routes unregister-pack: ${err.message}`,
-      );
+      printError(ctx.io, `gateway routes unregister-pack: ${err.message}`);
       return 2;
     }
     throw err;
@@ -549,10 +522,7 @@ async function runUnregisterPackBySourcePack(
       dryRun: false,
     });
   } else {
-    printSuccess(
-      ctx.io,
-      `deleted ${deleted.toString()} route(s) where source_pack = '${slug}'.`,
-    );
+    printSuccess(ctx.io, `deleted ${deleted.toString()} route(s) where source_pack = '${slug}'.`);
   }
   return 0;
 }
@@ -620,12 +590,8 @@ async function runRoutesSyncPack(
   const storedIds = new Set(stored.map((r) => r.id));
   const added = records.filter((r) => !storedIds.has(r.route.id));
   const persistent = records.filter((r) => storedIds.has(r.route.id));
-  const obsolete = stored.filter(
-    (r) => r.sourcePack === slug && !generatedIds.has(r.id),
-  );
-  const external = stored.filter(
-    (r) => r.sourcePack !== slug && !generatedIds.has(r.id),
-  );
+  const obsolete = stored.filter((r) => r.sourcePack === slug && !generatedIds.has(r.id));
+  const external = stored.filter((r) => r.sourcePack !== slug && !generatedIds.has(r.id));
 
   const dryRun = getBooleanFlag(command, "dry-run");
   const pruneObsolete = getBooleanFlag(command, "prune-obsolete");
@@ -651,17 +617,21 @@ async function runRoutesSyncPack(
         ctx.io,
         `-- dry-run: pack '${slug}' would sync ${records.length.toString()} route(s) (${added.length.toString()} added, ${persistent.length.toString()} refreshed${obsolete.length > 0 ? obsoleteSuffix : ""}, ${external.length.toString()} external — left alone).`,
       );
-      printPackRouteList(ctx, "added", added.map((r) => r.route));
-      printPackRouteList(ctx, "refreshed", persistent.map((r) => r.route));
+      printPackRouteList(
+        ctx,
+        "added",
+        added.map((r) => r.route),
+      );
+      printPackRouteList(
+        ctx,
+        "refreshed",
+        persistent.map((r) => r.route),
+      );
       const obsoleteLabel = pruneObsolete
         ? "obsolete (will be pruned)"
         : "obsolete (left alone — use --prune-obsolete to delete)";
       printStoredRouteList(ctx, obsoleteLabel, obsolete);
-      printStoredRouteList(
-        ctx,
-        "external (not part of this pack, left alone)",
-        external,
-      );
+      printStoredRouteList(ctx, "external (not part of this pack, left alone)", external);
     }
     return 0;
   }

@@ -22,8 +22,7 @@ export const pack: CompliancePack = {
         type: "integer",
         min: 7,
         default: 7,
-        helpText:
-          "Years to retain audit records on gxp_signed entities. Minimum 7 per §11.10(e).",
+        helpText: "Years to retain audit records on gxp_signed entities. Minimum 7 per §11.10(e).",
       },
       signatureMeaningStatement: {
         type: "localized-string",

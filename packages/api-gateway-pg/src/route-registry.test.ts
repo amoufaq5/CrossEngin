@@ -116,7 +116,12 @@ describe("PostgresRouteRegistry — after loading", () => {
 
   it("parses path_segments delivered as JSON-text", async () => {
     const conn = mockConnection([
-      routeRow({ path_segments: JSON.stringify([{ kind: "literal", value: "v1" }, { kind: "literal", value: "tenants" }]) }),
+      routeRow({
+        path_segments: JSON.stringify([
+          { kind: "literal", value: "v1" },
+          { kind: "literal", value: "tenants" },
+        ]),
+      }),
     ]);
     const registry = new PostgresRouteRegistry({ conn });
     await registry.ensureLoaded();
@@ -243,7 +248,9 @@ describe("PostgresRouteRegistry — deleteByRouteId", () => {
 
   it("returns false when no row matched the route id", async () => {
     const conn: PgConnection = {
-      query: vi.fn(async (): Promise<PgQueryResult> => ({ rows: [], rowCount: 0 })) as PgConnection["query"],
+      query: vi.fn(
+        async (): Promise<PgQueryResult> => ({ rows: [], rowCount: 0 }),
+      ) as PgConnection["query"],
       transaction: vi.fn() as PgConnection["transaction"],
       withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
       close: vi.fn() as PgConnection["close"],
@@ -363,7 +370,9 @@ describe("PostgresRouteRegistry — source_pack (M4.10)", () => {
 
   it("deleteByPackSlug returns 0 when no rows match (idempotent)", async () => {
     const conn: PgConnection = {
-      query: vi.fn(async (): Promise<PgQueryResult> => ({ rows: [], rowCount: 0 })) as PgConnection["query"],
+      query: vi.fn(
+        async (): Promise<PgQueryResult> => ({ rows: [], rowCount: 0 }),
+      ) as PgConnection["query"],
       transaction: vi.fn() as PgConnection["transaction"],
       withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
       close: vi.fn() as PgConnection["close"],

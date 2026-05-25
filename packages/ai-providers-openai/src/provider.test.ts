@@ -33,13 +33,15 @@ interface CapturedCall {
   body: string | Uint8Array;
 }
 
-function buildFetch(opts: {
-  status?: number;
-  responseBody?: string;
-  asStream?: boolean;
-  capture?: CapturedCall[];
-  throwOnce?: Error;
-} = {}): FetchLike {
+function buildFetch(
+  opts: {
+    status?: number;
+    responseBody?: string;
+    asStream?: boolean;
+    capture?: CapturedCall[];
+    throwOnce?: Error;
+  } = {},
+): FetchLike {
   const status = opts.status ?? 200;
   const responseBody = opts.responseBody ?? STREAM_SAMPLE;
   let didThrow = false;
@@ -73,9 +75,7 @@ function buildFetch(opts: {
   };
 }
 
-function fixtureRequest(
-  overrides: Partial<CompletionRequest> = {},
-): CompletionRequest {
+function fixtureRequest(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
   return {
     task: "executor",
     messages: [{ role: "user", content: "Hello" }],
@@ -148,10 +148,7 @@ describe("OpenAIProvider.complete — streaming", () => {
     const chunks: CompletionChunk[] = [];
     for await (const c of provider.complete(fixtureRequest())) chunks.push(c);
     const texts = chunks.filter((c) => c.kind === "text");
-    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual([
-      "Hello",
-      " there",
-    ]);
+    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual(["Hello", " there"]);
     const final = chunks.find((c) => c.kind === "usage_final");
     expect(final?.kind).toBe("usage_final");
     if (final?.kind === "usage_final") {
@@ -204,9 +201,7 @@ describe("OpenAIProvider.complete — streaming", () => {
       fetch: buildFetch({ asStream: true }),
     });
     await expect(async () => {
-      for await (const _ of provider.complete(
-        fixtureRequest({ model: "claude-sonnet-4-6" }),
-      )) {
+      for await (const _ of provider.complete(fixtureRequest({ model: "claude-sonnet-4-6" }))) {
         void _;
       }
     }).rejects.toMatchObject({ kind: "invalid_request_error" });
@@ -266,9 +261,7 @@ describe("OpenAIProvider.embed", () => {
   const EMBED_RESPONSE = JSON.stringify({
     object: "list",
     model: "text-embedding-3-small",
-    data: [
-      { object: "embedding", embedding: [0.1, 0.2, 0.3], index: 0 },
-    ],
+    data: [{ object: "embedding", embedding: [0.1, 0.2, 0.3], index: 0 }],
     usage: { prompt_tokens: 5, total_tokens: 5 },
   });
 
@@ -310,9 +303,9 @@ describe("OpenAIProvider.embed", () => {
         }),
       }),
     });
-    await expect(
-      provider.embed({ texts: ["x"], tenantId: TENANT }),
-    ).rejects.toMatchObject({ kind: "authentication_error" });
+    await expect(provider.embed({ texts: ["x"], tenantId: TENANT })).rejects.toMatchObject({
+      kind: "authentication_error",
+    });
   });
 });
 
@@ -355,7 +348,11 @@ describe("OpenAIProvider — Responses API path", () => {
     const provider = new OpenAIProvider({
       apiKey: API_KEY,
       defaultApiPath: "responses",
-      fetch: buildFetch({ asStream: true, capture: captured, responseBody: RESPONSES_STREAM_SAMPLE }),
+      fetch: buildFetch({
+        asStream: true,
+        capture: captured,
+        responseBody: RESPONSES_STREAM_SAMPLE,
+      }),
     });
     for await (const _ of provider.complete(fixtureRequest())) void _;
     expect(captured).toHaveLength(1);
@@ -372,10 +369,7 @@ describe("OpenAIProvider — Responses API path", () => {
       chunks.push(c);
     }
     const texts = chunks.filter((c) => c.kind === "text");
-    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual([
-      "Hello",
-      " world",
-    ]);
+    expect(texts.map((c) => (c.kind === "text" ? c.text : ""))).toEqual(["Hello", " world"]);
     const final = chunks.find((c) => c.kind === "usage_final");
     if (final?.kind === "usage_final") {
       expect(final.usage.inputTokens).toBe(9);
@@ -388,7 +382,11 @@ describe("OpenAIProvider — Responses API path", () => {
     const provider = new OpenAIProvider({
       apiKey: API_KEY,
       reasoningEffort: "high",
-      fetch: buildFetch({ asStream: true, capture: captured, responseBody: RESPONSES_STREAM_SAMPLE }),
+      fetch: buildFetch({
+        asStream: true,
+        capture: captured,
+        responseBody: RESPONSES_STREAM_SAMPLE,
+      }),
     });
     for await (const _ of provider.completeViaResponses(fixtureRequest())) void _;
     const body = JSON.parse(captured[0]!.body as string) as { reasoning?: { effort: string } };
@@ -504,9 +502,7 @@ describe("OpenAIProvider Files API (M2.X.5.aa.z)", () => {
     expect(file.purpose).toBe("user_data");
     expect(captured[0]!.url).toBe("https://api.openai.com/v1/files");
     expect(captured[0]!.method).toBe("POST");
-    expect(captured[0]!.headers["content-type"]).toMatch(
-      /^multipart\/form-data; boundary=/,
-    );
+    expect(captured[0]!.headers["content-type"]).toMatch(/^multipart\/form-data; boundary=/);
   });
 
   it("uploadFile rejects invalid purpose at the provider boundary", async () => {
@@ -586,8 +582,22 @@ describe("OpenAIProvider Files API (M2.X.5.aa.z)", () => {
         responseBody: JSON.stringify({
           object: "list",
           data: [
-            { id: "file-1", object: "file", bytes: 100, created_at: 1, filename: "a.pdf", purpose: "user_data" },
-            { id: "file-2", object: "file", bytes: 200, created_at: 2, filename: "b.pdf", purpose: "user_data" },
+            {
+              id: "file-1",
+              object: "file",
+              bytes: 100,
+              created_at: 1,
+              filename: "a.pdf",
+              purpose: "user_data",
+            },
+            {
+              id: "file-2",
+              object: "file",
+              bytes: 200,
+              created_at: 2,
+              filename: "b.pdf",
+              purpose: "user_data",
+            },
           ],
         }),
       }),
@@ -626,9 +636,9 @@ describe("OpenAIProvider Files API (M2.X.5.aa.z)", () => {
       apiKey: API_KEY,
       fetch: buildFetch({}),
     });
-    await expect(
-      provider.listFiles({ purpose: "training" as never }),
-    ).rejects.toThrow(/invalid purpose/);
+    await expect(provider.listFiles({ purpose: "training" as never })).rejects.toThrow(
+      /invalid purpose/,
+    );
   });
 
   it("listFiles rejects limit < 1 or > 10000", async () => {
@@ -783,9 +793,9 @@ describe("OpenAIProvider.moderate (M2.X.8)", () => {
       apiKey: API_KEY,
       fetch: buildFetch({}),
     });
-    await expect(
-      provider.moderate({ input: "x", model: "gpt-4o" as never }),
-    ).rejects.toThrow(/not a known OpenAI moderation model/);
+    await expect(provider.moderate({ input: "x", model: "gpt-4o" as never })).rejects.toThrow(
+      /not a known OpenAI moderation model/,
+    );
   });
 
   it("surfaces HTTP errors via fromHttpResponse → OpenAIError", async () => {

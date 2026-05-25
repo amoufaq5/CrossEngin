@@ -32,9 +32,7 @@ export const TERMINAL_INSTANCE_STATUSES: ReadonlySet<InstanceStatus> = new Set([
   "compensated",
 ]);
 
-export const INSTANCE_TRANSITIONS: Readonly<
-  Record<InstanceStatus, readonly InstanceStatus[]>
-> = {
+export const INSTANCE_TRANSITIONS: Readonly<Record<InstanceStatus, readonly InstanceStatus[]>> = {
   created: ["running", "cancelled"],
   running: [
     "waiting_for_signal",
@@ -59,10 +57,8 @@ export const INSTANCE_TRANSITIONS: Readonly<
   compensated: [],
 };
 
-export const canTransitionInstance = (
-  from: InstanceStatus,
-  to: InstanceStatus,
-): boolean => INSTANCE_TRANSITIONS[from].includes(to);
+export const canTransitionInstance = (from: InstanceStatus, to: InstanceStatus): boolean =>
+  INSTANCE_TRANSITIONS[from].includes(to);
 
 export const RELATED_ENTITY_KINDS = [
   "purchase_request",
@@ -105,14 +101,23 @@ export const WorkflowInstanceSchema = z
     id: z.string().regex(/^wfi_[a-z0-9]{8,40}$/),
     tenantId: z.string().uuid(),
     definitionId: z.string().regex(/^wfd_[a-z0-9]{8,32}$/),
-    definitionKey: z.string().regex(/^[a-z][a-z0-9_.-]*$/).max(120),
+    definitionKey: z
+      .string()
+      .regex(/^[a-z][a-z0-9_.-]*$/)
+      .max(120),
     definitionVersion: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/),
     status: z.enum(INSTANCE_STATUSES),
-    currentState: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+    currentState: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(80),
     variables: z.record(z.string(), z.unknown()).default({}),
     relatedEntity: RelatedEntityRefSchema.nullable(),
     correlationKey: z.string().max(200).nullable(),
-    parentInstanceId: z.string().regex(/^wfi_[a-z0-9]{8,40}$/).nullable(),
+    parentInstanceId: z
+      .string()
+      .regex(/^wfi_[a-z0-9]{8,40}$/)
+      .nullable(),
     startedAt: z.string().datetime({ offset: true }),
     startedByUserId: z.string().uuid().nullable(),
     startedBySystem: z.string().max(120).nullable(),
@@ -169,16 +174,11 @@ export const WorkflowInstanceSchema = z
       }
     }
     if (i.status === "failed") {
-      if (
-        i.failedAt === null ||
-        i.failureCode === null ||
-        i.failureMessage === null
-      ) {
+      if (i.failedAt === null || i.failureCode === null || i.failureMessage === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["failureCode"],
-          message:
-            "failed instance requires failedAt + failureCode + failureMessage",
+          message: "failed instance requires failedAt + failureCode + failureMessage",
         });
       }
     }
@@ -199,47 +199,33 @@ export const WorkflowInstanceSchema = z
       });
     }
     if (i.status === "compensated") {
-      if (
-        i.compensationStartedAt === null ||
-        i.compensationCompletedAt === null
-      ) {
+      if (i.compensationStartedAt === null || i.compensationCompletedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["compensationCompletedAt"],
-          message:
-            "compensated instance requires compensationStartedAt + compensationCompletedAt",
+          message: "compensated instance requires compensationStartedAt + compensationCompletedAt",
         });
       }
     }
-    if (
-      i.status === "waiting_for_signal" &&
-      i.awaitingSignalNames.length === 0
-    ) {
+    if (i.status === "waiting_for_signal" && i.awaitingSignalNames.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["awaitingSignalNames"],
         message: "waiting_for_signal instance must have ≥ 1 awaitingSignalNames",
       });
     }
-    if (
-      i.status === "waiting_for_timer" &&
-      i.awaitingTimerNames.length === 0
-    ) {
+    if (i.status === "waiting_for_timer" && i.awaitingTimerNames.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["awaitingTimerNames"],
         message: "waiting_for_timer instance must have ≥ 1 awaitingTimerNames",
       });
     }
-    if (
-      i.status === "waiting_for_activity" &&
-      i.awaitingActivityIds.length === 0
-    ) {
+    if (i.status === "waiting_for_activity" && i.awaitingActivityIds.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["awaitingActivityIds"],
-        message:
-          "waiting_for_activity instance must have ≥ 1 awaitingActivityIds",
+        message: "waiting_for_activity instance must have ≥ 1 awaitingActivityIds",
       });
     }
     if (i.startedByUserId === null && i.startedBySystem === null) {
@@ -258,24 +244,13 @@ export const isInstanceActive = (instance: WorkflowInstance): boolean =>
 export const isInstanceTerminal = (instance: WorkflowInstance): boolean =>
   TERMINAL_INSTANCE_STATUSES.has(instance.status);
 
-export const isInstanceTimedOut = (
-  instance: WorkflowInstance,
-  now: Date,
-): boolean => {
+export const isInstanceTimedOut = (instance: WorkflowInstance, now: Date): boolean => {
   if (isInstanceTerminal(instance)) return false;
   return now.getTime() >= Date.parse(instance.timeoutAt);
 };
 
-export const elapsedSinceLastTransitionSeconds = (
-  instance: WorkflowInstance,
-  now: Date,
-): number =>
-  Math.max(
-    0,
-    Math.floor(
-      (now.getTime() - Date.parse(instance.lastTransitionAt)) / 1000,
-    ),
-  );
+export const elapsedSinceLastTransitionSeconds = (instance: WorkflowInstance, now: Date): number =>
+  Math.max(0, Math.floor((now.getTime() - Date.parse(instance.lastTransitionAt)) / 1000));
 
 export const transitionInstance = (
   instance: WorkflowInstance,
@@ -284,9 +259,7 @@ export const transitionInstance = (
   now: Date,
 ): WorkflowInstance => {
   if (!canTransitionInstance(instance.status, toStatus)) {
-    throw new Error(
-      `cannot transition instance from ${instance.status} to ${toStatus}`,
-    );
+    throw new Error(`cannot transition instance from ${instance.status} to ${toStatus}`);
   }
   return {
     ...instance,

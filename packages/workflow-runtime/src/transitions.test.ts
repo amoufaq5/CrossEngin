@@ -18,10 +18,38 @@ function definitionFixture(): WorkflowDefinition {
     description: "",
     status: "published",
     states: [
-      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "submitted", kind: "intermediate", label: "Submitted", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "approved", kind: "terminal_success", label: "Approved", onEntryActions: [], onExitActions: [], slaSeconds: null },
-      { name: "rejected", kind: "terminal_failure", label: "Rejected", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "draft",
+        kind: "initial",
+        label: "Draft",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "submitted",
+        kind: "intermediate",
+        label: "Submitted",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "approved",
+        kind: "terminal_success",
+        label: "Approved",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      {
+        name: "rejected",
+        kind: "terminal_failure",
+        label: "Rejected",
+        onEntryActions: [],
+        onExitActions: [],
+        slaSeconds: null,
+      },
     ],
     transitions: [
       {
@@ -150,7 +178,10 @@ describe("chooseTransition", () => {
       kind: "signal_received",
       signalName: "approve",
     });
-    const chosen = chooseTransition(candidates, { variables: { amount: 1500 }, currentState: "submitted" });
+    const chosen = chooseTransition(candidates, {
+      variables: { amount: 1500 },
+      currentState: "submitted",
+    });
     expect(chosen?.name).toBe("approve_high");
   });
 
@@ -159,7 +190,10 @@ describe("chooseTransition", () => {
       kind: "signal_received",
       signalName: "approve",
     });
-    const chosen = chooseTransition(candidates, { variables: { amount: 500 }, currentState: "submitted" });
+    const chosen = chooseTransition(candidates, {
+      variables: { amount: 500 },
+      currentState: "submitted",
+    });
     expect(chosen?.name).toBe("approve_low");
   });
 
@@ -175,7 +209,9 @@ describe("chooseTransition", () => {
 
 describe("defaultGuardEvaluator", () => {
   it("always_true returns true", () => {
-    expect(defaultGuardEvaluator({ kind: "always_true" }, { variables: {}, currentState: "x" })).toBe(true);
+    expect(
+      defaultGuardEvaluator({ kind: "always_true" }, { variables: {}, currentState: "x" }),
+    ).toBe(true);
   });
 
   it("variable_equals matches equal values", () => {
@@ -197,7 +233,12 @@ describe("defaultGuardEvaluator", () => {
   });
 
   it("variable_predicate gt", () => {
-    const g = { kind: "variable_predicate" as const, variableName: "n", operator: "gt" as const, operand: 10 };
+    const g = {
+      kind: "variable_predicate" as const,
+      variableName: "n",
+      operator: "gt" as const,
+      operand: 10,
+    };
     expect(defaultGuardEvaluator(g, { variables: { n: 11 }, currentState: "s" })).toBe(true);
     expect(defaultGuardEvaluator(g, { variables: { n: 10 }, currentState: "s" })).toBe(false);
   });

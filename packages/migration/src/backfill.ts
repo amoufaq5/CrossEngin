@@ -17,22 +17,18 @@ export const BACKFILL_STATUSES = [
 export type BackfillStatus = (typeof BACKFILL_STATUSES)[number];
 export const BackfillStatusSchema = z.enum(BACKFILL_STATUSES);
 
-export const BACKFILL_TRANSITIONS: Readonly<
-  Record<BackfillStatus, readonly BackfillStatus[]>
-> = Object.freeze({
-  queued: ["running", "cancelled"],
-  running: ["paused", "completed", "completed_with_errors", "failed", "cancelled"],
-  paused: ["running", "cancelled"],
-  completed: [],
-  completed_with_errors: [],
-  failed: ["running"],
-  cancelled: [],
-});
+export const BACKFILL_TRANSITIONS: Readonly<Record<BackfillStatus, readonly BackfillStatus[]>> =
+  Object.freeze({
+    queued: ["running", "cancelled"],
+    running: ["paused", "completed", "completed_with_errors", "failed", "cancelled"],
+    paused: ["running", "cancelled"],
+    completed: [],
+    completed_with_errors: [],
+    failed: ["running"],
+    cancelled: [],
+  });
 
-export function canTransitionBackfill(
-  from: BackfillStatus,
-  to: BackfillStatus,
-): boolean {
+export function canTransitionBackfill(from: BackfillStatus, to: BackfillStatus): boolean {
   return BACKFILL_TRANSITIONS[from].includes(to);
 }
 
@@ -74,7 +70,13 @@ export const BackfillJobSchema = z
     checkpointToken: z.string().min(1).optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.status === "running" || v.status === "paused" || v.status === "completed" || v.status === "completed_with_errors" || v.status === "failed") {
+    if (
+      v.status === "running" ||
+      v.status === "paused" ||
+      v.status === "completed" ||
+      v.status === "completed_with_errors" ||
+      v.status === "failed"
+    ) {
       if (v.startedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -101,16 +103,14 @@ export const BackfillJobSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["rowsFailed"],
-        message:
-          "status='completed' must have rowsFailed=0; use 'completed_with_errors' instead",
+        message: "status='completed' must have rowsFailed=0; use 'completed_with_errors' instead",
       });
     }
     if (v.status === "completed_with_errors" && v.rowsFailed === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["rowsFailed"],
-        message:
-          "status='completed_with_errors' requires rowsFailed > 0",
+        message: "status='completed_with_errors' requires rowsFailed > 0",
       });
     }
     if (v.status === "failed" && v.lastError === undefined) {
@@ -140,19 +140,14 @@ export const BackfillJobSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["rowsProcessed"],
-        message: "rowsInserted + rowsUpdated + rowsSkipped + rowsFailed must not exceed rowsProcessed",
+        message:
+          "rowsInserted + rowsUpdated + rowsSkipped + rowsFailed must not exceed rowsProcessed",
       });
     }
   });
 export type BackfillJob = z.infer<typeof BackfillJobSchema>;
 
-export const LEDGER_OUTCOMES = [
-  "inserted",
-  "updated",
-  "skipped",
-  "failed",
-  "merged",
-] as const;
+export const LEDGER_OUTCOMES = ["inserted", "updated", "skipped", "failed", "merged"] as const;
 export type LedgerOutcome = (typeof LEDGER_OUTCOMES)[number];
 export const LedgerOutcomeSchema = z.enum(LEDGER_OUTCOMES);
 
@@ -178,9 +173,7 @@ export const BackfillLedgerEntrySchema = z
       });
     }
     if (
-      (v.outcome === "inserted" ||
-        v.outcome === "updated" ||
-        v.outcome === "merged") &&
+      (v.outcome === "inserted" || v.outcome === "updated" || v.outcome === "merged") &&
       v.targetRowId === null
     ) {
       ctx.addIssue({

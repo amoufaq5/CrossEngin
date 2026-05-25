@@ -91,7 +91,12 @@ describe("redact", () => {
 
   it("redacts array elements when their fields are sensitive", () => {
     const r = redact({
-      payload: { patients: [{ name: "A", email: "a@x" }, { name: "B", email: "b@x" }] },
+      payload: {
+        patients: [
+          { name: "A", email: "a@x" },
+          { name: "B", email: "b@x" },
+        ],
+      },
       fieldClasses: { email: "pii" },
     });
     expect(r.value).toEqual({

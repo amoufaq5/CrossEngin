@@ -51,17 +51,12 @@ describe("resolveCompliancePacks — single pack", () => {
           "21-cfr-part-11": { signatureMeaningStatement: { en: "I approve" } },
         },
       },
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
     };
     const result = await resolveCompliancePacks(m, {
       registry: registryFrom({ "21-cfr-part-11": part11Pack }),
     });
-    expect(result.entities?.map((e) => e.name).sort()).toEqual([
-      "Prescription",
-      "Signature",
-    ]);
+    expect(result.entities?.map((e) => e.name).sort()).toEqual(["Prescription", "Signature"]);
   });
 
   it("throws UnknownPackError when a pack is missing from the registry", async () => {
@@ -69,9 +64,9 @@ describe("resolveCompliancePacks — single pack", () => {
       manifestVersion: "1.0",
       meta: { name: "T", slug: "t", version: v, compliancePacks: ["nonexistent"] },
     };
-    await expect(
-      resolveCompliancePacks(m, { registry: registryFrom({}) }),
-    ).rejects.toBeInstanceOf(UnknownPackError);
+    await expect(resolveCompliancePacks(m, { registry: registryFrom({}) })).rejects.toBeInstanceOf(
+      UnknownPackError,
+    );
   });
 });
 
@@ -285,9 +280,7 @@ describe("resolveCompliancePacks — end-to-end with validateManifest", () => {
           "21-cfr-part-11": { signatureMeaningStatement: { en: "I approve" } },
         },
       },
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
     };
     const augmented = await resolveCompliancePacks(m, {
       registry: registryFrom({ "21-cfr-part-11": part11Pack }),
@@ -416,9 +409,7 @@ describe("resolveCompliancePacks — v1 showcase packs", () => {
           },
         },
       },
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
     };
     const result = await resolveCompliancePacks(m, { registry: v1Registry });
     const entityNames = (result.entities ?? []).map((e) => e.name).sort();

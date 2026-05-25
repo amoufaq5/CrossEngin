@@ -44,21 +44,19 @@ describe("ScalingPolicySchema", () => {
   });
 
   it("rejects minReplicas > maxReplicas", () => {
-    expect(() =>
-      ScalingPolicySchema.parse({ ...base, minReplicas: 30 }),
-    ).toThrow(/minReplicas cannot exceed maxReplicas/);
+    expect(() => ScalingPolicySchema.parse({ ...base, minReplicas: 30 })).toThrow(
+      /minReplicas cannot exceed maxReplicas/,
+    );
   });
 
   it("rejects flapping thresholds (down >= up)", () => {
-    expect(() =>
-      ScalingPolicySchema.parse({ ...base, scaleDownThreshold: 80 }),
-    ).toThrow(/strictly less than scaleUpThreshold/);
+    expect(() => ScalingPolicySchema.parse({ ...base, scaleDownThreshold: 80 })).toThrow(
+      /strictly less than scaleUpThreshold/,
+    );
   });
 
   it("rejects percentage signals with threshold > 100", () => {
-    expect(() =>
-      ScalingPolicySchema.parse({ ...base, scaleUpThreshold: 150 }),
-    ).toThrow(/0\.\.100/);
+    expect(() => ScalingPolicySchema.parse({ ...base, scaleUpThreshold: 150 })).toThrow(/0\.\.100/);
   });
 
   it("accepts non-percentage signals with thresholds above 100", () => {
@@ -95,9 +93,9 @@ describe("ScalingEventSchema", () => {
   });
 
   it("rejects scale_up with toReplicas <= fromReplicas", () => {
-    expect(() =>
-      ScalingEventSchema.parse({ ...base, toReplicas: 5 }),
-    ).toThrow(/scale_up decision requires toReplicas > fromReplicas/);
+    expect(() => ScalingEventSchema.parse({ ...base, toReplicas: 5 })).toThrow(
+      /scale_up decision requires toReplicas > fromReplicas/,
+    );
   });
 
   it("rejects scale_down with toReplicas >= fromReplicas", () => {
@@ -123,15 +121,13 @@ describe("ScalingEventSchema", () => {
   });
 
   it("rejects scale_up with non-threshold reason", () => {
-    expect(() =>
-      ScalingEventSchema.parse({ ...base, reason: "cooldown_active" }),
-    ).toThrow(/threshold_exceeded or manual_override/);
+    expect(() => ScalingEventSchema.parse({ ...base, reason: "cooldown_active" })).toThrow(
+      /threshold_exceeded or manual_override/,
+    );
   });
 
   it("rejects completedAt without durationMs", () => {
-    expect(() =>
-      ScalingEventSchema.parse({ ...base, durationMs: null }),
-    ).toThrow(/durationMs/);
+    expect(() => ScalingEventSchema.parse({ ...base, durationMs: null })).toThrow(/durationMs/);
   });
 });
 

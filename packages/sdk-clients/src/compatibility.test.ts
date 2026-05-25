@@ -46,9 +46,9 @@ describe("CompatibilityEntrySchema", () => {
   });
 
   it("rejects fully_compatible with warnings", () => {
-    expect(() =>
-      CompatibilityEntrySchema.parse({ ...base, warningCount: 5 }),
-    ).toThrow(/cannot have warnings/);
+    expect(() => CompatibilityEntrySchema.parse({ ...base, warningCount: 5 })).toThrow(
+      /cannot have warnings/,
+    );
   });
 
   it("rejects unsupported without notes", () => {
@@ -80,9 +80,9 @@ describe("CompatibilityMatrixSchema", () => {
       warningCount: 0,
       determinedAt: "2026-05-15T10:00:00Z",
     };
-    expect(() =>
-      CompatibilityMatrixSchema.parse([entry, entry]),
-    ).toThrow(/duplicate \(language, clientVersion, apiVersion\)/);
+    expect(() => CompatibilityMatrixSchema.parse([entry, entry])).toThrow(
+      /duplicate \(language, clientVersion, apiVersion\)/,
+    );
   });
 });
 

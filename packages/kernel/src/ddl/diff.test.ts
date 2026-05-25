@@ -104,9 +104,7 @@ describe("computeEntityDiff — field modification", () => {
     const e1: Entity = { name: "X", fields: [{ name: "a", type: { kind: "text" } }] };
     const e2: Entity = {
       name: "X",
-      fields: [
-        { name: "a", type: { kind: "text" }, default: { kind: "literal", value: "x" } },
-      ],
+      fields: [{ name: "a", type: { kind: "text" }, default: { kind: "literal", value: "x" } }],
     };
     const diff = computeEntityDiff(e1, e2);
     expect(diff.modifiedFields[0]?.defaultChange?.from).toBeUndefined();
@@ -116,9 +114,7 @@ describe("computeEntityDiff — field modification", () => {
   it("detects default removed", () => {
     const e1: Entity = {
       name: "X",
-      fields: [
-        { name: "a", type: { kind: "text" }, default: { kind: "literal", value: "x" } },
-      ],
+      fields: [{ name: "a", type: { kind: "text" }, default: { kind: "literal", value: "x" } }],
     };
     const e2: Entity = { name: "X", fields: [{ name: "a", type: { kind: "text" } }] };
     const diff = computeEntityDiff(e1, e2);
@@ -222,12 +218,7 @@ describe("computeEntityDiff — traits", () => {
     };
     const e2: Entity = { name: "X", fields: [{ name: "a", type: { kind: "text" } }] };
     const diff = computeEntityDiff(e1, e2);
-    expect(diff.removedFields).toEqual([
-      "created_at",
-      "updated_at",
-      "created_by",
-      "updated_by",
-    ]);
+    expect(diff.removedFields).toEqual(["created_at", "updated_at", "created_by", "updated_by"]);
     expect(diff.destructive).toBe(true);
   });
 
@@ -244,12 +235,7 @@ describe("computeEntityDiff — traits", () => {
     };
     const diff = computeEntityDiff(e1, e2);
     expect(diff.addedFields.map((f) => f.name)).toEqual(["deleted_at", "deleted_by"]);
-    expect(diff.removedFields).toEqual([
-      "created_at",
-      "updated_at",
-      "created_by",
-      "updated_by",
-    ]);
+    expect(diff.removedFields).toEqual(["created_at", "updated_at", "created_by", "updated_by"]);
   });
 });
 
@@ -278,12 +264,18 @@ describe("computeEntityDiff — indexes", () => {
   it("detects a removed explicit index", () => {
     const e1: Entity = {
       name: "X",
-      fields: [{ name: "a", type: { kind: "text" } }, { name: "b", type: { kind: "text" } }],
+      fields: [
+        { name: "a", type: { kind: "text" } },
+        { name: "b", type: { kind: "text" } },
+      ],
       indexes: [{ fields: ["a", "b"] }],
     };
     const e2: Entity = {
       name: "X",
-      fields: [{ name: "a", type: { kind: "text" } }, { name: "b", type: { kind: "text" } }],
+      fields: [
+        { name: "a", type: { kind: "text" } },
+        { name: "b", type: { kind: "text" } },
+      ],
     };
     const diff = computeEntityDiff(e1, e2);
     expect(diff.removedIndexes).toHaveLength(1);
@@ -332,9 +324,7 @@ describe("emitDiff", () => {
       removedIndexes: [],
       destructive: true,
     };
-    expect(emitDiff(diff, { schema })).toEqual([
-      `ALTER TABLE "t_acme"."x" DROP COLUMN "b";`,
-    ]);
+    expect(emitDiff(diff, { schema })).toEqual([`ALTER TABLE "t_acme"."x" DROP COLUMN "b";`]);
   });
 
   it("emits ALTER COLUMN TYPE for type changes", () => {
@@ -440,9 +430,7 @@ describe("emitDiff", () => {
       removedIndexes: [],
       destructive: false,
     };
-    expect(emitDiff(diff, { schema })).toEqual([
-      `CREATE INDEX "idx_x_a" ON "t_acme"."x" ("a");`,
-    ]);
+    expect(emitDiff(diff, { schema })).toEqual([`CREATE INDEX "idx_x_a" ON "t_acme"."x" ("a");`]);
   });
 
   it("emits DROP INDEX for removed indexes", () => {

@@ -70,7 +70,9 @@ export function formatRefusalMessage(input: FormatInput): {
   ]);
   for (const name of required) {
     if (!(name in input.params)) {
-      throw new Error(`refusal template '${input.template.id}' missing required placeholder '${name}'`);
+      throw new Error(
+        `refusal template '${input.template.id}' missing required placeholder '${name}'`,
+      );
     }
   }
   return {
@@ -83,32 +85,30 @@ function substitute(template: string, params: Readonly<Record<string, string>>):
   return template.replace(PLACEHOLDER_REGEX, (_match, name: string) => params[name] ?? "");
 }
 
-export const TemplateRegistrySchema = z
-  .array(RefusalTemplateSchema)
-  .superRefine((entries, ctx) => {
-    const ids = new Set<string>();
-    const byRefusalLocale = new Map<string, number>();
-    entries.forEach((t, i) => {
-      if (ids.has(t.id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i, "id"],
-          message: `duplicate template id '${t.id}'`,
-        });
-      }
-      ids.add(t.id);
-      const key = `${t.refusal}|${t.locale}`;
-      const prior = byRefusalLocale.get(key);
-      if (prior !== undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i],
-          message: `refusal '${t.refusal}' already has a template for locale '${t.locale}' (templates[${prior}])`,
-        });
-      }
-      byRefusalLocale.set(key, i);
-    });
+export const TemplateRegistrySchema = z.array(RefusalTemplateSchema).superRefine((entries, ctx) => {
+  const ids = new Set<string>();
+  const byRefusalLocale = new Map<string, number>();
+  entries.forEach((t, i) => {
+    if (ids.has(t.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i, "id"],
+        message: `duplicate template id '${t.id}'`,
+      });
+    }
+    ids.add(t.id);
+    const key = `${t.refusal}|${t.locale}`;
+    const prior = byRefusalLocale.get(key);
+    if (prior !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i],
+        message: `refusal '${t.refusal}' already has a template for locale '${t.locale}' (templates[${prior}])`,
+      });
+    }
+    byRefusalLocale.set(key, i);
   });
+});
 export type TemplateRegistry = z.infer<typeof TemplateRegistrySchema>;
 
 export function findTemplate(

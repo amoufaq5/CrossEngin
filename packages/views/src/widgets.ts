@@ -16,10 +16,9 @@ export const CustomWidgetDeclarationSchema = z.object({
       entity: z.string().min(1).optional(),
       fieldKind: z.string().min(1).optional(),
     })
-    .refine(
-      (v) => v.field !== undefined || v.entity !== undefined || v.fieldKind !== undefined,
-      { message: "appliesTo must specify at least one of field, entity, or fieldKind" },
-    ),
+    .refine((v) => v.field !== undefined || v.entity !== undefined || v.fieldKind !== undefined, {
+      message: "appliesTo must specify at least one of field, entity, or fieldKind",
+    }),
   capacitorOnly: z.boolean().default(false),
   requiresPermission: z.string().min(1).optional(),
   fallbackRender: z.enum(["text", "json", "hidden"]).default("text"),

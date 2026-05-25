@@ -228,10 +228,7 @@ describe("helpers", () => {
       retractedAt: "2026-05-15T13:00:00Z",
       retractedReason: "incorrect info",
     };
-    const result = publishedCommsFor(
-      [later, earlier, retracted],
-      "INC-2026-0042",
-    );
+    const result = publishedCommsFor([later, earlier, retracted], "INC-2026-0042");
     expect(result.map((c) => c.id)).toEqual(["a", "b"]);
   });
 });

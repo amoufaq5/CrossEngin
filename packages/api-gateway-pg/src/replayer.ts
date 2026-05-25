@@ -260,12 +260,14 @@ export class GatewayReplayer {
     };
   }
 
-  async listRecentExecutions(opts: {
-    readonly since?: Date;
-    readonly tenantId?: string;
-    readonly limit?: number;
-    readonly offset?: number;
-  } = {}): Promise<readonly string[]> {
+  async listRecentExecutions(
+    opts: {
+      readonly since?: Date;
+      readonly tenantId?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    } = {},
+  ): Promise<readonly string[]> {
     const limit = opts.limit ?? 1000;
     const offset = opts.offset ?? 0;
     const filters: string[] = [];
@@ -290,12 +292,14 @@ export class GatewayReplayer {
     return result.rows.map((r) => r.request_id);
   }
 
-  async bulkVerify(opts: {
-    readonly since?: Date;
-    readonly tenantId?: string;
-    readonly batchSize?: number;
-    readonly maxExecutions?: number;
-  } = {}): Promise<readonly ExecutionVerifyReport[]> {
+  async bulkVerify(
+    opts: {
+      readonly since?: Date;
+      readonly tenantId?: string;
+      readonly batchSize?: number;
+      readonly maxExecutions?: number;
+    } = {},
+  ): Promise<readonly ExecutionVerifyReport[]> {
     const batchSize = opts.batchSize ?? 100;
     const max = opts.maxExecutions ?? Number.POSITIVE_INFINITY;
     const reports: ExecutionVerifyReport[] = [];
@@ -320,10 +324,12 @@ export class GatewayReplayer {
     return reports;
   }
 
-  async summarize(opts: {
-    readonly since?: Date;
-    readonly tenantId?: string;
-  } = {}): Promise<ExecutionSummary> {
+  async summarize(
+    opts: {
+      readonly since?: Date;
+      readonly tenantId?: string;
+    } = {},
+  ): Promise<ExecutionSummary> {
     const filters: string[] = [];
     const params: unknown[] = [];
     if (opts.since !== undefined) {

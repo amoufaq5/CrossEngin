@@ -94,15 +94,13 @@ describe("LineageNodeSchema", () => {
   });
 
   it("rejects frozen without frozenAt + frozenSha256", () => {
-    expect(() =>
-      LineageNodeSchema.parse({ ...baseNode, status: "frozen" }),
-    ).toThrow(/frozen node requires frozenAt \+ frozenSha256/);
+    expect(() => LineageNodeSchema.parse({ ...baseNode, status: "frozen" })).toThrow(
+      /frozen node requires frozenAt \+ frozenSha256/,
+    );
   });
 
   it("rejects purged without purgedAt", () => {
-    expect(() =>
-      LineageNodeSchema.parse({ ...baseNode, status: "purged" }),
-    ).toThrow(/purgedAt/);
+    expect(() => LineageNodeSchema.parse({ ...baseNode, status: "purged" })).toThrow(/purgedAt/);
   });
 
   it("rejects aggregation_result without minimumKAnonymity", () => {
@@ -115,9 +113,9 @@ describe("LineageNodeSchema", () => {
   });
 
   it("rejects redacted_view classified as pii_personal (must downgrade)", () => {
-    expect(() =>
-      LineageNodeSchema.parse({ ...baseNode, kind: "redacted_view" }),
-    ).toThrow(/redacted_view classification must downgrade/);
+    expect(() => LineageNodeSchema.parse({ ...baseNode, kind: "redacted_view" })).toThrow(
+      /redacted_view classification must downgrade/,
+    );
   });
 
   it("rejects tenant_export without tenantId", () => {
@@ -136,9 +134,7 @@ describe("isRegulatedNode", () => {
     expect(isRegulatedNode(baseNode)).toBe(true);
   });
   it("does not flag public", () => {
-    expect(
-      isRegulatedNode({ ...baseNode, classification: "public" }),
-    ).toBe(false);
+    expect(isRegulatedNode({ ...baseNode, classification: "public" })).toBe(false);
   });
 });
 
@@ -156,29 +152,20 @@ describe("maxSensitivityOf", () => {
     expect(maxSensitivityOf([])).toBe("public");
   });
   it("returns highest of inputs", () => {
-    expect(
-      maxSensitivityOf(["internal", "pii_personal", "confidential"]),
-    ).toBe("pii_personal");
+    expect(maxSensitivityOf(["internal", "pii_personal", "confidential"])).toBe("pii_personal");
   });
 });
 
 describe("isWithinRetention", () => {
   it("returns true before retentionUntil", () => {
-    expect(
-      isWithinRetention(baseNode, new Date("2026-12-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isWithinRetention(baseNode, new Date("2026-12-01T00:00:00Z"))).toBe(true);
   });
   it("returns false past retentionUntil", () => {
-    expect(
-      isWithinRetention(baseNode, new Date("2033-01-01T00:00:00Z")),
-    ).toBe(false);
+    expect(isWithinRetention(baseNode, new Date("2033-01-01T00:00:00Z"))).toBe(false);
   });
   it("returns true when retentionUntil is null (indefinite)", () => {
     expect(
-      isWithinRetention(
-        { ...baseNode, retentionUntil: null },
-        new Date("2099-01-01T00:00:00Z"),
-      ),
+      isWithinRetention({ ...baseNode, retentionUntil: null }, new Date("2099-01-01T00:00:00Z")),
     ).toBe(true);
   });
 });

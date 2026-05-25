@@ -24,7 +24,10 @@ export const R2DeliverySchema = z.object({
   bucket: z.string().min(1),
   pathTemplate: z.string().min(1),
   formats: z.array(ExportFormatSchema).min(1).default(["pdf"]),
-  signedUrlExpiry: z.string().regex(/^P(?=.)(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$/).default("P1D"),
+  signedUrlExpiry: z
+    .string()
+    .regex(/^P(?=.)(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$/)
+    .default("P1D"),
 });
 
 export const WebhookDeliverySchema = z.object({

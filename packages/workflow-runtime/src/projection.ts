@@ -379,7 +379,7 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
         tenantId: event.tenantId,
         kind: (event.payload["kind"] as WorkflowActivity["kind"]) ?? "transformation",
         definitionActivityKey:
-          (asString(event.payload["definitionActivityKey"], "activity") ?? "activity"),
+          asString(event.payload["definitionActivityKey"], "activity") ?? "activity",
         status: "scheduled",
         attemptNumber:
           typeof event.payload["attemptNumber"] === "number"

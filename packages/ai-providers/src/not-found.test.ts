@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  NOT_FOUND_ERROR_KINDS,
-  isNotFoundError,
-  isNotFoundErrorKind,
-} from "./not-found.js";
+import { NOT_FOUND_ERROR_KINDS, isNotFoundError, isNotFoundErrorKind } from "./not-found.js";
 
 describe("NOT_FOUND_ERROR_KINDS", () => {
   it("includes not_found_error (HTTP 404 across all three providers)", () => {

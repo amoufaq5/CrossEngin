@@ -48,9 +48,7 @@ describe("CertificationRoadmapSchema", () => {
 
   it("requires certifiedAt when status is certified", () => {
     expect(() =>
-      CertificationRoadmapSchema.parse([
-        { standard: "soc2_type_ii", status: "certified" },
-      ]),
+      CertificationRoadmapSchema.parse([{ standard: "soc2_type_ii", status: "certified" }]),
     ).toThrow(/must declare certifiedAt/);
   });
 

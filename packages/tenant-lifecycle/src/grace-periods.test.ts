@@ -56,9 +56,7 @@ describe("GracePeriodSchema", () => {
   });
 
   it("rejects durationDays mismatch with expiresAt-startedAt", () => {
-    expect(() =>
-      GracePeriodSchema.parse({ ...base, durationDays: 5 }),
-    ).toThrow(/should match/);
+    expect(() => GracePeriodSchema.parse({ ...base, durationDays: 5 })).toThrow(/should match/);
   });
 
   it("rejects deletion_grace below minimum (14 days)", () => {

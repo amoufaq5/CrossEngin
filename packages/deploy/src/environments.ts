@@ -34,12 +34,13 @@ export const RUNTIME_TARGET: Readonly<Record<RuntimeProfile, DeployTarget>> = Ob
 export const DEPLOY_STRATEGIES = ["atomic", "rolling", "blue_green", "canary"] as const;
 export type DeployStrategy = (typeof DEPLOY_STRATEGIES)[number];
 
-export const ENVIRONMENT_STRATEGY: Readonly<Record<Environment, readonly DeployStrategy[]>> = Object.freeze({
-  local: ["atomic"],
-  preview: ["atomic", "rolling"],
-  staging: ["atomic", "rolling", "blue_green"],
-  production: ["atomic", "rolling", "blue_green", "canary"],
-});
+export const ENVIRONMENT_STRATEGY: Readonly<Record<Environment, readonly DeployStrategy[]>> =
+  Object.freeze({
+    local: ["atomic"],
+    preview: ["atomic", "rolling"],
+    staging: ["atomic", "rolling", "blue_green"],
+    production: ["atomic", "rolling", "blue_green", "canary"],
+  });
 
 export const TargetCredentialsRefSchema = z.object({
   target: DeployTargetSchema,
@@ -106,35 +107,33 @@ export const EnvironmentConfigSchema = z
   });
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
 
-export const EnvironmentSetSchema = z
-  .array(EnvironmentConfigSchema)
-  .superRefine((entries, ctx) => {
-    const primariesPerEnv = new Map<Environment, number>();
-    const byKey = new Set<string>();
-    entries.forEach((e, i) => {
-      const key = `${e.environment}|${e.region}`;
-      if (byKey.has(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [i],
-          message: `duplicate environment+region pair '${key}'`,
-        });
-      }
-      byKey.add(key);
-      if (e.isPrimary) {
-        primariesPerEnv.set(e.environment, (primariesPerEnv.get(e.environment) ?? 0) + 1);
-      }
-    });
-    for (const [env, count] of primariesPerEnv) {
-      if (count > 1) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [],
-          message: `environment '${env}' has ${count} primaries; exactly one must be primary`,
-        });
-      }
+export const EnvironmentSetSchema = z.array(EnvironmentConfigSchema).superRefine((entries, ctx) => {
+  const primariesPerEnv = new Map<Environment, number>();
+  const byKey = new Set<string>();
+  entries.forEach((e, i) => {
+    const key = `${e.environment}|${e.region}`;
+    if (byKey.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i],
+        message: `duplicate environment+region pair '${key}'`,
+      });
+    }
+    byKey.add(key);
+    if (e.isPrimary) {
+      primariesPerEnv.set(e.environment, (primariesPerEnv.get(e.environment) ?? 0) + 1);
     }
   });
+  for (const [env, count] of primariesPerEnv) {
+    if (count > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: `environment '${env}' has ${count} primaries; exactly one must be primary`,
+      });
+    }
+  }
+});
 export type EnvironmentSet = z.infer<typeof EnvironmentSetSchema>;
 
 export function targetFor(profile: RuntimeProfile): DeployTarget {

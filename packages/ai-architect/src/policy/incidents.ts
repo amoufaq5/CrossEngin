@@ -43,9 +43,9 @@ export const AiIncidentSchema = z.object({
   affectedTenantIds: z.array(Uuid).default([]),
   triggeringConversationId: z.string().min(1).nullable().default(null),
   triggeringEvalCaseId: z.string().min(1).nullable().default(null),
-  notificationStatus: z.enum(["not_required", "pending", "in_progress", "completed"]).default(
-    "not_required",
-  ),
+  notificationStatus: z
+    .enum(["not_required", "pending", "in_progress", "completed"])
+    .default("not_required"),
   postMortemPath: z.string().min(1).optional(),
   rootCause: z.string().optional(),
 });

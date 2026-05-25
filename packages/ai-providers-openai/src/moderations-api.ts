@@ -6,8 +6,7 @@ export const OPENAI_MODERATION_MODELS = [
 ] as const;
 export type OpenAIModerationModel = (typeof OPENAI_MODERATION_MODELS)[number];
 
-export const OPENAI_DEFAULT_MODERATION_MODEL: OpenAIModerationModel =
-  "omni-moderation-latest";
+export const OPENAI_DEFAULT_MODERATION_MODEL: OpenAIModerationModel = "omni-moderation-latest";
 
 export function isOpenAIModerationModel(value: string): value is OpenAIModerationModel {
   return (OPENAI_MODERATION_MODELS as readonly string[]).includes(value);
@@ -26,8 +25,7 @@ export const OPENAI_MODERATION_CATEGORY_KEYS = [
   "harassment/threatening",
   "violence",
 ] as const;
-export type OpenAIModerationCategoryKey =
-  (typeof OPENAI_MODERATION_CATEGORY_KEYS)[number];
+export type OpenAIModerationCategoryKey = (typeof OPENAI_MODERATION_CATEGORY_KEYS)[number];
 
 export type OpenAIModerationCategories = Record<OpenAIModerationCategoryKey, boolean>;
 export type OpenAIModerationCategoryScores = Record<OpenAIModerationCategoryKey, number>;

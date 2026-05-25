@@ -58,7 +58,10 @@ export const LineageEdgeSchema = z
     rowCountProduced: z.number().int().min(0).nullable(),
     kAnonymityAchieved: z.number().int().min(1).nullable(),
     redactionRules: z.array(z.string().max(200)).default([]),
-    provenanceRecordId: z.string().regex(/^prv_[a-z0-9]{8,40}$/).nullable(),
+    provenanceRecordId: z
+      .string()
+      .regex(/^prv_[a-z0-9]{8,40}$/)
+      .nullable(),
     createdAt: z.string().datetime({ offset: true }),
     createdByUserId: z.string().uuid().nullable(),
     createdBySystem: z.string().min(1).max(120).nullable(),
@@ -105,11 +108,7 @@ export const LineageEdgeSchema = z
         message: "redacted_from edge requires at least one redactionRule",
       });
     }
-    if (
-      e.kAnonymityAchieved !== null &&
-      e.kind === "anonymized_from" &&
-      e.kAnonymityAchieved < 5
-    ) {
+    if (e.kAnonymityAchieved !== null && e.kind === "anonymized_from" && e.kAnonymityAchieved < 5) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["kAnonymityAchieved"],
@@ -127,9 +126,7 @@ export interface PropagationInput {
   readonly allColumnsRedacted: boolean;
 }
 
-export const propagateClassification = (
-  input: PropagationInput,
-): DataClassification => {
+export const propagateClassification = (input: PropagationInput): DataClassification => {
   const inputMax = maxSensitivityOf(input.inputClassifications);
   if (input.edgeKind === "redacted_from" && input.allColumnsRedacted) {
     if (inputMax === "pii_personal" || inputMax === "phi_protected") {

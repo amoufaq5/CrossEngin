@@ -60,9 +60,9 @@ describe("EvidenceItemSchema", () => {
   });
 
   it("rejects sealedAt before collectedAt", () => {
-    expect(() =>
-      EvidenceItemSchema.parse({ ...base, sealedAt: "2026-05-14T09:00:00Z" }),
-    ).toThrow(/cannot be before collectedAt/);
+    expect(() => EvidenceItemSchema.parse({ ...base, sealedAt: "2026-05-14T09:00:00Z" })).toThrow(
+      /cannot be before collectedAt/,
+    );
   });
 
   it("rejects retentionUntil <= collectedAt", () => {
@@ -75,9 +75,9 @@ describe("EvidenceItemSchema", () => {
   });
 
   it("rejects same collectedBy + sealedBy for human collection", () => {
-    expect(() =>
-      EvidenceItemSchema.parse({ ...base, sealedBy: "u-collector" }),
-    ).toThrow(/two-person integrity/);
+    expect(() => EvidenceItemSchema.parse({ ...base, sealedBy: "u-collector" })).toThrow(
+      /two-person integrity/,
+    );
   });
 
   it("rejects destruction while under legal hold", () => {
@@ -121,9 +121,7 @@ describe("EvidenceItemSchema", () => {
   });
 
   it("rejects malformed evidence id", () => {
-    expect(() =>
-      EvidenceItemSchema.parse({ ...base, id: "EV-1" }),
-    ).toThrow();
+    expect(() => EvidenceItemSchema.parse({ ...base, id: "EV-1" })).toThrow();
   });
 });
 

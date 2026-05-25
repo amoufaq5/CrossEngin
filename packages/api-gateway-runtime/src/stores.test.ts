@@ -60,7 +60,12 @@ describe("InMemoryPrincipalResolver", () => {
   it("returns null for unknown ref", async () => {
     const r = new InMemoryPrincipalResolver();
     expect(
-      await r.resolve({ tenantId: TENANT, principalRef: "x", scopes: [], authScheme: "bearer_opaque" }),
+      await r.resolve({
+        tenantId: TENANT,
+        principalRef: "x",
+        scopes: [],
+        authScheme: "bearer_opaque",
+      }),
     ).toBeNull();
   });
 
@@ -103,7 +108,9 @@ describe("InMemoryIdempotencyStore", () => {
   it("scopes records by tenantId", async () => {
     const s = new InMemoryIdempotencyStore();
     await s.put({ tenantId: TENANT, record: fixtureIdemRecord({ idempotencyKey: "shared" }) });
-    expect(await s.get({ tenantId: "00000000-0000-4000-8000-000000000002", key: "shared" })).toBeNull();
+    expect(
+      await s.get({ tenantId: "00000000-0000-4000-8000-000000000002", key: "shared" }),
+    ).toBeNull();
   });
 
   it("updates via mutate function", async () => {
@@ -112,16 +119,20 @@ describe("InMemoryIdempotencyStore", () => {
     const updated = await s.update({
       tenantId: TENANT,
       key: "key-1",
-      mutate: (r) => ({ ...r, status: "completed_success", completedAt: "2026-05-16T12:00:01.000Z" }),
+      mutate: (r) => ({
+        ...r,
+        status: "completed_success",
+        completedAt: "2026-05-16T12:00:01.000Z",
+      }),
     });
     expect(updated.status).toBe("completed_success");
   });
 
   it("rejects update of an unknown record", async () => {
     const s = new InMemoryIdempotencyStore();
-    await expect(
-      s.update({ tenantId: TENANT, key: "missing", mutate: (r) => r }),
-    ).rejects.toThrow(/no idempotency record/);
+    await expect(s.update({ tenantId: TENANT, key: "missing", mutate: (r) => r })).rejects.toThrow(
+      /no idempotency record/,
+    );
   });
 });
 
@@ -162,9 +173,27 @@ describe("InMemoryRateLimitChecker", () => {
     const req = {} as never;
     const first = new Date("2026-05-16T12:00:00.000Z");
     const after = new Date("2026-05-16T12:02:00.000Z");
-    const a = await r.check({ tenantId: TENANT, principalId: "p1", route, request: req, now: first });
-    const b = await r.check({ tenantId: TENANT, principalId: "p1", route, request: req, now: first });
-    const c = await r.check({ tenantId: TENANT, principalId: "p1", route, request: req, now: after });
+    const a = await r.check({
+      tenantId: TENANT,
+      principalId: "p1",
+      route,
+      request: req,
+      now: first,
+    });
+    const b = await r.check({
+      tenantId: TENANT,
+      principalId: "p1",
+      route,
+      request: req,
+      now: first,
+    });
+    const c = await r.check({
+      tenantId: TENANT,
+      principalId: "p1",
+      route,
+      request: req,
+      now: after,
+    });
     expect(a.allowed).toBe(true);
     expect(b.allowed).toBe(false);
     expect(c.allowed).toBe(true);
@@ -172,7 +201,12 @@ describe("InMemoryRateLimitChecker", () => {
 
   it("setLimitForKey jumps the bucket count to trigger denial", async () => {
     const r = new InMemoryRateLimitChecker({ limit: 10, windowSeconds: 60 });
-    r.setLimitForKey({ tenantId: TENANT, principalId: "p1", operationId: "tenants.create", count: 20 });
+    r.setLimitForKey({
+      tenantId: TENANT,
+      principalId: "p1",
+      operationId: "tenants.create",
+      count: 20,
+    });
     const route = fixtureRoute();
     const req = {} as never;
     const d = await r.check({

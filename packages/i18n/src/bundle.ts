@@ -57,11 +57,13 @@ export const DEFAULT_RENDERER_MISSING_STRATEGY: MissingTranslationStrategyOption
   markerTemplate: "[{locale}]",
 });
 
-export const DEFAULT_VALIDATION_MISSING_STRATEGY: MissingTranslationStrategyOptions = Object.freeze({
-  strategy: "show_marker",
-  defaultLocale: "en",
-  markerTemplate: "[Translation needed: {key}]",
-});
+export const DEFAULT_VALIDATION_MISSING_STRATEGY: MissingTranslationStrategyOptions = Object.freeze(
+  {
+    strategy: "show_marker",
+    defaultLocale: "en",
+    markerTemplate: "[Translation needed: {key}]",
+  },
+);
 
 export interface LookupInput {
   readonly bundle: TranslationBundle;

@@ -225,9 +225,7 @@ async function readFileTool(
   try {
     contents = await readFile(absolute, "utf8");
   } catch (err) {
-    throw new ToolExecutionError(
-      `read_file: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw new ToolExecutionError(`read_file: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (Buffer.byteLength(contents, "utf8") > maxBytes) {
     throw new ToolExecutionError(`read_file: file exceeds ${maxBytes.toString()} bytes`);
@@ -415,16 +413,19 @@ export async function executeToolCall(
       isError: true,
     };
   }
-  const input = call.input === undefined || call.input === null
-    ? {}
-    : typeof call.input === "object" && !Array.isArray(call.input)
-      ? (call.input as ToolInput)
-      : null;
+  const input =
+    call.input === undefined || call.input === null
+      ? {}
+      : typeof call.input === "object" && !Array.isArray(call.input)
+        ? (call.input as ToolInput)
+        : null;
   if (input === null) {
     return {
       id: call.id,
       name: call.name,
-      output: JSON.stringify({ error: `tool input must be a JSON object, got ${typeof call.input}` }),
+      output: JSON.stringify({
+        error: `tool input must be a JSON object, got ${typeof call.input}`,
+      }),
       isError: true,
     };
   }

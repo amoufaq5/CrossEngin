@@ -5,8 +5,7 @@ const IDEMPOTENCY_KEY_REGEX = /^[A-Za-z0-9_-]{8,64}$/;
 const SHA256_REGEX = /^[0-9a-f]{64}$/;
 
 export const SdkIdempotencyKeySchema = z.string().regex(IDEMPOTENCY_KEY_REGEX, {
-  message:
-    "Idempotency-Key must be 8..64 chars of [A-Za-z0-9_-] (UUID v7 or alphanumeric token)",
+  message: "Idempotency-Key must be 8..64 chars of [A-Za-z0-9_-] (UUID v7 or alphanumeric token)",
 });
 export type SdkIdempotencyKey = z.infer<typeof SdkIdempotencyKeySchema>;
 
@@ -14,12 +13,7 @@ export const IDEMPOTENCY_TTL_MIN_SECONDS = 1;
 export const IDEMPOTENCY_TTL_MAX_SECONDS = 172_800;
 export const IDEMPOTENCY_TTL_DEFAULT_SECONDS = 86_400;
 
-export const IDEMPOTENCY_OUTCOMES = [
-  "stored",
-  "replayed",
-  "conflict",
-  "in_progress",
-] as const;
+export const IDEMPOTENCY_OUTCOMES = ["stored", "replayed", "conflict", "in_progress"] as const;
 export type IdempotencyOutcome = (typeof IDEMPOTENCY_OUTCOMES)[number];
 export const IdempotencyOutcomeSchema = z.enum(IDEMPOTENCY_OUTCOMES);
 
@@ -118,10 +112,7 @@ export function isIdempotencyConflict(
   return stored.requestHash !== candidate.requestHash;
 }
 
-export function isIdempotencyExpired(
-  record: IdempotencyRecord,
-  now: Date = new Date(),
-): boolean {
+export function isIdempotencyExpired(record: IdempotencyRecord, now: Date = new Date()): boolean {
   return now.getTime() >= new Date(record.expiresAt).getTime();
 }
 
@@ -146,9 +137,7 @@ export interface IdempotencyResolveOutcome {
   readonly reason: string;
 }
 
-export function resolveIdempotency(
-  input: IdempotencyResolveInput,
-): IdempotencyResolveOutcome {
+export function resolveIdempotency(input: IdempotencyResolveInput): IdempotencyResolveOutcome {
   if (input.existing === null) {
     return { outcome: "stored", reason: "no prior record; first execution" };
   }

@@ -18,11 +18,7 @@ import {
   resolveProviders,
 } from "./resolve.js";
 
-function fakeProvider(opts: {
-  id: string;
-  models?: string[];
-  residency?: Region[];
-}): LlmProvider {
+function fakeProvider(opts: { id: string; models?: string[]; residency?: Region[] }): LlmProvider {
   return {
     id: opts.id,
     models: opts.models ?? ["default-model"],
@@ -83,9 +79,9 @@ describe("residencyAllowsProvider", () => {
   });
 
   it("blocks when required region missing from provider", () => {
-    expect(
-      residencyAllowsProvider("eu-only", fakeProvider({ id: "x", residency: ["us"] })),
-    ).toBe(false);
+    expect(residencyAllowsProvider("eu-only", fakeProvider({ id: "x", residency: ["us"] }))).toBe(
+      false,
+    );
   });
 
   it("allows when required region is in provider's list", () => {
@@ -116,9 +112,7 @@ describe("resolveProviders", () => {
   });
 
   it("skips unknown providers in the chain", () => {
-    const providers = new Map<string, LlmProvider>([
-      ["openai", fakeProvider({ id: "openai" })],
-    ]);
+    const providers = new Map<string, LlmProvider>([["openai", fakeProvider({ id: "openai" })]]);
     const result = resolveProviders({
       task: "executor",
       tenantId: TENANT,
@@ -185,8 +179,6 @@ describe("resolveProviders", () => {
       taskPolicies: POLICIES,
       overrides: { executor: { primary: "openai/gpt-4-mini", fallback: [] } },
     });
-    expect(result.map((c) => `${c.providerId}/${c.modelId}`)).toEqual([
-      "openai/gpt-4-mini",
-    ]);
+    expect(result.map((c) => `${c.providerId}/${c.modelId}`)).toEqual(["openai/gpt-4-mini"]);
   });
 });

@@ -18,19 +18,11 @@ export interface PackRouteRecord {
   readonly transitionName?: string;
 }
 
-export const CRUD_OPERATION_KINDS = [
-  "list",
-  "read",
-  "create",
-  "update",
-  "delete",
-] as const;
+export const CRUD_OPERATION_KINDS = ["list", "read", "create", "update", "delete"] as const;
 export type CrudOperationKind = (typeof CRUD_OPERATION_KINDS)[number];
 export type PackOperationKind = CrudOperationKind | "transition";
 
-export function generatePackRoutes(
-  input: GeneratePackRoutesInput,
-): readonly PackRouteRecord[] {
+export function generatePackRoutes(input: GeneratePackRoutesInput): readonly PackRouteRecord[] {
   const apiVersion = input.apiVersion ?? DEFAULT_PACK_ROUTE_API_VERSION;
   const out: PackRouteRecord[] = [];
   const entities = input.manifest.entities ?? [];

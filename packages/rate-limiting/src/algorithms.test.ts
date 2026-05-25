@@ -122,17 +122,11 @@ describe("evaluateTokenBucket", () => {
 
 describe("computeFixedWindowStart", () => {
   it("aligns to 60-second boundary", () => {
-    const start = computeFixedWindowStart(
-      new Date("2026-05-16T10:00:45Z"),
-      60,
-    );
+    const start = computeFixedWindowStart(new Date("2026-05-16T10:00:45Z"), 60);
     expect(start).toBe("2026-05-16T10:00:00.000Z");
   });
   it("aligns to hour boundary", () => {
-    const start = computeFixedWindowStart(
-      new Date("2026-05-16T10:42:13Z"),
-      3600,
-    );
+    const start = computeFixedWindowStart(new Date("2026-05-16T10:42:13Z"), 3600);
     expect(start).toBe("2026-05-16T10:00:00.000Z");
   });
 });

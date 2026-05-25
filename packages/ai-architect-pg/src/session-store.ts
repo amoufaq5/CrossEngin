@@ -96,10 +96,9 @@ export class PostgresArchitectSessionStore {
   }
 
   async getById(id: string): Promise<ArchitectSessionRecord | null> {
-    const result = await this.conn.query<Row>(
-      `SELECT * FROM ${SCHEMA}.${TABLE} WHERE id = $1`,
-      [id],
-    );
+    const result = await this.conn.query<Row>(`SELECT * FROM ${SCHEMA}.${TABLE} WHERE id = $1`, [
+      id,
+    ]);
     const row = result.rows[0];
     return row !== undefined ? rowToRecord(row) : null;
   }

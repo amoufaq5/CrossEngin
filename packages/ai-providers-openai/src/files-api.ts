@@ -45,9 +45,7 @@ export interface BuildMultipartUploadResult {
 
 const TEXT_ENCODER = new TextEncoder();
 
-export function buildMultipartUpload(
-  input: BuildMultipartUploadInput,
-): BuildMultipartUploadResult {
+export function buildMultipartUpload(input: BuildMultipartUploadInput): BuildMultipartUploadResult {
   if (input.filename.length === 0) {
     throw new Error("buildMultipartUpload: filename must be non-empty");
   }

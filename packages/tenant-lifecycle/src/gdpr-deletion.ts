@@ -104,7 +104,12 @@ export const GdprDeletionRequestSchema = z
         message: "GDPR Article 12(3) caps deadlineAt at 3 months from submittedAt",
       });
     }
-    if (v.status === "verified" || v.status === "in_progress" || v.status === "completed" || v.status === "deferred") {
+    if (
+      v.status === "verified" ||
+      v.status === "in_progress" ||
+      v.status === "completed" ||
+      v.status === "deferred"
+    ) {
       if (v.verifiedAt === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -221,18 +226,12 @@ export const GdprDeletionRequestSchema = z
   });
 export type GdprDeletionRequest = z.infer<typeof GdprDeletionRequestSchema>;
 
-export function isOverdue(
-  request: GdprDeletionRequest,
-  now: Date = new Date(),
-): boolean {
+export function isOverdue(request: GdprDeletionRequest, now: Date = new Date()): boolean {
   if (request.status === "completed" || request.status === "rejected") return false;
   return now.getTime() > new Date(request.deadlineAt).getTime();
 }
 
-export function daysUntilDeadline(
-  request: GdprDeletionRequest,
-  now: Date = new Date(),
-): number {
+export function daysUntilDeadline(request: GdprDeletionRequest, now: Date = new Date()): number {
   const ms = new Date(request.deadlineAt).getTime() - now.getTime();
   return Math.floor(ms / 1000 / 86_400);
 }

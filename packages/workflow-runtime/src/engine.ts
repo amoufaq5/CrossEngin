@@ -7,10 +7,7 @@ import {
   type WorkflowEvent,
 } from "@crossengin/workflow-engine";
 
-import {
-  type ActivityRegistry,
-  unsupportedHandler,
-} from "./activity-handlers.js";
+import { type ActivityRegistry, unsupportedHandler } from "./activity-handlers.js";
 import { type Clock, type IdGenerator, SystemClock, RandomIdGenerator } from "./clock.js";
 import { type EventLog } from "./event-log.js";
 import {
@@ -405,7 +402,11 @@ export class WorkflowEngine {
   }): Promise<void> {
     const state = await this.getInstanceState(input.instanceId);
     if (state === null) throw new Error(`unknown instance ${input.instanceId}`);
-    if (state.status === "completed" || state.status === "cancelled" || state.status === "compensated") {
+    if (
+      state.status === "completed" ||
+      state.status === "cancelled" ||
+      state.status === "compensated"
+    ) {
       throw new Error(`cannot cancel instance in terminal status ${state.status}`);
     }
     const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
@@ -462,10 +463,7 @@ export class WorkflowEngine {
     return event;
   }
 
-  private async runStepLoop(
-    instanceId: string,
-    definition: WorkflowDefinition,
-  ): Promise<void> {
+  private async runStepLoop(instanceId: string, definition: WorkflowDefinition): Promise<void> {
     for (let i = 0; i < MAX_STEP_ITERATIONS; i++) {
       const state = await this.getInstanceState(instanceId);
       if (state === null) return;
@@ -480,7 +478,11 @@ export class WorkflowEngine {
       const stateDef = definition.states.find((s) => s.name === state.currentState);
       if (stateDef !== undefined && TERMINAL_STATE_KINDS.has(stateDef.kind)) {
         const kind = stateDef.kind;
-        if (kind === "terminal_success" || kind === "terminal_failure" || kind === "terminal_cancelled") {
+        if (
+          kind === "terminal_success" ||
+          kind === "terminal_failure" ||
+          kind === "terminal_cancelled"
+        ) {
           await this.emitTerminalForStateKind(instanceId, state, kind);
         }
         return;
@@ -562,7 +564,14 @@ export class WorkflowEngine {
     const newStateDef = definition.states.find((s) => s.name === transition.toState);
     if (newStateDef !== undefined) {
       for (const action of newStateDef.onEntryActions) {
-        await this.applyAction(instanceId, definition, action, fromState.tenantId, signalId, timerId);
+        await this.applyAction(
+          instanceId,
+          definition,
+          action,
+          fromState.tenantId,
+          signalId,
+          timerId,
+        );
       }
     }
   }
@@ -909,8 +918,12 @@ export class WorkflowEngine {
     const scheduled = new Map<string, { id: string; name: string; fireAt: number }>();
     for (const e of events) {
       if (e.kind === "timer_scheduled" && e.timerId !== null) {
-        const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
-        const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
+        const name =
+          typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
+        const fireAt =
+          typeof e.payload["fireAt"] === "string"
+            ? Date.parse(e.payload["fireAt"] as string)
+            : Number.MAX_SAFE_INTEGER;
         scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
       } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
         scheduled.delete(e.timerId);

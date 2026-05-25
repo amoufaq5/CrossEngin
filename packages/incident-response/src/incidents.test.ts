@@ -193,9 +193,7 @@ describe("IncidentRecordSchema", () => {
   });
 
   it("rejects malformed incident id", () => {
-    expect(() =>
-      IncidentRecordSchema.parse({ ...base, id: "INC-42" }),
-    ).toThrow();
+    expect(() => IncidentRecordSchema.parse({ ...base, id: "INC-42" })).toThrow();
   });
 
   it("rejects duplicate affected tenant ids", () => {
@@ -260,8 +258,6 @@ describe("helpers", () => {
   });
 
   it("metAckSla false when over the SLA", () => {
-    expect(
-      metAckSla({ ...base, ackedAt: "2026-05-14T10:30:00Z" }),
-    ).toBe(false);
+    expect(metAckSla({ ...base, ackedAt: "2026-05-14T10:30:00Z" })).toBe(false);
   });
 });

@@ -19,9 +19,11 @@ export interface OnMessageInput {
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly content: string;
   readonly toolCallId?: string | null;
-  readonly toolUses?:
-    | ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: unknown }>
-    | null;
+  readonly toolUses?: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly input: unknown;
+  }> | null;
   readonly inputTokens?: number | null;
   readonly outputTokens?: number | null;
   readonly cachedInputTokens?: number | null;
@@ -70,18 +72,9 @@ export interface Transcript {
 
 import type { PgConnection } from "@crossengin/kernel-pg";
 
-import {
-  PostgresArchitectMessageStore,
-  type AppendMessageInput,
-} from "./message-store.js";
-import {
-  PostgresArchitectProposalStore,
-  type AppendProposalInput,
-} from "./proposal-store.js";
-import {
-  PostgresArchitectSessionStore,
-  type StartSessionInput,
-} from "./session-store.js";
+import { PostgresArchitectMessageStore, type AppendMessageInput } from "./message-store.js";
+import { PostgresArchitectProposalStore, type AppendProposalInput } from "./proposal-store.js";
+import { PostgresArchitectSessionStore, type StartSessionInput } from "./session-store.js";
 import {
   PostgresArchitectToolInvocationStore,
   type AppendToolInvocationInput,
@@ -134,9 +127,7 @@ export class PostgresTranscript implements Transcript {
     return this.messages.append(append);
   }
 
-  async onToolInvocation(
-    input: OnToolInvocationInput,
-  ): Promise<ArchitectToolInvocationRecord> {
+  async onToolInvocation(input: OnToolInvocationInput): Promise<ArchitectToolInvocationRecord> {
     this.requireSession("onToolInvocation");
     const append: AppendToolInvocationInput = {
       tenantId: this.tenantId!,

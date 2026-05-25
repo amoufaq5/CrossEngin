@@ -1,15 +1,7 @@
 import { z } from "zod";
 import { NOTIFICATION_CHANNELS, type NotificationChannel } from "./channels.js";
-import {
-  CONTENT_CATEGORIES,
-  isCategorySuppressible,
-  type ContentCategory,
-} from "./templates.js";
-import {
-  PRIORITY_LEVELS,
-  type DeliveryAttempt,
-  type PriorityLevel,
-} from "./delivery.js";
+import { CONTENT_CATEGORIES, isCategorySuppressible, type ContentCategory } from "./templates.js";
+import { PRIORITY_LEVELS, type DeliveryAttempt, type PriorityLevel } from "./delivery.js";
 
 export const DIGEST_FREQUENCIES = [
   "immediate",
@@ -82,13 +74,9 @@ export const isWithinQuietHours = (
   const start = minutesSinceMidnight(config.startTime);
   const end = minutesSinceMidnight(config.endTime);
   if (start < end) {
-    return (
-      localMinutesSinceMidnight >= start && localMinutesSinceMidnight < end
-    );
+    return localMinutesSinceMidnight >= start && localMinutesSinceMidnight < end;
   }
-  return (
-    localMinutesSinceMidnight >= start || localMinutesSinceMidnight < end
-  );
+  return localMinutesSinceMidnight >= start || localMinutesSinceMidnight < end;
 };
 
 export interface QuietHoursDecision {
@@ -136,9 +124,7 @@ export const RateLimitPolicySchema = z
     perTenantPerSecond: z.number().int().min(1).max(100_000),
     burstAllowance: z.number().int().min(0).max(10_000),
     appliesToCategories: z.array(z.enum(CONTENT_CATEGORIES)).min(1),
-    overrideForPriorities: z.array(z.enum(PRIORITY_LEVELS)).default([
-      "critical",
-    ]),
+    overrideForPriorities: z.array(z.enum(PRIORITY_LEVELS)).default(["critical"]),
   })
   .superRefine((p, ctx) => {
     if (p.perRecipientPerDay < p.perRecipientPerHour) {
@@ -173,11 +159,7 @@ export const countRecentDeliveries = (
 
 export interface RateLimitDecision {
   readonly allowed: boolean;
-  readonly reason:
-    | "ok"
-    | "hourly_quota_exceeded"
-    | "daily_quota_exceeded"
-    | "tenant_rps_exceeded";
+  readonly reason: "ok" | "hourly_quota_exceeded" | "daily_quota_exceeded" | "tenant_rps_exceeded";
 }
 
 export const evaluateRateLimit = (input: {
@@ -216,7 +198,10 @@ export const DigestBatchSchema = z
     dispatchedAt: z.string().datetime({ offset: true }).nullable(),
     itemCount: z.number().int().min(0),
     maxItems: z.number().int().min(1).max(1000),
-    dedupSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    dedupSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
   })
   .superRefine((d, ctx) => {
     if (d.frequency === "immediate" || d.frequency === "never") {
@@ -233,9 +218,7 @@ export const DigestBatchSchema = z
         message: "itemCount exceeds maxItems",
       });
     }
-    if (
-      Date.parse(d.scheduledDispatchAt) <= Date.parse(d.openedAt)
-    ) {
+    if (Date.parse(d.scheduledDispatchAt) <= Date.parse(d.openedAt)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["scheduledDispatchAt"],

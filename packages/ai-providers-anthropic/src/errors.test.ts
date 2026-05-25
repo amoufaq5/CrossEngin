@@ -45,16 +45,18 @@ describe("AnthropicError.isRetryable", () => {
   });
 
   it("returns false for authentication / permission / invalid_request", () => {
-    for (const kind of ["authentication_error", "permission_error", "invalid_request_error"] as const) {
+    for (const kind of [
+      "authentication_error",
+      "permission_error",
+      "invalid_request_error",
+    ] as const) {
       const err = new AnthropicError({ kind, message: "x" });
       expect(err.isRetryable()).toBe(false);
     }
   });
 
   it("returns false for refusal (M2.X.6 — terminal)", () => {
-    expect(
-      new AnthropicError({ kind: "refusal", message: "x" }).isRetryable(),
-    ).toBe(false);
+    expect(new AnthropicError({ kind: "refusal", message: "x" }).isRetryable()).toBe(false);
   });
 });
 
@@ -76,9 +78,7 @@ describe("AnthropicError x kernel isRetryableError (M2.X.7)", () => {
 
   it("kernel isRetryableError returns false for refusal + authentication_error", async () => {
     const { isRetryableError } = await import("@crossengin/ai-providers");
-    expect(
-      isRetryableError(new AnthropicError({ kind: "refusal", message: "" })),
-    ).toBe(false);
+    expect(isRetryableError(new AnthropicError({ kind: "refusal", message: "" }))).toBe(false);
     expect(
       isRetryableError(new AnthropicError({ kind: "authentication_error", message: "" })),
     ).toBe(false);
@@ -98,9 +98,7 @@ describe("AnthropicError x kernel isInputTooLargeError (M2.X.9)", () => {
     expect(
       isInputTooLargeError(new AnthropicError({ kind: "rate_limit_error", message: "" })),
     ).toBe(false);
-    expect(
-      isInputTooLargeError(new AnthropicError({ kind: "refusal", message: "" })),
-    ).toBe(false);
+    expect(isInputTooLargeError(new AnthropicError({ kind: "refusal", message: "" }))).toBe(false);
   });
 });
 

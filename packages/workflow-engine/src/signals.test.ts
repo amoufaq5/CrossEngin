@@ -129,14 +129,10 @@ describe("WorkflowSignalSchema", () => {
 
 describe("isSignalExpired", () => {
   it("returns false before expiresAt for received signal", () => {
-    expect(
-      isSignalExpired(baseSignal, new Date("2026-05-16T10:30:00Z")),
-    ).toBe(false);
+    expect(isSignalExpired(baseSignal, new Date("2026-05-16T10:30:00Z"))).toBe(false);
   });
   it("returns true past expiresAt for received signal", () => {
-    expect(
-      isSignalExpired(baseSignal, new Date("2026-05-16T11:30:00Z")),
-    ).toBe(true);
+    expect(isSignalExpired(baseSignal, new Date("2026-05-16T11:30:00Z"))).toBe(true);
   });
   it("returns false for consumed signal even past expiry", () => {
     const consumed: WorkflowSignal = {
@@ -146,9 +142,7 @@ describe("isSignalExpired", () => {
       matchedAt: "2026-05-16T10:01:00.000Z",
       consumedAt: "2026-05-16T10:02:00.000Z",
     };
-    expect(isSignalExpired(consumed, new Date("2026-05-16T12:00:00Z"))).toBe(
-      false,
-    );
+    expect(isSignalExpired(consumed, new Date("2026-05-16T12:00:00Z"))).toBe(false);
   });
 });
 

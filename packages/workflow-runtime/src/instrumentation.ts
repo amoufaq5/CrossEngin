@@ -16,8 +16,7 @@ export const WORKFLOW_INSTRUMENTATION_KINDS = [
   "action_applied",
   "engine_error",
 ] as const;
-export type WorkflowInstrumentationKind =
-  (typeof WORKFLOW_INSTRUMENTATION_KINDS)[number];
+export type WorkflowInstrumentationKind = (typeof WORKFLOW_INSTRUMENTATION_KINDS)[number];
 
 export function isWorkflowInstrumentationKind(
   value: unknown,

@@ -131,12 +131,7 @@ describe("buildCompletionRequest", () => {
       tenantId: TENANT,
       sessionId: SESSION,
     });
-    expect(req.messages.map((m) => m.role)).toEqual([
-      "system",
-      "user",
-      "assistant",
-      "user",
-    ]);
+    expect(req.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
     expect(req.messages[3]?.content).toBe("Tell me more.");
   });
 
@@ -216,7 +211,7 @@ describe("runChatTurn", () => {
       responses: [
         [
           { kind: "tool_call_start", id: "tc-1", name: "lookup" },
-          { kind: "tool_call_arg_delta", id: "tc-1", delta: "{\"a\":" },
+          { kind: "tool_call_arg_delta", id: "tc-1", delta: '{"a":' },
           { kind: "tool_call_arg_delta", id: "tc-1", delta: "1}" },
           { kind: "tool_call_end", id: "tc-1" },
           {
@@ -238,9 +233,7 @@ describe("runChatTurn", () => {
       },
       plainTextRenderer(io),
     );
-    expect(result.record.toolCalls).toEqual([
-      { id: "tc-1", name: "lookup", input: { a: 1 } },
-    ]);
+    expect(result.record.toolCalls).toEqual([{ id: "tc-1", name: "lookup", input: { a: 1 } }]);
   });
 });
 
@@ -534,7 +527,10 @@ describe("runChatRepl — --max-cost-usd session budget (M5.11)", () => {
       oneShot: false,
       maxCostUsd: TURN_COST * 1.5,
     });
-    const lines = out().trim().split("\n").filter((l) => l.length > 0);
+    const lines = out()
+      .trim()
+      .split("\n")
+      .filter((l) => l.length > 0);
     const parsed = lines.map((l) => JSON.parse(l) as { kind: string });
     expect(parsed.some((p) => p.kind === "budget_exceeded")).toBe(true);
   });
@@ -830,7 +826,10 @@ describe("runChatExchange — tool dispatch", () => {
       sessionId: SESSION,
       toolCatalog: buildToolCatalog(),
     });
-    const lines = out().trim().split("\n").map((l) => JSON.parse(l) as { kind: string });
+    const lines = out()
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { kind: string });
     expect(lines.some((l) => l.kind === "tool_result")).toBe(true);
   });
 });
@@ -994,7 +993,12 @@ function recordingTranscript(): { transcript: Transcript; calls: TranscriptCall[
         role: input.role,
         content: input.content,
         toolCallId: input.toolCallId ?? null,
-        toolUses: input.toolUses === undefined ? null : input.toolUses === null ? null : [...input.toolUses],
+        toolUses:
+          input.toolUses === undefined
+            ? null
+            : input.toolUses === null
+              ? null
+              : [...input.toolUses],
         inputTokens: input.inputTokens ?? null,
         outputTokens: input.outputTokens ?? null,
         cachedInputTokens: input.cachedInputTokens ?? null,
@@ -1188,7 +1192,11 @@ describe("runChatExchange — transcript wiring", () => {
     // Use an approver that records but DENIES so we don't actually write to disk
     const tools = buildToolCatalog({
       allowFileWrite: true,
-      approver: { async approve() { return false; } },
+      approver: {
+        async approve() {
+          return false;
+        },
+      },
     });
     await runChatExchange({
       provider,
@@ -1345,12 +1353,10 @@ describe("parseUserLine (M5.10.5)", () => {
   });
 
   it("parses /attach text (multi-word value preserved)", () => {
-    expect(parseUserLine("/attach text some prefatory context for the model")).toEqual(
-      {
-        kind: "attach",
-        block: { type: "text", text: "some prefatory context for the model" },
-      },
-    );
+    expect(parseUserLine("/attach text some prefatory context for the model")).toEqual({
+      kind: "attach",
+      block: { type: "text", text: "some prefatory context for the model" },
+    });
   });
 
   it("returns error for unknown attach type", () => {
@@ -1408,9 +1414,7 @@ describe("composeUserContent (M5.10.5)", () => {
     const blocks = composeUserContent("", [
       { type: "image_url", url: "https://example.com/img.png" },
     ]);
-    expect(blocks).toEqual([
-      { type: "image_url", url: "https://example.com/img.png" },
-    ]);
+    expect(blocks).toEqual([{ type: "image_url", url: "https://example.com/img.png" }]);
   });
 });
 
@@ -1457,21 +1461,19 @@ describe("userContentToTranscriptText (M5.10.5)", () => {
 
 describe("describeAttachment (M5.10.5)", () => {
   it("formats image_url", () => {
-    expect(
-      describeAttachment({ type: "image_url", url: "https://example.com/img.png" }),
-    ).toBe("image_url: https://example.com/img.png");
-  });
-
-  it("formats file_id", () => {
-    expect(describeAttachment({ type: "file_id", fileId: "file-abc" })).toBe(
-      "file_id: file-abc",
+    expect(describeAttachment({ type: "image_url", url: "https://example.com/img.png" })).toBe(
+      "image_url: https://example.com/img.png",
     );
   });
 
+  it("formats file_id", () => {
+    expect(describeAttachment({ type: "file_id", fileId: "file-abc" })).toBe("file_id: file-abc");
+  });
+
   it("formats document_url", () => {
-    expect(
-      describeAttachment({ type: "document_url", url: "https://example.com/doc" }),
-    ).toBe("document_url: https://example.com/doc");
+    expect(describeAttachment({ type: "document_url", url: "https://example.com/doc" })).toBe(
+      "document_url: https://example.com/doc",
+    );
   });
 
   it("formats short text", () => {
@@ -1565,9 +1567,7 @@ describe("runChatRepl — attachment commands (M5.10.5)", () => {
       format: "human",
       oneShot: false,
     });
-    expect(buf.out()).toContain(
-      "[attached image_url: https://example.com/img.png]",
-    );
+    expect(buf.out()).toContain("[attached image_url: https://example.com/img.png]");
     const userMsg = captured[0]!.messages.find((m) => m.role === "user")!;
     expect(Array.isArray(userMsg.content)).toBe(true);
   });

@@ -148,15 +148,15 @@ describe("ModelRegistryEntrySchema", () => {
   });
 
   it("rejects production without promotedToProductionBy", () => {
-    expect(() =>
-      ModelRegistryEntrySchema.parse({ ...base, promotedToProductionBy: null }),
-    ).toThrow(/promotedToProductionBy/);
+    expect(() => ModelRegistryEntrySchema.parse({ ...base, promotedToProductionBy: null })).toThrow(
+      /promotedToProductionBy/,
+    );
   });
 
   it("rejects production without blocking eval runs", () => {
-    expect(() =>
-      ModelRegistryEntrySchema.parse({ ...base, blockingEvalRunIds: [] }),
-    ).toThrow(/at least one passing/);
+    expect(() => ModelRegistryEntrySchema.parse({ ...base, blockingEvalRunIds: [] })).toThrow(
+      /at least one passing/,
+    );
   });
 
   it("rejects safety_filter without fairnessConsiderations", () => {

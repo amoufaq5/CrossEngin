@@ -1,11 +1,7 @@
 import { EntityPermissionsSchema } from "@crossengin/auth";
 import { describe, expect, it } from "vitest";
 
-import {
-  ACCOUNT_PERMISSIONS,
-  ERP_CORE_PERMISSIONS,
-  INVOICE_PERMISSIONS,
-} from "./permissions.js";
+import { ACCOUNT_PERMISSIONS, ERP_CORE_PERMISSIONS, INVOICE_PERMISSIONS } from "./permissions.js";
 
 describe("ACCOUNT_PERMISSIONS", () => {
   it("parses", () => {
@@ -31,18 +27,11 @@ describe("ACCOUNT_PERMISSIONS", () => {
 describe("INVOICE_PERMISSIONS", () => {
   it("has transitions for send / mark_paid / mark_overdue / void", () => {
     const t = INVOICE_PERMISSIONS.transitions;
-    expect(Object.keys(t ?? {}).sort()).toEqual([
-      "mark_overdue",
-      "mark_paid",
-      "send",
-      "void",
-    ]);
+    expect(Object.keys(t ?? {}).sort()).toEqual(["mark_overdue", "mark_paid", "send", "void"]);
   });
 
   it("void is admin-only", () => {
-    expect(INVOICE_PERMISSIONS.transitions?.["void"]?.roles).toEqual([
-      "erp_admin",
-    ]);
+    expect(INVOICE_PERMISSIONS.transitions?.["void"]?.roles).toEqual(["erp_admin"]);
   });
 });
 

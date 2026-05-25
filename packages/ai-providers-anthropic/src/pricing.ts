@@ -61,8 +61,7 @@ export interface UsageCostInput {
 export function computeUsageCost(model: AnthropicModel, usage: UsageCostInput): number {
   const pricing = ANTHROPIC_PRICING[model];
   const inputDollars =
-    ((usage.inputTokens - (usage.cachedInputTokens ?? 0)) * pricing.inputUsdPerMillion) /
-    1_000_000;
+    ((usage.inputTokens - (usage.cachedInputTokens ?? 0)) * pricing.inputUsdPerMillion) / 1_000_000;
   const cachedDollars =
     ((usage.cachedInputTokens ?? 0) * pricing.cachedInputUsdPerMillion) / 1_000_000;
   const cacheWriteDollars =

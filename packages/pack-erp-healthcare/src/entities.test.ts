@@ -41,12 +41,7 @@ describe("PATIENT_ENTITY", () => {
   });
 
   it("sex_assigned_at_birth includes the four documented options", () => {
-    expect([...SEX_ASSIGNED_AT_BIRTH].sort()).toEqual([
-      "female",
-      "intersex",
-      "male",
-      "unknown",
-    ]);
+    expect([...SEX_ASSIGNED_AT_BIRTH].sort()).toEqual(["female", "intersex", "male", "unknown"]);
   });
 
   it("blood_type covers the standard 8 + unknown", () => {
@@ -91,7 +86,9 @@ describe("ENCOUNTER_ENTITY", () => {
     const scheduledField = ENCOUNTER_ENTITY.fields.find((f) => f.name === "scheduled_at");
     expect(scheduledField?.indexed).toBe(true);
     const idx = ENCOUNTER_ENTITY.indexes ?? [];
-    expect(idx.some((i) => i.fields.includes("state") && i.fields.includes("scheduled_at"))).toBe(true);
+    expect(idx.some((i) => i.fields.includes("state") && i.fields.includes("scheduled_at"))).toBe(
+      true,
+    );
   });
 });
 

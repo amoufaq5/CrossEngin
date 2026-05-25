@@ -14,17 +14,16 @@ export const DUNNING_STAGES = [
 ] as const;
 export type DunningStage = (typeof DUNNING_STAGES)[number];
 
-export const DUNNING_STAGE_TRANSITIONS: Readonly<
-  Record<DunningStage, readonly DunningStage[]>
-> = Object.freeze({
-  current: ["notified"],
-  notified: ["retry_1", "current", "canceled"],
-  retry_1: ["retry_2", "current", "canceled"],
-  retry_2: ["escalation", "current", "canceled"],
-  escalation: ["restricted", "current", "canceled"],
-  restricted: ["canceled", "current"],
-  canceled: [],
-});
+export const DUNNING_STAGE_TRANSITIONS: Readonly<Record<DunningStage, readonly DunningStage[]>> =
+  Object.freeze({
+    current: ["notified"],
+    notified: ["retry_1", "current", "canceled"],
+    retry_1: ["retry_2", "current", "canceled"],
+    retry_2: ["escalation", "current", "canceled"],
+    escalation: ["restricted", "current", "canceled"],
+    restricted: ["canceled", "current"],
+    canceled: [],
+  });
 
 export const DunningPolicySchema = z
   .object({

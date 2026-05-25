@@ -4,30 +4,20 @@ const Iso8601 = z.string().datetime({ offset: true });
 const SOURCE_ID_REGEX = /^[a-z][a-z0-9-]*$/;
 const MAPPING_ID_REGEX = /^[a-z][a-z0-9-]*$/;
 
-export const PREVIEW_STATUSES = [
-  "pending",
-  "running",
-  "completed",
-  "failed",
-  "cancelled",
-] as const;
+export const PREVIEW_STATUSES = ["pending", "running", "completed", "failed", "cancelled"] as const;
 export type PreviewStatus = (typeof PREVIEW_STATUSES)[number];
 export const PreviewStatusSchema = z.enum(PREVIEW_STATUSES);
 
-export const PREVIEW_TRANSITIONS: Readonly<
-  Record<PreviewStatus, readonly PreviewStatus[]>
-> = Object.freeze({
-  pending: ["running", "cancelled"],
-  running: ["completed", "failed", "cancelled"],
-  completed: [],
-  failed: [],
-  cancelled: [],
-});
+export const PREVIEW_TRANSITIONS: Readonly<Record<PreviewStatus, readonly PreviewStatus[]>> =
+  Object.freeze({
+    pending: ["running", "cancelled"],
+    running: ["completed", "failed", "cancelled"],
+    completed: [],
+    failed: [],
+    cancelled: [],
+  });
 
-export function canTransitionPreview(
-  from: PreviewStatus,
-  to: PreviewStatus,
-): boolean {
+export function canTransitionPreview(from: PreviewStatus, to: PreviewStatus): boolean {
   return PREVIEW_TRANSITIONS[from].includes(to);
 }
 
@@ -183,9 +173,7 @@ export function summarizePreview(
     invalidRows: run.rowsInvalid,
     issueByOutcome: counts,
     readyToCommit:
-      run.status === "completed" &&
-      run.rowsRead > 0 &&
-      failureRate <= acceptableFailureRate,
+      run.status === "completed" && run.rowsRead > 0 && failureRate <= acceptableFailureRate,
   };
 }
 

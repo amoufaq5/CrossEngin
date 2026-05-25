@@ -22,15 +22,11 @@ const usAddress = TaxAddressSchema.parse({
 
 describe("TaxAddressSchema", () => {
   it("accepts a minimal address", () => {
-    expect(() =>
-      TaxAddressSchema.parse({ line1: "x", city: "x", country: "AE" }),
-    ).not.toThrow();
+    expect(() => TaxAddressSchema.parse({ line1: "x", city: "x", country: "AE" })).not.toThrow();
   });
 
   it("rejects malformed country code", () => {
-    expect(() =>
-      TaxAddressSchema.parse({ line1: "x", city: "x", country: "uae" }),
-    ).toThrow();
+    expect(() => TaxAddressSchema.parse({ line1: "x", city: "x", country: "uae" })).toThrow();
   });
 });
 

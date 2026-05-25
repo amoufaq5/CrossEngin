@@ -28,11 +28,7 @@ export class PostgresLatencyTracker implements LatencyTracker {
     this.windowSize = opts.windowSize ?? DEFAULT_WINDOW_SIZE;
   }
 
-  async record(input: {
-    providerId: string;
-    latencyMs: number;
-    success: boolean;
-  }): Promise<void> {
+  async record(input: { providerId: string; latencyMs: number; success: boolean }): Promise<void> {
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (provider_id, latency_ms, success)
        VALUES ($1, $2, $3)`,

@@ -27,12 +27,7 @@ export const FilterOperatorSchema = z.enum([
 ]);
 export type FilterOperator = z.infer<typeof FilterOperatorSchema>;
 
-export const FilterValueSchema = z.union([
-  z.string(),
-  z.number(),
-  z.boolean(),
-  z.null(),
-]);
+export const FilterValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
 const SingleValueOperators = new Set([
   "eq",
@@ -224,7 +219,10 @@ export const FunnelReportSchema = BaseReportSchema.extend({
       }),
     )
     .min(2),
-  timeWindow: z.string().regex(/^P\d+[DWMY]$/).default("P30D"),
+  timeWindow: z
+    .string()
+    .regex(/^P\d+[DWMY]$/)
+    .default("P30D"),
 });
 
 export const CohortReportSchema = BaseReportSchema.extend({

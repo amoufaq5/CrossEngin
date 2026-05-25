@@ -122,10 +122,9 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   }
 
   async deleteExpired(now: Date): Promise<number> {
-    const result = await this.conn.query(
-      `DELETE FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1`,
-      [now.toISOString()],
-    );
+    const result = await this.conn.query(`DELETE FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1`, [
+      now.toISOString(),
+    ]);
     return result.rowCount;
   }
 }

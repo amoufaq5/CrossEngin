@@ -120,9 +120,9 @@ describe("ConflictRecordSchema", () => {
   });
 
   it("rejects resolved without resolutionPayloadSha256", () => {
-    expect(() =>
-      ConflictRecordSchema.parse({ ...base, resolutionPayloadSha256: null }),
-    ).toThrow(/resolutionPayloadSha256/);
+    expect(() => ConflictRecordSchema.parse({ ...base, resolutionPayloadSha256: null })).toThrow(
+      /resolutionPayloadSha256/,
+    );
   });
 
   it("rejects manual_review resolved without notes", () => {
@@ -187,9 +187,7 @@ describe("ConflictRecordSchema", () => {
   });
 
   it("rejects malformed conflict id", () => {
-    expect(() =>
-      ConflictRecordSchema.parse({ ...base, id: "CFL-1" }),
-    ).toThrow();
+    expect(() => ConflictRecordSchema.parse({ ...base, id: "CFL-1" })).toThrow();
   });
 });
 

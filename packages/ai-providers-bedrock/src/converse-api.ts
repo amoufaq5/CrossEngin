@@ -92,9 +92,7 @@ export interface BedrockMessage {
   readonly content: readonly BedrockContentBlock[];
 }
 
-export type BedrockSystemBlock =
-  | { readonly text: string }
-  | BedrockCachePointBlock;
+export type BedrockSystemBlock = { readonly text: string } | BedrockCachePointBlock;
 
 export const BEDROCK_CACHE_POINT: BedrockCachePointBlock = {
   cachePoint: { type: "default" },
@@ -230,9 +228,7 @@ export function buildBedrockConverseRequest(
     ...(req.tools !== undefined && req.tools.length > 0
       ? { toolConfig: { tools: req.tools.map(translateTool) } }
       : {}),
-    ...(opts.guardrailConfig !== undefined
-      ? { guardrailConfig: opts.guardrailConfig }
-      : {}),
+    ...(opts.guardrailConfig !== undefined ? { guardrailConfig: opts.guardrailConfig } : {}),
   };
   return request;
 }
@@ -244,15 +240,11 @@ function applyCacheBreakpoints(
 ): void {
   if (cacheControl === undefined) return;
   const cacheSystem =
-    cacheControl.systemPrompt !== undefined ||
-    cacheControl.toolSchemas !== undefined;
+    cacheControl.systemPrompt !== undefined || cacheControl.toolSchemas !== undefined;
   if (cacheSystem && systemBlocks.length > 0) {
     systemBlocks.push(BEDROCK_CACHE_POINT);
   }
-  if (
-    cacheControl.conversationHistory !== undefined &&
-    messages.length >= 2
-  ) {
+  if (cacheControl.conversationHistory !== undefined && messages.length >= 2) {
     const historyIdx = messages.length - 2;
     messages[historyIdx] = appendCachePoint(messages[historyIdx]!);
   }
@@ -280,10 +272,7 @@ function translateAssistantMessage(m: LlmMessage): BedrockMessage {
   return { role: "assistant", content };
 }
 
-function appendKernelBlocks(
-  out: BedrockContentBlock[],
-  content: LlmContent,
-): void {
+function appendKernelBlocks(out: BedrockContentBlock[], content: LlmContent): void {
   if (typeof content === "string") {
     if (content.length > 0) out.push({ text: content });
     return;
@@ -370,9 +359,7 @@ export function normalizeConverseUsage(
   });
 }
 
-export function extractTextFromConverseResponse(
-  response: BedrockConverseResponse,
-): string {
+export function extractTextFromConverseResponse(response: BedrockConverseResponse): string {
   const out: string[] = [];
   for (const block of response.output.message.content) {
     if ("text" in block) out.push(block.text);

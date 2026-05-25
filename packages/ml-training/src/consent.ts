@@ -28,12 +28,7 @@ export const FORBIDDEN_TRAINING_DATA_CLASSES: ReadonlySet<DataClass> = new Set([
   "regulated",
 ]);
 
-export const CONSENT_STATUSES = [
-  "active",
-  "withdrawn",
-  "expired",
-  "superseded",
-] as const;
+export const CONSENT_STATUSES = ["active", "withdrawn", "expired", "superseded"] as const;
 export type ConsentStatus = (typeof CONSENT_STATUSES)[number];
 
 export const TrainingConsentSchema = z
@@ -75,10 +70,7 @@ export const TrainingConsentSchema = z
         });
       }
     });
-    if (
-      v.allowedDataClasses.includes("pii") &&
-      !v.redactPii
-    ) {
+    if (v.allowedDataClasses.includes("pii") && !v.redactPii) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["redactPii"],
@@ -136,10 +128,7 @@ export const TrainingConsentSchema = z
   });
 export type TrainingConsent = z.infer<typeof TrainingConsentSchema>;
 
-export function isConsentActive(
-  consent: TrainingConsent,
-  now: Date = new Date(),
-): boolean {
+export function isConsentActive(consent: TrainingConsent, now: Date = new Date()): boolean {
   if (consent.status !== "active") return false;
   if (consent.expiresAt !== null) {
     if (now.getTime() >= new Date(consent.expiresAt).getTime()) return false;
@@ -147,10 +136,7 @@ export function isConsentActive(
   return true;
 }
 
-export function permitsDataClass(
-  consent: TrainingConsent,
-  dataClass: DataClass,
-): boolean {
+export function permitsDataClass(consent: TrainingConsent, dataClass: DataClass): boolean {
   if (FORBIDDEN_TRAINING_DATA_CLASSES.has(dataClass)) return false;
   if (!isConsentActive(consent)) return false;
   return consent.allowedDataClasses.includes(dataClass);
@@ -163,9 +149,6 @@ export function activeConsentsFor(
   now: Date = new Date(),
 ): readonly TrainingConsent[] {
   return consents.filter(
-    (c) =>
-      c.tenantId === tenantId &&
-      c.purpose === purpose &&
-      isConsentActive(c, now),
+    (c) => c.tenantId === tenantId && c.purpose === purpose && isConsentActive(c, now),
   );
 }

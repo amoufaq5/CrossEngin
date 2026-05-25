@@ -7,16 +7,11 @@ function toBytes(input: Uint8Array | string): Uint8Array {
   return input;
 }
 
-export function hmacSha256Hex(
-  keyBytes: Uint8Array,
-  message: Uint8Array | string,
-): string {
+export function hmacSha256Hex(keyBytes: Uint8Array, message: Uint8Array | string): string {
   if (keyBytes.length < 16) {
     throw new Error(`HMAC key must be at least 16 bytes, got ${keyBytes.length}`);
   }
-  return createHmac("sha256", Buffer.from(keyBytes))
-    .update(toBytes(message))
-    .digest("hex");
+  return createHmac("sha256", Buffer.from(keyBytes)).update(toBytes(message)).digest("hex");
 }
 
 export function generateHmacKey(byteLength = 32): Uint8Array {
@@ -58,10 +53,7 @@ export type WebhookVerifyOutcome =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason:
-        | "malformed_header"
-        | "timestamp_outside_tolerance"
-        | "signature_mismatch";
+      readonly reason: "malformed_header" | "timestamp_outside_tolerance" | "signature_mismatch";
     };
 
 export interface WebhookVerifyOptions {

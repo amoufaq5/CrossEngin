@@ -9,9 +9,7 @@ export function isNotFoundErrorKind(value: string): value is NotFoundErrorKind {
   return (NOT_FOUND_ERROR_KINDS as readonly string[]).includes(value);
 }
 
-export function isNotFoundError(
-  err: unknown,
-): err is Error & { readonly kind: NotFoundErrorKind } {
+export function isNotFoundError(err: unknown): err is Error & { readonly kind: NotFoundErrorKind } {
   if (err === null || typeof err !== "object") return false;
   const candidate = err as Record<string, unknown>;
   const kind = candidate["kind"];

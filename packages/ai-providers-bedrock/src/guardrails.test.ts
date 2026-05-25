@@ -191,12 +191,8 @@ describe("BedrockGuardrailViolationError", () => {
 
 describe("isGuardrailInterventionResponse", () => {
   it("returns true for intervention stopReasons", () => {
-    expect(
-      isGuardrailInterventionResponse({ stopReason: "guardrail_intervened" }),
-    ).toBe(true);
-    expect(
-      isGuardrailInterventionResponse({ stopReason: "content_filtered" }),
-    ).toBe(true);
+    expect(isGuardrailInterventionResponse({ stopReason: "guardrail_intervened" })).toBe(true);
+    expect(isGuardrailInterventionResponse({ stopReason: "content_filtered" })).toBe(true);
   });
 
   it("returns false for normal stopReasons", () => {

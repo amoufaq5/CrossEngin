@@ -14,14 +14,7 @@ export const SUBCOMMANDS = [
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
-export const OUTPUT_FORMATS = [
-  "human",
-  "json",
-  "csv",
-  "tsv",
-  "ndjson",
-  "yaml",
-] as const;
+export const OUTPUT_FORMATS = ["human", "json", "csv", "tsv", "ndjson", "yaml"] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 export interface ParsedCommand {
@@ -131,10 +124,7 @@ export function isSubcommand(value: unknown): value is Subcommand {
   return typeof value === "string" && (SUBCOMMANDS as readonly string[]).includes(value);
 }
 
-export function getStringFlag(
-  command: ParsedCommand,
-  name: string,
-): string | null {
+export function getStringFlag(command: ParsedCommand, name: string): string | null {
   const value = command.flags.get(name);
   if (typeof value === "string") return value;
   return null;
@@ -145,10 +135,7 @@ export function getBooleanFlag(command: ParsedCommand, name: string): boolean {
   return value === true || value === "true" || value === "1";
 }
 
-export function getMultiFlag(
-  command: ParsedCommand,
-  name: string,
-): ReadonlyArray<string> {
+export function getMultiFlag(command: ParsedCommand, name: string): ReadonlyArray<string> {
   return command.multiFlags.get(name) ?? [];
 }
 
@@ -351,8 +338,8 @@ export function helpText(): string {
     "                          assert side A / side B is or is not system-authored.",
     "                          --system-only-X and --no-system-X are mutually exclusive",
     "                          per side; A's and B's flags don't interact (operators can",
-    "                          set --system-only-a + --no-system-b for asymmetric \"A is",
-    "                          system, B is human\" assertion). Per-side fires after global.",
+    '                          set --system-only-a + --no-system-b for asymmetric "A is',
+    '                          system, B is human" assertion). Per-side fires after global.',
     "                          With --with-actor-names, LEFT JOIN meta.users so the header",
     "                          renders 'by display_name (uuid)' per event (falls back to",
     "                          email then raw UUID; null actor_id renders as <system>).",

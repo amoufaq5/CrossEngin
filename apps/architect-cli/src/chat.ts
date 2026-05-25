@@ -680,7 +680,13 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
         });
         messageIndex += 1;
         if (call.name === "propose_manifest_edit" && !result.isError) {
-          await emitProposal(transcript, toolInvocationId, call, result.output, opts.autoApprove === true);
+          await emitProposal(
+            transcript,
+            toolInvocationId,
+            call,
+            result.output,
+            opts.autoApprove === true,
+          );
         }
       }
       toolMessages.push({
@@ -787,7 +793,7 @@ async function emitProposal(
     entitiesModified: diff.entitiesModified ?? 0,
     decision,
     applied: parsed.applied === true,
-    denialReason: parsed.applied === false ? parsed.reason ?? null : null,
+    denialReason: parsed.applied === false ? (parsed.reason ?? null) : null,
   });
 }
 
@@ -800,7 +806,12 @@ function extractInputPath(input: unknown): string | null {
 function decideProposal(
   parsed: ProposalToolPayload,
   autoApprove: boolean,
-): "auto_approved" | "interactive_approved" | "interactive_denied" | "no_changes" | "invalid_manifest" {
+):
+  | "auto_approved"
+  | "interactive_approved"
+  | "interactive_denied"
+  | "no_changes"
+  | "invalid_manifest" {
   if (parsed.reason === "invalid_manifest") return "invalid_manifest";
   if (parsed.reason === "no_changes") return "no_changes";
   if (parsed.applied === true) {
@@ -936,8 +947,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
     turns += 1;
     if (opts.oneShot) {
       await emitSessionEnd(opts.transcript, turns, aggregate);
-      const exceeded =
-        opts.maxCostUsd !== undefined && aggregate.cost > opts.maxCostUsd;
+      const exceeded = opts.maxCostUsd !== undefined && aggregate.cost > opts.maxCostUsd;
       if (exceeded) announceBudgetExceeded(opts, aggregate.cost, opts.maxCostUsd!);
       return {
         turns,
@@ -953,19 +963,14 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
         "Attach blocks with /attach <type> <value>; /show-attachments; /clear-attachments.\n",
     );
     if (opts.maxCostUsd !== undefined) {
-      opts.io.stdout.write(
-        `Session budget: $${opts.maxCostUsd.toFixed(4)} USD.\n`,
-      );
+      opts.io.stdout.write(`Session budget: $${opts.maxCostUsd.toFixed(4)} USD.\n`);
     }
   }
 
   let budgetExceeded = false;
   const pendingBlocks: LlmContentBlock[] = [];
   while (true) {
-    if (
-      opts.maxCostUsd !== undefined &&
-      aggregate.cost >= opts.maxCostUsd
-    ) {
+    if (opts.maxCostUsd !== undefined && aggregate.cost >= opts.maxCostUsd) {
       budgetExceeded = true;
       announceBudgetExceeded(opts, aggregate.cost, opts.maxCostUsd);
       break;
@@ -1052,11 +1057,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
   };
 }
 
-function announceBudgetExceeded(
-  opts: ChatReplOptions,
-  spentUsd: number,
-  budgetUsd: number,
-): void {
+function announceBudgetExceeded(opts: ChatReplOptions, spentUsd: number, budgetUsd: number): void {
   if (opts.format === "json") {
     opts.io.stdout.write(
       JSON.stringify({

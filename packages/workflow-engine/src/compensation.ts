@@ -8,8 +8,7 @@ export const COMPENSATION_PLAN_STATUSES = [
   "failed",
   "abandoned",
 ] as const;
-export type CompensationPlanStatus =
-  (typeof COMPENSATION_PLAN_STATUSES)[number];
+export type CompensationPlanStatus = (typeof COMPENSATION_PLAN_STATUSES)[number];
 
 export const COMPENSATION_PLAN_TRANSITIONS: Readonly<
   Record<CompensationPlanStatus, readonly CompensationPlanStatus[]>
@@ -48,11 +47,7 @@ export const computeCompensationPlan = (input: {
 }): readonly CompensationStep[] => {
   if (input.strategy === "no_compensation") return [];
   const succeededSideEffects = input.executedActivities
-    .filter(
-      (a) =>
-        a.status === "succeeded" &&
-        a.compensationActivityKey !== null,
-    )
+    .filter((a) => a.status === "succeeded" && a.compensationActivityKey !== null)
     .slice();
   if (input.strategy === "immediate_reverse_order") {
     succeededSideEffects.sort((a, b) => b.sequenceCursor - a.sequenceCursor);
@@ -83,7 +78,10 @@ export const CompensationPlanSchema = z
       .array(
         z.object({
           executedActivityId: z.string().regex(/^wfa_[a-z0-9]{8,40}$/),
-          compensationActivityKey: z.string().regex(/^[a-z][a-z0-9_]*$/).max(80),
+          compensationActivityKey: z
+            .string()
+            .regex(/^[a-z][a-z0-9_]*$/)
+            .max(80),
           orderIndex: z.number().int().min(0).max(10_000),
           compensationActivityId: z
             .string()
@@ -91,13 +89,7 @@ export const CompensationPlanSchema = z
             .nullable(),
           startedAt: z.string().datetime({ offset: true }).nullable(),
           completedAt: z.string().datetime({ offset: true }).nullable(),
-          stepStatus: z.enum([
-            "pending",
-            "running",
-            "succeeded",
-            "failed",
-            "skipped",
-          ]),
+          stepStatus: z.enum(["pending", "running", "succeeded", "failed", "skipped"]),
           errorMessage: z.string().max(500).nullable(),
         }),
       )
@@ -119,8 +111,7 @@ export const CompensationPlanSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["requiresManualReview"],
-        message:
-          "manual_review strategy requires requiresManualReview=true",
+        message: "manual_review strategy requires requiresManualReview=true",
       });
     }
     if (p.totalSteps !== p.steps.length) {
@@ -158,8 +149,7 @@ export const CompensationPlanSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["abandonedReason"],
-          message:
-            "abandoned compensation plan requires abandonedAt + abandonedReason",
+          message: "abandoned compensation plan requires abandonedAt + abandonedReason",
         });
       }
     }
@@ -171,8 +161,7 @@ export const CompensationPlanSchema = z
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["steps"],
-            message:
-              "immediate_reverse_order strategy requires dense orderIndex (0..n-1)",
+            message: "immediate_reverse_order strategy requires dense orderIndex (0..n-1)",
           });
           return;
         }

@@ -67,9 +67,9 @@ describe("TombstoneRecordSchema", () => {
   });
 
   it("rejects executedBy == approvedBy (four-eyes)", () => {
-    expect(() =>
-      TombstoneRecordSchema.parse({ ...base, approvedBy: "u-executor" }),
-    ).toThrow(/four-eyes/);
+    expect(() => TombstoneRecordSchema.parse({ ...base, approvedBy: "u-executor" })).toThrow(
+      /four-eyes/,
+    );
   });
 
   it("rejects data_subject_erasure without relatedDeletionRequestId", () => {
@@ -177,9 +177,7 @@ describe("TombstoneRecordSchema", () => {
   });
 
   it("rejects malformed tombstone id", () => {
-    expect(() =>
-      TombstoneRecordSchema.parse({ ...base, id: "tomb_short" }),
-    ).toThrow();
+    expect(() => TombstoneRecordSchema.parse({ ...base, id: "tomb_short" })).toThrow();
   });
 });
 

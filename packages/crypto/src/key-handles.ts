@@ -5,8 +5,7 @@ import { type KeyAlgorithm, type KeyPurpose } from "./algorithms.js";
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const KEY_ID_REGEX = /^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$/;
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type KeyId = `key_${string}`;
 
@@ -50,12 +49,7 @@ export const KeyHandleSchema = z.object({
   id: z.string().regex(KEY_ID_REGEX),
   tenantId: z.string().regex(UUID_REGEX).nullable(),
   algorithm: z.enum(["hmac-sha256", "ed25519"]),
-  purpose: z.enum([
-    "pack_signing",
-    "webhook_signing",
-    "evidence_sealing",
-    "tombstone_anchoring",
-  ]),
+  purpose: z.enum(["pack_signing", "webhook_signing", "evidence_sealing", "tombstone_anchoring"]),
   version: z.number().int().positive(),
 });
 
@@ -85,10 +79,7 @@ export function parseKeyHandle(serialized: string): KeyHandle {
   return KeyHandleSchema.parse(parsed);
 }
 
-export function assertHandleTenant(
-  handle: KeyHandle,
-  tenantId: string | null,
-): void {
+export function assertHandleTenant(handle: KeyHandle, tenantId: string | null): void {
   if (handle.tenantId === null) {
     return;
   }

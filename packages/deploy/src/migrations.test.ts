@@ -15,12 +15,7 @@ const SHA256_64 = "a".repeat(64);
 
 describe("constants", () => {
   it("MIGRATION_STATUSES has 4 entries", () => {
-    expect(MIGRATION_STATUSES).toEqual([
-      "pending",
-      "applied",
-      "failed",
-      "rolled_forward",
-    ]);
+    expect(MIGRATION_STATUSES).toEqual(["pending", "applied", "failed", "rolled_forward"]);
   });
 
   it("MIGRATION_KINDS has 11 entries", () => {
@@ -49,9 +44,9 @@ describe("MigrationDeclarationSchema", () => {
   });
 
   it("rejects a malformed migration id", () => {
-    expect(() =>
-      MigrationDeclarationSchema.parse({ ...base, id: "add_column" }),
-    ).toThrow(/NNNN_snake_case/);
+    expect(() => MigrationDeclarationSchema.parse({ ...base, id: "add_column" })).toThrow(
+      /NNNN_snake_case/,
+    );
   });
 
   it("rejects schema_rename without isDestructive=true", () => {
@@ -111,9 +106,7 @@ describe("MigrationDeclarationSchema", () => {
   });
 
   it("rejects bad SHA-256 length", () => {
-    expect(() =>
-      MigrationDeclarationSchema.parse({ ...base, sqlSha256: "deadbeef" }),
-    ).toThrow();
+    expect(() => MigrationDeclarationSchema.parse({ ...base, sqlSha256: "deadbeef" })).toThrow();
   });
 });
 
@@ -138,15 +131,15 @@ describe("MigrationSequenceSchema", () => {
   });
 
   it("rejects non-strictly-increasing sequence", () => {
-    expect(() =>
-      MigrationSequenceSchema.parse([m("0002_a"), m("0001_b")]),
-    ).toThrow(/strictly greater/);
+    expect(() => MigrationSequenceSchema.parse([m("0002_a"), m("0001_b")])).toThrow(
+      /strictly greater/,
+    );
   });
 
   it("rejects duplicate ids", () => {
-    expect(() =>
-      MigrationSequenceSchema.parse([m("0001_a"), m("0001_a")]),
-    ).toThrow(/duplicate migration id/);
+    expect(() => MigrationSequenceSchema.parse([m("0001_a"), m("0001_a")])).toThrow(
+      /duplicate migration id/,
+    );
   });
 });
 
@@ -167,9 +160,9 @@ describe("MigrationApplicationRecordSchema", () => {
   });
 
   it("requires errorMessage on failed", () => {
-    expect(() =>
-      MigrationApplicationRecordSchema.parse({ ...base, status: "failed" }),
-    ).toThrow(/errorMessage/);
+    expect(() => MigrationApplicationRecordSchema.parse({ ...base, status: "failed" })).toThrow(
+      /errorMessage/,
+    );
   });
 
   it("requires compensatingMigrationId on rolled_forward", () => {
@@ -180,7 +173,10 @@ describe("MigrationApplicationRecordSchema", () => {
 });
 
 describe("helpers", () => {
-  const base = (id: string, kind: MigrationDeclaration["kind"] = "schema_add_column"): MigrationDeclaration => ({
+  const base = (
+    id: string,
+    kind: MigrationDeclaration["kind"] = "schema_add_column",
+  ): MigrationDeclaration => ({
     id,
     kind,
     description: "x",
@@ -211,9 +207,6 @@ describe("helpers", () => {
 
   it("pendingMigrations excludes applied ids", () => {
     const seq = [base("0001_a"), base("0002_b"), base("0003_c")];
-    expect(pendingMigrations(seq, ["0001_a"]).map((m) => m.id)).toEqual([
-      "0002_b",
-      "0003_c",
-    ]);
+    expect(pendingMigrations(seq, ["0001_a"]).map((m) => m.id)).toEqual(["0002_b", "0003_c"]);
   });
 });

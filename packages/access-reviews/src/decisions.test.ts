@@ -58,9 +58,7 @@ describe("constants", () => {
     expect(STRONG_ATTESTATION_KINDS.has("e_signature_digital")).toBe(true);
     expect(STRONG_ATTESTATION_KINDS.has("qualified_e_signature")).toBe(true);
     expect(STRONG_ATTESTATION_KINDS.has("two_person_attestation")).toBe(true);
-    expect(STRONG_ATTESTATION_KINDS.has("click_through_acknowledgement")).toBe(
-      false,
-    );
+    expect(STRONG_ATTESTATION_KINDS.has("click_through_acknowledgement")).toBe(false);
   });
 });
 
@@ -202,14 +200,10 @@ describe("requiresStrongAttestation", () => {
     expect(requiresStrongAttestation("keep", "regulatory_requirement")).toBe(true);
   });
   it("time_bound_extend requires strong", () => {
-    expect(
-      requiresStrongAttestation("time_bound_extend", "manager_attestation"),
-    ).toBe(true);
+    expect(requiresStrongAttestation("time_bound_extend", "manager_attestation")).toBe(true);
   });
   it("security_concern_revoked requires strong", () => {
-    expect(
-      requiresStrongAttestation("revoke", "security_concern_revoked"),
-    ).toBe(true);
+    expect(requiresStrongAttestation("revoke", "security_concern_revoked")).toBe(true);
   });
   it("routine keep + role_appropriate does not require strong", () => {
     expect(requiresStrongAttestation("keep", "role_appropriate")).toBe(false);

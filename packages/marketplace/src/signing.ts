@@ -51,11 +51,7 @@ export function signPackManifest(input: {
   readonly signedAt: string;
 }): PackSignature {
   const bytes = canonicalManifestBytes(input.manifest);
-  const signature = signEd25519(
-    input.privateKeyBase64,
-    input.publicKeyBase64,
-    bytes,
-  );
+  const signature = signEd25519(input.privateKeyBase64, input.publicKeyBase64, bytes);
   const sig: PackSignature = {
     algorithm: "ed25519",
     publicKeyFingerprint: ed25519PublicKeyFingerprint(input.publicKeyBase64),

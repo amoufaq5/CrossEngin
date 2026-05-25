@@ -31,9 +31,7 @@ describe("FieldPathSchema", () => {
 
 describe("LocalizedTextSchema", () => {
   it("accepts BCP-47 locale keys", () => {
-    expect(() =>
-      LocalizedTextSchema.parse({ en: "Hi", "ar-AE": "مرحبا" }),
-    ).not.toThrow();
+    expect(() => LocalizedTextSchema.parse({ en: "Hi", "ar-AE": "مرحبا" })).not.toThrow();
   });
 });
 
@@ -60,9 +58,9 @@ describe("ViewFilterSchema", () => {
   });
 
   it("rejects in without values", () => {
-    expect(() =>
-      ViewFilterSchema.parse({ field: "status", operator: "in" }),
-    ).toThrow(/non-empty 'values' array/);
+    expect(() => ViewFilterSchema.parse({ field: "status", operator: "in" })).toThrow(
+      /non-empty 'values' array/,
+    );
   });
 });
 

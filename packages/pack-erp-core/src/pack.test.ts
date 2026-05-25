@@ -7,11 +7,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { ACCOUNT_ENTITY, INVOICE_ENTITY } from "./entities.js";
-import {
-  ERP_CORE_PACK_SLUG,
-  ERP_CORE_PACK_VERSION,
-  buildErpCorePack,
-} from "./pack.js";
+import { ERP_CORE_PACK_SLUG, ERP_CORE_PACK_VERSION, buildErpCorePack } from "./pack.js";
 
 describe("buildErpCorePack — manifest shape", () => {
   it("parses against the kernel ManifestSchema", () => {
@@ -43,17 +39,13 @@ describe("buildErpCorePack — full kernel cross-validation", () => {
     const m = buildErpCorePack();
     const result = tryValidateManifest(m);
     if (!result.ok) {
-      throw new Error(
-        `tryValidateManifest failed: ${JSON.stringify(result.errors)}`,
-      );
+      throw new Error(`tryValidateManifest failed: ${JSON.stringify(result.errors)}`);
     }
     expect(result.ok).toBe(true);
   });
 
   it("returns deterministic hash across two builds", () => {
-    expect(manifestHash(buildErpCorePack())).toBe(
-      manifestHash(buildErpCorePack()),
-    );
+    expect(manifestHash(buildErpCorePack())).toBe(manifestHash(buildErpCorePack()));
   });
 
   it("two empty diffs against itself returns no changes", () => {
@@ -106,12 +98,7 @@ describe("Account entity — shape spot-checks", () => {
     if (f?.type.kind !== "enum") {
       throw new Error("status field is not an enum");
     }
-    expect(f.type.values).toEqual([
-      "prospect",
-      "active",
-      "suspended",
-      "churned",
-    ]);
+    expect(f.type.values).toEqual(["prospect", "active", "suspended", "churned"]);
   });
 });
 
@@ -126,9 +113,7 @@ describe("Invoice entity — shape spot-checks", () => {
     if (f?.type.kind !== "enum") {
       throw new Error("state field is not an enum");
     }
-    expect(f.type.values.sort()).toEqual(
-      ["draft", "overdue", "paid", "sent", "void"].sort(),
-    );
+    expect(f.type.values.sort()).toEqual(["draft", "overdue", "paid", "sent", "void"].sort());
   });
 
   it("decimal fields have correct precision/scale", () => {

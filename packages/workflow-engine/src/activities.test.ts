@@ -313,22 +313,16 @@ describe("decideActivityRetry", () => {
 
 describe("isIdempotentActivity / isSideEffectActivity", () => {
   it("classifies db_read as idempotent", () => {
-    expect(isIdempotentActivity({ ...baseActivity, kind: "db_read" })).toBe(
-      true,
-    );
+    expect(isIdempotentActivity({ ...baseActivity, kind: "db_read" })).toBe(true);
   });
   it("classifies http_call as side effect", () => {
-    expect(isSideEffectActivity({ ...baseActivity, kind: "http_call" })).toBe(
-      true,
-    );
+    expect(isSideEffectActivity({ ...baseActivity, kind: "http_call" })).toBe(true);
   });
 });
 
 describe("isActivityTimedOut", () => {
   it("returns true past timeoutAt for active activity", () => {
-    expect(
-      isActivityTimedOut(baseActivity, new Date("2026-05-16T10:02:00Z")),
-    ).toBe(true);
+    expect(isActivityTimedOut(baseActivity, new Date("2026-05-16T10:02:00Z"))).toBe(true);
   });
   it("returns false for succeeded activity", () => {
     expect(

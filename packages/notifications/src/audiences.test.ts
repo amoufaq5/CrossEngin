@@ -113,9 +113,7 @@ describe("AudienceSchema", () => {
 
 describe("OncallShiftSchema", () => {
   it("accepts a valid shift", () => {
-    expect(() =>
-      OncallShiftSchema.parse(rotation.shifts[0]),
-    ).not.toThrow();
+    expect(() => OncallShiftSchema.parse(rotation.shifts[0])).not.toThrow();
   });
 
   it("rejects endsAt <= startsAt", () => {
@@ -161,21 +159,19 @@ describe("OncallRotationSchema", () => {
 
 describe("findActiveOncallUser", () => {
   it("returns the user whose shift covers now", () => {
-    expect(
-      findActiveOncallUser(rotation, new Date("2026-05-16T12:00:00Z")),
-    ).toBe("11111111-1111-1111-1111-111111111111");
+    expect(findActiveOncallUser(rotation, new Date("2026-05-16T12:00:00Z"))).toBe(
+      "11111111-1111-1111-1111-111111111111",
+    );
   });
 
   it("returns the next shift's user after handoff", () => {
-    expect(
-      findActiveOncallUser(rotation, new Date("2026-05-16T22:00:00Z")),
-    ).toBe("33333333-3333-3333-3333-333333333333");
+    expect(findActiveOncallUser(rotation, new Date("2026-05-16T22:00:00Z"))).toBe(
+      "33333333-3333-3333-3333-333333333333",
+    );
   });
 
   it("returns null outside any shift", () => {
-    expect(
-      findActiveOncallUser(rotation, new Date("2026-05-15T00:00:00Z")),
-    ).toBeNull();
+    expect(findActiveOncallUser(rotation, new Date("2026-05-15T00:00:00Z"))).toBeNull();
   });
 });
 
@@ -191,9 +187,7 @@ describe("resolveEscalationChain", () => {
   };
 
   it("returns the first user at index 0", () => {
-    expect(resolveEscalationChain(chain, 0)).toBe(
-      "11111111-1111-1111-1111-111111111111",
-    );
+    expect(resolveEscalationChain(chain, 0)).toBe("11111111-1111-1111-1111-111111111111");
   });
 
   it("returns null past the chain", () => {
@@ -207,49 +201,33 @@ describe("resolveEscalationChain", () => {
 
 describe("resolveUserAddress", () => {
   it("returns email address for email channel", () => {
-    expect(
-      resolveUserAddress(
-        "11111111-1111-1111-1111-111111111111",
-        "email",
-        addressBook,
-      ),
-    ).toBe("alice@acme.com");
+    expect(resolveUserAddress("11111111-1111-1111-1111-111111111111", "email", addressBook)).toBe(
+      "alice@acme.com",
+    );
   });
 
   it("returns array of device tokens for push", () => {
     expect(
-      resolveUserAddress(
-        "11111111-1111-1111-1111-111111111111",
-        "push_mobile",
-        addressBook,
-      ),
+      resolveUserAddress("11111111-1111-1111-1111-111111111111", "push_mobile", addressBook),
     ).toEqual(["device-token-1", "device-token-2"]);
   });
 
   it("returns null for webhook (no per-user address)", () => {
     expect(
-      resolveUserAddress(
-        "11111111-1111-1111-1111-111111111111",
-        "webhook",
-        addressBook,
-      ),
+      resolveUserAddress("11111111-1111-1111-1111-111111111111", "webhook", addressBook),
     ).toBeNull();
   });
 
   it("returns null for unknown user", () => {
-    expect(resolveUserAddress("99999999-9999-9999-9999-999999999999", "email", addressBook)).toBeNull();
+    expect(
+      resolveUserAddress("99999999-9999-9999-9999-999999999999", "email", addressBook),
+    ).toBeNull();
   });
 });
 
 describe("isAddressable", () => {
   it("returns true when email address exists", () => {
-    expect(
-      isAddressable(
-        "11111111-1111-1111-1111-111111111111",
-        "email",
-        addressBook,
-      ),
-    ).toBe(true);
+    expect(isAddressable("11111111-1111-1111-1111-111111111111", "email", addressBook)).toBe(true);
   });
 
   it("returns false when push tokens are empty", () => {
@@ -257,8 +235,8 @@ describe("isAddressable", () => {
       ...addressBook,
       push_mobile: { "11111111-1111-1111-1111-111111111111": [] },
     };
-    expect(
-      isAddressable("11111111-1111-1111-1111-111111111111", "push_mobile", emptyBook),
-    ).toBe(false);
+    expect(isAddressable("11111111-1111-1111-1111-111111111111", "push_mobile", emptyBook)).toBe(
+      false,
+    );
   });
 });

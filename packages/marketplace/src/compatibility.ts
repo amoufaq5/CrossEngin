@@ -5,23 +5,11 @@ import { compareSemver, type PackManifest } from "./packs.js";
 const SEMVER_REGEX =
   /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-export const PLAN_TIERS = [
-  "trial",
-  "base",
-  "professional",
-  "enterprise",
-  "non_profit",
-] as const;
+export const PLAN_TIERS = ["trial", "base", "professional", "enterprise", "non_profit"] as const;
 export type PlanTier = (typeof PLAN_TIERS)[number];
 export const PlanTierSchema = z.enum(PLAN_TIERS);
 
-export const COMPLIANCE_PACKS = [
-  "hipaa",
-  "gdpr",
-  "uae_moh",
-  "soc2",
-  "iso_27001",
-] as const;
+export const COMPLIANCE_PACKS = ["hipaa", "gdpr", "uae_moh", "soc2", "iso_27001"] as const;
 export type CompliancePackId = (typeof COMPLIANCE_PACKS)[number];
 
 export const PackCompatibilitySchema = z
@@ -160,10 +148,7 @@ export function checkCompatibility(
   };
 }
 
-export function packMatchesPlatform(
-  manifest: PackManifest,
-  platformVersion: string,
-): boolean {
+export function packMatchesPlatform(manifest: PackManifest, platformVersion: string): boolean {
   if (compareSemver(platformVersion, manifest.minPlatformVersion) < 0) return false;
   if (
     manifest.maxPlatformVersion !== undefined &&

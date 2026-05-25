@@ -108,8 +108,6 @@ describe("isCostRunaway", () => {
   });
 
   it("honors a custom threshold", () => {
-    expect(
-      isCostRunaway({ hourlyDollarsUsed: 50, hourlyThresholdDollars: 25 }),
-    ).toBe(true);
+    expect(isCostRunaway({ hourlyDollarsUsed: 50, hourlyThresholdDollars: 25 })).toBe(true);
   });
 });

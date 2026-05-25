@@ -36,11 +36,7 @@ describe("canonicalizeForHash", () => {
   });
 
   it("preserves order in arrays of mixed named and unnamed objects", () => {
-    const result = canonicalizeForHash([
-      { name: "z" },
-      { kind: "y" },
-      { name: "a" },
-    ]);
+    const result = canonicalizeForHash([{ name: "z" }, { kind: "y" }, { name: "a" }]);
     expect(result).toEqual([{ name: "z" }, { kind: "y" }, { name: "a" }]);
   });
 
@@ -178,9 +174,7 @@ describe("manifestHash", () => {
       meta: {
         ...baseMeta,
         manifestResolution: {
-          parents: [
-            { slug: "p", version: "1.0.0", hash: "x".repeat(64), parentId: "p" },
-          ],
+          parents: [{ slug: "p", version: "1.0.0", hash: "x".repeat(64), parentId: "p" }],
         },
       },
     };
@@ -204,9 +198,7 @@ describe("canonicalManifestJson", () => {
       meta: {
         ...baseMeta,
         manifestResolution: {
-          parents: [
-            { slug: "p", version: "1.0.0", hash: "h".repeat(64), parentId: "p" },
-          ],
+          parents: [{ slug: "p", version: "1.0.0", hash: "h".repeat(64), parentId: "p" }],
         },
       },
     };

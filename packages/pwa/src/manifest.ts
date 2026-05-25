@@ -73,7 +73,10 @@ export const WebAppManifestSchema = z
     orientation: z.enum(ORIENTATIONS).default("any"),
     theme_color: z.string().regex(HEX_COLOR_REGEX),
     background_color: z.string().regex(HEX_COLOR_REGEX),
-    lang: z.string().regex(/^[a-z]{2,3}(?:-[A-Z]{2})?$/).default("en"),
+    lang: z
+      .string()
+      .regex(/^[a-z]{2,3}(?:-[A-Z]{2})?$/)
+      .default("en"),
     dir: z.enum(["ltr", "rtl", "auto"]).default("auto"),
     id: z.string().min(1).optional(),
     icons: z.array(ManifestIconSchema).min(1),
@@ -118,7 +121,8 @@ export const WebAppManifestSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["related_applications"],
-        message: "prefer_related_applications=true requires at least one related_applications entry",
+        message:
+          "prefer_related_applications=true requires at least one related_applications entry",
       });
     }
   });

@@ -15,19 +15,11 @@ export const HOLD_KINDS = [
 export type HoldKind = (typeof HOLD_KINDS)[number];
 export const HoldKindSchema = z.enum(HOLD_KINDS);
 
-export const HOLD_STATUSES = [
-  "draft",
-  "active",
-  "suspended",
-  "released",
-  "expired",
-] as const;
+export const HOLD_STATUSES = ["draft", "active", "suspended", "released", "expired"] as const;
 export type HoldStatus = (typeof HOLD_STATUSES)[number];
 export const HoldStatusSchema = z.enum(HOLD_STATUSES);
 
-export const HOLD_TRANSITIONS: Readonly<
-  Record<HoldStatus, readonly HoldStatus[]>
-> = Object.freeze({
+export const HOLD_TRANSITIONS: Readonly<Record<HoldStatus, readonly HoldStatus[]>> = Object.freeze({
   draft: ["active"],
   active: ["suspended", "released", "expired"],
   suspended: ["active", "released"],
@@ -220,15 +212,10 @@ export function isHoldEnforced(hold: LegalHold): boolean {
 
 export function acknowledgementRate(hold: LegalHold): number {
   if (hold.affectedCustodianCount === 0) return 1;
-  return (
-    Math.round((hold.custodianAcknowledgementCount / hold.affectedCustodianCount) * 100) / 100
-  );
+  return Math.round((hold.custodianAcknowledgementCount / hold.affectedCustodianCount) * 100) / 100;
 }
 
-export function isHoldOverdue(
-  hold: LegalHold,
-  now: Date = new Date(),
-): boolean {
+export function isHoldOverdue(hold: LegalHold, now: Date = new Date()): boolean {
   if (hold.expiresAt === undefined) return false;
   if (hold.status === "released") return false;
   return now.getTime() >= new Date(hold.expiresAt).getTime();

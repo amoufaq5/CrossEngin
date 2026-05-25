@@ -43,15 +43,15 @@ describe("CachePolicySchema", () => {
   });
 
   it("rejects no_store with ttlSeconds > 0", () => {
-    expect(() =>
-      CachePolicySchema.parse({ ...base, cacheControl: "no_store" }),
-    ).toThrow(/no_store/);
+    expect(() => CachePolicySchema.parse({ ...base, cacheControl: "no_store" })).toThrow(
+      /no_store/,
+    );
   });
 
   it("rejects private cacheControl on edge_cdn", () => {
-    expect(() =>
-      CachePolicySchema.parse({ ...base, cacheControl: "private" }),
-    ).toThrow(/edge_cdn caches must use cacheControl='public'/);
+    expect(() => CachePolicySchema.parse({ ...base, cacheControl: "private" })).toThrow(
+      /edge_cdn caches must use cacheControl='public'/,
+    );
   });
 
   it("rejects path_query_vary_headers without varyHeaders", () => {
@@ -80,9 +80,7 @@ describe("CachePolicySchema", () => {
   });
 
   it("rejects malformed path pattern", () => {
-    expect(() =>
-      CachePolicySchema.parse({ ...base, pathPattern: "marketing/*" }),
-    ).toThrow();
+    expect(() => CachePolicySchema.parse({ ...base, pathPattern: "marketing/*" })).toThrow();
   });
 });
 
@@ -106,9 +104,9 @@ describe("CachePolicySetSchema", () => {
   });
 
   it("rejects duplicate ids", () => {
-    expect(() =>
-      CachePolicySetSchema.parse([policy("a"), policy("a")]),
-    ).toThrow(/duplicate cache policy/);
+    expect(() => CachePolicySetSchema.parse([policy("a"), policy("a")])).toThrow(
+      /duplicate cache policy/,
+    );
   });
 });
 
@@ -128,9 +126,7 @@ describe("shouldCache", () => {
   };
 
   it("returns false for POST requests", () => {
-    expect(
-      shouldCache(policy, { path: "/x", method: "POST", headers: {} }),
-    ).toBe(false);
+    expect(shouldCache(policy, { path: "/x", method: "POST", headers: {} })).toBe(false);
   });
 
   it("returns false when authorization is present and bypassAuthenticated=true", () => {
@@ -154,9 +150,7 @@ describe("shouldCache", () => {
   });
 
   it("returns true for a normal GET request", () => {
-    expect(
-      shouldCache(policy, { path: "/x", method: "GET", headers: {} }),
-    ).toBe(true);
+    expect(shouldCache(policy, { path: "/x", method: "GET", headers: {} })).toBe(true);
   });
 });
 
@@ -176,9 +170,7 @@ describe("cacheKeyFor", () => {
   };
 
   it("returns the path for path_only", () => {
-    expect(
-      cacheKeyFor(base, { path: "/x", method: "GET", query: "a=1", headers: {} }),
-    ).toBe("/x");
+    expect(cacheKeyFor(base, { path: "/x", method: "GET", query: "a=1", headers: {} })).toBe("/x");
   });
 
   it("includes query for path_query", () => {

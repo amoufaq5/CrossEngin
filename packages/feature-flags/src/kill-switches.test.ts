@@ -171,40 +171,26 @@ describe("isKillSwitchActive / findActiveKillSwitch", () => {
   };
 
   it("returns true for triggered_active within window", () => {
-    expect(
-      isKillSwitchActive(triggered, new Date("2026-05-16T15:00:00Z")),
-    ).toBe(true);
+    expect(isKillSwitchActive(triggered, new Date("2026-05-16T15:00:00Z"))).toBe(true);
   });
 
   it("returns false past expiresAt", () => {
-    expect(
-      isKillSwitchActive(triggered, new Date("2026-05-18T00:00:00Z")),
-    ).toBe(false);
+    expect(isKillSwitchActive(triggered, new Date("2026-05-18T00:00:00Z"))).toBe(false);
   });
 
   it("returns false for armed status (not yet triggered)", () => {
-    expect(
-      isKillSwitchActive(baseSwitch, new Date("2026-05-16T11:00:00Z")),
-    ).toBe(false);
+    expect(isKillSwitchActive(baseSwitch, new Date("2026-05-16T11:00:00Z"))).toBe(false);
   });
 
   it("findActiveKillSwitch matches by flagId", () => {
     expect(
-      findActiveKillSwitch(
-        [triggered],
-        triggered.flagId,
-        new Date("2026-05-16T15:00:00Z"),
-      ),
+      findActiveKillSwitch([triggered], triggered.flagId, new Date("2026-05-16T15:00:00Z")),
     ).not.toBeNull();
   });
 
   it("findActiveKillSwitch returns null on flagId mismatch", () => {
     expect(
-      findActiveKillSwitch(
-        [triggered],
-        "ff_otherflag1",
-        new Date("2026-05-16T15:00:00Z"),
-      ),
+      findActiveKillSwitch([triggered], "ff_otherflag1", new Date("2026-05-16T15:00:00Z")),
     ).toBeNull();
   });
 });

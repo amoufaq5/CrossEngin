@@ -41,10 +41,7 @@ export const RegionParticipationSchema = z
     healthCheckSeconds: z.number().int().min(1).max(300).default(15),
   })
   .superRefine((v, ctx) => {
-    const writeRoles: ReadonlySet<RegionRole> = new Set([
-      "writer_primary",
-      "writer_secondary",
-    ]);
+    const writeRoles: ReadonlySet<RegionRole> = new Set(["writer_primary", "writer_secondary"]);
     if (writeRoles.has(v.role) && v.acceptsWritesFor.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -157,7 +154,8 @@ export const ActiveActiveTopologySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["participations"],
-          message: "active_active kind cannot have more than one writer_primary (use writer_secondary for additional writers)",
+          message:
+            "active_active kind cannot have more than one writer_primary (use writer_secondary for additional writers)",
         });
       }
     }
@@ -166,7 +164,8 @@ export const ActiveActiveTopologySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["participations"],
-          message: "multi_master_partitioned kind requires >=2 writer_primary regions (one per partition)",
+          message:
+            "multi_master_partitioned kind requires >=2 writer_primary regions (one per partition)",
         });
       }
       const writeMap = new Map<string, Region>();

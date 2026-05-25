@@ -10,13 +10,7 @@ export const NOTIFICATION_CHANNELS = [
 ] as const;
 export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number];
 
-export const EMAIL_PROVIDERS = [
-  "smtp_relay",
-  "sendgrid",
-  "mailgun",
-  "ses",
-  "postmark",
-] as const;
+export const EMAIL_PROVIDERS = ["smtp_relay", "sendgrid", "mailgun", "ses", "postmark"] as const;
 export type EmailProvider = (typeof EMAIL_PROVIDERS)[number];
 
 export const SMS_PROVIDERS = [
@@ -54,9 +48,7 @@ export interface ChannelCapability {
   readonly singleSegmentBytes: number | null;
 }
 
-export const CHANNEL_CAPABILITIES: Readonly<
-  Record<NotificationChannel, ChannelCapability>
-> = {
+export const CHANNEL_CAPABILITIES: Readonly<Record<NotificationChannel, ChannelCapability>> = {
   email: {
     maxBodyBytes: 5_000_000,
     supportsHtml: true,
@@ -113,16 +105,15 @@ export const CHANNEL_CAPABILITIES: Readonly<
   },
 };
 
-export const PROVIDERS_BY_CHANNEL: Readonly<
-  Record<NotificationChannel, readonly ProviderKind[]>
-> = {
-  email: EMAIL_PROVIDERS,
-  sms: SMS_PROVIDERS,
-  push_mobile: PUSH_PROVIDERS,
-  in_app: ["in_app_native"],
-  webhook: ["webhook_http"],
-  voice_call: VOICE_PROVIDERS,
-};
+export const PROVIDERS_BY_CHANNEL: Readonly<Record<NotificationChannel, readonly ProviderKind[]>> =
+  {
+    email: EMAIL_PROVIDERS,
+    sms: SMS_PROVIDERS,
+    push_mobile: PUSH_PROVIDERS,
+    in_app: ["in_app_native"],
+    webhook: ["webhook_http"],
+    voice_call: VOICE_PROVIDERS,
+  };
 
 export const providerSupportsChannel = (
   provider: ProviderKind,
@@ -136,11 +127,17 @@ const ProviderConfigBaseSchema = z.object({
   provider: z.enum(PROVIDER_KINDS),
   label: z.string().min(1).max(120),
   enabled: z.boolean(),
-  apiKeySha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  apiKeySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
   endpointUrl: z.string().url().nullable(),
   fromAddress: z.string().min(1).max(256).nullable(),
   fromName: z.string().min(1).max(120).nullable(),
-  webhookSecretSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  webhookSecretSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
   rateLimitPerSecond: z.number().int().min(1).max(10_000),
   retryMaxAttempts: z.number().int().min(0).max(20).default(3),
   retryInitialBackoffSeconds: z.number().int().min(1).max(600).default(2),
@@ -148,58 +145,54 @@ const ProviderConfigBaseSchema = z.object({
   createdBy: z.string().uuid(),
 });
 
-export const ProviderConfigSchema = ProviderConfigBaseSchema.superRefine(
-  (p, ctx) => {
-    if (!providerSupportsChannel(p.provider, p.channel)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["provider"],
-        message: `provider ${p.provider} does not support channel ${p.channel}`,
-      });
-    }
-    if (p.channel === "email" && p.fromAddress === null) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["fromAddress"],
-        message: "email provider requires fromAddress",
-      });
-    }
-    if (p.channel === "webhook" && p.webhookSecretSha256 === null) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["webhookSecretSha256"],
-        message: "webhook provider requires webhookSecretSha256 (HMAC-SHA256)",
-      });
-    }
-    if (p.channel === "webhook" && p.endpointUrl === null) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["endpointUrl"],
-        message: "webhook provider requires endpointUrl",
-      });
-    }
-    if (
-      (p.channel === "sms" ||
-        p.channel === "push_mobile" ||
-        p.channel === "voice_call" ||
-        p.channel === "email") &&
-      p.provider !== "smtp_relay" &&
-      p.apiKeySha256 === null
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["apiKeySha256"],
-        message: `${p.channel} provider ${p.provider} requires apiKeySha256`,
-      });
-    }
-  },
-);
+export const ProviderConfigSchema = ProviderConfigBaseSchema.superRefine((p, ctx) => {
+  if (!providerSupportsChannel(p.provider, p.channel)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["provider"],
+      message: `provider ${p.provider} does not support channel ${p.channel}`,
+    });
+  }
+  if (p.channel === "email" && p.fromAddress === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["fromAddress"],
+      message: "email provider requires fromAddress",
+    });
+  }
+  if (p.channel === "webhook" && p.webhookSecretSha256 === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["webhookSecretSha256"],
+      message: "webhook provider requires webhookSecretSha256 (HMAC-SHA256)",
+    });
+  }
+  if (p.channel === "webhook" && p.endpointUrl === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["endpointUrl"],
+      message: "webhook provider requires endpointUrl",
+    });
+  }
+  if (
+    (p.channel === "sms" ||
+      p.channel === "push_mobile" ||
+      p.channel === "voice_call" ||
+      p.channel === "email") &&
+    p.provider !== "smtp_relay" &&
+    p.apiKeySha256 === null
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["apiKeySha256"],
+      message: `${p.channel} provider ${p.provider} requires apiKeySha256`,
+    });
+  }
+});
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
-export const isWithinChannelLimits = (
-  channel: NotificationChannel,
-  bodyBytes: number,
-): boolean => bodyBytes <= CHANNEL_CAPABILITIES[channel].maxBodyBytes;
+export const isWithinChannelLimits = (channel: NotificationChannel, bodyBytes: number): boolean =>
+  bodyBytes <= CHANNEL_CAPABILITIES[channel].maxBodyBytes;
 
 export const isSingleSmsSegment = (bodyBytes: number): boolean => {
   const limit = CHANNEL_CAPABILITIES.sms.singleSegmentBytes;

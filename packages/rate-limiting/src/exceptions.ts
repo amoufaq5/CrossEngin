@@ -20,25 +20,20 @@ export const EXCEPTION_STATUSES = [
 ] as const;
 export type ExceptionStatus = (typeof EXCEPTION_STATUSES)[number];
 
-export const EXCEPTION_TRANSITIONS: Readonly<
-  Record<ExceptionStatus, readonly ExceptionStatus[]>
-> = {
-  requested: ["approved", "rejected"],
-  approved: ["active", "revoked_early"],
-  active: ["expired", "revoked_early"],
-  expired: [],
-  rejected: [],
-  revoked_early: [],
-};
+export const EXCEPTION_TRANSITIONS: Readonly<Record<ExceptionStatus, readonly ExceptionStatus[]>> =
+  {
+    requested: ["approved", "rejected"],
+    approved: ["active", "revoked_early"],
+    active: ["expired", "revoked_early"],
+    expired: [],
+    rejected: [],
+    revoked_early: [],
+  };
 
-export const canTransitionException = (
-  from: ExceptionStatus,
-  to: ExceptionStatus,
-): boolean => EXCEPTION_TRANSITIONS[from].includes(to);
+export const canTransitionException = (from: ExceptionStatus, to: ExceptionStatus): boolean =>
+  EXCEPTION_TRANSITIONS[from].includes(to);
 
-export const MAX_EXCEPTION_DURATION_HOURS: Readonly<
-  Record<ExceptionKind, number>
-> = {
+export const MAX_EXCEPTION_DURATION_HOURS: Readonly<Record<ExceptionKind, number>> = {
   principal_overage: 24 * 30,
   tenant_burst_allowance: 24 * 7,
   scheduled_event_uplift: 24 * 14,
@@ -81,8 +76,7 @@ export const RateLimitExceptionSchema = z
       });
     }
     const maxDurationMs = MAX_EXCEPTION_DURATION_HOURS[e.kind] * 3_600_000;
-    const requestedDurationMs =
-      Date.parse(e.expiresAt) - Date.parse(e.requestedAt);
+    const requestedDurationMs = Date.parse(e.expiresAt) - Date.parse(e.requestedAt);
     if (requestedDurationMs > maxDurationMs) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -115,25 +109,16 @@ export const RateLimitExceptionSchema = z
       }
     }
     if (e.status === "rejected") {
-      if (
-        e.rejectedAt === null ||
-        e.rejectedBy === null ||
-        e.rejectedReason === null
-      ) {
+      if (e.rejectedAt === null || e.rejectedBy === null || e.rejectedReason === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["rejectedReason"],
-          message:
-            "rejected exception requires rejectedAt + rejectedBy + rejectedReason",
+          message: "rejected exception requires rejectedAt + rejectedBy + rejectedReason",
         });
       }
     }
     if (e.status === "revoked_early") {
-      if (
-        e.revokedEarlyAt === null ||
-        e.revokedEarlyBy === null ||
-        e.revokedEarlyReason === null
-      ) {
+      if (e.revokedEarlyAt === null || e.revokedEarlyBy === null || e.revokedEarlyReason === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["revokedEarlyReason"],
@@ -142,34 +127,23 @@ export const RateLimitExceptionSchema = z
         });
       }
     }
-    if (
-      e.kind === "incident_response_bypass" &&
-      e.relatedIncidentId === null
-    ) {
+    if (e.kind === "incident_response_bypass" && e.relatedIncidentId === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["relatedIncidentId"],
-        message:
-          "incident_response_bypass exception requires relatedIncidentId",
+        message: "incident_response_bypass exception requires relatedIncidentId",
       });
     }
   });
 export type RateLimitException = z.infer<typeof RateLimitExceptionSchema>;
 
-export const isExceptionActive = (
-  exception: RateLimitException,
-  now: Date,
-): boolean => {
+export const isExceptionActive = (exception: RateLimitException, now: Date): boolean => {
   if (exception.status !== "active") return false;
   return now.getTime() < Date.parse(exception.expiresAt);
 };
 
-export const applyException = (
-  baseLimit: number,
-  exception: RateLimitException,
-): number =>
-  Math.max(0, Math.floor(baseLimit * exception.multiplier)) +
-  exception.additiveBurst;
+export const applyException = (baseLimit: number, exception: RateLimitException): number =>
+  Math.max(0, Math.floor(baseLimit * exception.multiplier)) + exception.additiveBurst;
 
 export const findActiveException = (
   exceptions: readonly RateLimitException[],

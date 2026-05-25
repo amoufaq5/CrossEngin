@@ -1,11 +1,6 @@
 import type { EntityPermissions } from "@crossengin/auth";
 
-const ALL_ROLES = [
-  "erp_admin",
-  "erp_clinician",
-  "erp_front_desk",
-  "erp_viewer",
-];
+const ALL_ROLES = ["erp_admin", "erp_clinician", "erp_front_desk", "erp_viewer"];
 const CLINICAL_WRITE_ROLES = ["erp_admin", "erp_clinician"];
 const SCHEDULING_ROLES = ["erp_admin", "erp_clinician", "erp_front_desk"];
 const ADMIN_ONLY = ["erp_admin"];

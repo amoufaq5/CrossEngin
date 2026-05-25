@@ -14,7 +14,10 @@ function fixtureRoute(overrides: Partial<RouteDefinition> = {}): RouteDefinition
     id: "rt_route0001",
     operationId: "tenants.create",
     method: "POST",
-    pathSegments: [{ kind: "literal", value: "v1" }, { kind: "literal", value: "tenants" }],
+    pathSegments: [
+      { kind: "literal", value: "v1" },
+      { kind: "literal", value: "tenants" },
+    ],
     apiVersion: "v1",
     isDeprecated: false,
     deprecatedSince: null,
@@ -83,7 +86,11 @@ describe("handlerOutputToResponse", () => {
   });
 
   it("handles empty output", () => {
-    const res = handlerOutputToResponse({ kind: "empty", status: 204, headers: { "x-foo": "bar" } });
+    const res = handlerOutputToResponse({
+      kind: "empty",
+      status: 204,
+      headers: { "x-foo": "bar" },
+    });
     expect(res.status).toBe(204);
     expect(res.bodyBytes).toBeNull();
     expect(res.headers["x-foo"]).toBe("bar");

@@ -15,10 +15,7 @@ export const KEY_PURPOSES = [
 ] as const;
 export type KeyPurpose = (typeof KEY_PURPOSES)[number];
 
-export const KEY_ALGORITHMS = [
-  ...MAC_ALGORITHMS,
-  ...SIGNATURE_ALGORITHMS,
-] as const;
+export const KEY_ALGORITHMS = [...MAC_ALGORITHMS, ...SIGNATURE_ALGORITHMS] as const;
 export type KeyAlgorithm = (typeof KEY_ALGORITHMS)[number];
 
 export const CRYPTO_VERSION = 1;
@@ -43,9 +40,7 @@ export function isKeyPurpose(value: unknown): value is KeyPurpose {
   return typeof value === "string" && (KEY_PURPOSES as readonly string[]).includes(value);
 }
 
-export function allowedPurposesForAlgorithm(
-  algorithm: KeyAlgorithm,
-): readonly KeyPurpose[] {
+export function allowedPurposesForAlgorithm(algorithm: KeyAlgorithm): readonly KeyPurpose[] {
   switch (algorithm) {
     case "ed25519":
       return ["pack_signing", "evidence_sealing", "tombstone_anchoring"];
@@ -54,9 +49,6 @@ export function allowedPurposesForAlgorithm(
   }
 }
 
-export function isPurposeAllowed(
-  algorithm: KeyAlgorithm,
-  purpose: KeyPurpose,
-): boolean {
+export function isPurposeAllowed(algorithm: KeyAlgorithm, purpose: KeyPurpose): boolean {
   return allowedPurposesForAlgorithm(algorithm).includes(purpose);
 }

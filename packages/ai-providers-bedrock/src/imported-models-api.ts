@@ -6,13 +6,9 @@ export const BEDROCK_IMPORTED_MODEL_NAME_CONTAINS_MIN_LEN = 1;
 export const BEDROCK_IMPORTED_MODEL_NAME_CONTAINS_MAX_LEN = 63;
 
 export const BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES = ["CreationTime"] as const;
-export type BedrockImportedModelSortBy =
-  (typeof BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES)[number];
+export type BedrockImportedModelSortBy = (typeof BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES)[number];
 
-export const BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES = [
-  "Ascending",
-  "Descending",
-] as const;
+export const BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES = ["Ascending", "Descending"] as const;
 export type BedrockImportedModelSortOrder =
   (typeof BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES)[number];
 
@@ -49,9 +45,7 @@ export interface BedrockImportedModelDetail {
   readonly modelKmsKeyArn?: string;
 }
 
-export function parseImportedModelDetail(
-  raw: unknown,
-): BedrockImportedModelDetail {
+export function parseImportedModelDetail(raw: unknown): BedrockImportedModelDetail {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -85,10 +79,7 @@ export function parseImportedModelDetail(
     jobArn,
     modelDataSource,
   };
-  if (
-    typeof j["modelKmsKeyArn"] === "string" &&
-    j["modelKmsKeyArn"].length > 0
-  ) {
+  if (typeof j["modelKmsKeyArn"] === "string" && j["modelKmsKeyArn"].length > 0) {
     out.modelKmsKeyArn = j["modelKmsKeyArn"];
   }
   return out;
@@ -105,8 +96,7 @@ function parseModelDataSource(raw: unknown): BedrockImportedModelDataSource {
   if (o.s3DataSource === null || typeof o.s3DataSource !== "object") {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "getImportedModel: modelDataSource.s3DataSource is missing or not an object",
+      message: "getImportedModel: modelDataSource.s3DataSource is missing or not an object",
     });
   }
   const inner = o.s3DataSource as Record<string, unknown>;
@@ -193,11 +183,7 @@ export function buildImportedModelListQuery(
     out["nextToken"] = options.nextToken;
   }
   if (options.sortBy !== undefined) {
-    if (
-      !(BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES as readonly string[]).includes(
-        options.sortBy,
-      )
-    ) {
+    if (!(BEDROCK_IMPORTED_MODEL_SORT_BY_VALUES as readonly string[]).includes(options.sortBy)) {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `listImportedModels: invalid sortBy '${String(options.sortBy)}'`,
@@ -207,9 +193,7 @@ export function buildImportedModelListQuery(
   }
   if (options.sortOrder !== undefined) {
     if (
-      !(BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES as readonly string[]).includes(
-        options.sortOrder,
-      )
+      !(BEDROCK_IMPORTED_MODEL_SORT_ORDER_VALUES as readonly string[]).includes(options.sortOrder)
     ) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -221,9 +205,7 @@ export function buildImportedModelListQuery(
   return out;
 }
 
-export function parseImportedModelListResponse(
-  raw: unknown,
-): BedrockImportedModelListResponse {
+export function parseImportedModelListResponse(raw: unknown): BedrockImportedModelListResponse {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -256,9 +238,7 @@ export function parseImportedModelListResponse(
   return out;
 }
 
-export function parseImportedModelSummary(
-  raw: unknown,
-): BedrockImportedModelSummary {
+export function parseImportedModelSummary(raw: unknown): BedrockImportedModelSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",

@@ -128,10 +128,7 @@ function routeAsRow(r: RouteDefinition): Record<string, unknown> {
   };
 }
 
-async function withTempFile<T>(
-  contents: string,
-  fn: (path: string) => Promise<T>,
-): Promise<T> {
+async function withTempFile<T>(contents: string, fn: (path: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "routes-"));
   const path = join(dir, "route.json");
   await writeFile(path, contents, "utf8");
@@ -200,10 +197,7 @@ describe("runGatewayRoutes list", () => {
     const { io, outChunks } = makeIo();
     const { registry } = fakeRegistry([fixtureRoute()]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("list", "--format", "json"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "json"), ctx);
     expect(code).toBe(0);
     const parsed = JSON.parse(outChunks.join("")) as {
       count: number;
@@ -221,10 +215,7 @@ describe("runGatewayRoutes register", () => {
     const route = fixtureRoute({ id: "rt_route0099", operationId: "tenants.update" });
     await withTempFile(JSON.stringify(route), async (path) => {
       const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-      const code = await runGatewayRoutes(
-        parseRoutesArgs("register", path),
-        ctx,
-      );
+      const code = await runGatewayRoutes(parseRoutesArgs("register", path), ctx);
       expect(code).toBe(0);
       expect(outChunks.join("")).toContain("rt_route0099");
       const insert = capture.find((c) => c.sql.includes("INSERT"));
@@ -246,10 +237,7 @@ describe("runGatewayRoutes register", () => {
     const { io, errChunks } = makeIo();
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("register", "/nope/missing.json"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("register", "/nope/missing.json"), ctx);
     expect(code).toBe(1);
     expect(errChunks.join("")).toMatch(/failed to read/);
   });
@@ -259,10 +247,7 @@ describe("runGatewayRoutes register", () => {
     const { registry } = fakeRegistry([]);
     await withTempFile("not json", async (path) => {
       const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-      const code = await runGatewayRoutes(
-        parseRoutesArgs("register", path),
-        ctx,
-      );
+      const code = await runGatewayRoutes(parseRoutesArgs("register", path), ctx);
       expect(code).toBe(1);
       expect(errChunks.join("")).toMatch(/not valid JSON/);
     });
@@ -273,10 +258,7 @@ describe("runGatewayRoutes register", () => {
     const { registry } = fakeRegistry([]);
     await withTempFile(JSON.stringify({ id: "bad" }), async (path) => {
       const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-      const code = await runGatewayRoutes(
-        parseRoutesArgs("register", path),
-        ctx,
-      );
+      const code = await runGatewayRoutes(parseRoutesArgs("register", path), ctx);
       expect(code).toBe(1);
       expect(errChunks.join("")).toMatch(/RouteDefinitionSchema/);
     });
@@ -289,12 +271,7 @@ describe("runGatewayRoutes register", () => {
     await withTempFile(JSON.stringify(route), async (path) => {
       const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
       await runGatewayRoutes(
-        parseRoutesArgs(
-          "register",
-          path,
-          "--created-by",
-          "11111111-2222-3333-4444-555555555555",
-        ),
+        parseRoutesArgs("register", path, "--created-by", "11111111-2222-3333-4444-555555555555"),
         ctx,
       );
       const insert = capture.find((c) => c.sql.includes("INSERT"));
@@ -308,10 +285,7 @@ describe("runGatewayRoutes unregister", () => {
     const { io, outChunks } = makeIo();
     const { registry, capture } = fakeRegistry([fixtureRoute({ id: "rt_route0042" })]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("unregister", "rt_route0042"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("unregister", "rt_route0042"), ctx);
     expect(code).toBe(0);
     expect(outChunks.join("")).toMatch(/unregistered route rt_route0042/);
     const del = capture.find((c) => c.sql.includes("DELETE"));
@@ -322,10 +296,7 @@ describe("runGatewayRoutes unregister", () => {
     const { io, errChunks } = makeIo();
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("unregister", "rt_nomatch1"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("unregister", "rt_nomatch1"), ctx);
     expect(code).toBe(1);
     expect(errChunks.join("")).toMatch(/no route with id 'rt_nomatch1'/);
   });
@@ -368,18 +339,13 @@ describe("formatRoutesTable + formatPath", () => {
 
   it("renders wildcard segments as *", () => {
     const route = fixtureRoute({
-      pathSegments: [
-        { kind: "literal", value: "v1" },
-        { kind: "wildcard" },
-      ],
+      pathSegments: [{ kind: "literal", value: "v1" }, { kind: "wildcard" }],
     });
     expect(formatPath(route)).toBe("/v1/*");
   });
 
   it("table emits one row per route + a header + a separator", () => {
-    const out = formatRoutesTable([
-      fixtureRoute({ id: "rt_route0001", method: "GET" }),
-    ]);
+    const out = formatRoutesTable([fixtureRoute({ id: "rt_route0001", method: "GET" })]);
     const lines = out.trim().split("\n");
     expect(lines.length).toBe(3); // header + sep + 1 row
     expect(lines[0]).toContain("route_id");
@@ -401,10 +367,7 @@ describe("runGatewayRoutes register-pack (M4.8)", () => {
     const { io, errChunks } = makeIo();
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("register-pack", "bogus/pack"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("register-pack", "bogus/pack"), ctx);
     expect(code).toBe(2);
     expect(errChunks.join("")).toMatch(/unknown pack/);
   });
@@ -446,13 +409,7 @@ describe("runGatewayRoutes register-pack (M4.8)", () => {
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "register-pack",
-        "operate-erp/core",
-        "--dry-run",
-        "--format",
-        "json",
-      ),
+      parseRoutesArgs("register-pack", "operate-erp/core", "--dry-run", "--format", "json"),
       ctx,
     );
     expect(code).toBe(0);
@@ -523,10 +480,7 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
     const { io, errChunks } = makeIo();
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("unregister-pack", "bogus/pack"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("unregister-pack", "bogus/pack"), ctx);
     expect(code).toBe(2);
     expect(errChunks.join("")).toMatch(/unknown pack/);
   });
@@ -554,10 +508,7 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
     const { registry, capture } = fakeRegistry(seededRoutes);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     // First, register-pack to seed the rows
-    await runGatewayRoutes(
-      parseRoutesArgs("register-pack", "operate-erp/core"),
-      ctx,
-    );
+    await runGatewayRoutes(parseRoutesArgs("register-pack", "operate-erp/core"), ctx);
     // Now unregister
     const code = await runGatewayRoutes(
       parseRoutesArgs("unregister-pack", "operate-erp/core"),
@@ -614,13 +565,7 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "unregister-pack",
-        "operate-erp/core",
-        "--dry-run",
-        "--format",
-        "json",
-      ),
+      parseRoutesArgs("unregister-pack", "operate-erp/core", "--dry-run", "--format", "json"),
       ctx,
     );
     expect(code).toBe(0);
@@ -643,12 +588,7 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     // register with v2
     await runGatewayRoutes(
-      parseRoutesArgs(
-        "register-pack",
-        "operate-erp/core",
-        "--api-version",
-        "v2",
-      ),
+      parseRoutesArgs("register-pack", "operate-erp/core", "--api-version", "v2"),
       ctx,
     );
     const registeredIds = capture
@@ -656,12 +596,7 @@ describe("runGatewayRoutes unregister-pack (M4.8.x)", () => {
       .map((c) => c.params?.[0] as string);
     // unregister with v2
     await runGatewayRoutes(
-      parseRoutesArgs(
-        "unregister-pack",
-        "operate-erp/core",
-        "--api-version",
-        "v2",
-      ),
+      parseRoutesArgs("unregister-pack", "operate-erp/core", "--api-version", "v2"),
       ctx,
     );
     const deletedIds = capture
@@ -718,11 +653,7 @@ describe("runGatewayRoutes unregister-pack --by-source-pack (M4.10.x)", () => {
     const { registry, capture } = fakeRegistry([oldRoute]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "unregister-pack",
-        "operate-erp/deprecated-thing",
-        "--by-source-pack",
-      ),
+      parseRoutesArgs("unregister-pack", "operate-erp/deprecated-thing", "--by-source-pack"),
       ctx,
     );
     expect(code).toBe(0);
@@ -742,12 +673,7 @@ describe("runGatewayRoutes unregister-pack --by-source-pack (M4.10.x)", () => {
     const { registry, capture } = fakeRegistry([matching]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "unregister-pack",
-        "operate-erp/core",
-        "--by-source-pack",
-        "--dry-run",
-      ),
+      parseRoutesArgs("unregister-pack", "operate-erp/core", "--by-source-pack", "--dry-run"),
       ctx,
     );
     expect(code).toBe(0);
@@ -763,12 +689,7 @@ describe("runGatewayRoutes unregister-pack --by-source-pack (M4.10.x)", () => {
     const { registry, capture } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "unregister-pack",
-        "operate-erp/empty",
-        "--by-source-pack",
-        "--dry-run",
-      ),
+      parseRoutesArgs("unregister-pack", "operate-erp/empty", "--by-source-pack", "--dry-run"),
       ctx,
     );
     expect(code).toBe(0);
@@ -847,11 +768,7 @@ describe("runGatewayRoutes unregister-pack --by-source-pack (M4.10.x)", () => {
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "unregister-pack",
-        "operate-erp/never-existed",
-        "--by-source-pack",
-      ),
+      parseRoutesArgs("unregister-pack", "operate-erp/never-existed", "--by-source-pack"),
       ctx,
     );
     expect(code).toBe(0);
@@ -874,10 +791,7 @@ describe("runGatewayRoutes unregister-pack --by-source-pack (M4.10.x)", () => {
     const { io, outChunks } = makeIo();
     const { registry, capture } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    await runGatewayRoutes(
-      parseRoutesArgs("register-pack", "operate-erp/core"),
-      ctx,
-    );
+    await runGatewayRoutes(parseRoutesArgs("register-pack", "operate-erp/core"), ctx);
     const code = await runGatewayRoutes(
       parseRoutesArgs("unregister-pack", "operate-erp/core"),
       ctx,
@@ -907,10 +821,7 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const { io, errChunks } = makeIo();
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "bogus/pack"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack", "bogus/pack"), ctx);
     expect(code).toBe(2);
     expect(errChunks.join("")).toMatch(/unknown pack/);
   });
@@ -919,10 +830,7 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const { io, outChunks } = makeIo();
     const { registry, capture } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "operate-erp/core"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx);
     expect(code).toBe(0);
     const inserts = capture.filter((c) => c.sql.includes("INSERT"));
     expect(inserts).toHaveLength(24);
@@ -935,15 +843,9 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const { io, outChunks } = makeIo();
     const { registry, capture } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    await runGatewayRoutes(
-      parseRoutesArgs("register-pack", "operate-erp/core"),
-      ctx,
-    );
+    await runGatewayRoutes(parseRoutesArgs("register-pack", "operate-erp/core"), ctx);
     const beforeSync = capture.length;
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "operate-erp/core"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx);
     expect(code).toBe(0);
     const newCalls = capture.slice(beforeSync);
     const newInserts = newCalls.filter((c) => c.sql.includes("INSERT"));
@@ -962,10 +864,7 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     });
     const { registry, capture } = fakeRegistry([externalRoute]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "operate-erp/core"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx);
     expect(code).toBe(0);
     const deletes = capture.filter((c) => c.sql.includes("DELETE"));
     expect(deletes).toHaveLength(0);
@@ -1024,13 +923,7 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const { registry } = fakeRegistry([externalRoute]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "sync-pack",
-        "operate-erp/core",
-        "--dry-run",
-        "--format",
-        "json",
-      ),
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--dry-run", "--format", "json"),
       ctx,
     );
     expect(code).toBe(0);
@@ -1078,10 +971,7 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const { io, outChunks } = makeIo();
     const { registry } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "operate-erp/payments"),
-      ctx,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/payments"), ctx);
     expect(code).toBe(0);
     expect(outChunks.join("")).toMatch(/synced 34 route\(s\)/);
     expect(outChunks.join("")).toMatch(/34 added/);
@@ -1095,10 +985,7 @@ describe("runGatewayRoutes sync-pack (M4.8.y)", () => {
     const beforeSecond = capture.length;
     const { io: io2, outChunks: outChunks2 } = makeIo();
     const ctx2: GatewayRoutesContext = { io: io2, env: {}, registryOverride: registry };
-    const code = await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "operate-erp/core"),
-      ctx2,
-    );
+    const code = await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx2);
     expect(code).toBe(0);
     const newCalls = capture.slice(beforeSecond);
     const newInserts = newCalls.filter((c) => c.sql.includes("INSERT"));
@@ -1226,13 +1113,7 @@ describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
     const { registry } = fakeRegistry([obsolete1, obsolete2]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "sync-pack",
-        "operate-erp/core",
-        "--prune-obsolete",
-        "--format",
-        "json",
-      ),
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--prune-obsolete", "--format", "json"),
       ctx,
     );
     expect(code).toBe(0);
@@ -1244,10 +1125,7 @@ describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
     };
     expect(parsed.pruneObsolete).toBe(true);
     expect(parsed.obsolete).toBe(2);
-    expect(parsed.obsoleteIds.sort()).toEqual([
-      "rt_obsoleteabc11111",
-      "rt_obsoleteabc22222",
-    ]);
+    expect(parsed.obsoleteIds.sort()).toEqual(["rt_obsoleteabc11111", "rt_obsoleteabc22222"]);
     expect(parsed.pruned).toBe(2);
   });
 
@@ -1260,12 +1138,7 @@ describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
     const { registry, capture } = fakeRegistry([obsoleteRoute]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
     const code = await runGatewayRoutes(
-      parseRoutesArgs(
-        "sync-pack",
-        "operate-erp/core",
-        "--prune-obsolete",
-        "--dry-run",
-      ),
+      parseRoutesArgs("sync-pack", "operate-erp/core", "--prune-obsolete", "--dry-run"),
       ctx,
     );
     expect(code).toBe(0);
@@ -1279,10 +1152,7 @@ describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
     const { io } = makeIo();
     const { registry, capture } = fakeRegistry([]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    await runGatewayRoutes(
-      parseRoutesArgs("register-pack", "operate-erp/core"),
-      ctx,
-    );
+    await runGatewayRoutes(parseRoutesArgs("register-pack", "operate-erp/core"), ctx);
     const inserts = capture.filter((c) => c.sql.includes("INSERT"));
     expect(inserts.length).toBeGreaterThan(0);
     for (const insert of inserts) {
@@ -1298,10 +1168,7 @@ describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
     });
     const { registry } = fakeRegistry([obsoleteRoute]);
     const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
-    await runGatewayRoutes(
-      parseRoutesArgs("sync-pack", "operate-erp/core"),
-      ctx,
-    );
+    await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx);
     const out = outChunks.join("");
     expect(out).toMatch(/use --prune-obsolete to delete/);
   });

@@ -5,8 +5,7 @@ import { BedrockProvider, type FetchLike } from "./provider.js";
 import type { BedrockTag } from "./tagging-api.js";
 import { setExactTags } from "./tagging-helpers.js";
 
-const VALID_ARN =
-  "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
+const VALID_ARN = "arn:aws:bedrock:us-east-1:123456789012:custom-model/abc123def456";
 
 interface FetchCallRecord {
   readonly method: string;
@@ -21,8 +20,7 @@ function buildProviderWithMockFetch(opts: {
 }): BedrockProvider {
   const records = opts.records ?? [];
   const fetchImpl: FetchLike = async (url, init) => {
-    const bodyStr =
-      init.body.byteLength > 0 ? new TextDecoder().decode(init.body) : "";
+    const bodyStr = init.body.byteLength > 0 ? new TextDecoder().decode(init.body) : "";
     records.push({ method: init.method, url, body: bodyStr });
     if (url.includes("/listTagsForResource")) {
       return {
@@ -268,14 +266,12 @@ describe("setExactTags (M6.8.y)", () => {
     const records: FetchCallRecord[] = [];
     let listCallCount = 0;
     const fetchImpl: FetchLike = async (url, init) => {
-      const bodyStr =
-        init.body.byteLength > 0 ? new TextDecoder().decode(init.body) : "";
+      const bodyStr = init.body.byteLength > 0 ? new TextDecoder().decode(init.body) : "";
       records.push({ method: init.method, url, body: bodyStr });
       if (url.includes("/listTagsForResource")) {
         listCallCount += 1;
         // First call: no tags. Second call: includes the previously-added tag.
-        const tags =
-          listCallCount === 1 ? [] : [{ key: "env", value: "prod" }];
+        const tags = listCallCount === 1 ? [] : [{ key: "env", value: "prod" }];
         return {
           ok: true,
           status: 200,

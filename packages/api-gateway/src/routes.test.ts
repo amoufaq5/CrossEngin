@@ -46,9 +46,9 @@ describe("RouteDefinitionSchema", () => {
   });
 
   it("rejects deprecated without deprecatedSince", () => {
-    expect(() =>
-      RouteDefinitionSchema.parse({ ...route, isDeprecated: true }),
-    ).toThrow(/deprecatedSince/);
+    expect(() => RouteDefinitionSchema.parse({ ...route, isDeprecated: true })).toThrow(
+      /deprecatedSince/,
+    );
   });
 
   it("rejects sunsetAt without deprecation", () => {
@@ -88,10 +88,7 @@ describe("RouteDefinitionSchema", () => {
     expect(() =>
       RouteDefinitionSchema.parse({
         ...route,
-        pathSegments: [
-          { kind: "wildcard" },
-          { kind: "literal", value: "tail" },
-        ],
+        pathSegments: [{ kind: "wildcard" }, { kind: "literal", value: "tail" }],
       }),
     ).toThrow(/wildcard segment must be the last/);
   });

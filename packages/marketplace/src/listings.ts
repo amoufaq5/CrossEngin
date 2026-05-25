@@ -5,30 +5,20 @@ const PACK_ID_REGEX = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,3}$/;
 const SEMVER_REGEX =
   /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-export const LISTING_STATUSES = [
-  "draft",
-  "submitted",
-  "approved",
-  "live",
-  "delisted",
-] as const;
+export const LISTING_STATUSES = ["draft", "submitted", "approved", "live", "delisted"] as const;
 export type ListingStatus = (typeof LISTING_STATUSES)[number];
 export const ListingStatusSchema = z.enum(LISTING_STATUSES);
 
-export const LISTING_TRANSITIONS: Readonly<
-  Record<ListingStatus, readonly ListingStatus[]>
-> = Object.freeze({
-  draft: ["submitted", "delisted"],
-  submitted: ["approved", "draft", "delisted"],
-  approved: ["live", "delisted"],
-  live: ["delisted"],
-  delisted: ["draft"],
-});
+export const LISTING_TRANSITIONS: Readonly<Record<ListingStatus, readonly ListingStatus[]>> =
+  Object.freeze({
+    draft: ["submitted", "delisted"],
+    submitted: ["approved", "draft", "delisted"],
+    approved: ["live", "delisted"],
+    live: ["delisted"],
+    delisted: ["draft"],
+  });
 
-export function canTransitionListing(
-  from: ListingStatus,
-  to: ListingStatus,
-): boolean {
+export function canTransitionListing(from: ListingStatus, to: ListingStatus): boolean {
   return LISTING_TRANSITIONS[from].includes(to);
 }
 
@@ -217,10 +207,7 @@ export const PackReviewSchema = z
         message: "hidden moderationStatus requires hiddenReason",
       });
     }
-    if (
-      v.editedAt !== null &&
-      new Date(v.editedAt).getTime() < new Date(v.submittedAt).getTime()
-    ) {
+    if (v.editedAt !== null && new Date(v.editedAt).getTime() < new Date(v.submittedAt).getTime()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["editedAt"],

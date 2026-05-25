@@ -18,9 +18,7 @@ describe("ThemeOverlaySchema", () => {
 
   it("accepts #RGB shorthand and #RRGGBBAA forms", () => {
     expect(() => ThemeOverlaySchema.parse({ brandColor: "#abc" })).not.toThrow();
-    expect(() =>
-      ThemeOverlaySchema.parse({ brandColor: "#11223380" }),
-    ).not.toThrow();
+    expect(() => ThemeOverlaySchema.parse({ brandColor: "#11223380" })).not.toThrow();
   });
 
   it("rejects non-hex brand colors", () => {
@@ -28,9 +26,9 @@ describe("ThemeOverlaySchema", () => {
   });
 
   it("rejects identical brand + accent colors", () => {
-    expect(() =>
-      ThemeOverlaySchema.parse({ brandColor: "#abc", accentColor: "#abc" }),
-    ).toThrow(/brandColor and accentColor must differ/);
+    expect(() => ThemeOverlaySchema.parse({ brandColor: "#abc", accentColor: "#abc" })).toThrow(
+      /brandColor and accentColor must differ/,
+    );
   });
 
   it("accepts a dark-mode subtheme", () => {

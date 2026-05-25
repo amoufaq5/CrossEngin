@@ -84,8 +84,7 @@ export const IncidentCommunicationSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["audience"],
-          message:
-            "breach_notification audience must be 'affected_tenants' or 'regulators'",
+          message: "breach_notification audience must be 'affected_tenants' or 'regulators'",
         });
       }
       if (!v.requiresLegalReview) {
@@ -99,8 +98,7 @@ export const IncidentCommunicationSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["breachNotificationDeadlineAt"],
-          message:
-            "breach_notification requires breachNotificationDeadlineAt (GDPR 72h)",
+          message: "breach_notification requires breachNotificationDeadlineAt (GDPR 72h)",
         });
       } else {
         const deadlineMs = new Date(v.breachNotificationDeadlineAt).getTime();
@@ -197,15 +195,10 @@ export function bounceRate(c: IncidentCommunication): number {
   return Math.round((c.bouncesCount / c.recipientCount) * 1000) / 10;
 }
 
-export function isBreachNotificationTimely(
-  c: IncidentCommunication,
-): boolean {
+export function isBreachNotificationTimely(c: IncidentCommunication): boolean {
   if (c.kind !== "breach_notification") return true;
   if (c.breachNotificationDeadlineAt === undefined) return false;
-  return (
-    new Date(c.publishedAt).getTime() <=
-    new Date(c.breachNotificationDeadlineAt).getTime()
-  );
+  return new Date(c.publishedAt).getTime() <= new Date(c.breachNotificationDeadlineAt).getTime();
 }
 
 export function publishedCommsFor(

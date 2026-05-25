@@ -11,9 +11,9 @@ const now = "2026-05-13T10:00:00.000Z";
 
 describe("UsagePeriodSchema", () => {
   it("rejects end <= start", () => {
-    expect(() =>
-      UsagePeriodSchema.parse({ start: now, end: now }),
-    ).toThrow(/period.end must be after/);
+    expect(() => UsagePeriodSchema.parse({ start: now, end: now })).toThrow(
+      /period.end must be after/,
+    );
   });
 });
 
@@ -90,24 +90,22 @@ describe("rollupUsage", () => {
       { tenantId: "t_2", meter: "ai_call", period, quantity: 9 },
     ]);
     expect(buckets).toHaveLength(3);
-    const aiCallBucket = buckets.find(
-      (b) => b.tenantId === "t_1" && b.meter === "ai_call",
-    );
+    const aiCallBucket = buckets.find((b) => b.tenantId === "t_1" && b.meter === "ai_call");
     expect(aiCallBucket?.quantity).toBe(12);
   });
 });
 
 describe("isUsageAnomalous", () => {
   it("flags ai_call usage at 10x the rolling average", () => {
-    expect(
-      isUsageAnomalous({ meter: "ai_call", currentQuantity: 5000, rollingAverage: 500 }),
-    ).toBe(true);
+    expect(isUsageAnomalous({ meter: "ai_call", currentQuantity: 5000, rollingAverage: 500 })).toBe(
+      true,
+    );
   });
 
   it("does not flag at 5x for ai_call (threshold 10x)", () => {
-    expect(
-      isUsageAnomalous({ meter: "ai_call", currentQuantity: 2500, rollingAverage: 500 }),
-    ).toBe(false);
+    expect(isUsageAnomalous({ meter: "ai_call", currentQuantity: 2500, rollingAverage: 500 })).toBe(
+      false,
+    );
   });
 
   it("storage threshold is more sensitive (5x)", () => {

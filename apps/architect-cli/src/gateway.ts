@@ -15,20 +15,13 @@ import {
   type PrincipalResolver,
   type RateLimitChecker,
 } from "@crossengin/api-gateway-runtime";
-import {
-  createNodePgConnection,
-  parsePgEnvConfig,
-  type PgConnection,
-} from "@crossengin/kernel-pg";
+import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson, printSuccess } from "./format.js";
-import {
-  buildDefaultGatewayHandlers,
-  type GatewayMode,
-} from "./gateway-handlers.js";
+import { buildDefaultGatewayHandlers, type GatewayMode } from "./gateway-handlers.js";
 import {
   JwksLoadError,
   resolveJwtFlags,
@@ -37,10 +30,7 @@ import {
   type JwtFlagsResult,
   type RefreshableJwksProvider,
 } from "./gateway-jwks.js";
-import {
-  runGatewayRoutes,
-  type GatewayRoutesContext,
-} from "./gateway-routes.js";
+import { runGatewayRoutes, type GatewayRoutesContext } from "./gateway-routes.js";
 import {
   startGatewayServer,
   type PipelineExecutionSink,
@@ -62,10 +52,7 @@ export interface GatewayContext extends RunContext, GatewayRoutesContext {
   readonly registerReloadHandler?: (handler: () => void) => () => void;
 }
 
-export async function runGateway(
-  command: ParsedCommand,
-  ctx: GatewayContext,
-): Promise<number> {
+export async function runGateway(command: ParsedCommand, ctx: GatewayContext): Promise<number> {
   const action = command.positional[0];
   if (action === undefined) {
     printError(
@@ -80,10 +67,7 @@ export async function runGateway(
   if (action === "routes") {
     return runGatewayRoutes(command, ctx);
   }
-  printError(
-    ctx.io,
-    `gateway: unknown action '${action}'. expected one of: start, routes`,
-  );
+  printError(ctx.io, `gateway: unknown action '${action}'. expected one of: start, routes`);
   return 2;
 }
 
@@ -95,10 +79,7 @@ interface BuiltRuntime {
   readonly executionSink: PipelineExecutionSink | undefined;
 }
 
-async function runGatewayStart(
-  command: ParsedCommand,
-  ctx: GatewayContext,
-): Promise<number> {
+async function runGatewayStart(command: ParsedCommand, ctx: GatewayContext): Promise<number> {
   const portFlag = getStringFlag(command, "port");
   const port = portFlag !== null ? Number.parseInt(portFlag, 10) : DEFAULT_PORT;
   if (!Number.isFinite(port) || port < 0 || port > 65_535) {
@@ -124,10 +105,7 @@ async function runGatewayStart(
       printError(ctx.io, `gateway start: ${err.message}`);
       return 2;
     }
-    printError(
-      ctx.io,
-      `gateway start: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `gateway start: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -137,10 +115,7 @@ async function runGatewayStart(
   try {
     built = await buildRuntime({ inMemory, ctx, jwt });
   } catch (err) {
-    printError(
-      ctx.io,
-      `gateway start: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `gateway start: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -193,9 +168,7 @@ async function runGatewayStart(
       host: server.host,
       port: server.port,
       mode: built.mode,
-      ...(jwt.refreshable !== undefined
-        ? { jwksSource: jwt.refreshable.source }
-        : {}),
+      ...(jwt.refreshable !== undefined ? { jwksSource: jwt.refreshable.source } : {}),
     });
   } else {
     printSuccess(
@@ -203,15 +176,9 @@ async function runGatewayStart(
       `gateway listening on http://${server.host}:${server.port.toString()} (mode: ${built.mode})`,
     );
     if (jwt.refreshable !== undefined) {
-      printSuccess(
-        ctx.io,
-        `JWKS loaded from ${jwt.refreshable.source}; SIGHUP triggers reload`,
-      );
+      printSuccess(ctx.io, `JWKS loaded from ${jwt.refreshable.source}; SIGHUP triggers reload`);
     }
-    printSuccess(
-      ctx.io,
-      `built-in routes: GET /__ping, GET /__health  —  Ctrl+C to stop`,
-    );
+    printSuccess(ctx.io, `built-in routes: GET /__ping, GET /__health  —  Ctrl+C to stop`);
   }
 
   try {
@@ -310,9 +277,7 @@ function jwtRuntimeOptions(jwt: JwtFlagsResult): {
     ...(jwt.jwksProvider !== undefined ? { jwksProvider: jwt.jwksProvider } : {}),
     ...(jwt.jwtIssuer !== undefined ? { jwtIssuer: jwt.jwtIssuer } : {}),
     ...(jwt.jwtAudience !== undefined ? { jwtAudience: jwt.jwtAudience } : {}),
-    ...(jwt.clockSkewSeconds !== undefined
-      ? { clockSkewSeconds: jwt.clockSkewSeconds }
-      : {}),
+    ...(jwt.clockSkewSeconds !== undefined ? { clockSkewSeconds: jwt.clockSkewSeconds } : {}),
   };
 }
 
@@ -355,8 +320,7 @@ async function buildRuntime(input: BuildRuntimeInput): Promise<BuiltRuntime> {
     };
   }
   const pgConnection =
-    input.ctx.pgConnectionOverride ??
-    createNodePgConnection(parsePgEnvConfig(input.ctx.env));
+    input.ctx.pgConnectionOverride ?? createNodePgConnection(parsePgEnvConfig(input.ctx.env));
   const { handlers } = buildDefaultGatewayHandlers({
     mode: "postgres",
     startedAt,

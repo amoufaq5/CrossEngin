@@ -96,9 +96,7 @@ describe("canTransitionCampaign", () => {
 
 describe("ReviewerAssignmentSchema", () => {
   it("accepts principal_manager policy", () => {
-    expect(() =>
-      ReviewerAssignmentSchema.parse(baseCampaign.reviewerAssignment),
-    ).not.toThrow();
+    expect(() => ReviewerAssignmentSchema.parse(baseCampaign.reviewerAssignment)).not.toThrow();
   });
 
   it("rejects specific_user without specificReviewerUserId", () => {
@@ -216,9 +214,7 @@ describe("computeCampaignProgress", () => {
   });
 
   it("returns 1 when totalItems is 0 (vacuous)", () => {
-    expect(
-      computeCampaignProgress({ ...baseCampaign, totalItems: 0 }),
-    ).toBe(1);
+    expect(computeCampaignProgress({ ...baseCampaign, totalItems: 0 })).toBe(1);
   });
 
   it("returns ratio of resolved/total", () => {
@@ -235,35 +231,25 @@ describe("computeCampaignProgress", () => {
 
 describe("isPastDeadline", () => {
   it("returns false before deadline", () => {
-    expect(
-      isPastDeadline(baseCampaign, new Date("2026-04-15T00:00:00Z")),
-    ).toBe(false);
+    expect(isPastDeadline(baseCampaign, new Date("2026-04-15T00:00:00Z"))).toBe(false);
   });
   it("returns true after deadline", () => {
-    expect(
-      isPastDeadline(baseCampaign, new Date("2026-05-01T00:00:00Z")),
-    ).toBe(true);
+    expect(isPastDeadline(baseCampaign, new Date("2026-05-01T00:00:00Z"))).toBe(true);
   });
 });
 
 describe("isPastGracePeriod", () => {
   it("returns false within grace period", () => {
-    expect(
-      isPastGracePeriod(baseCampaign, new Date("2026-05-01T12:00:00Z")),
-    ).toBe(false);
+    expect(isPastGracePeriod(baseCampaign, new Date("2026-05-01T12:00:00Z"))).toBe(false);
   });
   it("returns true after grace period (24h)", () => {
-    expect(
-      isPastGracePeriod(baseCampaign, new Date("2026-05-02T00:00:00Z")),
-    ).toBe(true);
+    expect(isPastGracePeriod(baseCampaign, new Date("2026-05-02T00:00:00Z"))).toBe(true);
   });
 });
 
 describe("computeNextScheduledStart", () => {
   it("returns null for one_time", () => {
-    expect(
-      computeNextScheduledStart({ ...baseCampaign, frequency: "one_time" }),
-    ).toBeNull();
+    expect(computeNextScheduledStart({ ...baseCampaign, frequency: "one_time" })).toBeNull();
   });
   it("returns null for post_incident", () => {
     expect(
@@ -289,9 +275,7 @@ describe("computeNextScheduledStart", () => {
       frequency: "annual",
     });
     if (next) {
-      const days =
-        (Date.parse(next) - Date.parse(baseCampaign.scheduledStartAt)) /
-        86_400_000;
+      const days = (Date.parse(next) - Date.parse(baseCampaign.scheduledStartAt)) / 86_400_000;
       expect(days).toBe(365);
     }
   });

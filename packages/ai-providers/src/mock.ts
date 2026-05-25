@@ -31,9 +31,7 @@ export interface MockLlmProviderConfig {
   readonly capabilities?: Partial<ProviderCapabilities>;
   readonly residency?: readonly Region[];
   readonly pricing?: ProviderPricing;
-  readonly completeBehavior?: (
-    req: CompletionRequest,
-  ) => AsyncIterable<CompletionChunk>;
+  readonly completeBehavior?: (req: CompletionRequest) => AsyncIterable<CompletionChunk>;
   readonly embedBehavior?: (req: EmbeddingRequest) => Promise<EmbeddingResponse>;
   readonly errorOnComplete?: Error;
   readonly errorOnEmbed?: Error;
@@ -46,9 +44,7 @@ export class MockLlmProvider implements LlmProvider {
   readonly residency: readonly Region[];
   readonly pricing: ProviderPricing;
 
-  private readonly completeBehavior?: (
-    req: CompletionRequest,
-  ) => AsyncIterable<CompletionChunk>;
+  private readonly completeBehavior?: (req: CompletionRequest) => AsyncIterable<CompletionChunk>;
   private readonly embedBehavior?: (req: EmbeddingRequest) => Promise<EmbeddingResponse>;
   private readonly errorOnComplete?: Error;
   private readonly errorOnEmbed?: Error;

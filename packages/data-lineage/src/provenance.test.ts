@@ -77,9 +77,9 @@ describe("ProvenanceRecordSchema", () => {
   });
 
   it("rejects failed without errorCode/errorMessage", () => {
-    expect(() =>
-      ProvenanceRecordSchema.parse({ ...baseRecord, outcome: "failed" }),
-    ).toThrow(/failed outcome requires/);
+    expect(() => ProvenanceRecordSchema.parse({ ...baseRecord, outcome: "failed" })).toThrow(
+      /failed outcome requires/,
+    );
   });
 
   it("rejects rolled_back without rolledBackAt/reason", () => {
@@ -148,14 +148,10 @@ describe("isProvenanceImmutable", () => {
 
 describe("requiresRegulatoryAudit", () => {
   it("flags anonymize", () => {
-    expect(
-      requiresRegulatoryAudit({ ...baseRecord, operationKind: "anonymize" }),
-    ).toBe(true);
+    expect(requiresRegulatoryAudit({ ...baseRecord, operationKind: "anonymize" })).toBe(true);
   });
   it("does not flag query", () => {
-    expect(
-      requiresRegulatoryAudit({ ...baseRecord, operationKind: "query" }),
-    ).toBe(false);
+    expect(requiresRegulatoryAudit({ ...baseRecord, operationKind: "query" })).toBe(false);
   });
 });
 

@@ -55,20 +55,13 @@ describe("constants", () => {
 
 describe("CONTROL_MAPPINGS", () => {
   it("SOC 2 maps to CC6.1, CC6.2, CC6.3, CC6.7", () => {
-    expect(CONTROL_MAPPINGS.soc2_type2).toEqual([
-      "CC6.1",
-      "CC6.2",
-      "CC6.3",
-      "CC6.7",
-    ]);
+    expect(CONTROL_MAPPINGS.soc2_type2).toEqual(["CC6.1", "CC6.2", "CC6.3", "CC6.7"]);
   });
   it("ISO 27001 includes A.9.2.5", () => {
     expect(CONTROL_MAPPINGS.iso27001).toContain("A.9.2.5");
   });
   it("HIPAA includes 164.308(a)(4)(ii)(C)", () => {
-    expect(CONTROL_MAPPINGS.hipaa_security_rule).toContain(
-      "164.308(a)(4)(ii)(C)",
-    );
+    expect(CONTROL_MAPPINGS.hipaa_security_rule).toContain("164.308(a)(4)(ii)(C)");
   });
   it("21 CFR Part 11 includes 11.10(d)", () => {
     expect(CONTROL_MAPPINGS.cfr_21_part_11).toContain("11.10(d)");

@@ -33,38 +33,27 @@ describe("ThreatEntrySchema", () => {
   });
 
   it("rejects unknown likelihood or impact", () => {
-    expect(() =>
-      ThreatEntrySchema.parse(baseEntry({ likelihood: "extreme" })),
-    ).toThrow();
-    expect(() =>
-      ThreatEntrySchema.parse(baseEntry({ impact: "huge" })),
-    ).toThrow();
+    expect(() => ThreatEntrySchema.parse(baseEntry({ likelihood: "extreme" }))).toThrow();
+    expect(() => ThreatEntrySchema.parse(baseEntry({ impact: "huge" }))).toThrow();
   });
 });
 
 describe("ThreatModelSchema", () => {
   it("rejects duplicate threat ids", () => {
     expect(() =>
-      ThreatModelSchema.parse([
-        baseEntry({ id: "dup" }),
-        baseEntry({ id: "dup" }),
-      ]),
+      ThreatModelSchema.parse([baseEntry({ id: "dup" }), baseEntry({ id: "dup" })]),
     ).toThrow(/duplicate threat id/);
   });
 });
 
 describe("riskScore", () => {
   it("scores low likelihood × catastrophic impact correctly", () => {
-    const e = ThreatEntrySchema.parse(
-      baseEntry({ likelihood: "low", impact: "catastrophic" }),
-    );
+    const e = ThreatEntrySchema.parse(baseEntry({ likelihood: "low", impact: "catastrophic" }));
     expect(riskScore(e)).toBe(LIKELIHOOD_ORDER.low * IMPACT_ORDER.catastrophic);
   });
 
   it("scores zero on negligible impact regardless of likelihood", () => {
-    const e = ThreatEntrySchema.parse(
-      baseEntry({ likelihood: "very_high", impact: "negligible" }),
-    );
+    const e = ThreatEntrySchema.parse(baseEntry({ likelihood: "very_high", impact: "negligible" }));
     expect(riskScore(e)).toBe(0);
   });
 });

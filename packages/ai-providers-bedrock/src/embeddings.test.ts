@@ -241,12 +241,8 @@ describe("buildTitanMultimodalRequest (M2.9.7)", () => {
   });
 
   it("rejects invalid dimensions", () => {
-    expect(() =>
-      buildTitanMultimodalRequest({ text: "x", dimensions: 512 }),
-    ).toThrow(BedrockError);
-    expect(() =>
-      buildTitanMultimodalRequest({ text: "x", dimensions: 768 }),
-    ).toThrow(BedrockError);
+    expect(() => buildTitanMultimodalRequest({ text: "x", dimensions: 512 })).toThrow(BedrockError);
+    expect(() => buildTitanMultimodalRequest({ text: "x", dimensions: 768 })).toThrow(BedrockError);
   });
 
   it("rejects empty input (neither text nor image)", () => {
@@ -254,9 +250,7 @@ describe("buildTitanMultimodalRequest (M2.9.7)", () => {
   });
 
   it("rejects empty text and empty image strings as no input", () => {
-    expect(() =>
-      buildTitanMultimodalRequest({ text: "", imageBase64: "" }),
-    ).toThrow(BedrockError);
+    expect(() => buildTitanMultimodalRequest({ text: "", imageBase64: "" })).toThrow(BedrockError);
   });
 });
 
@@ -288,9 +282,7 @@ describe("parseTitanMultimodalResponse", () => {
 
   it("throws when embedding array is missing", () => {
     expect(() => parseTitanMultimodalResponse({})).toThrow(BedrockError);
-    expect(() =>
-      parseTitanMultimodalResponse({ embedding: "not-an-array" }),
-    ).toThrow(BedrockError);
+    expect(() => parseTitanMultimodalResponse({ embedding: "not-an-array" })).toThrow(BedrockError);
   });
 
   it("throws on null payload", () => {

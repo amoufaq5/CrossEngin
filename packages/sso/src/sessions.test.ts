@@ -106,19 +106,13 @@ describe("SsoSessionSchema", () => {
 
 describe("isSessionActive", () => {
   it("returns true within window", () => {
-    expect(isSessionActive(activeSession, new Date("2026-05-15T10:30:00Z"))).toBe(
-      true,
-    );
+    expect(isSessionActive(activeSession, new Date("2026-05-15T10:30:00Z"))).toBe(true);
   });
   it("returns false past expiresAt", () => {
-    expect(isSessionActive(activeSession, new Date("2026-05-15T11:30:00Z"))).toBe(
-      false,
-    );
+    expect(isSessionActive(activeSession, new Date("2026-05-15T11:30:00Z"))).toBe(false);
   });
   it("returns false past absoluteExpiresAt", () => {
-    expect(isSessionActive(activeSession, new Date("2026-05-17T10:30:00Z"))).toBe(
-      false,
-    );
+    expect(isSessionActive(activeSession, new Date("2026-05-17T10:30:00Z"))).toBe(false);
   });
   it("returns false when status is not active", () => {
     expect(
@@ -137,45 +131,29 @@ describe("isSessionActive", () => {
 
 describe("shouldRefreshSession", () => {
   it("returns true within refresh window", () => {
-    expect(
-      shouldRefreshSession(activeSession, new Date("2026-05-15T10:55:00Z"), 600),
-    ).toBe(true);
+    expect(shouldRefreshSession(activeSession, new Date("2026-05-15T10:55:00Z"), 600)).toBe(true);
   });
   it("returns false well before expiry", () => {
-    expect(
-      shouldRefreshSession(activeSession, new Date("2026-05-15T10:30:00Z"), 600),
-    ).toBe(false);
+    expect(shouldRefreshSession(activeSession, new Date("2026-05-15T10:30:00Z"), 600)).toBe(false);
   });
 });
 
 describe("computeIdleTimeoutReached", () => {
   it("returns true when idle gap exceeds threshold", () => {
-    expect(
-      computeIdleTimeoutReached(
-        activeSession,
-        new Date("2026-05-15T10:30:00Z"),
-        600,
-      ),
-    ).toBe(true);
+    expect(computeIdleTimeoutReached(activeSession, new Date("2026-05-15T10:30:00Z"), 600)).toBe(
+      true,
+    );
   });
   it("returns false when within idle window", () => {
-    expect(
-      computeIdleTimeoutReached(
-        activeSession,
-        new Date("2026-05-15T10:05:00Z"),
-        600,
-      ),
-    ).toBe(false);
+    expect(computeIdleTimeoutReached(activeSession, new Date("2026-05-15T10:05:00Z"), 600)).toBe(
+      false,
+    );
   });
 });
 
 describe("extendSession", () => {
   it("caps at absoluteExpiresAt", () => {
-    const extended = extendSession(
-      activeSession,
-      new Date("2026-05-16T09:30:00Z"),
-      7200,
-    );
+    const extended = extendSession(activeSession, new Date("2026-05-16T09:30:00Z"), 7200);
     expect(Date.parse(extended.expiresAt)).toBeLessThanOrEqual(
       Date.parse(activeSession.absoluteExpiresAt),
     );
@@ -219,7 +197,12 @@ describe("terminateSession", () => {
   it("throws if session already terminal", () => {
     expect(() =>
       terminateSession(
-        { ...activeSession, status: "expired", terminatedAt: "2026-05-15T11:00:00.000Z", terminationKind: "idle_timeout" },
+        {
+          ...activeSession,
+          status: "expired",
+          terminatedAt: "2026-05-15T11:00:00.000Z",
+          terminationKind: "idle_timeout",
+        },
         "admin_revoke",
         "x",
         new Date("2026-05-15T11:00:00Z"),
@@ -230,14 +213,10 @@ describe("terminateSession", () => {
 
 describe("isMfaStillFresh", () => {
   it("returns true within TTL", () => {
-    expect(
-      isMfaStillFresh(activeSession, new Date("2026-05-15T10:30:00Z"), 3600),
-    ).toBe(true);
+    expect(isMfaStillFresh(activeSession, new Date("2026-05-15T10:30:00Z"), 3600)).toBe(true);
   });
   it("returns false past TTL", () => {
-    expect(
-      isMfaStillFresh(activeSession, new Date("2026-05-15T12:30:00Z"), 3600),
-    ).toBe(false);
+    expect(isMfaStillFresh(activeSession, new Date("2026-05-15T12:30:00Z"), 3600)).toBe(false);
   });
   it("returns false when MFA never satisfied", () => {
     expect(

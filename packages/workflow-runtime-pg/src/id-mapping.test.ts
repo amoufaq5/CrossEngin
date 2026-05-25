@@ -1,10 +1,7 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  WorkflowDefinitionIdResolver,
-  WorkflowInstanceIdResolver,
-} from "./id-mapping.js";
+import { WorkflowDefinitionIdResolver, WorkflowInstanceIdResolver } from "./id-mapping.js";
 
 function mockConnection(
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
@@ -40,7 +37,7 @@ describe("WorkflowInstanceIdResolver — register / cache", () => {
   it("falls back to DB lookup + caches the result", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const conn = mockConnection(capture, {
-      "wfi_inst0001": [{ id: "00000000-0000-4000-8000-000000000111" }],
+      wfi_inst0001: [{ id: "00000000-0000-4000-8000-000000000111" }],
     });
     const r = new WorkflowInstanceIdResolver(conn);
     expect(await r.resolve("wfi_inst0001")).toBe("00000000-0000-4000-8000-000000000111");
@@ -51,7 +48,7 @@ describe("WorkflowInstanceIdResolver — register / cache", () => {
   it("invalidate clears a cached entry", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const conn = mockConnection(capture, {
-      "wfi_inst0001": [{ id: "00000000-0000-4000-8000-000000000111" }],
+      wfi_inst0001: [{ id: "00000000-0000-4000-8000-000000000111" }],
     });
     const r = new WorkflowInstanceIdResolver(conn);
     await r.resolve("wfi_inst0001");
@@ -90,7 +87,7 @@ describe("WorkflowDefinitionIdResolver", () => {
   it("queries workflow_definitions on cache miss", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const conn = mockConnection(capture, {
-      "wfd_def0002": [{ id: "00000000-0000-4000-8000-000000000888" }],
+      wfd_def0002: [{ id: "00000000-0000-4000-8000-000000000888" }],
     });
     const r = new WorkflowDefinitionIdResolver(conn);
     expect(await r.resolve("wfd_def0002")).toBe("00000000-0000-4000-8000-000000000888");

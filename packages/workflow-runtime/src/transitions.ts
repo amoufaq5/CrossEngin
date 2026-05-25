@@ -27,21 +27,13 @@ export const defaultGuardEvaluator: GuardEvaluator = (guard, ctx) => {
         case "ne":
           return actual !== operand;
         case "gt":
-          return (
-            typeof actual === "number" && typeof operand === "number" && actual > operand
-          );
+          return typeof actual === "number" && typeof operand === "number" && actual > operand;
         case "ge":
-          return (
-            typeof actual === "number" && typeof operand === "number" && actual >= operand
-          );
+          return typeof actual === "number" && typeof operand === "number" && actual >= operand;
         case "lt":
-          return (
-            typeof actual === "number" && typeof operand === "number" && actual < operand
-          );
+          return typeof actual === "number" && typeof operand === "number" && actual < operand;
         case "le":
-          return (
-            typeof actual === "number" && typeof operand === "number" && actual <= operand
-          );
+          return typeof actual === "number" && typeof operand === "number" && actual <= operand;
         case "in":
           return Array.isArray(operand) && (operand as readonly unknown[]).includes(actual);
         case "not_in":

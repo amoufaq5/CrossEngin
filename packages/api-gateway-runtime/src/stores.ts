@@ -17,9 +17,16 @@ export interface PrincipalResolver {
 }
 
 export interface IdempotencyStore {
-  get(input: { readonly tenantId: string; readonly key: string }): Promise<IdempotencyRecord | null>;
+  get(input: {
+    readonly tenantId: string;
+    readonly key: string;
+  }): Promise<IdempotencyRecord | null>;
   put(input: { readonly tenantId: string; readonly record: IdempotencyRecord }): Promise<void>;
-  update(input: { readonly tenantId: string; readonly key: string; readonly mutate: (rec: IdempotencyRecord) => IdempotencyRecord }): Promise<IdempotencyRecord>;
+  update(input: {
+    readonly tenantId: string;
+    readonly key: string;
+    readonly mutate: (rec: IdempotencyRecord) => IdempotencyRecord;
+  }): Promise<IdempotencyRecord>;
 }
 
 export interface RateLimitDecision {
@@ -154,14 +161,24 @@ export class InMemoryRateLimitChecker implements RateLimitChecker {
     };
   }
 
-  setLimitForKey(opts: { tenantId: string | null; principalId: string | null; operationId: string; count: number }): void {
+  setLimitForKey(opts: {
+    tenantId: string | null;
+    principalId: string | null;
+    operationId: string;
+    count: number;
+  }): void {
     const bucketKey = `${opts.tenantId ?? "anon"}|${opts.principalId ?? "anon"}|${opts.operationId}`;
-    this.buckets.set(bucketKey, { count: opts.count, resetAtMs: Date.now() + this.windowSeconds * 1000 });
+    this.buckets.set(bucketKey, {
+      count: opts.count,
+      resetAtMs: Date.now() + this.windowSeconds * 1000,
+    });
   }
 }
 
 export class InMemoryRouteRegistry implements RouteRegistry {
-  private readonly routes: Array<RouteDefinition & { readonly pathRegex: RegExp; readonly paramNames: readonly string[] }> = [];
+  private readonly routes: Array<
+    RouteDefinition & { readonly pathRegex: RegExp; readonly paramNames: readonly string[] }
+  > = [];
 
   register(route: RouteDefinition): this {
     const { regex, paramNames } = compileRoutePattern(route);

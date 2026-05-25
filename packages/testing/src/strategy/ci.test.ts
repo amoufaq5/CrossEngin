@@ -98,9 +98,7 @@ describe("CiPipelineSchema", () => {
   it("fitsBudget returns false when critical path > budget", () => {
     const slow = CiPipelineSchema.parse({
       ...pipeline,
-      jobs: pipeline.jobs.map((j) =>
-        j.id === "e2e" ? { ...j, targetMinutes: 30 } : j,
-      ),
+      jobs: pipeline.jobs.map((j) => (j.id === "e2e" ? { ...j, targetMinutes: 30 } : j)),
     });
     expect(fitsBudget(slow, "pull_request")).toBe(false);
   });

@@ -33,10 +33,9 @@ describe("buildAnthropicRequest", () => {
   });
 
   it("uses request.model when set", () => {
-    const built = buildAnthropicRequest(
-      fixtureCompletionRequest({ model: "claude-opus-4-7" }),
-      { defaultModel: "claude-sonnet-4-6" },
-    );
+    const built = buildAnthropicRequest(fixtureCompletionRequest({ model: "claude-opus-4-7" }), {
+      defaultModel: "claude-sonnet-4-6",
+    });
     expect(built.model).toBe("claude-opus-4-7");
   });
 
@@ -104,11 +103,9 @@ describe("buildAnthropicRequest", () => {
           {
             role: "assistant",
             content: "I'll search now.",
-            toolUses: [
-              { id: "tu_1", name: "search", input: { q: "anthropic" } },
-            ],
+            toolUses: [{ id: "tu_1", name: "search", input: { q: "anthropic" } }],
           },
-          { role: "tool", content: "{\"hits\":1}", toolCallId: "tu_1" },
+          { role: "tool", content: '{"hits":1}', toolCallId: "tu_1" },
         ],
       }),
       { defaultModel: "claude-sonnet-4-6" },
@@ -168,9 +165,7 @@ describe("buildAnthropicRequest", () => {
   it("threads tools through", () => {
     const built = buildAnthropicRequest(
       fixtureCompletionRequest({
-        tools: [
-          { name: "search", description: "Search the web", inputSchema: { type: "object" } },
-        ],
+        tools: [{ name: "search", description: "Search the web", inputSchema: { type: "object" } }],
       }),
       { defaultModel: "claude-sonnet-4-6" },
     );
@@ -300,20 +295,21 @@ describe("extractToolCalls", () => {
 
 describe("buildAnthropicRequest — image attachments (M2.X)", () => {
   it("emits content as a [{type:text}, {type:image}] array for a user message with one image", () => {
-    const req = buildAnthropicRequest({
-      task: "planner",
-      messages: [
-        {
-          role: "user",
-          content: "what is this?",
-          attachments: [
-            { kind: "image", format: "png", bytes: "iVBORw0KGgo..." },
-          ],
-        },
-      ],
-      tenantId: "t",
-      sessionId: "s",
-    }, { defaultModel: "claude-sonnet-4-6" });
+    const req = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: "what is this?",
+            attachments: [{ kind: "image", format: "png", bytes: "iVBORw0KGgo..." }],
+          },
+        ],
+        tenantId: "t",
+        sessionId: "s",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
     expect(req.messages).toHaveLength(1);
     const userMsg = req.messages[0]!;
     expect(userMsg.role).toBe("user");
@@ -332,30 +328,34 @@ describe("buildAnthropicRequest — image attachments (M2.X)", () => {
   });
 
   it("emits content as a string when no attachments are present (backward compat)", () => {
-    const req = buildAnthropicRequest({
-      task: "planner",
-      messages: [{ role: "user", content: "hello" }],
-      tenantId: "t",
-      sessionId: "s",
-    }, { defaultModel: "claude-sonnet-4-6" });
+    const req = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [{ role: "user", content: "hello" }],
+        tenantId: "t",
+        sessionId: "s",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
     expect(req.messages[0]!.content).toBe("hello");
   });
 
   it("skips the text block when content is empty (image-only prompt)", () => {
-    const req = buildAnthropicRequest({
-      task: "planner",
-      messages: [
-        {
-          role: "user",
-          content: "",
-          attachments: [
-            { kind: "image", format: "webp", bytes: "abc" },
-          ],
-        },
-      ],
-      tenantId: "t",
-      sessionId: "s",
-    }, { defaultModel: "claude-sonnet-4-6" });
+    const req = buildAnthropicRequest(
+      {
+        task: "planner",
+        messages: [
+          {
+            role: "user",
+            content: "",
+            attachments: [{ kind: "image", format: "webp", bytes: "abc" }],
+          },
+        ],
+        tenantId: "t",
+        sessionId: "s",
+      },
+      { defaultModel: "claude-sonnet-4-6" },
+    );
     const blocks = req.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toEqual({
@@ -370,18 +370,21 @@ describe("buildAnthropicRequest — image attachments (M2.X)", () => {
 
   it("translates jpeg / gif / webp formats to the correct media_type", () => {
     for (const format of ["png", "jpeg", "gif", "webp"] as const) {
-      const req = buildAnthropicRequest({
-        task: "planner",
-        messages: [
-          {
-            role: "user",
-            content: "x",
-            attachments: [{ kind: "image", format, bytes: "abc" }],
-          },
-        ],
-        tenantId: "t",
-        sessionId: "s",
-      }, { defaultModel: "claude-sonnet-4-6" });
+      const req = buildAnthropicRequest(
+        {
+          task: "planner",
+          messages: [
+            {
+              role: "user",
+              content: "x",
+              attachments: [{ kind: "image", format, bytes: "abc" }],
+            },
+          ],
+          tenantId: "t",
+          sessionId: "s",
+        },
+        { defaultModel: "claude-sonnet-4-6" },
+      );
       const blocks = req.messages[0]!.content as ReadonlyArray<Record<string, unknown>>;
       const imageBlock = blocks[1] as { source: { media_type: string } };
       expect(imageBlock.source.media_type).toBe(`image/${format}`);
@@ -504,9 +507,7 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
         messages: [
           {
             role: "user",
-            content: [
-              { type: "image_url", url: "https://example.com/cat.png" },
-            ],
+            content: [{ type: "image_url", url: "https://example.com/cat.png" }],
           },
         ],
         tenantId: "ten-1",
@@ -628,9 +629,7 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
         messages: [
           {
             role: "user",
-            content: [
-              { type: "document", format: "txt", bytes, name: "note.txt" },
-            ],
+            content: [{ type: "document", format: "txt", bytes, name: "note.txt" }],
           },
         ],
         tenantId: "ten-1",
@@ -775,9 +774,7 @@ describe("buildAnthropicRequest — kernel content blocks (M2.X.5)", () => {
         messages: [
           {
             role: "user",
-            content: [
-              { type: "document", format: "pdf", bytes: "PDF_BYTES" },
-            ],
+            content: [{ type: "document", format: "pdf", bytes: "PDF_BYTES" }],
           },
         ],
         tenantId: "ten-1",
@@ -845,10 +842,10 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
   });
 
   it("omits cache_control when cacheBreakpoint is absent", () => {
-    const req = buildAnthropicRequest(
-      base([{ type: "text", text: "no caching" }]),
-      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
-    );
+    const req = buildAnthropicRequest(base([{ type: "text", text: "no caching" }]), {
+      defaultModel: "claude-sonnet-4-6",
+      defaultMaxTokens: 4096,
+    });
     const blocks = req.messages[0]!.content as unknown as Array<{
       type: string;
       cache_control?: { type: string };
@@ -897,9 +894,7 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
 
   it("emits cache_control on a file_id block", () => {
     const req = buildAnthropicRequest(
-      base([
-        { type: "file_id", fileId: "file-abc", cacheBreakpoint: { type: "ephemeral" } },
-      ]),
+      base([{ type: "file_id", fileId: "file-abc", cacheBreakpoint: { type: "ephemeral" } }]),
       { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
     );
     const blocks = req.messages[0]!.content as unknown as Array<{
@@ -986,10 +981,10 @@ describe("buildAnthropicRequest — cacheBreakpoint emission (M2.X.11)", () => {
   });
 
   it("plain-string user message has no cache_control (kernel field is per-block)", () => {
-    const req = buildAnthropicRequest(
-      base("hello"),
-      { defaultModel: "claude-sonnet-4-6", defaultMaxTokens: 4096 },
-    );
+    const req = buildAnthropicRequest(base("hello"), {
+      defaultModel: "claude-sonnet-4-6",
+      defaultMaxTokens: 4096,
+    });
     expect(typeof req.messages[0]!.content).toBe("string");
   });
 });

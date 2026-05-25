@@ -49,33 +49,29 @@ describe("DrillRecordSchema", () => {
   });
 
   it("rejects executed outcome without executedAt", () => {
-    expect(() =>
-      DrillRecordSchema.parse({ ...base, executedAt: null }),
-    ).toThrow(/executedAt/);
+    expect(() => DrillRecordSchema.parse({ ...base, executedAt: null })).toThrow(/executedAt/);
   });
 
   it("rejects executed outcome without executedBy", () => {
-    expect(() =>
-      DrillRecordSchema.parse({ ...base, executedBy: null }),
-    ).toThrow(/executedBy/);
+    expect(() => DrillRecordSchema.parse({ ...base, executedBy: null })).toThrow(/executedBy/);
   });
 
   it("rejects failover_test without measuredRpoSeconds", () => {
-    expect(() =>
-      DrillRecordSchema.parse({ ...base, measuredRpoSeconds: null }),
-    ).toThrow(/measuredRpoSeconds/);
+    expect(() => DrillRecordSchema.parse({ ...base, measuredRpoSeconds: null })).toThrow(
+      /measuredRpoSeconds/,
+    );
   });
 
   it("rejects failover_test without measuredRtoSeconds", () => {
-    expect(() =>
-      DrillRecordSchema.parse({ ...base, measuredRtoSeconds: null }),
-    ).toThrow(/measuredRtoSeconds/);
+    expect(() => DrillRecordSchema.parse({ ...base, measuredRtoSeconds: null })).toThrow(
+      /measuredRtoSeconds/,
+    );
   });
 
   it("rejects passed_with_findings without findings", () => {
-    expect(() =>
-      DrillRecordSchema.parse({ ...base, outcome: "passed_with_findings" }),
-    ).toThrow(/at least one finding/);
+    expect(() => DrillRecordSchema.parse({ ...base, outcome: "passed_with_findings" })).toThrow(
+      /at least one finding/,
+    );
   });
 
   it("rejects failed without findings", () => {
@@ -193,13 +189,19 @@ describe("helpers", () => {
 
   it("exceededRpoInDrill catches RPO exceedance", () => {
     expect(
-      exceededRpoInDrill({ ...base, measuredRpoSeconds: 120 }, DEFAULT_DR_TIERS.tier_1_business_critical),
+      exceededRpoInDrill(
+        { ...base, measuredRpoSeconds: 120 },
+        DEFAULT_DR_TIERS.tier_1_business_critical,
+      ),
     ).toBe(true);
   });
 
   it("exceededRtoInDrill catches RTO exceedance", () => {
     expect(
-      exceededRtoInDrill({ ...base, measuredRtoSeconds: 1800 }, DEFAULT_DR_TIERS.tier_1_business_critical),
+      exceededRtoInDrill(
+        { ...base, measuredRtoSeconds: 1800 },
+        DEFAULT_DR_TIERS.tier_1_business_critical,
+      ),
     ).toBe(true);
   });
 

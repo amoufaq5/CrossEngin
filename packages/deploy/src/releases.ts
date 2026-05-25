@@ -11,7 +11,8 @@ import {
 const Iso8601 = z.string().datetime({ offset: true });
 const Uuid = z.string().min(1);
 const SHA_REGEX = /^[0-9a-f]{40}$/;
-const SEMVER_REGEX = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const SEMVER_REGEX =
+  /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 export const DEPLOYMENT_STATUSES = [
   "queued",
@@ -79,7 +80,11 @@ export const DeploymentRecordSchema = z
         message: "rollback trigger requires previousVersion",
       });
     }
-    if (v.environment === "preview" && v.trigger !== "merge_to_main" && v.trigger !== "live_update") {
+    if (
+      v.environment === "preview" &&
+      v.trigger !== "merge_to_main" &&
+      v.trigger !== "live_update"
+    ) {
       const allowed: ReadonlyArray<DeploymentTrigger> = ["merge_to_main", "live_update"];
       if (!allowed.includes(v.trigger)) {
         // permissive — preview deploys can be triggered many ways; this is just a soft check
@@ -99,10 +104,7 @@ export const DEPLOYMENT_TRANSITIONS: Readonly<
   cancelled: [],
 });
 
-export function canTransitionDeployment(
-  from: DeploymentStatus,
-  to: DeploymentStatus,
-): boolean {
+export function canTransitionDeployment(from: DeploymentStatus, to: DeploymentStatus): boolean {
   return DEPLOYMENT_TRANSITIONS[from].includes(to);
 }
 
@@ -119,7 +121,9 @@ export const ReleaseSchema = z
     breakingChanges: z.boolean().default(false),
     apps: z.array(z.enum(APP_KINDS)).min(1),
     deprecatesVersions: z.array(z.string().regex(SEMVER_REGEX)).default([]),
-    securityAdvisoriesFixed: z.array(z.string().regex(/^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/)).default([]),
+    securityAdvisoriesFixed: z
+      .array(z.string().regex(/^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/))
+      .default([]),
   })
   .superRefine((v, ctx) => {
     if (v.breakingChanges && v.channel === "stable") {

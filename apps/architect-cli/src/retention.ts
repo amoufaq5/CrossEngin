@@ -61,9 +61,7 @@ function formatExplainPlan(plan: ExplainPlan): string {
     if (value === null || value === undefined) continue;
     if (typeof value === "object" && !Array.isArray(value)) {
       lines.push(`  ${key}:`);
-      for (const [subKey, subValue] of Object.entries(
-        value as Record<string, unknown>,
-      )) {
+      for (const [subKey, subValue] of Object.entries(value as Record<string, unknown>)) {
         const rendered =
           subValue === null || subValue === undefined
             ? "(any)"
@@ -75,9 +73,7 @@ function formatExplainPlan(plan: ExplainPlan): string {
         lines.push(`    ${subKey}: ${rendered}`);
       }
     } else if (Array.isArray(value)) {
-      lines.push(
-        `  ${key}: [${value.map((v) => JSON.stringify(v)).join(", ")}]`,
-      );
+      lines.push(`  ${key}: [${value.map((v) => JSON.stringify(v)).join(", ")}]`);
     } else {
       lines.push(`  ${key}: ${String(value)}`);
     }
@@ -97,10 +93,7 @@ async function runExplainAnalyze(
   try {
     plan = await retention.explainAnalyzeQuery(sql, params);
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention ${action}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention ${action}: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
   if (command.format === "human") {
@@ -146,10 +139,7 @@ interface ResolvedHandle {
   readonly close: () => Promise<void>;
 }
 
-export async function runRetention(
-  command: ParsedCommand,
-  ctx: RetentionContext,
-): Promise<number> {
+export async function runRetention(command: ParsedCommand, ctx: RetentionContext): Promise<number> {
   const action = command.positional[0];
   if (action === undefined) {
     printError(
@@ -167,11 +157,7 @@ export async function runRetention(
       case "effective":
         return await runRetentionEffective(command, ctx, handle.retention);
       case "effective-batch":
-        return await runRetentionEffectiveBatch(
-          command,
-          ctx,
-          handle.retention,
-        );
+        return await runRetentionEffectiveBatch(command, ctx, handle.retention);
       case "opt-out":
         return await runRetentionOptOut(command, ctx, handle.retention);
       case "opt-in":
@@ -208,9 +194,7 @@ export async function runRetention(
   }
 }
 
-async function resolveRetention(
-  ctx: RetentionContext,
-): Promise<ResolvedHandle | null> {
+async function resolveRetention(ctx: RetentionContext): Promise<ResolvedHandle | null> {
   if (ctx.retentionOverride !== undefined) {
     return { retention: ctx.retentionOverride, close: async () => undefined };
   }
@@ -254,10 +238,7 @@ async function runRetentionExpiring(
   try {
     results = await retention.expiringOptOuts({ withinDays, includeExpired });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention expiring: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention expiring: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -293,10 +274,7 @@ export function formatExpiringTable(
     : `Opt-outs expiring within ${withinDays} day(s) (${results.length} total):`;
   const rows = results.map((r) => {
     const days = r.daysUntilExpiry;
-    const daysLabel =
-      days < 0
-        ? `EXPIRED ${(-days).toFixed(1)}d ago`
-        : `${days.toFixed(1)}d`;
+    const daysLabel = days < 0 ? `EXPIRED ${(-days).toFixed(1)}d ago` : `${days.toFixed(1)}d`;
     const reason = r.optOutReason ?? "<no reason>";
     return `  ${daysLabel.padEnd(20)} ${r.tenantId}  ${r.tableName}  ${reason}`;
   });
@@ -322,10 +300,7 @@ async function runRetentionEffective(
   try {
     resolution = await retention.effectiveRetention(tenantId, tableName);
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention effective: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention effective: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -334,9 +309,7 @@ async function runRetentionEffective(
     return 0;
   }
 
-  ctx.io.stdout.write(
-    formatEffectiveResolution(resolution, tenantId, tableName),
-  );
+  ctx.io.stdout.write(formatEffectiveResolution(resolution, tenantId, tableName));
   return 0;
 }
 
@@ -358,14 +331,9 @@ export function formatEffectiveResolution(
       lines.push("Tenant opt-out (active)");
       lines.push(`  Tenant:     ${resolution.tenantId}`);
       lines.push(`  Table:      ${tableName}`);
-      const until =
-        resolution.optOutUntil === null
-          ? "indefinite"
-          : resolution.optOutUntil;
+      const until = resolution.optOutUntil === null ? "indefinite" : resolution.optOutUntil;
       lines.push(`  Until:      ${until}`);
-      lines.push(
-        `  Reason:     ${resolution.optOutReason ?? "<no reason>"}`,
-      );
+      lines.push(`  Reason:     ${resolution.optOutReason ?? "<no reason>"}`);
       break;
     }
     case "platform":
@@ -433,10 +401,7 @@ async function runRetentionEffectiveBatch(
 
   const validation = validateBatchPairs(parsedJson);
   if (!validation.ok) {
-    printError(
-      ctx.io,
-      `retention effective-batch: '${pairsFile}' ${validation.error}`,
-    );
+    printError(ctx.io, `retention effective-batch: '${pairsFile}' ${validation.error}`);
     return 2;
   }
   const pairs = validation.pairs;
@@ -453,9 +418,7 @@ async function runRetentionEffectiveBatch(
   }
 
   const results: EffectiveBatchResultEntry[] = pairs.map((p) => {
-    const resolution = resolutionMap.get(
-      effectiveRetentionKey(p.tenantId, p.tableName),
-    );
+    const resolution = resolutionMap.get(effectiveRetentionKey(p.tenantId, p.tableName));
     if (resolution === undefined) {
       throw new Error(
         `retention effective-batch: resolver returned no entry for ${p.tenantId}:${p.tableName}`,
@@ -485,9 +448,7 @@ interface BatchPairsValidationFail {
   error: string;
 }
 
-function validateBatchPairs(
-  raw: unknown,
-): BatchPairsValidation | BatchPairsValidationFail {
+function validateBatchPairs(raw: unknown): BatchPairsValidation | BatchPairsValidationFail {
   if (!Array.isArray(raw)) {
     return { ok: false, error: "must be a JSON array of {tenantId, tableName} objects" };
   }
@@ -520,9 +481,7 @@ function validateBatchPairs(
   return { ok: true, pairs };
 }
 
-export function formatEffectiveBatch(
-  results: ReadonlyArray<EffectiveBatchResultEntry>,
-): string {
+export function formatEffectiveBatch(results: ReadonlyArray<EffectiveBatchResultEntry>): string {
   if (results.length === 0) {
     return "Effective retention for 0 pair(s): (empty input)\n";
   }
@@ -536,9 +495,7 @@ export function formatEffectiveBatch(
   return lines.join("\n") + "\n";
 }
 
-function summarizeBatchResolution(
-  resolution: EffectiveRetentionResolution,
-): string {
+function summarizeBatchResolution(resolution: EffectiveRetentionResolution): string {
   switch (resolution.source) {
     case "tenant":
       return `source=tenant         retention=${resolution.retentionDays}d  enabled=yes`;
@@ -626,10 +583,7 @@ async function runRetentionOptOut(
       attributes: attributesResult.attributes,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention opt-out: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention opt-out: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -672,10 +626,7 @@ async function runRetentionOptIn(
       attributes: attributesResult.attributes,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention opt-in: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention opt-in: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -694,10 +645,7 @@ async function runRetentionOptIn(
   return 0;
 }
 
-export function formatPolicyChange(
-  action: string,
-  policy: TenantRetentionPolicyRow,
-): string {
+export function formatPolicyChange(action: string, policy: TenantRetentionPolicyRow): string {
   const lines: string[] = [];
   lines.push(`Tenant ${action}: ${policy.tenantId} / ${policy.tableName}`);
   lines.push(`  Retention:  ${policy.retentionDays} day(s)`);
@@ -785,8 +733,7 @@ export function formatPoliciesList(
   if (filters.tableFilter !== null) {
     filterDesc.push(`table=${filters.tableFilter}`);
   }
-  const filterSuffix =
-    filterDesc.length > 0 ? ` (filtered: ${filterDesc.join(", ")})` : "";
+  const filterSuffix = filterDesc.length > 0 ? ` (filtered: ${filterDesc.join(", ")})` : "";
 
   lines.push(`Platform defaults (${platform.length} total)${filterSuffix}:`);
   if (platform.length === 0) {
@@ -803,9 +750,7 @@ export function formatPoliciesList(
   }
 
   lines.push("");
-  lines.push(
-    `Per-tenant policies (${tenantPolicies.length} total)${filterSuffix}:`,
-  );
+  lines.push(`Per-tenant policies (${tenantPolicies.length} total)${filterSuffix}:`);
   if (tenantPolicies.length === 0) {
     lines.push("  (none configured)");
   } else {
@@ -856,10 +801,7 @@ async function runRetentionSet(
   }
   const days = Number.parseInt(daysFlag, 10);
   if (!Number.isFinite(days) || days < 1) {
-    printError(
-      ctx.io,
-      `retention set: invalid --days '${daysFlag}' (must be an integer >= 1)`,
-    );
+    printError(ctx.io, `retention set: invalid --days '${daysFlag}' (must be an integer >= 1)`);
     return 2;
   }
 
@@ -897,10 +839,7 @@ async function runRetentionSet(
       attributes: attributesResult.attributes,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention set: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention set: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -940,25 +879,16 @@ async function runRetentionHistory(
   const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
-    printError(
-      ctx.io,
-      "retention history: --csv-separator cannot be '\"' or newline",
-    );
+    printError(ctx.io, "retention history: --csv-separator cannot be '\"' or newline");
     return 2;
   }
   const csvSeparator = csvSeparatorFlag ?? ",";
 
   if (systemOnlyFlag && noSystemFlag) {
-    printError(
-      ctx.io,
-      "retention history: --system-only and --no-system are mutually exclusive",
-    );
+    printError(ctx.io, "retention history: --system-only and --no-system are mutually exclusive");
     return 2;
   }
-  const actorPresence:
-    | "system_only"
-    | "no_system"
-    | undefined = systemOnlyFlag
+  const actorPresence: "system_only" | "no_system" | undefined = systemOnlyFlag
     ? "system_only"
     : noSystemFlag
       ? "no_system"
@@ -992,10 +922,7 @@ async function runRetentionHistory(
   const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
 
-  const contradictoryKinds = findContradictoryValues(
-    eventKinds,
-    eventKindsNot,
-  );
+  const contradictoryKinds = findContradictoryValues(eventKinds, eventKindsNot);
   if (contradictoryKinds.length > 0) {
     const list = contradictoryKinds.map((k) => `'${k}'`).join(", ");
     printError(
@@ -1021,10 +948,8 @@ async function runRetentionHistory(
     return 2;
   }
 
-  let effectiveAfterId: string | undefined =
-    afterIdFlag !== null ? afterIdFlag : undefined;
-  let effectiveBeforeId: string | undefined =
-    beforeIdFlag !== null ? beforeIdFlag : undefined;
+  let effectiveAfterId: string | undefined = afterIdFlag !== null ? afterIdFlag : undefined;
+  let effectiveBeforeId: string | undefined = beforeIdFlag !== null ? beforeIdFlag : undefined;
 
   if (rangeFlag !== null) {
     if (afterIdFlag !== null || beforeIdFlag !== null) {
@@ -1114,10 +1039,7 @@ async function runRetentionHistory(
   };
 
   if (explainFlag && explainAnalyzeFlag) {
-    printError(
-      ctx.io,
-      "retention history: --explain and --explain-analyze are mutually exclusive",
-    );
+    printError(ctx.io, "retention history: --explain and --explain-analyze are mutually exclusive");
     return 2;
   }
   if (explainAnalyzeFlag) {
@@ -1166,17 +1088,12 @@ async function runRetentionHistory(
   try {
     entries = await retention.listOptOutHistory(historyInput);
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention history: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention history: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
-  const nextAfterId =
-    entries.length === limit ? (entries[entries.length - 1]?.id ?? null) : null;
-  const nextBeforeId =
-    entries.length === limit ? (entries[0]?.id ?? null) : null;
+  const nextAfterId = entries.length === limit ? (entries[entries.length - 1]?.id ?? null) : null;
+  const nextBeforeId = entries.length === limit ? (entries[0]?.id ?? null) : null;
 
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, {
@@ -1204,11 +1121,7 @@ async function runRetentionHistory(
     return 0;
   }
 
-  if (
-    command.format === "csv" ||
-    command.format === "tsv" ||
-    command.format === "ndjson"
-  ) {
+  if (command.format === "csv" || command.format === "tsv" || command.format === "ndjson") {
     const baseHeaders = [
       "id",
       "tenant_id",
@@ -1256,9 +1169,7 @@ async function runRetentionHistory(
     return 0;
   }
 
-  ctx.io.stdout.write(
-    formatHistoryList(entries, limit, nextAfterId, nextBeforeId),
-  );
+  ctx.io.stdout.write(formatHistoryList(entries, limit, nextAfterId, nextBeforeId));
   return 0;
 }
 
@@ -1269,9 +1180,7 @@ export function formatHistoryList(
   nextBeforeId?: string | null,
 ): string {
   const lines: string[] = [];
-  lines.push(
-    `Retention history (${entries.length} entries, limit ${limit}):`,
-  );
+  lines.push(`Retention history (${entries.length} entries, limit ${limit}):`);
   for (const e of entries) {
     lines.push(
       `  ${e.occurredAt}  ${e.eventKind.padEnd(16)} tenant=${e.tenantId}  table=${e.tableName}  actor=${formatActor(e)}`,
@@ -1279,9 +1188,7 @@ export function formatHistoryList(
   }
   if (nextAfterId !== undefined && nextAfterId !== null) {
     lines.push("");
-    lines.push(
-      `Page full — next page: crossengin retention history --after-id ${nextAfterId} ...`,
-    );
+    lines.push(`Page full — next page: crossengin retention history --after-id ${nextAfterId} ...`);
   }
   if (nextBeforeId !== undefined && nextBeforeId !== null) {
     lines.push("");
@@ -1362,8 +1269,7 @@ async function runRetentionSummary(
     );
     return 2;
   }
-  const thenBy: OptOutHistorySummaryGroupBy | undefined =
-    thenByFlag ?? undefined;
+  const thenBy: OptOutHistorySummaryGroupBy | undefined = thenByFlag ?? undefined;
   if (thenBy !== undefined && thenBy === groupBy) {
     printError(
       ctx.io,
@@ -1373,10 +1279,7 @@ async function runRetentionSummary(
   }
 
   if (systemOnlyFlag && noSystemFlag) {
-    printError(
-      ctx.io,
-      "retention summary: --system-only and --no-system are mutually exclusive",
-    );
+    printError(ctx.io, "retention summary: --system-only and --no-system are mutually exclusive");
     return 2;
   }
   const actorPresence: "system_only" | "no_system" | undefined = systemOnlyFlag
@@ -1503,8 +1406,7 @@ async function runRetentionSummary(
       return 2;
     }
     const TEMPORAL = new Set(["day", "hour", "week", "month"]);
-    const anyTemporal =
-      TEMPORAL.has(groupBy) || (thenBy !== undefined && TEMPORAL.has(thenBy));
+    const anyTemporal = TEMPORAL.has(groupBy) || (thenBy !== undefined && TEMPORAL.has(thenBy));
     if (!anyTemporal) {
       printError(
         ctx.io,
@@ -1630,15 +1532,11 @@ async function runRetentionSummary(
   };
 
   if (explainFlag && explainAnalyzeFlag) {
-    printError(
-      ctx.io,
-      "retention summary: --explain and --explain-analyze are mutually exclusive",
-    );
+    printError(ctx.io, "retention summary: --explain and --explain-analyze are mutually exclusive");
     return 2;
   }
   if (explainAnalyzeFlag) {
-    const { sql, params } =
-      retention.buildSummarizeOptOutHistoryQuery(summaryInput);
+    const { sql, params } = retention.buildSummarizeOptOutHistoryQuery(summaryInput);
     return runExplainAnalyze(ctx, command, retention, "summary", sql, params);
   }
   if (explainFlag) {
@@ -1681,10 +1579,7 @@ async function runRetentionSummary(
   try {
     result = await retention.summarizeOptOutHistory(summaryInput);
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention summary: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention summary: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -1698,17 +1593,12 @@ async function runRetentionSummary(
     });
     return 0;
   }
-  if (
-    command.format === "csv" ||
-    command.format === "tsv" ||
-    command.format === "ndjson"
-  ) {
+  if (command.format === "csv" || command.format === "tsv" || command.format === "ndjson") {
     if (command.format === "ndjson") {
       printNdjson(ctx.io, result.buckets);
       return 0;
     }
-    const headers =
-      thenBy !== undefined ? [groupBy, thenBy, "count"] : [groupBy, "count"];
+    const headers = thenBy !== undefined ? [groupBy, thenBy, "count"] : [groupBy, "count"];
     const rows = result.buckets.map((b) =>
       thenBy !== undefined ? [b.key, b.subKey ?? null, b.count] : [b.key, b.count],
     );
@@ -1734,15 +1624,9 @@ function formatSummary(result: OptOutHistorySummaryResult): string {
     lines.push("  (no events match the given filters)");
     return lines.join("\n") + "\n";
   }
-  const keyWidth = Math.max(
-    ...result.buckets.map((b) => (b.key ?? "<system>").length),
-    10,
-  );
+  const keyWidth = Math.max(...result.buckets.map((b) => (b.key ?? "<system>").length), 10);
   if (result.thenBy !== undefined) {
-    const subKeyWidth = Math.max(
-      ...result.buckets.map((b) => (b.subKey ?? "<system>").length),
-      10,
-    );
+    const subKeyWidth = Math.max(...result.buckets.map((b) => (b.subKey ?? "<system>").length), 10);
     for (const b of result.buckets) {
       const key = (b.key ?? "<system>").padEnd(keyWidth);
       const subKey = (b.subKey ?? "<system>").padEnd(subKeyWidth);
@@ -1788,10 +1672,7 @@ async function runRetentionDelete(
       attributes: attributesResult.attributes,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention delete: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention delete: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -1805,10 +1686,7 @@ async function runRetentionDelete(
     return 0;
   }
   if (deleted) {
-    printSuccess(
-      ctx.io,
-      `deleted per-tenant policy: ${tenantId} / ${tableName}`,
-    );
+    printSuccess(ctx.io, `deleted per-tenant policy: ${tenantId} / ${tableName}`);
   } else {
     printSuccess(
       ctx.io,
@@ -1838,10 +1716,7 @@ async function runRetentionRestore(
     try {
       preview = await retention.previewRestoreTenantPolicy({ historyId });
     } catch (err) {
-      printError(
-        ctx.io,
-        `retention restore: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      printError(ctx.io, `retention restore: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
     if (command.format === "json" || command.format === "yaml") {
@@ -1872,15 +1747,17 @@ async function runRetentionRestore(
       attributes: attributesResult.attributes,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention restore: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention restore: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
   if (command.format === "json" || command.format === "yaml") {
-    printStructured(ctx.io, command.format, { action: "restore", dryRun: false, historyId, result });
+    printStructured(ctx.io, command.format, {
+      action: "restore",
+      dryRun: false,
+      historyId,
+      result,
+    });
     return 0;
   }
   if (result.kind === "deleted") {
@@ -1894,9 +1771,7 @@ async function runRetentionRestore(
   return 0;
 }
 
-export function formatRestorePreview(
-  preview: RestoreTenantPolicyPreview,
-): string {
+export function formatRestorePreview(preview: RestoreTenantPolicyPreview): string {
   const lines: string[] = [];
   lines.push("Restore preview (no changes applied):");
   lines.push(`  Source history: ${preview.sourceHistoryId}`);
@@ -1910,9 +1785,7 @@ export function formatRestorePreview(
       lines.push(`  Action:         setTenantOptOut`);
       lines.push(`    retention_days: ${preview.retentionDays}`);
       lines.push(`    opt_out_until:  ${preview.optOutUntil ?? "indefinite"}`);
-      lines.push(
-        `    opt_out_reason: ${preview.optOutReason ?? "<no reason>"}`,
-      );
+      lines.push(`    opt_out_reason: ${preview.optOutReason ?? "<no reason>"}`);
       break;
     case "would_set_retention":
       lines.push(`  Action:         setTenantRetention`);
@@ -2099,10 +1972,7 @@ async function runRetentionDiffHistory(
   const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
-    printError(
-      ctx.io,
-      "retention diff-history: --csv-separator cannot be '\"' or newline",
-    );
+    printError(ctx.io, "retention diff-history: --csv-separator cannot be '\"' or newline");
     return 2;
   }
   const csvSeparator = csvSeparatorFlag ?? ",";
@@ -2128,26 +1998,17 @@ async function runRetentionDiffHistory(
     );
     return 2;
   }
-  const actorPresence:
-    | "system_only"
-    | "no_system"
-    | undefined = systemOnlyFlag
+  const actorPresence: "system_only" | "no_system" | undefined = systemOnlyFlag
     ? "system_only"
     : noSystemFlag
       ? "no_system"
       : undefined;
-  const actorPresenceA:
-    | "system_only"
-    | "no_system"
-    | undefined = systemOnlyAFlag
+  const actorPresenceA: "system_only" | "no_system" | undefined = systemOnlyAFlag
     ? "system_only"
     : noSystemAFlag
       ? "no_system"
       : undefined;
-  const actorPresenceB:
-    | "system_only"
-    | "no_system"
-    | undefined = systemOnlyBFlag
+  const actorPresenceB: "system_only" | "no_system" | undefined = systemOnlyBFlag
     ? "system_only"
     : noSystemBFlag
       ? "no_system"
@@ -2185,14 +2046,7 @@ async function runRetentionDiffHistory(
       idB,
       joinActor: withActorNames ? true : undefined,
     });
-    return runExplainAnalyze(
-      ctx,
-      command,
-      retention,
-      "diff-history",
-      sql,
-      params,
-    );
+    return runExplainAnalyze(ctx, command, retention, "diff-history", sql, params);
   }
   if (explainFlag) {
     const { sql, params } = retention.buildDiffHistoryEntriesQuery({
@@ -2295,11 +2149,7 @@ async function runRetentionDiffHistory(
     });
     return 0;
   }
-  if (
-    command.format === "csv" ||
-    command.format === "tsv" ||
-    command.format === "ndjson"
-  ) {
+  if (command.format === "csv" || command.format === "tsv" || command.format === "ndjson") {
     if (command.format === "ndjson") {
       printNdjson(ctx.io, result.fieldDiffs);
       return 0;
@@ -2347,9 +2197,7 @@ export function formatHistoryDiff(
   lines.push(`  Table:  ${result.tableName}`);
   lines.push("");
   if (result.fieldDiffs.length === 0) {
-    lines.push(
-      "No differences between the two events' policy states.",
-    );
+    lines.push("No differences between the two events' policy states.");
   } else {
     lines.push(`Field changes (${result.fieldDiffs.length}):`);
     for (const d of result.fieldDiffs) {
@@ -2373,10 +2221,7 @@ async function runRetentionPrune(
     try {
       results = await retention.previewPrune();
     } catch (err) {
-      printError(
-        ctx.io,
-        `retention prune: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      printError(ctx.io, `retention prune: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
     if (command.format === "json" || command.format === "yaml") {
@@ -2391,10 +2236,7 @@ async function runRetentionPrune(
   try {
     results = await retention.prune();
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention prune: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention prune: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
   if (command.format === "json" || command.format === "yaml") {
@@ -2405,9 +2247,7 @@ async function runRetentionPrune(
   return 0;
 }
 
-export function formatPruneRun(
-  results: ReadonlyArray<RetentionRunResult>,
-): string {
+export function formatPruneRun(results: ReadonlyArray<RetentionRunResult>): string {
   if (results.length === 0) {
     return "no retention policies configured\n";
   }
@@ -2421,20 +2261,14 @@ export function formatPruneRun(
   return lines.join("\n") + "\n";
 }
 
-export function formatPrunePreview(
-  results: ReadonlyArray<RetentionPreviewResult>,
-): string {
+export function formatPrunePreview(results: ReadonlyArray<RetentionPreviewResult>): string {
   if (results.length === 0) {
     return "no retention policies configured (dry-run)\n";
   }
   const lines: string[] = [];
-  lines.push(
-    `Retention prune dry-run results (${results.length} entries):`,
-  );
+  lines.push(`Retention prune dry-run results (${results.length} entries):`);
   for (const r of results) {
-    lines.push(
-      `  ${formatPruneResultLine(r, "would_delete", r.wouldDeleteCount)}`,
-    );
+    lines.push(`  ${formatPruneResultLine(r, "would_delete", r.wouldDeleteCount)}`);
   }
   lines.push("");
   lines.push(formatPruneSummary(results, "would_delete"));
@@ -2451,25 +2285,16 @@ interface PruneResultLike {
   readonly optOutUntil?: string | null;
 }
 
-function formatPruneResultLine(
-  r: PruneResultLike,
-  countLabel: string,
-  count: number,
-): string {
+function formatPruneResultLine(r: PruneResultLike, countLabel: string, count: number): string {
   const tenant = r.tenantId !== undefined ? `tenant=${r.tenantId}` : "(platform)";
-  const isCountedStatus =
-    r.status === "pruned" || r.status === "previewed";
+  const isCountedStatus = r.status === "pruned" || r.status === "previewed";
   const countPart = isCountedStatus ? `${countLabel}=${count}` : "-";
-  const cutoffPart =
-    r.cutoffMs === null
-      ? "-"
-      : `cutoff=${new Date(r.cutoffMs).toISOString()}`;
+  const cutoffPart = r.cutoffMs === null ? "-" : `cutoff=${new Date(r.cutoffMs).toISOString()}`;
   let extra = "";
   if (r.status === "skipped_opt_out" || r.status === "skipped_opt_out_expired") {
     const reason = r.optOutReason ?? "<no reason>";
     const until = r.optOutUntil ?? "indefinite";
-    const expiredMark =
-      r.status === "skipped_opt_out_expired" ? " (EXPIRED)" : "";
+    const expiredMark = r.status === "skipped_opt_out_expired" ? " (EXPIRED)" : "";
     extra = `  reason=${reason}  until=${until}${expiredMark}`;
   }
   return `${r.status.padEnd(24)} ${r.tableName.padEnd(36)} ${tenant.padEnd(48)} ${countPart.padEnd(20)} retention=${r.retentionDays}d  ${cutoffPart}${extra}`;
@@ -2497,14 +2322,9 @@ function formatPruneSummary(
   const skippedParts = Object.entries(skippedByStatus)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([status, n]) => `${n} ${status}`);
-  const totalSkipped = Object.values(skippedByStatus).reduce(
-    (acc, n) => acc + n,
-    0,
-  );
+  const totalSkipped = Object.values(skippedByStatus).reduce((acc, n) => acc + n, 0);
   const skippedSuffix =
-    totalSkipped > 0
-      ? `, ${totalSkipped} skipped (${skippedParts.join(", ")})`
-      : "";
+    totalSkipped > 0 ? `, ${totalSkipped} skipped (${skippedParts.join(", ")})` : "";
   return `Summary: ${prunedCount} ${verb} (${totalRows} rows)${skippedSuffix}`;
 }
 
@@ -2520,10 +2340,7 @@ async function runRetentionDiffTimeline(
   const hasAddTable = addTables.length > 0;
 
   if (hasAddTable && !crossTable) {
-    printError(
-      ctx.io,
-      "retention diff-timeline: --add-table requires --cross-table",
-    );
+    printError(ctx.io, "retention diff-timeline: --add-table requires --cross-table");
     return 2;
   }
   if (crossTable && hasAddTenant) {
@@ -2537,18 +2354,11 @@ async function runRetentionDiffTimeline(
   const positionalA = command.positional[1];
   const positionalB = command.positional[2];
   const positionalC = command.positional[3];
-  if (
-    positionalA === undefined ||
-    positionalB === undefined ||
-    positionalC === undefined
-  ) {
+  if (positionalA === undefined || positionalB === undefined || positionalC === undefined) {
     const usage = crossTable
       ? "crossengin retention diff-timeline <tenant> <table-a> <table-b> --cross-table [--add-table <table-c> ...]"
       : "crossengin retention diff-timeline <tenant-a> <tenant-b> <table-name> [--add-tenant <tenant-c> ...]";
-    printError(
-      ctx.io,
-      `retention diff-timeline: missing arguments. usage: ${usage}`,
-    );
+    printError(ctx.io, `retention diff-timeline: missing arguments. usage: ${usage}`);
     return 2;
   }
 
@@ -2598,18 +2408,14 @@ async function runRetentionDiffTimeline(
   const explainAnalyzeFlag = getBooleanFlag(command, "explain-analyze");
   const csvSeparatorFlag = getStringFlag(command, "csv-separator");
   if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
-    printError(
-      ctx.io,
-      "retention diff-timeline: --csv-separator cannot be '\"' or newline",
-    );
+    printError(ctx.io, "retention diff-timeline: --csv-separator cannot be '\"' or newline");
     return 2;
   }
   const csvSeparator = csvSeparatorFlag ?? ",";
   const actorIdFlags = getMultiFlag(command, "actor-id");
   const actorIds = actorIdFlags.length > 0 ? actorIdFlags : undefined;
   const actorIdNotFlags = getMultiFlag(command, "actor-id-not");
-  const actorIdsNot =
-    actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
+  const actorIdsNot = actorIdNotFlags.length > 0 ? actorIdNotFlags : undefined;
   const systemOnlyFlag = getBooleanFlag(command, "system-only");
   const noSystemFlag = getBooleanFlag(command, "no-system");
   if (systemOnlyFlag && noSystemFlag) {
@@ -2619,10 +2425,7 @@ async function runRetentionDiffTimeline(
     );
     return 2;
   }
-  const actorPresence:
-    | "system_only"
-    | "no_system"
-    | undefined = systemOnlyFlag
+  const actorPresence: "system_only" | "no_system" | undefined = systemOnlyFlag
     ? "system_only"
     : noSystemFlag
       ? "no_system"
@@ -2657,10 +2460,7 @@ async function runRetentionDiffTimeline(
   const eventKindsNot: ReadonlyArray<OptOutHistoryEventKind> | undefined =
     validatedKindsNot.length > 0 ? validatedKindsNot : undefined;
 
-  const contradictoryKinds = findContradictoryValues(
-    eventKinds,
-    eventKindsNot,
-  );
+  const contradictoryKinds = findContradictoryValues(eventKinds, eventKindsNot);
   if (contradictoryKinds.length > 0) {
     const list = contradictoryKinds.map((k) => `'${k}'`).join(", ");
     printError(
@@ -2690,10 +2490,8 @@ async function runRetentionDiffTimeline(
   const beforeIdFlag = getStringFlag(command, "before-id");
   const rangeFlag = getStringFlag(command, "range");
 
-  let afterId: string | undefined =
-    afterIdFlag !== null ? afterIdFlag : undefined;
-  let beforeId: string | undefined =
-    beforeIdFlag !== null ? beforeIdFlag : undefined;
+  let afterId: string | undefined = afterIdFlag !== null ? afterIdFlag : undefined;
+  let beforeId: string | undefined = beforeIdFlag !== null ? beforeIdFlag : undefined;
 
   if (rangeFlag !== null) {
     if (afterIdFlag !== null || beforeIdFlag !== null) {
@@ -2735,11 +2533,7 @@ async function runRetentionDiffTimeline(
     return 2;
   }
   if (explainFlag || explainAnalyzeFlag) {
-    const dispatchPath = crossTable
-      ? "cross-table"
-      : hasAddTenant
-        ? "nway"
-        : "pair-wise";
+    const dispatchPath = crossTable ? "cross-table" : hasAddTenant ? "nway" : "pair-wise";
     let sql: string;
     let params: unknown[];
     if (crossTable) {
@@ -2799,26 +2593,15 @@ async function runRetentionDiffTimeline(
       params = built.params;
     }
     if (explainAnalyzeFlag) {
-      return runExplainAnalyze(
-        ctx,
-        command,
-        retention,
-        "diff-timeline",
-        sql,
-        params,
-      );
+      return runExplainAnalyze(ctx, command, retention, "diff-timeline", sql, params);
     }
     const plan = {
       action: "diff-timeline",
       explain: true,
       executed: false,
       dispatchPath,
-      tenants: crossTable
-        ? [positionalA]
-        : [positionalA, positionalB, ...addTenants],
-      tables: crossTable
-        ? [positionalB, positionalC, ...addTables]
-        : [positionalC],
+      tenants: crossTable ? [positionalA] : [positionalA, positionalB, ...addTenants],
+      tables: crossTable ? [positionalB, positionalC, ...addTables] : [positionalC],
       filters: {
         kinds: eventKinds ?? null,
         kindsNot: eventKindsNot ?? null,
@@ -2882,9 +2665,7 @@ async function runRetentionDiffTimeline(
         ? (crossResult.entries[crossResult.entries.length - 1]?.id ?? null)
         : null;
     const nextBeforeIdCross =
-      crossResult.entries.length === limit
-        ? (crossResult.entries[0]?.id ?? null)
-        : null;
+      crossResult.entries.length === limit ? (crossResult.entries[0]?.id ?? null) : null;
 
     if (command.format === "json" || command.format === "yaml") {
       printStructured(ctx.io, command.format, {
@@ -2909,11 +2690,7 @@ async function runRetentionDiffTimeline(
       });
       return 0;
     }
-    if (
-      command.format === "csv" ||
-      command.format === "tsv" ||
-      command.format === "ndjson"
-    ) {
+    if (command.format === "csv" || command.format === "tsv" || command.format === "ndjson") {
       const baseHeaders = [
         "id",
         "tenant_id",
@@ -3003,9 +2780,7 @@ async function runRetentionDiffTimeline(
         ? (nwayResult.entries[nwayResult.entries.length - 1]?.id ?? null)
         : null;
     const nextBeforeIdNway =
-      nwayResult.entries.length === limit
-        ? (nwayResult.entries[0]?.id ?? null)
-        : null;
+      nwayResult.entries.length === limit ? (nwayResult.entries[0]?.id ?? null) : null;
 
     if (command.format === "json" || command.format === "yaml") {
       printStructured(ctx.io, command.format, {
@@ -3030,11 +2805,7 @@ async function runRetentionDiffTimeline(
       });
       return 0;
     }
-    if (
-      command.format === "csv" ||
-      command.format === "tsv" ||
-      command.format === "ndjson"
-    ) {
+    if (command.format === "csv" || command.format === "tsv" || command.format === "ndjson") {
       const baseHeaders = [
         "id",
         "tenant_id",
@@ -3118,10 +2889,7 @@ async function runRetentionDiffTimeline(
     result.entries.length === limit
       ? (result.entries[result.entries.length - 1]?.id ?? null)
       : null;
-  const nextBeforeIdPair =
-    result.entries.length === limit
-      ? (result.entries[0]?.id ?? null)
-      : null;
+  const nextBeforeIdPair = result.entries.length === limit ? (result.entries[0]?.id ?? null) : null;
 
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, {
@@ -3145,11 +2913,7 @@ async function runRetentionDiffTimeline(
     });
     return 0;
   }
-  if (
-    command.format === "csv" ||
-    command.format === "tsv" ||
-    command.format === "ndjson"
-  ) {
+  if (command.format === "csv" || command.format === "tsv" || command.format === "ndjson") {
     const baseHeaders = [
       "id",
       "tenant_id",
@@ -3223,9 +2987,7 @@ export function formatTimelineDiff(
   lines.push(`Events (${result.entries.length}):`);
   for (const e of result.entries) {
     const stateSummary = summarizeTimelineEntry(e);
-    const actorSuffix = opts.withActorNames
-      ? `  by ${formatActor(e)}`
-      : "";
+    const actorSuffix = opts.withActorNames ? `  by ${formatActor(e)}` : "";
     lines.push(
       `  ${e.occurredAt}  [${e.tenantSide}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
@@ -3254,9 +3016,7 @@ export function formatTimelineNwayDiff(
   } = {},
 ): string {
   const lines: string[] = [];
-  lines.push(
-    `N-way timeline for ${result.tenantIds.length} tenants on ${result.tableName}:`,
-  );
+  lines.push(`N-way timeline for ${result.tenantIds.length} tenants on ${result.tableName}:`);
   result.tenantIds.forEach((id, i) => {
     lines.push(`  Tenant ${labelForIndex(i)}: ${id}`);
   });
@@ -3268,9 +3028,7 @@ export function formatTimelineNwayDiff(
   lines.push(`Events (${result.entries.length}):`);
   for (const e of result.entries) {
     const stateSummary = summarizeTimelineEntry(e);
-    const actorSuffix = opts.withActorNames
-      ? `  by ${formatActor(e)}`
-      : "";
+    const actorSuffix = opts.withActorNames ? `  by ${formatActor(e)}` : "";
     lines.push(
       `  ${e.occurredAt}  [${e.tenantLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
@@ -3313,9 +3071,7 @@ export function formatTimelineCrossTableDiff(
   lines.push(`Events (${result.entries.length}):`);
   for (const e of result.entries) {
     const stateSummary = summarizeTimelineEntry(e);
-    const actorSuffix = opts.withActorNames
-      ? `  by ${formatActor(e)}`
-      : "";
+    const actorSuffix = opts.withActorNames ? `  by ${formatActor(e)}` : "";
     lines.push(
       `  ${e.occurredAt}  [${e.tableLabel}] ${e.eventKind.padEnd(16)} ${stateSummary}${actorSuffix}`,
     );
@@ -3343,10 +3099,7 @@ function summarizeTimelineEntry(e: {
     return "(policy deleted)";
   }
   const parts: string[] = [];
-  if (
-    typeof e.nextState.retention_days === "number" ||
-    e.nextState.retention_days === null
-  ) {
+  if (typeof e.nextState.retention_days === "number" || e.nextState.retention_days === null) {
     parts.push(`retention=${e.nextState.retention_days ?? "null"}`);
   }
   if (typeof e.nextState.opt_out === "boolean") {
@@ -3380,10 +3133,7 @@ async function runRetentionDiff(
   const hasAddTable = addTables.length > 0;
 
   if (hasAddTable && !crossTable) {
-    printError(
-      ctx.io,
-      "retention diff: --add-table requires --cross-table",
-    );
+    printError(ctx.io, "retention diff: --add-table requires --cross-table");
     return 2;
   }
 
@@ -3392,10 +3142,7 @@ async function runRetentionDiff(
   if (crossTable) conflicts.push("--cross-table");
   if (hasAddTenant) conflicts.push("--add-tenant");
   if (conflicts.length > 1) {
-    printError(
-      ctx.io,
-      `retention diff: ${conflicts.join(", ")} are mutually exclusive`,
-    );
+    printError(ctx.io, `retention diff: ${conflicts.join(", ")} are mutually exclusive`);
     return 2;
   }
 
@@ -3404,12 +3151,7 @@ async function runRetentionDiff(
   }
   if (crossTable) {
     if (hasAddTable) {
-      return await runRetentionDiffCrossTableNway(
-        command,
-        ctx,
-        retention,
-        addTables,
-      );
+      return await runRetentionDiffCrossTableNway(command, ctx, retention, addTables);
     }
     return await runRetentionDiffCrossTable(command, ctx, retention);
   }
@@ -3420,11 +3162,7 @@ async function runRetentionDiff(
   const tenantIdA = command.positional[1];
   const tenantIdB = command.positional[2];
   const tableName = command.positional[3];
-  if (
-    tenantIdA === undefined ||
-    tenantIdB === undefined ||
-    tableName === undefined
-  ) {
+  if (tenantIdA === undefined || tenantIdB === undefined || tableName === undefined) {
     printError(
       ctx.io,
       "retention diff: missing arguments. usage: crossengin retention diff <tenant-a> <tenant-b> <table-name>",
@@ -3440,10 +3178,7 @@ async function runRetentionDiff(
       tableName,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention diff: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -3474,10 +3209,7 @@ async function runRetentionDiffVsPlatform(
   try {
     result = await retention.diffTenantVsPlatform({ tenantId, tableName });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention diff: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -3497,11 +3229,7 @@ async function runRetentionDiffCrossTable(
   const tenantId = command.positional[1];
   const tableNameA = command.positional[2];
   const tableNameB = command.positional[3];
-  if (
-    tenantId === undefined ||
-    tableNameA === undefined ||
-    tableNameB === undefined
-  ) {
+  if (tenantId === undefined || tableNameA === undefined || tableNameB === undefined) {
     printError(
       ctx.io,
       "retention diff --cross-table: missing arguments. usage: crossengin retention diff <tenant> <table-a> <table-b> --cross-table",
@@ -3517,10 +3245,7 @@ async function runRetentionDiffCrossTable(
       tableNameB,
     });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention diff: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -3541,11 +3266,7 @@ async function runRetentionDiffNway(
   const tenantIdA = command.positional[1];
   const tenantIdB = command.positional[2];
   const tableName = command.positional[3];
-  if (
-    tenantIdA === undefined ||
-    tenantIdB === undefined ||
-    tableName === undefined
-  ) {
+  if (tenantIdA === undefined || tenantIdB === undefined || tableName === undefined) {
     printError(
       ctx.io,
       "retention diff --add-tenant: missing arguments. usage: crossengin retention diff <tenant-a> <tenant-b> <table-name> --add-tenant <tenant-c> [--add-tenant <tenant-d> ...]",
@@ -3558,10 +3279,7 @@ async function runRetentionDiffNway(
   try {
     result = await retention.diffTenantPoliciesNway({ tenantIds, tableName });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention diff: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -3582,11 +3300,7 @@ async function runRetentionDiffCrossTableNway(
   const tenantId = command.positional[1];
   const tableNameA = command.positional[2];
   const tableNameB = command.positional[3];
-  if (
-    tenantId === undefined ||
-    tableNameA === undefined ||
-    tableNameB === undefined
-  ) {
+  if (tenantId === undefined || tableNameA === undefined || tableNameB === undefined) {
     printError(
       ctx.io,
       "retention diff --cross-table --add-table: missing arguments. usage: crossengin retention diff <tenant> <table-a> <table-b> --cross-table --add-table <table-c> [--add-table <table-d> ...]",
@@ -3599,10 +3313,7 @@ async function runRetentionDiffCrossTableNway(
   try {
     result = await retention.diffTenantTablesNway({ tenantId, tableNames });
   } catch (err) {
-    printError(
-      ctx.io,
-      `retention diff: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    printError(ctx.io, `retention diff: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -3619,10 +3330,7 @@ async function runRetentionDiffCrossTableNway(
   return divergenceExitCode(command, result.fieldVariations.length);
 }
 
-function divergenceExitCode(
-  command: ParsedCommand,
-  fieldDiffsLength: number,
-): number {
+function divergenceExitCode(command: ParsedCommand, fieldDiffsLength: number): number {
   if (!getBooleanFlag(command, "exit-on-divergence")) return 0;
   const thresholdRaw = getStringFlag(command, "threshold");
   const threshold = thresholdRaw === null ? 1 : Number(thresholdRaw);
@@ -3638,9 +3346,7 @@ interface AttributesParseFail {
   readonly error: string;
 }
 
-function parseAttributesFlag(
-  command: ParsedCommand,
-): AttributesParseOk | AttributesParseFail {
+function parseAttributesFlag(command: ParsedCommand): AttributesParseOk | AttributesParseFail {
   const raw = getStringFlag(command, "attributes");
   if (raw === null) return { ok: true, attributes: undefined };
   let parsed: unknown;
@@ -3652,11 +3358,7 @@ function parseAttributesFlag(
       error: `--attributes is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    Array.isArray(parsed)
-  ) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return {
       ok: false,
       error: "--attributes must be a JSON object (not array, primitive, or null)",
@@ -3678,9 +3380,7 @@ function validateThresholdFlag(command: ParsedCommand): string | null {
   return null;
 }
 
-function summarizeResolutionForDiff(
-  resolution: EffectiveRetentionResolution,
-): string {
+function summarizeResolutionForDiff(resolution: EffectiveRetentionResolution): string {
   switch (resolution.source) {
     case "tenant":
       return `source=tenant         retention=${resolution.retentionDays}d  enabled=yes`;
@@ -3699,17 +3399,11 @@ function summarizeResolutionForDiff(
 export function formatTenantDiff(result: DiffTenantPoliciesResult): string {
   const lines: string[] = [];
   lines.push(`Diff between tenant policies (table: ${result.tableName}):`);
-  lines.push(
-    `  Tenant A: ${result.tenantIdA}  ${summarizeResolutionForDiff(result.resolutionA)}`,
-  );
-  lines.push(
-    `  Tenant B: ${result.tenantIdB}  ${summarizeResolutionForDiff(result.resolutionB)}`,
-  );
+  lines.push(`  Tenant A: ${result.tenantIdA}  ${summarizeResolutionForDiff(result.resolutionA)}`);
+  lines.push(`  Tenant B: ${result.tenantIdB}  ${summarizeResolutionForDiff(result.resolutionB)}`);
   lines.push("");
   if (result.fieldDiffs.length === 0) {
-    lines.push(
-      "No differences — both tenants have the same effective retention policy.",
-    );
+    lines.push("No differences — both tenants have the same effective retention policy.");
   } else {
     lines.push(`Field changes (${result.fieldDiffs.length}):`);
     for (const d of result.fieldDiffs) {
@@ -3721,9 +3415,7 @@ export function formatTenantDiff(result: DiffTenantPoliciesResult): string {
   return lines.join("\n") + "\n";
 }
 
-export function formatTenantNwayDiff(
-  result: DiffTenantPoliciesNwayResult,
-): string {
+export function formatTenantNwayDiff(result: DiffTenantPoliciesNwayResult): string {
   const lines: string[] = [];
   lines.push(
     `N-way diff between ${result.resolutions.length} tenants (table: ${result.tableName}):`,
@@ -3752,11 +3444,8 @@ export function formatTenantNwayDiff(
     for (const variation of result.fieldVariations) {
       const groups = variation.distinctValues
         .map((group) => {
-          const value =
-            group.value === undefined ? "absent" : JSON.stringify(group.value);
-          const labels = group.labels
-            .map((tid) => labelByTenant.get(tid) ?? "?")
-            .join(", ");
+          const value = group.value === undefined ? "absent" : JSON.stringify(group.value);
+          const labels = group.labels.map((tid) => labelByTenant.get(tid) ?? "?").join(", ");
           return `${value} (${labels})`;
         })
         .join(" | ");
@@ -3766,9 +3455,7 @@ export function formatTenantNwayDiff(
   return lines.join("\n") + "\n";
 }
 
-export function formatTenantTablesNwayDiff(
-  result: DiffTenantTablesNwayResult,
-): string {
+export function formatTenantTablesNwayDiff(result: DiffTenantTablesNwayResult): string {
   const lines: string[] = [];
   lines.push(
     `N-way diff across ${result.resolutions.length} tables for tenant ${result.tenantId}:`,
@@ -3797,11 +3484,8 @@ export function formatTenantTablesNwayDiff(
     for (const variation of result.fieldVariations) {
       const groups = variation.distinctValues
         .map((group) => {
-          const value =
-            group.value === undefined ? "absent" : JSON.stringify(group.value);
-          const labels = group.labels
-            .map((tname) => labelByTable.get(tname) ?? "?")
-            .join(", ");
+          const value = group.value === undefined ? "absent" : JSON.stringify(group.value);
+          const labels = group.labels.map((tname) => labelByTable.get(tname) ?? "?").join(", ");
           return `${value} (${labels})`;
         })
         .join(" | ");
@@ -3811,9 +3495,7 @@ export function formatTenantTablesNwayDiff(
   return lines.join("\n") + "\n";
 }
 
-export function formatTenantTablesDiff(
-  result: DiffTenantTablesResult,
-): string {
+export function formatTenantTablesDiff(result: DiffTenantTablesResult): string {
   const lines: string[] = [];
   lines.push(`Diff between tables for tenant ${result.tenantId}:`);
   lines.push(
@@ -3838,19 +3520,13 @@ export function formatTenantTablesDiff(
   return lines.join("\n") + "\n";
 }
 
-export function formatTenantVsPlatformDiff(
-  result: DiffTenantVsPlatformResult,
-): string {
+export function formatTenantVsPlatformDiff(result: DiffTenantVsPlatformResult): string {
   const lines: string[] = [];
-  lines.push(
-    `Diff between tenant and platform default (table: ${result.tableName}):`,
-  );
+  lines.push(`Diff between tenant and platform default (table: ${result.tableName}):`);
   lines.push(
     `  Tenant:   ${result.tenantId}  ${summarizeResolutionForDiff(result.tenantResolution)}`,
   );
-  lines.push(
-    `  Platform: ${summarizeResolutionForDiff(result.platformResolution)}`,
-  );
+  lines.push(`  Platform: ${summarizeResolutionForDiff(result.platformResolution)}`);
   lines.push("");
   if (result.fieldDiffs.length === 0) {
     lines.push(

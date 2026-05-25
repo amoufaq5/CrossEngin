@@ -24,11 +24,9 @@ export type ResidencyDataClass = (typeof RESIDENCY_DATA_CLASSES)[number];
 
 const Iso8601 = z.string().datetime({ offset: true });
 
-const LlmProviderRef = z
-  .string()
-  .regex(/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$/, {
-    message: "llm provider must be '<provider>:<region|qualifier>' (e.g., 'fireworks:eu')",
-  });
+const LlmProviderRef = z.string().regex(/^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$/, {
+  message: "llm provider must be '<provider>:<region|qualifier>' (e.g., 'fireworks:eu')",
+});
 
 export const ResidencyProfileSchema = z
   .object({
@@ -78,7 +76,10 @@ export interface ProfileTemplateInput {
 }
 
 export const PROFILE_TEMPLATES: Readonly<
-  Record<Exclude<ResidencyProfileTemplate, "custom">, Omit<ResidencyProfile, "establishedAt" | "validatedBy">>
+  Record<
+    Exclude<ResidencyProfileTemplate, "custom">,
+    Omit<ResidencyProfile, "establishedAt" | "validatedBy">
+  >
 > = Object.freeze({
   "eu-only": {
     profile: "eu-only",

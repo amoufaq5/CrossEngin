@@ -79,9 +79,7 @@ export function computeTax(input: TaxComputationInput): TaxComputation {
   const rate = rateFor(input.address, input.rates);
   const reverseCharged =
     input.isB2b === true && rate.reverseChargeEligible && input.hasValidVatId === true;
-  const taxCents = reverseCharged
-    ? 0
-    : Math.round((input.subtotalCents * rate.ratePercent) / 100);
+  const taxCents = reverseCharged ? 0 : Math.round((input.subtotalCents * rate.ratePercent) / 100);
   return {
     subtotalCents: input.subtotalCents,
     taxCents,

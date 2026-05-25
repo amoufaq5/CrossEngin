@@ -87,26 +87,18 @@ export const FlagChangeSchema = z
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ["fourEyesAttested"],
-            message:
-              "requiredFourEyes change cannot succeed without fourEyesAttested=true",
+            message: "requiredFourEyes change cannot succeed without fourEyesAttested=true",
           });
         }
       }
-      if (
-        c.coActorUserId === null &&
-        c.fourEyesAttested
-      ) {
+      if (c.coActorUserId === null && c.fourEyesAttested) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["coActorUserId"],
           message: "four-eyes attested requires coActorUserId",
         });
       }
-      if (
-        c.coActorUserId !== null &&
-        c.actorUserId !== null &&
-        c.coActorUserId === c.actorUserId
-      ) {
+      if (c.coActorUserId !== null && c.actorUserId !== null && c.coActorUserId === c.actorUserId) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["coActorUserId"],
@@ -202,9 +194,7 @@ export interface ChangeHistorySummary {
   readonly lastAt: string | null;
 }
 
-export const summarizeChangeHistory = (
-  changes: readonly FlagChange[],
-): ChangeHistorySummary => {
+export const summarizeChangeHistory = (changes: readonly FlagChange[]): ChangeHistorySummary => {
   const changeKindCounts: Partial<Record<ChangeKind, number>> = {};
   let succeeded = 0;
   let blocked = 0;
@@ -217,10 +207,7 @@ export const summarizeChangeHistory = (
   for (const c of changes) {
     changeKindCounts[c.kind] = (changeKindCounts[c.kind] ?? 0) + 1;
     if (c.outcome === "succeeded") succeeded++;
-    if (
-      c.outcome === "blocked_by_policy" ||
-      c.outcome === "blocked_by_four_eyes"
-    ) {
+    if (c.outcome === "blocked_by_policy" || c.outcome === "blocked_by_four_eyes") {
       blocked++;
     }
     if (c.outcome === "rolled_back") rolledBack++;
@@ -247,5 +234,4 @@ export const summarizeChangeHistory = (
   };
 };
 
-export const isHighRiskChange = (kind: ChangeKind): boolean =>
-  HIGH_RISK_CHANGE_KINDS.has(kind);
+export const isHighRiskChange = (kind: ChangeKind): boolean => HIGH_RISK_CHANGE_KINDS.has(kind);

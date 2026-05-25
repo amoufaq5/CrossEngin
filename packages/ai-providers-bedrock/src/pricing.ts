@@ -92,10 +92,7 @@ export function computeBedrockChatCost(
   return Number((inputCost + cachedCost + outputCost).toFixed(6));
 }
 
-export function buildBedrockUsage(
-  model: BedrockChatModel,
-  tokens: BedrockTokenBreakdown,
-): Usage {
+export function buildBedrockUsage(model: BedrockChatModel, tokens: BedrockTokenBreakdown): Usage {
   return {
     inputTokens: tokens.inputTokens,
     outputTokens: tokens.outputTokens,
@@ -114,7 +111,9 @@ export interface BedrockEmbeddingPricing {
   readonly inputUsdPerMillion: number;
 }
 
-export const BEDROCK_EMBEDDING_PRICING: Readonly<Record<BedrockEmbeddingModel, BedrockEmbeddingPricing>> = {
+export const BEDROCK_EMBEDDING_PRICING: Readonly<
+  Record<BedrockEmbeddingModel, BedrockEmbeddingPricing>
+> = {
   "amazon.titan-embed-text-v2:0": { inputUsdPerMillion: 0.02 },
   "amazon.titan-embed-text-v1": { inputUsdPerMillion: 0.1 },
   "cohere.embed-english-v3": { inputUsdPerMillion: 0.1 },
@@ -140,9 +139,7 @@ export function buildBedrockEmbeddingUsage(
   };
 }
 
-export function isBedrockEmbeddingModel(
-  value: string,
-): value is BedrockEmbeddingModel {
+export function isBedrockEmbeddingModel(value: string): value is BedrockEmbeddingModel {
   return (BEDROCK_EMBEDDING_MODELS as readonly string[]).includes(value);
 }
 
@@ -157,12 +154,9 @@ export function isBedrockModel(value: string): value is BedrockModel {
 export const BEDROCK_DEFAULT_EMBEDDING_MODEL: BedrockEmbeddingModel =
   "amazon.titan-embed-text-v2:0";
 
-export const BEDROCK_MULTIMODAL_EMBEDDING_MODELS = [
-  "amazon.titan-embed-image-v1",
-] as const;
+export const BEDROCK_MULTIMODAL_EMBEDDING_MODELS = ["amazon.titan-embed-image-v1"] as const;
 
-export type BedrockMultimodalEmbeddingModel =
-  (typeof BEDROCK_MULTIMODAL_EMBEDDING_MODELS)[number];
+export type BedrockMultimodalEmbeddingModel = (typeof BEDROCK_MULTIMODAL_EMBEDDING_MODELS)[number];
 
 export interface BedrockMultimodalEmbeddingPricing {
   readonly textUsdPerMillion: number;

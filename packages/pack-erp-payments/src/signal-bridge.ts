@@ -34,8 +34,7 @@ export const PAYMENT_SIGNAL_NAMES = {
   CANCELLED: "payment.cancelled",
 } as const;
 
-export type PaymentSignalName =
-  (typeof PAYMENT_SIGNAL_NAMES)[keyof typeof PAYMENT_SIGNAL_NAMES];
+export type PaymentSignalName = (typeof PAYMENT_SIGNAL_NAMES)[keyof typeof PAYMENT_SIGNAL_NAMES];
 
 export const PROVIDER_EVENT_SIGNAL_MAP: Readonly<Record<string, PaymentSignalName>> = {
   "payment_intent.succeeded": PAYMENT_SIGNAL_NAMES.CAPTURED,
@@ -51,9 +50,7 @@ export const PROVIDER_EVENT_SIGNAL_MAP: Readonly<Record<string, PaymentSignalNam
   CANCELLATION: PAYMENT_SIGNAL_NAMES.CANCELLED,
 };
 
-export function resolvePaymentSignalForEvent(
-  eventType: string,
-): PaymentSignalName | null {
+export function resolvePaymentSignalForEvent(eventType: string): PaymentSignalName | null {
   return PROVIDER_EVENT_SIGNAL_MAP[eventType] ?? null;
 }
 
@@ -67,8 +64,10 @@ export function paymentReferenceExtractor(): CorrelationExtractor {
   ]);
 }
 
-export interface BuildPaymentSignalBridgeOptions
-  extends Omit<WorkflowSignalBridgeOptions, "correlationExtractor" | "signalName"> {
+export interface BuildPaymentSignalBridgeOptions extends Omit<
+  WorkflowSignalBridgeOptions,
+  "correlationExtractor" | "signalName"
+> {
   readonly signalName?: PaymentSignalName;
 }
 

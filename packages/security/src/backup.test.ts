@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  BackupPolicySchema,
-  checkPolicyConsistency,
-  durationToSeconds,
-} from "./backup.js";
+import { BackupPolicySchema, checkPolicyConsistency, durationToSeconds } from "./backup.js";
 
 describe("BackupPolicySchema", () => {
   it("parses a PITR + pg-dump + R2 cold tier policy", () => {

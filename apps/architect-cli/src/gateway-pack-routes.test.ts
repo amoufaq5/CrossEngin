@@ -1,14 +1,8 @@
 import { RouteDefinitionSchema } from "@crossengin/api-gateway";
 import { resolveManifest } from "@crossengin/kernel/manifest";
 import { buildErpCorePack, ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
-import {
-  buildErpHealthcarePack,
-  ERP_HEALTHCARE_PACK_SLUG,
-} from "@crossengin/pack-erp-healthcare";
-import {
-  buildErpPaymentsPack,
-  ERP_PAYMENTS_PACK_SLUG,
-} from "@crossengin/pack-erp-payments";
+import { buildErpHealthcarePack, ERP_HEALTHCARE_PACK_SLUG } from "@crossengin/pack-erp-healthcare";
+import { buildErpPaymentsPack, ERP_PAYMENTS_PACK_SLUG } from "@crossengin/pack-erp-payments";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -155,9 +149,7 @@ describe("generatePackRoutes — core pack (4 entities, 1 lifecycle workflow)", 
   });
 
   it("Invoice transitions are POST /v1/invoices/:id/transitions/<name>", () => {
-    const sendTransition = records.find(
-      (r) => r.route.operationId === "invoice.transition.send",
-    );
+    const sendTransition = records.find((r) => r.route.operationId === "invoice.transition.send");
     expect(sendTransition).toBeDefined();
     const path = sendTransition!.route.pathSegments;
     expect(path[0]).toEqual({ kind: "literal", value: "v1" });
@@ -200,15 +192,9 @@ describe("generatePackRoutes — healthcare pack (resolved, 3 entities + 2 workf
       packSlug: ERP_HEALTHCARE_PACK_SLUG,
     });
     const transitionEntities = new Set(
-      records
-        .filter((r) => r.operationKind === "transition")
-        .map((r) => r.entity),
+      records.filter((r) => r.operationKind === "transition").map((r) => r.entity),
     );
-    expect([...transitionEntities].sort()).toEqual([
-      "Encounter",
-      "Invoice",
-      "Observation",
-    ]);
+    expect([...transitionEntities].sort()).toEqual(["Encounter", "Invoice", "Observation"]);
   });
 
   it("encounter.transition.check_in routes to POST /v1/encounters/:id/transitions/check_in", async () => {
@@ -217,9 +203,7 @@ describe("generatePackRoutes — healthcare pack (resolved, 3 entities + 2 workf
       manifest: m,
       packSlug: ERP_HEALTHCARE_PACK_SLUG,
     });
-    const checkIn = records.find(
-      (r) => r.route.operationId === "encounter.transition.check_in",
-    );
+    const checkIn = records.find((r) => r.route.operationId === "encounter.transition.check_in");
     expect(checkIn).toBeDefined();
     expect(checkIn!.route.method).toBe("POST");
     expect(checkIn!.route.idempotencyRequired).toBe(true);
@@ -276,12 +260,6 @@ describe("generatePackRoutes — edge cases", () => {
   });
 
   it("CRUD_OPERATION_KINDS is the documented set", () => {
-    expect([...CRUD_OPERATION_KINDS]).toEqual([
-      "list",
-      "read",
-      "create",
-      "update",
-      "delete",
-    ]);
+    expect([...CRUD_OPERATION_KINDS]).toEqual(["list", "read", "create", "update", "delete"]);
   });
 });

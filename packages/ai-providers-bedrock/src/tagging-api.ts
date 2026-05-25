@@ -54,10 +54,7 @@ function validateTag(tag: BedrockTag, operation: string, index: number): void {
       message: `${operation}: invalid tag key at index ${index.toString()}`,
     });
   }
-  if (
-    tag.value.length > BEDROCK_TAG_VALUE_MAX_LEN ||
-    !BEDROCK_TAG_PATTERN.test(tag.value)
-  ) {
+  if (tag.value.length > BEDROCK_TAG_VALUE_MAX_LEN || !BEDROCK_TAG_PATTERN.test(tag.value)) {
     throw new BedrockError({
       kind: "invalid_request_error",
       message: `${operation}: invalid tag value at index ${index.toString()}`,
@@ -101,11 +98,7 @@ export function buildUntagResourceBody(input: BedrockUntagResourceInput): string
   }
   for (let i = 0; i < input.tagKeys.length; i++) {
     const key = input.tagKeys[i]!;
-    if (
-      key.length < 1 ||
-      key.length > BEDROCK_TAG_KEY_MAX_LEN ||
-      !BEDROCK_TAG_PATTERN.test(key)
-    ) {
+    if (key.length < 1 || key.length > BEDROCK_TAG_KEY_MAX_LEN || !BEDROCK_TAG_PATTERN.test(key)) {
       throw new BedrockError({
         kind: "invalid_request_error",
         message: `untagResource: invalid tag key at index ${i.toString()}`,
@@ -115,28 +108,20 @@ export function buildUntagResourceBody(input: BedrockUntagResourceInput): string
   return JSON.stringify({ tagKeys: input.tagKeys });
 }
 
-export function buildListTagsForResourceBody(
-  input: BedrockListTagsForResourceInput,
-): string {
+export function buildListTagsForResourceBody(input: BedrockListTagsForResourceInput): string {
   validateResourceArn(input.resourceArn, "listTagsForResource");
   return JSON.stringify({ resourceARN: input.resourceArn });
 }
 
-export function buildTagResourceQuery(
-  input: BedrockTagResourceInput,
-): Record<string, string> {
+export function buildTagResourceQuery(input: BedrockTagResourceInput): Record<string, string> {
   return { resourceARN: input.resourceArn };
 }
 
-export function buildUntagResourceQuery(
-  input: BedrockUntagResourceInput,
-): Record<string, string> {
+export function buildUntagResourceQuery(input: BedrockUntagResourceInput): Record<string, string> {
   return { resourceARN: input.resourceArn };
 }
 
-export function parseListTagsForResourceResponse(
-  raw: unknown,
-): BedrockListTagsForResourceResponse {
+export function parseListTagsForResourceResponse(raw: unknown): BedrockListTagsForResourceResponse {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",

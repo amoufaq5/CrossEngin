@@ -52,15 +52,15 @@ describe("ApiOperationSchema", () => {
   });
 
   it("rejects GET with idempotent=false", () => {
-    expect(() =>
-      ApiOperationSchema.parse({ ...base, idempotent: false }),
-    ).toThrow(/safe method 'GET' must be idempotent=true/);
+    expect(() => ApiOperationSchema.parse({ ...base, idempotent: false })).toThrow(
+      /safe method 'GET' must be idempotent=true/,
+    );
   });
 
   it("rejects GET with requestBodyRequired", () => {
-    expect(() =>
-      ApiOperationSchema.parse({ ...base, requestBodyRequired: true }),
-    ).toThrow(/must not require a request body/);
+    expect(() => ApiOperationSchema.parse({ ...base, requestBodyRequired: true })).toThrow(
+      /must not require a request body/,
+    );
   });
 
   it("rejects PUT with idempotent=false", () => {
@@ -126,9 +126,7 @@ describe("ApiOperationSchema", () => {
   });
 
   it("rejects malformed operation id", () => {
-    expect(() =>
-      ApiOperationSchema.parse({ ...base, id: "TenantsList" }),
-    ).toThrow();
+    expect(() => ApiOperationSchema.parse({ ...base, id: "TenantsList" })).toThrow();
   });
 });
 
@@ -212,21 +210,17 @@ describe("helpers", () => {
   ];
 
   it("operationsRequiringScope filters by scope", () => {
-    expect(
-      operationsRequiringScope(set, "tenants:read").map((o) => o.id),
-    ).toEqual(["tenants.list"]);
+    expect(operationsRequiringScope(set, "tenants:read").map((o) => o.id)).toEqual([
+      "tenants.list",
+    ]);
   });
 
   it("operationsByCategory filters by category", () => {
-    expect(
-      operationsByCategory(set, "manifests").map((o) => o.id),
-    ).toEqual(["manifests.apply"]);
+    expect(operationsByCategory(set, "manifests").map((o) => o.id)).toEqual(["manifests.apply"]);
   });
 
   it("findOperation matches (method, path)", () => {
-    expect(findOperation(set, "POST", "/v1/manifests/apply")?.id).toBe(
-      "manifests.apply",
-    );
+    expect(findOperation(set, "POST", "/v1/manifests/apply")?.id).toBe("manifests.apply");
     expect(findOperation(set, "POST", "/v1/none")).toBeNull();
   });
 });

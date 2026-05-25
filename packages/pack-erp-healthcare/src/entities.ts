@@ -2,12 +2,7 @@ import type { Entity } from "@crossengin/types/meta-schema";
 
 const PACK_TRAITS = ["auditable", "tenant_owned"] as const;
 
-export const SEX_ASSIGNED_AT_BIRTH = [
-  "female",
-  "male",
-  "intersex",
-  "unknown",
-] as const;
+export const SEX_ASSIGNED_AT_BIRTH = ["female", "male", "intersex", "unknown"] as const;
 
 export const BLOOD_TYPES = [
   "a_pos",
@@ -39,12 +34,7 @@ export const ENCOUNTER_STATES = [
   "no_show",
 ] as const;
 
-export const OBSERVATION_CODE_SYSTEMS = [
-  "loinc",
-  "snomed_ct",
-  "icd10",
-  "custom",
-] as const;
+export const OBSERVATION_CODE_SYSTEMS = ["loinc", "snomed_ct", "icd10", "custom"] as const;
 
 export const OBSERVATION_STATUSES = [
   "preliminary",

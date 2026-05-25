@@ -11,9 +11,7 @@ export const RETENTION_BASES = [
 ] as const;
 export type RetentionBasis = (typeof RETENTION_BASES)[number];
 
-export const REGULATORY_RETENTION_MINIMUMS_DAYS: Readonly<
-  Record<string, number>
-> = {
+export const REGULATORY_RETENTION_MINIMUMS_DAYS: Readonly<Record<string, number>> = {
   hipaa_phi: 6 * 365,
   sox_financial: 7 * 365,
   pci_dss: 1 * 365,
@@ -42,23 +40,18 @@ export const RetentionPolicySchema = z
     disabledReason: z.string().max(500).nullable(),
   })
   .superRefine((p, ctx) => {
-    if (
-      p.maximumRetentionDays !== null &&
-      p.maximumRetentionDays < p.minimumRetentionDays
-    ) {
+    if (p.maximumRetentionDays !== null && p.maximumRetentionDays < p.minimumRetentionDays) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["maximumRetentionDays"],
-        message:
-          "maximumRetentionDays must be >= minimumRetentionDays",
+        message: "maximumRetentionDays must be >= minimumRetentionDays",
       });
     }
     if (p.basis === "regulatory_minimum" && p.regulatoryReference === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["regulatoryReference"],
-        message:
-          "regulatory_minimum basis requires regulatoryReference (citation)",
+        message: "regulatory_minimum basis requires regulatoryReference (citation)",
       });
     }
     if (
@@ -77,34 +70,26 @@ export const RetentionPolicySchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["disabledByUserId"],
-          message:
-            "disabled policy requires disabledByUserId + disabledReason",
+          message: "disabled policy requires disabledByUserId + disabledReason",
         });
       }
       if (p.disabledByUserId === p.enabledByUserId) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["disabledByUserId"],
-          message:
-            "four-eyes: disabledByUserId must differ from enabledByUserId",
+          message: "four-eyes: disabledByUserId must differ from enabledByUserId",
         });
       }
     }
   });
 export type RetentionPolicy = z.infer<typeof RetentionPolicySchema>;
 
-export const isPolicyActive = (
-  policy: RetentionPolicy,
-  now: Date,
-): boolean => {
+export const isPolicyActive = (policy: RetentionPolicy, now: Date): boolean => {
   if (policy.disabledAt !== null) return false;
   return now.getTime() >= Date.parse(policy.enabledAt);
 };
 
-export const computeNodeRetentionUntil = (
-  node: LineageNode,
-  policy: RetentionPolicy,
-): string => {
+export const computeNodeRetentionUntil = (node: LineageNode, policy: RetentionPolicy): string => {
   const createdMs = Date.parse(node.createdAt);
   const minMs = createdMs + policy.minimumRetentionDays * 86_400_000;
   if (policy.maximumRetentionDays === null) {
@@ -120,8 +105,7 @@ export const ARTICLE_15_EVIDENCE_STATUSES = [
   "delivered",
   "expired",
 ] as const;
-export type Article15EvidenceStatus =
-  (typeof ARTICLE_15_EVIDENCE_STATUSES)[number];
+export type Article15EvidenceStatus = (typeof ARTICLE_15_EVIDENCE_STATUSES)[number];
 
 export const Article15EvidencePackSchema = z
   .object({
@@ -132,15 +116,16 @@ export const Article15EvidencePackSchema = z
     status: z.enum(ARTICLE_15_EVIDENCE_STATUSES),
     nodeIds: z.array(z.string().regex(/^lng_[a-z0-9]{8,40}$/)).min(0),
     edgeIds: z.array(z.string().regex(/^lne_[a-z0-9]{8,40}$/)).default([]),
-    provenanceRecordIds: z
-      .array(z.string().regex(/^prv_[a-z0-9]{8,40}$/))
-      .default([]),
+    provenanceRecordIds: z.array(z.string().regex(/^prv_[a-z0-9]{8,40}$/)).default([]),
     totalRowCount: z.number().int().min(0),
     derivedNodeCount: z.number().int().min(0),
     regulatedNodeCount: z.number().int().min(0),
     compiledAt: z.string().datetime({ offset: true }).nullable(),
     sealedAt: z.string().datetime({ offset: true }).nullable(),
-    sealedSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    sealedSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
     storageUri: z.string().min(1).max(500).nullable(),
     encryptionKeyFingerprint: z
       .string()
@@ -191,19 +176,13 @@ export const Article15EvidencePackSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["redactedReasons"],
-        message:
-          "redactedPiiFields and redactedReasons must have equal length",
+        message: "redactedPiiFields and redactedReasons must have equal length",
       });
     }
   });
-export type Article15EvidencePack = z.infer<
-  typeof Article15EvidencePackSchema
->;
+export type Article15EvidencePack = z.infer<typeof Article15EvidencePackSchema>;
 
-export const isPackDownloadable = (
-  pack: Article15EvidencePack,
-  now: Date,
-): boolean => {
+export const isPackDownloadable = (pack: Article15EvidencePack, now: Date): boolean => {
   if (pack.status !== "sealed" && pack.status !== "delivered") return false;
   if (pack.expiresAt === null) return true;
   return now.getTime() < Date.parse(pack.expiresAt);
@@ -222,9 +201,7 @@ export interface RetentionDecision {
   readonly effectiveRetentionUntil: string | null;
 }
 
-export const decideRetention = (
-  input: RetentionDecisionInput,
-): RetentionDecision => {
+export const decideRetention = (input: RetentionDecisionInput): RetentionDecision => {
   const nowMs = input.now.getTime();
   let latestRetention = 0;
   let blockingPolicy: RetentionPolicy | null = null;
@@ -247,10 +224,7 @@ export const decideRetention = (
       effectiveRetentionUntil: new Date(latestRetention).toISOString(),
     };
   }
-  if (
-    input.node.retentionUntil !== null &&
-    nowMs < Date.parse(input.node.retentionUntil)
-  ) {
+  if (input.node.retentionUntil !== null && nowMs < Date.parse(input.node.retentionUntil)) {
     return {
       canPurge: false,
       reason: "blocked_by_node_retention_until",

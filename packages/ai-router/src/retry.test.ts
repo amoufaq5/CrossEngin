@@ -1,11 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  DEFAULT_RETRY_POLICY,
-  computeBackoffMs,
-  isRetryableError,
-  withRetry,
-} from "./retry.js";
+import { DEFAULT_RETRY_POLICY, computeBackoffMs, isRetryableError, withRetry } from "./retry.js";
 
 class RetryableErr extends Error {
   isRetryable(): boolean {
@@ -54,32 +49,26 @@ describe("isRetryableError", () => {
   });
 
   it("returns false for moderation .kind values (terminal)", () => {
-    expect(
-      isRetryableError(Object.assign(new Error(), { kind: "guardrail_intervened" })),
-    ).toBe(false);
-    expect(
-      isRetryableError(Object.assign(new Error(), { kind: "content_filtered" })),
-    ).toBe(false);
-    expect(
-      isRetryableError(Object.assign(new Error(), { kind: "refusal" })),
-    ).toBe(false);
+    expect(isRetryableError(Object.assign(new Error(), { kind: "guardrail_intervened" }))).toBe(
+      false,
+    );
+    expect(isRetryableError(Object.assign(new Error(), { kind: "content_filtered" }))).toBe(false);
+    expect(isRetryableError(Object.assign(new Error(), { kind: "refusal" }))).toBe(false);
   });
 
   it("returns false for auth / invalid_request .kind values", () => {
-    expect(
-      isRetryableError(Object.assign(new Error(), { kind: "authentication_error" })),
-    ).toBe(false);
-    expect(
-      isRetryableError(Object.assign(new Error(), { kind: "invalid_request_error" })),
-    ).toBe(false);
+    expect(isRetryableError(Object.assign(new Error(), { kind: "authentication_error" }))).toBe(
+      false,
+    );
+    expect(isRetryableError(Object.assign(new Error(), { kind: "invalid_request_error" }))).toBe(
+      false,
+    );
   });
 });
 
 describe("computeBackoffMs", () => {
   it("returns 0 for attempt < 0", () => {
-    expect(
-      computeBackoffMs(-1, { policy: DEFAULT_RETRY_POLICY, random: () => 0.5 }),
-    ).toBe(0);
+    expect(computeBackoffMs(-1, { policy: DEFAULT_RETRY_POLICY, random: () => 0.5 })).toBe(0);
   });
 
   it("doubles per attempt without jitter", () => {
@@ -95,15 +84,11 @@ describe("computeBackoffMs", () => {
   });
 
   it("with jitter, random=1 returns the full delay", () => {
-    expect(
-      computeBackoffMs(0, { policy: DEFAULT_RETRY_POLICY, random: () => 1 }),
-    ).toBe(1_000);
+    expect(computeBackoffMs(0, { policy: DEFAULT_RETRY_POLICY, random: () => 1 })).toBe(1_000);
   });
 
   it("with jitter, random=0 returns half the delay", () => {
-    expect(
-      computeBackoffMs(0, { policy: DEFAULT_RETRY_POLICY, random: () => 0 }),
-    ).toBe(500);
+    expect(computeBackoffMs(0, { policy: DEFAULT_RETRY_POLICY, random: () => 0 })).toBe(500);
   });
 });
 
@@ -136,9 +121,12 @@ describe("withRetry", () => {
   it("throws immediately on non-retryable errors", async () => {
     const sleep = vi.fn(async () => undefined);
     await expect(
-      withRetry(async () => {
-        throw new NonRetryableErr("fatal");
-      }, { sleep }),
+      withRetry(
+        async () => {
+          throw new NonRetryableErr("fatal");
+        },
+        { sleep },
+      ),
     ).rejects.toThrow("fatal");
     expect(sleep).not.toHaveBeenCalled();
   });

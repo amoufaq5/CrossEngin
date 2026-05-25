@@ -70,9 +70,9 @@ describe("canonicalEvidenceBundleBytes", () => {
 
 describe("computeEvidenceSealSha256", () => {
   it("returns 64-char hex", () => {
-    expect(
-      computeEvidenceSealSha256({ evidence: fixtureEvidence(), bundleBytes: "x" }),
-    ).toMatch(/^[0-9a-f]{64}$/);
+    expect(computeEvidenceSealSha256({ evidence: fixtureEvidence(), bundleBytes: "x" })).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
   });
 
   it("differs for different bundle payloads", () => {

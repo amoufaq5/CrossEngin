@@ -26,9 +26,7 @@ describe("BEDROCK_CHAT_MODELS", () => {
   });
 
   it("includes Claude on Bedrock + Llama + Mistral + Titan", () => {
-    expect(BEDROCK_CHAT_MODELS).toContain(
-      "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    );
+    expect(BEDROCK_CHAT_MODELS).toContain("anthropic.claude-3-5-sonnet-20241022-v2:0");
     expect(BEDROCK_CHAT_MODELS).toContain("meta.llama3-1-405b-instruct-v1:0");
     expect(BEDROCK_CHAT_MODELS).toContain("mistral.mistral-large-2407-v1:0");
     expect(BEDROCK_CHAT_MODELS).toContain("amazon.titan-text-premier-v1:0");
@@ -61,9 +59,15 @@ describe("BEDROCK_CHAT_PRICING", () => {
   });
 
   it("Meta + Mistral + Titan have no separate cached input pricing", () => {
-    expect(BEDROCK_CHAT_PRICING["meta.llama3-1-405b-instruct-v1:0"].cachedInputUsdPerMillion).toBeUndefined();
-    expect(BEDROCK_CHAT_PRICING["mistral.mistral-large-2407-v1:0"].cachedInputUsdPerMillion).toBeUndefined();
-    expect(BEDROCK_CHAT_PRICING["amazon.titan-text-premier-v1:0"].cachedInputUsdPerMillion).toBeUndefined();
+    expect(
+      BEDROCK_CHAT_PRICING["meta.llama3-1-405b-instruct-v1:0"].cachedInputUsdPerMillion,
+    ).toBeUndefined();
+    expect(
+      BEDROCK_CHAT_PRICING["mistral.mistral-large-2407-v1:0"].cachedInputUsdPerMillion,
+    ).toBeUndefined();
+    expect(
+      BEDROCK_CHAT_PRICING["amazon.titan-text-premier-v1:0"].cachedInputUsdPerMillion,
+    ).toBeUndefined();
   });
 });
 
@@ -214,9 +218,7 @@ describe("isBedrockEmbeddingModel + isBedrockModel", () => {
 
 describe("BEDROCK_MULTIMODAL_EMBEDDING_MODELS + pricing (M2.9.7)", () => {
   it("lists titan-embed-image-v1 as a multimodal model", () => {
-    expect(BEDROCK_MULTIMODAL_EMBEDDING_MODELS).toEqual([
-      "amazon.titan-embed-image-v1",
-    ]);
+    expect(BEDROCK_MULTIMODAL_EMBEDDING_MODELS).toEqual(["amazon.titan-embed-image-v1"]);
   });
 
   it("titan-embed-image-v1 has dual-billing: $0.80/M text + $0.00006/image", () => {

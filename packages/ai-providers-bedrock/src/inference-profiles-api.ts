@@ -1,8 +1,7 @@
 import { BedrockError } from "./errors.js";
 
 export const BEDROCK_INFERENCE_PROFILE_STATUSES = ["ACTIVE"] as const;
-export type BedrockInferenceProfileStatus =
-  (typeof BEDROCK_INFERENCE_PROFILE_STATUSES)[number];
+export type BedrockInferenceProfileStatus = (typeof BEDROCK_INFERENCE_PROFILE_STATUSES)[number];
 
 export function isBedrockInferenceProfileStatus(
   value: unknown,
@@ -13,12 +12,8 @@ export function isBedrockInferenceProfileStatus(
   );
 }
 
-export const BEDROCK_INFERENCE_PROFILE_TYPES = [
-  "SYSTEM_DEFINED",
-  "APPLICATION",
-] as const;
-export type BedrockInferenceProfileType =
-  (typeof BEDROCK_INFERENCE_PROFILE_TYPES)[number];
+export const BEDROCK_INFERENCE_PROFILE_TYPES = ["SYSTEM_DEFINED", "APPLICATION"] as const;
+export type BedrockInferenceProfileType = (typeof BEDROCK_INFERENCE_PROFILE_TYPES)[number];
 
 export function isBedrockInferenceProfileType(
   value: unknown,
@@ -55,9 +50,7 @@ export interface BedrockInferenceProfileListResponse {
 
 export type BedrockInferenceProfileDetail = BedrockInferenceProfileSummary;
 
-export function parseInferenceProfileDetail(
-  raw: unknown,
-): BedrockInferenceProfileDetail {
+export function parseInferenceProfileDetail(raw: unknown): BedrockInferenceProfileDetail {
   return parseInferenceProfileSummary(raw);
 }
 
@@ -122,8 +115,7 @@ export function parseInferenceProfileListResponse(
   if (summaries !== undefined && !Array.isArray(summaries)) {
     throw new BedrockError({
       kind: "api_error",
-      message:
-        "listInferenceProfiles: inferenceProfileSummaries is not an array",
+      message: "listInferenceProfiles: inferenceProfileSummaries is not an array",
     });
   }
   const parsed: BedrockInferenceProfileSummary[] = [];
@@ -144,9 +136,7 @@ export function parseInferenceProfileListResponse(
   return out;
 }
 
-export function parseInferenceProfileSummary(
-  raw: unknown,
-): BedrockInferenceProfileSummary {
+export function parseInferenceProfileSummary(raw: unknown): BedrockInferenceProfileSummary {
   if (raw === null || typeof raw !== "object") {
     throw new BedrockError({
       kind: "api_error",
@@ -252,9 +242,7 @@ export interface BedrockCreateInferenceProfileResponse {
   readonly status: BedrockInferenceProfileStatus;
 }
 
-export function buildCreateInferenceProfileBody(
-  input: BedrockCreateInferenceProfileInput,
-): string {
+export function buildCreateInferenceProfileBody(input: BedrockCreateInferenceProfileInput): string {
   if (
     input.inferenceProfileName.length < 1 ||
     input.inferenceProfileName.length > BEDROCK_INFERENCE_PROFILE_NAME_MAX_LEN ||
@@ -289,11 +277,8 @@ export function buildCreateInferenceProfileBody(
   if (input.clientRequestToken !== undefined) {
     if (
       input.clientRequestToken.length < 1 ||
-      input.clientRequestToken.length >
-        BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_MAX_LEN ||
-      !BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_PATTERN.test(
-        input.clientRequestToken,
-      )
+      input.clientRequestToken.length > BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_MAX_LEN ||
+      !BEDROCK_INFERENCE_PROFILE_CLIENT_REQUEST_TOKEN_PATTERN.test(input.clientRequestToken)
     ) {
       throw new BedrockError({
         kind: "invalid_request_error",
@@ -309,10 +294,7 @@ export function buildCreateInferenceProfileBody(
       });
     }
     for (const tag of input.tags) {
-      if (
-        tag.key.length < 1 ||
-        tag.key.length > BEDROCK_INFERENCE_PROFILE_TAG_KEY_MAX_LEN
-      ) {
+      if (tag.key.length < 1 || tag.key.length > BEDROCK_INFERENCE_PROFILE_TAG_KEY_MAX_LEN) {
         throw new BedrockError({
           kind: "invalid_request_error",
           message: `createInferenceProfile: tag key length must be in [1, ${BEDROCK_INFERENCE_PROFILE_TAG_KEY_MAX_LEN.toString()}]`,
@@ -342,14 +324,11 @@ export interface BedrockUpdateInferenceProfileInput {
   readonly description?: string;
 }
 
-export function buildUpdateInferenceProfileBody(
-  input: BedrockUpdateInferenceProfileInput,
-): string {
+export function buildUpdateInferenceProfileBody(input: BedrockUpdateInferenceProfileInput): string {
   if (input.description === undefined) {
     throw new BedrockError({
       kind: "invalid_request_error",
-      message:
-        "updateInferenceProfile: at least one mutable field must be provided (description)",
+      message: "updateInferenceProfile: at least one mutable field must be provided (description)",
     });
   }
   if (
