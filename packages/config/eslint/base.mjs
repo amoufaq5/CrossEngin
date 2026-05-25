@@ -46,4 +46,14 @@ export default tseslint.config(
       "require-yield": "off",
     },
   },
+  {
+    // CommonJS config files (e.g. the root .prettierrc.cjs that re-exports the
+    // shared @crossengin/config/prettier base): lint as CommonJS so module /
+    // require are defined and require() is permitted, not flagged as ESM.
+    files: ["**/*.cjs"],
+    languageOptions: { sourceType: "commonjs" },
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
 );

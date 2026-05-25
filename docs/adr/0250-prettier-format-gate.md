@@ -134,6 +134,12 @@ and the changes are whitespace.
   resolves `.prettierrc.cjs`, the re-export yields the six expected options, and
   `format:check` stays green (resolved values are identical, so the 636 already
   formatted files don't move).
+- Follow-up (fix-forward): `.prettierrc.cjs` is the repo's first CommonJS file,
+  so the ESLint flat config flagged `module` / `require` (no-undef) and
+  `no-require-imports`. The shared `@crossengin/config/eslint/base.mjs` gained a
+  `**/*.cjs` override (`sourceType: "commonjs"` + `no-require-imports` off) so
+  `.cjs` files lint as CommonJS. (Missed initially because `pnpm lint` was run
+  before the `.json`→`.cjs` swap; the lint gate would have caught it in CI.)
 
 ## Open questions
 
