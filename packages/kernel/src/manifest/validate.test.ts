@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Manifest } from "./types.js";
+import { ManifestSchema, type Manifest } from "./types.js";
 import { ManifestValidationError } from "./errors.js";
 import { validateManifest } from "./validate.js";
 
@@ -12,19 +12,19 @@ describe("validateManifest — entities", () => {
   });
 
   it("throws on duplicate entity names", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
         { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
         { name: "Patient", fields: [{ name: "b", type: { kind: "text" } }] },
       ],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(ManifestValidationError);
   });
 
   it("accepts entities with reference to a known entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -34,12 +34,12 @@ describe("validateManifest — entities", () => {
           fields: [{ name: "patient", type: { kind: "reference", target: "Patient" } }],
         },
       ],
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws on reference to an unknown entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -48,35 +48,35 @@ describe("validateManifest — entities", () => {
           fields: [{ name: "patient", type: { kind: "reference", target: "Patient" } }],
         },
       ],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/Patient/);
   });
 });
 
 describe("validateManifest — traits", () => {
   it("throws on duplicate custom trait names", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       traits: [
         { name: "geocoded", fields: [] },
         { name: "geocoded", fields: [] },
       ],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(ManifestValidationError);
   });
 
   it("throws when a custom trait shadows a built-in", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       traits: [{ name: "auditable", fields: [] }],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/built-in/);
   });
 
   it("accepts entities referencing a built-in trait", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -86,12 +86,12 @@ describe("validateManifest — traits", () => {
           traits: ["auditable"],
         },
       ],
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("accepts entities referencing a custom trait declared in manifest", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -107,12 +107,12 @@ describe("validateManifest — traits", () => {
           fields: [{ name: "lat", type: { kind: "decimal", precision: 10, scale: 6 } }],
         },
       ],
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws on an unknown trait reference", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -122,12 +122,12 @@ describe("validateManifest — traits", () => {
           traits: ["mystery"],
         },
       ],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/mystery/);
   });
 
   it("checks trait field references against entity set", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [{ name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] }],
@@ -137,14 +137,14 @@ describe("validateManifest — traits", () => {
           fields: [{ name: "owner", type: { kind: "reference", target: "Owner" } }],
         },
       ],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/Owner/);
   });
 });
 
 describe("validateManifest — relations", () => {
   it("accepts many_to_one with known entities", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -154,77 +154,77 @@ describe("validateManifest — relations", () => {
       relations: [
         { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
       ],
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws on many_to_one with unknown 'to'", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [{ name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] }],
       relations: [
         { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
       ],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/Patient/);
   });
 
   it("throws on many_to_many with unknown 'left'", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [{ name: "Specialty", fields: [{ name: "a", type: { kind: "text" } }] }],
       relations: [{ kind: "many_to_many", left: "Doctor", right: "Specialty" }],
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/Doctor/);
   });
 });
 
 describe("validateManifest — roles", () => {
   it("accepts a manifest with a flat role set", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       roles: {
         staff: { name: "staff" },
         pharmacist: { name: "pharmacist", inherits: ["staff"] },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws when role.name doesn't match its record key", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       roles: {
         staff: { name: "pharmacist" },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/does not match record key/);
   });
 
   it("throws on a role inheritance cycle", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       roles: {
         a: { name: "a", inherits: ["b"] },
         b: { name: "b", inherits: ["a"] },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/inheritance cycle/);
   });
 
   it("throws when inherits references an unknown role", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       roles: {
         pharmacist: { name: "pharmacist", inherits: ["mystery"] },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown role 'mystery'/);
   });
 });
@@ -236,7 +236,7 @@ describe("validateManifest — permissions", () => {
   };
 
   it("accepts permissions for declared entities with declared roles", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -249,12 +249,12 @@ describe("validateManifest — permissions", () => {
           update: { roles: ["pharmacist"] },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws on a permission entry for an unknown entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -264,12 +264,12 @@ describe("validateManifest — permissions", () => {
       permissions: {
         NonExistent: { read: { roles: ["pharmacist"] } },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown entity 'NonExistent'/);
   });
 
   it("throws when an operation grant references an unknown role", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -279,12 +279,12 @@ describe("validateManifest — permissions", () => {
       permissions: {
         Prescription: { read: { roles: ["mystery"] } },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
   });
 
   it("throws when a transition grant references an unknown role", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -306,12 +306,12 @@ describe("validateManifest — permissions", () => {
           transitions: { verify: { roles: ["mystery"] } },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
   });
 
   it("throws on a field-level permission for an unknown field", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -323,12 +323,12 @@ describe("validateManifest — permissions", () => {
           fields: { mystery_field: { read: { roles: ["pharmacist"] } } },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown field 'mystery_field'/);
   });
 
   it("accepts a field-level permission for a trait-supplied field (e.g. auditable's created_at)", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -344,12 +344,12 @@ describe("validateManifest — permissions", () => {
           fields: { created_at: { read: { roles: ["pharmacist"] } } },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws when a field-level grant references an unknown role", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -361,14 +361,14 @@ describe("validateManifest — permissions", () => {
           fields: { qty: { read: { roles: ["mystery"] } } },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/role 'mystery'/);
   });
 });
 
 describe("validateManifest — workflows", () => {
   it("accepts a manifest with workflow + entity + permissions all consistent", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -400,12 +400,12 @@ describe("validateManifest — workflows", () => {
           },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws when workflow.entity is not a declared entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -421,12 +421,12 @@ describe("validateManifest — workflows", () => {
           transitions: [],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown entity 'Mystery'/);
   });
 
   it("propagates workflow validation errors with the workflow path", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -442,12 +442,12 @@ describe("validateManifest — workflows", () => {
           transitions: [],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/workflows\.lifecycle\.initialState/);
   });
 
   it("throws when permissions.transitions references a transition not in any workflow", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -469,14 +469,14 @@ describe("validateManifest — workflows", () => {
           transitions: { verify: { roles: ["pharmacist"] } },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /transition 'verify' is not declared in any workflow/,
     );
   });
 
   it("accepts a transition declared by a workflow even if no permission entry exists", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -492,14 +492,14 @@ describe("validateManifest — workflows", () => {
           transitions: [{ name: "complete", from: "pending", to: "done" }],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
 
 describe("validateManifest — integrations", () => {
   it("accepts a manifest with valid integrations", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       integrations: {
@@ -513,12 +513,12 @@ describe("validateManifest — integrations", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("throws on duplicate operation names within an outbound.http integration", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       integrations: {
@@ -532,12 +532,12 @@ describe("validateManifest — integrations", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/duplicate operation name 'createCustomer'/);
   });
 
   it("throws on duplicate operation names within an outbound.graphql integration", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       integrations: {
@@ -551,12 +551,12 @@ describe("validateManifest — integrations", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/duplicate operation name 'fetchUser'/);
   });
 
   it("does not enforce operation-name uniqueness across different integrations", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       integrations: {
@@ -573,14 +573,14 @@ describe("validateManifest — integrations", () => {
           operations: [{ name: "lookup", method: "GET", path: "/" }],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
 
 describe("validateManifest — jobs", () => {
   it("accepts a manifest with valid jobs", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       jobs: {
@@ -594,12 +594,12 @@ describe("validateManifest — jobs", () => {
           outputDataClass: "internal",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects jobs whose id doesn't match the record key", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       jobs: {
@@ -613,17 +613,17 @@ describe("validateManifest — jobs", () => {
           outputDataClass: "internal",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/does not match its record key/);
   });
 
   it("rejects workflow-triggered jobs whose workflow isn't declared", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       jobs: {
-        runStep: {
-          id: "runStep",
+        "run-step": {
+          id: "run-step",
           name: "Run Step",
           trigger: { kind: "workflow", workflow: "missing_wf", step: "humanTask" },
           onFailure: { strategy: "dead-letter" },
@@ -632,12 +632,12 @@ describe("validateManifest — jobs", () => {
           outputDataClass: "internal",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown workflow 'missing_wf'/);
   });
 
   it("accepts workflow-triggered jobs when the workflow is declared", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
@@ -657,8 +657,8 @@ describe("validateManifest — jobs", () => {
         },
       },
       jobs: {
-        runStep: {
-          id: "runStep",
+        "run-step": {
+          id: "run-step",
           name: "Run Step",
           trigger: {
             kind: "workflow",
@@ -671,7 +671,7 @@ describe("validateManifest — jobs", () => {
           outputDataClass: "internal",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
@@ -683,7 +683,7 @@ describe("validateManifest — reports + dashboards", () => {
   };
 
   it("accepts a manifest with valid reports + dashboards", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -707,12 +707,12 @@ describe("validateManifest — reports + dashboards", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a report referencing an unknown entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -722,12 +722,12 @@ describe("validateManifest — reports + dashboards", () => {
           entity: "Missing",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/'Missing' is not declared/);
   });
 
   it("rejects a dashboard widget pointing to an unknown report", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -747,7 +747,7 @@ describe("validateManifest — reports + dashboards", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown report 'phantom'/);
   });
 });
@@ -759,7 +759,7 @@ describe("validateManifest — views", () => {
   };
 
   it("accepts a list view referencing a record view + workflow transition", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -785,31 +785,39 @@ describe("validateManifest — views", () => {
         prescriptionInbox: {
           kind: "list",
           entity: "Prescription",
-          columns: [{ field: "qty" }],
+          columns: [
+            { field: "qty", sortable: true, filterable: true, hidden: false, truncate: true },
+          ],
           rowAction: { kind: "openRecord", view: "prescriptionDetail" },
           bulkActions: [
             { kind: "workflow", name: "verify", label: { en: "Verify" } },
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a view referencing an unknown entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
       views: {
-        bad: { kind: "list", entity: "Missing", columns: [{ field: "x" }] },
+        bad: {
+          kind: "list",
+          entity: "Missing",
+          columns: [
+            { field: "x", sortable: true, filterable: true, hidden: false, truncate: true },
+          ],
+        },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/'Missing' is not declared/);
   });
 
   it("rejects a row-action targeting a missing view", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -817,16 +825,18 @@ describe("validateManifest — views", () => {
         inbox: {
           kind: "list",
           entity: "Prescription",
-          columns: [{ field: "qty" }],
+          columns: [
+            { field: "qty", sortable: true, filterable: true, hidden: false, truncate: true },
+          ],
           rowAction: { kind: "openRecord", view: "missingDetail" },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown view 'missingDetail'/);
   });
 
   it("rejects a dashboard-kind view referencing a missing dashboard", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -837,12 +847,12 @@ describe("validateManifest — views", () => {
           dashboardRef: "phantomDashboard",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown dashboard 'phantomDashboard'/);
   });
 
   it("rejects a workflow transition not declared on the entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -850,11 +860,13 @@ describe("validateManifest — views", () => {
         inbox: {
           kind: "list",
           entity: "Prescription",
-          columns: [{ field: "qty" }],
+          columns: [
+            { field: "qty", sortable: true, filterable: true, hidden: false, truncate: true },
+          ],
           rowAction: { kind: "workflow", name: "verify" },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /transition 'verify' not declared on entity 'Prescription'/,
     );
@@ -871,7 +883,7 @@ describe("validateManifest — search", () => {
   };
 
   it("accepts a search section that references declared fields", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -884,12 +896,12 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a search entry for an unknown entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -899,12 +911,12 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/'Missing'/);
   });
 
   it("rejects an indexed field whose root is not declared on the entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -916,14 +928,14 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /indexed field 'patient.name' has no matching root field/,
     );
   });
 
   it("rejects a facet path whose root is not declared on the entity", () => {
-    const m: Manifest = {
+    const m: Manifest = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -936,7 +948,7 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /facet 'unknown_facet' has no matching root field/,
     );

@@ -308,7 +308,7 @@ describe("resolveManifest — sections", () => {
       maxSize: "20MB" as const,
       storage: { bucket: "crossengin-files-eu", prefix: "x/" },
       dataClass: "internal" as const,
-    };
+    } as unknown as NonNullable<Manifest["files"]>[string];
     const parent: Manifest = {
       manifestVersion: "1.0",
       meta: { name: "Base", slug: "base", version: v },

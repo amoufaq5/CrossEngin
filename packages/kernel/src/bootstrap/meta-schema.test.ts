@@ -537,7 +537,7 @@ describe("table column shapes", () => {
 
   it("META_FEATURE_FLAGS enforces unique flag keys with snake-case dotted check", () => {
     const key = META_FEATURE_FLAGS.columns.find((c) => c.name === "key");
-    expect(key?.unique?.constraintName).toBe("feature_flags_key_key");
+    expect((key?.unique as { constraintName: string } | undefined)?.constraintName).toBe("feature_flags_key_key");
     expect(key?.check).toContain("[a-z]");
   });
 
@@ -652,7 +652,7 @@ describe("table column shapes", () => {
     const url = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "url");
     expect(url?.check).toContain("https://");
     const eid = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "endpoint_id");
-    expect(eid?.unique?.constraintName).toBe("webhook_endpoints_endpoint_id_key");
+    expect((eid?.unique as { constraintName: string } | undefined)?.constraintName).toBe("webhook_endpoints_endpoint_id_key");
   });
 
   it("META_WEBHOOK_DELIVERIES check-constrains status to the six delivery states", () => {
@@ -951,7 +951,7 @@ describe("table column shapes", () => {
 
   it("META_TENANT_TOMBSTONES enforces unique tombstone_id with 'tomb_' prefix", () => {
     const tid = META_TENANT_TOMBSTONES.columns.find((c) => c.name === "tombstone_id");
-    expect(tid?.unique?.constraintName).toBe("tenant_tombstones_tombstone_id_key");
+    expect((tid?.unique as { constraintName: string } | undefined)?.constraintName).toBe("tenant_tombstones_tombstone_id_key");
     expect(tid?.check).toContain("tomb_");
   });
 
@@ -964,7 +964,7 @@ describe("table column shapes", () => {
 
   it("META_INCIDENTS enforces unique incident_id with INC-YYYY-NNNN pattern", () => {
     const iid = META_INCIDENTS.columns.find((c) => c.name === "incident_id");
-    expect(iid?.unique?.constraintName).toBe("incidents_incident_id_key");
+    expect((iid?.unique as { constraintName: string } | undefined)?.constraintName).toBe("incidents_incident_id_key");
     expect(iid?.check).toContain("INC-");
   });
 
