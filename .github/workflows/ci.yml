@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: build · typecheck · typecheck:tests · test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        # version is read from the "packageManager" field in package.json
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Type-check src (per package)
+        run: pnpm -r typecheck
+
+      # Closes the systemic src/test drift gap (ADR-0244): every *.test.ts is
+      # type-checked here. The script builds first (turbo cache hits the step
+      # above) then runs the single-root-pass tsc.
+      - name: Type-check test files (workspace-wide)
+        run: pnpm typecheck:tests
+
+      - name: Test all packages
+        run: pnpm -r test
