@@ -41,6 +41,7 @@ import {
 } from "./moderations-api.js";
 import {
   OPENAI_CHAT_PRICING,
+  OPENAI_EMBEDDING_PRICING,
   OPENAI_DEFAULT_CHAT_MODEL,
   OPENAI_DEFAULT_EMBEDDING_MODEL,
   isOpenAIChatModel,
@@ -164,6 +165,24 @@ export class OpenAIProvider implements LlmProvider {
       outputPerMillionTokens: p.outputUsdPerMillion,
       cachedInputPerMillionTokens: p.cachedInputUsdPerMillion,
     };
+  }
+
+  pricingFor(modelId: string): ProviderPricing | undefined {
+    if (isOpenAIChatModel(modelId)) {
+      const c = OPENAI_CHAT_PRICING[modelId];
+      return {
+        inputPerMillionTokens: c.inputUsdPerMillion,
+        outputPerMillionTokens: c.outputUsdPerMillion,
+        cachedInputPerMillionTokens: c.cachedInputUsdPerMillion,
+      };
+    }
+    if (isOpenAIEmbeddingModel(modelId)) {
+      return {
+        inputPerMillionTokens: OPENAI_EMBEDDING_PRICING[modelId].inputUsdPerMillion,
+        outputPerMillionTokens: 0,
+      };
+    }
+    return undefined;
   }
 
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {

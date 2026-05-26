@@ -38,19 +38,30 @@ class StubProvider implements LlmProvider {
     supportsThinking: false,
     vision: false,
   };
-  readonly pricing: ProviderPricing = {
-    inputPerMillionTokens: 1,
-    outputPerMillionTokens: 2,
-  };
+  readonly pricing: ProviderPricing;
   readonly residency: readonly Region[] = ["us", "eu"];
 
   private readonly behavior: "ok" | "retryable_then_ok" | "always_retryable" | "fatal";
+  private readonly modelPricing?: Readonly<Record<string, ProviderPricing>>;
   private attempts = 0;
 
-  constructor(id: string, behavior: StubProvider["behavior"]) {
+  constructor(
+    id: string,
+    behavior: StubProvider["behavior"],
+    extra?: {
+      pricing?: ProviderPricing;
+      modelPricing?: Readonly<Record<string, ProviderPricing>>;
+    },
+  ) {
     this.id = id;
     this.models = [`${id}-model-1`];
     this.behavior = behavior;
+    this.pricing = extra?.pricing ?? { inputPerMillionTokens: 1, outputPerMillionTokens: 2 };
+    this.modelPricing = extra?.modelPricing;
+  }
+
+  pricingFor(modelId: string): ProviderPricing | undefined {
+    return this.modelPricing?.[modelId];
   }
 
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
@@ -361,6 +372,44 @@ describe("DefaultLlmRouter.embed — cost ceiling (ADR-0248)", () => {
     const kinds = cap.events.map((e) => e.kind);
     expect(kinds).toContain("ceiling_resolved");
     expect(kinds).not.toContain("embed_call_started");
+  });
+});
+
+describe("DefaultLlmRouter.embed — per-model pricing (M6.8.x.trace.embed.pricing, ADR-0248 Q1)", () => {
+  // 4000 chars ≈ 1000 input tokens. The provider default is expensive
+  // ($5000/M → $5.00) but the routed model's per-model rate is cheap
+  // ($20/M → $0.02). With a $0.10 ceiling, the per-model rate keeps the embed
+  // under the ceiling where the provider default would block it.
+  const BIG_TEXT = "x".repeat(4000);
+  const EXPENSIVE_DEFAULT: ProviderPricing = {
+    inputPerMillionTokens: 5000,
+    outputPerMillionTokens: 0,
+  };
+
+  it("estimates the ceiling from the chosen model's per-model rate, not the provider default", async () => {
+    const openai = new StubProvider("openai", "ok", {
+      pricing: EXPENSIVE_DEFAULT,
+      modelPricing: {
+        "openai-model-1": { inputPerMillionTokens: 20, outputPerMillionTokens: 0 },
+      },
+    });
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      costCeiling: { maxUsdPerRequest: 0.1 },
+    });
+    const res = await router.embed({ texts: [BIG_TEXT], tenantId: TENANT });
+    expect(res.dim).toBe(3);
+  });
+
+  it("control: the same input blocks under the provider-default rate (no per-model pricing)", async () => {
+    const openai = new StubProvider("openai", "ok", { pricing: EXPENSIVE_DEFAULT });
+    const router = buildRouter({
+      providers: new Map<string, LlmProvider>([["openai", openai]]),
+      costCeiling: { maxUsdPerRequest: 0.1 },
+    });
+    await expect(router.embed({ texts: [BIG_TEXT], tenantId: TENANT })).rejects.toThrow(
+      CostCeilingExceededError,
+    );
   });
 });
 

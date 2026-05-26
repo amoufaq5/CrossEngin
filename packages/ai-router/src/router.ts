@@ -459,7 +459,7 @@ export class DefaultLlmRouter implements LlmRouter {
     req: CompletionRequest,
     choice: { provider: LlmProvider; modelId: string },
   ): number {
-    const pricing = choice.provider.pricing;
+    const pricing = choice.provider.pricingFor?.(choice.modelId) ?? choice.provider.pricing;
     const expectedInputTokens = estimateRequestTokens(req);
     const expectedOutputTokens = req.maxTokens ?? 1024;
     return (
@@ -469,12 +469,14 @@ export class DefaultLlmRouter implements LlmRouter {
   }
 
   // Embeddings are priced on input tokens only (no output). Estimate from the
-  // input text length; the real cost is recorded post-call from usage_final.
+  // input text length using the chosen model's per-model rate (ADR-0248 Q1)
+  // when the provider exposes it, falling back to the provider-level pricing;
+  // the real cost is recorded post-call from usage_final.
   private estimateEmbedPreflightCost(
     req: EmbeddingRequest,
     choice: { provider: LlmProvider; modelId: string },
   ): number {
-    const pricing = choice.provider.pricing;
+    const pricing = choice.provider.pricingFor?.(choice.modelId) ?? choice.provider.pricing;
     let chars = 0;
     for (const text of req.texts) chars += text.length;
     const expectedInputTokens = Math.max(1, Math.ceil(chars / 4));

@@ -122,6 +122,33 @@ describe("OpenAIProvider — constructor", () => {
   });
 });
 
+describe("OpenAIProvider.pricingFor (per-model rates, ADR-0248 Q1)", () => {
+  const provider = new OpenAIProvider({ apiKey: API_KEY });
+
+  it("returns the embedding-model rate (input only, no output)", () => {
+    expect(provider.pricingFor("text-embedding-3-small")).toEqual({
+      inputPerMillionTokens: 0.02,
+      outputPerMillionTokens: 0,
+    });
+    expect(provider.pricingFor("text-embedding-3-large")).toEqual({
+      inputPerMillionTokens: 0.13,
+      outputPerMillionTokens: 0,
+    });
+  });
+
+  it("returns the chat-model rate (input/output/cached) regardless of the default", () => {
+    expect(provider.pricingFor("gpt-4o")).toEqual({
+      inputPerMillionTokens: 2.5,
+      outputPerMillionTokens: 10,
+      cachedInputPerMillionTokens: 1.25,
+    });
+  });
+
+  it("returns undefined for an unknown model (caller falls back to provider pricing)", () => {
+    expect(provider.pricingFor("not-a-model")).toBeUndefined();
+  });
+});
+
 describe("OpenAIProvider.complete — streaming", () => {
   it("calls /v1/chat/completions with stream=true + correct headers", async () => {
     const captured: CapturedCall[] = [];

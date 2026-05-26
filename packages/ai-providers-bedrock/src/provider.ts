@@ -108,7 +108,9 @@ import {
   BEDROCK_CHAT_PRICING,
   BEDROCK_DEFAULT_EMBEDDING_MODEL,
   BEDROCK_EMBEDDING_MODELS,
+  BEDROCK_EMBEDDING_PRICING,
   BEDROCK_MULTIMODAL_EMBEDDING_MODELS,
+  BEDROCK_MULTIMODAL_EMBEDDING_PRICING,
   buildBedrockMultimodalEmbeddingUsage,
   isBedrockChatModel,
   isBedrockEmbeddingModel,
@@ -282,6 +284,32 @@ export class BedrockProvider implements LlmProvider {
         ? { cachedInputPerMillionTokens: p.cachedInputUsdPerMillion }
         : {}),
     };
+  }
+
+  pricingFor(modelId: string): ProviderPricing | undefined {
+    if (isBedrockChatModel(modelId)) {
+      const c = BEDROCK_CHAT_PRICING[modelId];
+      return {
+        inputPerMillionTokens: c.inputUsdPerMillion,
+        outputPerMillionTokens: c.outputUsdPerMillion,
+        ...(c.cachedInputUsdPerMillion !== undefined
+          ? { cachedInputPerMillionTokens: c.cachedInputUsdPerMillion }
+          : {}),
+      };
+    }
+    if (isBedrockEmbeddingModel(modelId)) {
+      return {
+        inputPerMillionTokens: BEDROCK_EMBEDDING_PRICING[modelId].inputUsdPerMillion,
+        outputPerMillionTokens: 0,
+      };
+    }
+    if (isBedrockMultimodalEmbeddingModel(modelId)) {
+      return {
+        inputPerMillionTokens: BEDROCK_MULTIMODAL_EMBEDDING_PRICING[modelId].textUsdPerMillion,
+        outputPerMillionTokens: 0,
+      };
+    }
+    return undefined;
   }
 
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {

@@ -31,6 +31,7 @@ export interface MockLlmProviderConfig {
   readonly capabilities?: Partial<ProviderCapabilities>;
   readonly residency?: readonly Region[];
   readonly pricing?: ProviderPricing;
+  readonly modelPricing?: Readonly<Record<string, ProviderPricing>>;
   readonly completeBehavior?: (req: CompletionRequest) => AsyncIterable<CompletionChunk>;
   readonly embedBehavior?: (req: EmbeddingRequest) => Promise<EmbeddingResponse>;
   readonly errorOnComplete?: Error;
@@ -44,6 +45,7 @@ export class MockLlmProvider implements LlmProvider {
   readonly residency: readonly Region[];
   readonly pricing: ProviderPricing;
 
+  private readonly modelPricing?: Readonly<Record<string, ProviderPricing>>;
   private readonly completeBehavior?: (req: CompletionRequest) => AsyncIterable<CompletionChunk>;
   private readonly embedBehavior?: (req: EmbeddingRequest) => Promise<EmbeddingResponse>;
   private readonly errorOnComplete?: Error;
@@ -55,6 +57,7 @@ export class MockLlmProvider implements LlmProvider {
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...config.capabilities };
     this.residency = config.residency ?? ["eu", "us", "me"];
     this.pricing = config.pricing ?? DEFAULT_PRICING;
+    this.modelPricing = config.modelPricing;
     this.completeBehavior = config.completeBehavior;
     this.embedBehavior = config.embedBehavior;
     this.errorOnComplete = config.errorOnComplete;
@@ -90,6 +93,10 @@ export class MockLlmProvider implements LlmProvider {
         cost: 0,
       },
     };
+  }
+
+  pricingFor(modelId: string): ProviderPricing | undefined {
+    return this.modelPricing?.[modelId];
   }
 }
 

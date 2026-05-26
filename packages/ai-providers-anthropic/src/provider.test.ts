@@ -134,6 +134,19 @@ describe("AnthropicProvider — constructor", () => {
     expect(provider.pricing.inputPerMillionTokens).toBe(15);
     expect(provider.pricing.outputPerMillionTokens).toBe(75);
   });
+
+  it("pricingFor returns the per-model rate regardless of the default (ADR-0248 Q1)", () => {
+    const provider = new AnthropicProvider({
+      apiKey: API_KEY,
+      defaultModel: "claude-opus-4-7",
+    });
+    expect(provider.pricingFor("claude-haiku-4-5")).toEqual({
+      inputPerMillionTokens: 1,
+      outputPerMillionTokens: 5,
+      cachedInputPerMillionTokens: 0.1,
+    });
+    expect(provider.pricingFor("not-a-model")).toBeUndefined();
+  });
 });
 
 describe("AnthropicProvider.complete (streaming)", () => {

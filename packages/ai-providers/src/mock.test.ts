@@ -103,3 +103,25 @@ describe("MockLlmProvider — embed()", () => {
     await expect(p.embed(baseEmbeddingReq)).rejects.toThrow("embedding service down");
   });
 });
+
+describe("MockLlmProvider — pricingFor()", () => {
+  it("returns the configured per-model rate", () => {
+    const p = new MockLlmProvider({
+      modelPricing: {
+        "embed-cheap": { inputPerMillionTokens: 0.02, outputPerMillionTokens: 0 },
+      },
+    });
+    expect(p.pricingFor("embed-cheap")).toEqual({
+      inputPerMillionTokens: 0.02,
+      outputPerMillionTokens: 0,
+    });
+  });
+
+  it("returns undefined for an unconfigured model or when modelPricing is unset", () => {
+    expect(new MockLlmProvider().pricingFor("anything")).toBeUndefined();
+    const p = new MockLlmProvider({
+      modelPricing: { known: { inputPerMillionTokens: 1, outputPerMillionTokens: 1 } },
+    });
+    expect(p.pricingFor("unknown")).toBeUndefined();
+  });
+});

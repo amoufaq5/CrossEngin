@@ -174,6 +174,38 @@ describe("BedrockProvider — constructor", () => {
   });
 });
 
+describe("BedrockProvider.pricingFor (per-model rates, ADR-0248 Q1)", () => {
+  const provider = build({ fetch: buildFetch({}) });
+
+  it("returns the embedding-model rate (input only, no output)", () => {
+    expect(provider.pricingFor("amazon.titan-embed-text-v2:0")).toEqual({
+      inputPerMillionTokens: 0.02,
+      outputPerMillionTokens: 0,
+    });
+    expect(provider.pricingFor("cohere.embed-english-v3")).toEqual({
+      inputPerMillionTokens: 0.1,
+      outputPerMillionTokens: 0,
+    });
+  });
+
+  it("returns the multimodal-embedding text rate (input only)", () => {
+    expect(provider.pricingFor("amazon.titan-embed-image-v1")).toEqual({
+      inputPerMillionTokens: 0.8,
+      outputPerMillionTokens: 0,
+    });
+  });
+
+  it("returns the chat-model rate with input + output", () => {
+    const p = provider.pricingFor("anthropic.claude-3-5-haiku-20241022-v1:0");
+    expect(p?.inputPerMillionTokens).toBeGreaterThan(0);
+    expect(p?.outputPerMillionTokens).toBeGreaterThan(0);
+  });
+
+  it("returns undefined for an unknown model", () => {
+    expect(provider.pricingFor("not-a-bedrock-model")).toBeUndefined();
+  });
+});
+
 describe("BedrockProvider — guardrailConfig threading (M2.9.8)", () => {
   it("non-streaming: passes guardrailConfig into the request body", async () => {
     const captures: FetchCapture[] = [];

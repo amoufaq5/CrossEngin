@@ -106,6 +106,16 @@ export class AnthropicProvider implements LlmProvider {
     };
   }
 
+  pricingFor(modelId: string): ProviderPricing | undefined {
+    if (!isAnthropicModel(modelId)) return undefined;
+    const p = ANTHROPIC_PRICING[modelId];
+    return {
+      inputPerMillionTokens: p.inputUsdPerMillion,
+      outputPerMillionTokens: p.outputUsdPerMillion,
+      cachedInputPerMillionTokens: p.cachedInputUsdPerMillion,
+    };
+  }
+
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
     const model = this.resolveModel(req.model);
     const built = buildAnthropicRequest(req, {
