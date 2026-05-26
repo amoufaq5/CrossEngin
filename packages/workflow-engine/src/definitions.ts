@@ -226,6 +226,13 @@ export const StateActionSchema = z
         message: "send_signal action requires correlationKey parameter",
       });
     }
+    if (a.kind === "spawn_child_workflow" && !a.parameters.childDefinitionKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "childDefinitionKey"],
+        message: "spawn_child_workflow action requires childDefinitionKey parameter",
+      });
+    }
   });
 export type StateAction = z.infer<typeof StateActionSchema>;
 

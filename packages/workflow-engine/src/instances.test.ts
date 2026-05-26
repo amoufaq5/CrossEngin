@@ -54,12 +54,13 @@ const baseInstance: WorkflowInstance = {
 };
 
 describe("constants", () => {
-  it("has 12 instance statuses", () => {
-    expect(INSTANCE_STATUSES).toHaveLength(12);
+  it("has 13 instance statuses", () => {
+    expect(INSTANCE_STATUSES).toHaveLength(13);
   });
   it("ACTIVE includes running and waiting variants", () => {
     expect(ACTIVE_INSTANCE_STATUSES.has("running")).toBe(true);
     expect(ACTIVE_INSTANCE_STATUSES.has("waiting_for_signal")).toBe(true);
+    expect(ACTIVE_INSTANCE_STATUSES.has("waiting_for_child")).toBe(true);
     expect(ACTIVE_INSTANCE_STATUSES.has("compensating")).toBe(true);
   });
   it("TERMINAL covers completed/failed/cancelled/compensated", () => {

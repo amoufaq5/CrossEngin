@@ -228,6 +228,25 @@ describe("WorkflowDefinitionSchema", () => {
     ).toThrow(/send_signal action requires correlationKey/);
   });
 
+  it("rejects spawn_child_workflow action without childDefinitionKey", () => {
+    expect(() =>
+      WorkflowDefinitionSchema.parse({
+        ...baseDefinition,
+        states: [
+          {
+            name: "submitted",
+            kind: "initial",
+            label: "Submitted",
+            onEntryActions: [{ kind: "spawn_child_workflow", parameters: {} }],
+            onExitActions: [],
+            slaSeconds: null,
+          },
+          ...baseDefinition.states.slice(1),
+        ],
+      }),
+    ).toThrow(/spawn_child_workflow action requires childDefinitionKey/);
+  });
+
   it("rejects transition referencing undeclared fromState", () => {
     expect(() =>
       WorkflowDefinitionSchema.parse({

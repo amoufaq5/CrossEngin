@@ -11,7 +11,7 @@ import {
 } from "./instrumentation.js";
 
 describe("WORKFLOW_INSTRUMENTATION_KINDS", () => {
-  it("includes the 17 documented engine events", () => {
+  it("includes the 19 documented engine events", () => {
     expect(WORKFLOW_INSTRUMENTATION_KINDS).toEqual([
       "instance_started",
       "instance_completed",
@@ -28,6 +28,8 @@ describe("WORKFLOW_INSTRUMENTATION_KINDS", () => {
       "activity_started",
       "activity_completed",
       "activity_failed",
+      "child_workflow_spawned",
+      "child_workflow_completed",
       "action_applied",
       "engine_error",
     ]);

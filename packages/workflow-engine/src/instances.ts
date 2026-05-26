@@ -7,6 +7,7 @@ export const INSTANCE_STATUSES = [
   "waiting_for_timer",
   "waiting_for_activity",
   "waiting_for_manual",
+  "waiting_for_child",
   "suspended",
   "completed",
   "failed",
@@ -22,6 +23,7 @@ export const ACTIVE_INSTANCE_STATUSES: ReadonlySet<InstanceStatus> = new Set([
   "waiting_for_timer",
   "waiting_for_activity",
   "waiting_for_manual",
+  "waiting_for_child",
   "compensating",
 ]);
 
@@ -39,6 +41,7 @@ export const INSTANCE_TRANSITIONS: Readonly<Record<InstanceStatus, readonly Inst
     "waiting_for_timer",
     "waiting_for_activity",
     "waiting_for_manual",
+    "waiting_for_child",
     "suspended",
     "completed",
     "failed",
@@ -49,6 +52,7 @@ export const INSTANCE_TRANSITIONS: Readonly<Record<InstanceStatus, readonly Inst
   waiting_for_timer: ["running", "suspended", "cancelled", "failed"],
   waiting_for_activity: ["running", "suspended", "cancelled", "failed"],
   waiting_for_manual: ["running", "suspended", "cancelled", "failed"],
+  waiting_for_child: ["running", "suspended", "cancelled", "failed"],
   suspended: ["running", "cancelled"],
   compensating: ["compensated", "failed"],
   completed: [],

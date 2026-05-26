@@ -187,6 +187,10 @@ function refineStatusFromDefinition(
       state.status = "waiting_for_manual";
       return;
     }
+    if (outgoing.some((t) => t.trigger.kind === "child_workflow_completed")) {
+      state.status = "waiting_for_child";
+      return;
+    }
   }
 }
 

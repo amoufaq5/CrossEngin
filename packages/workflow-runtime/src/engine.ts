@@ -44,6 +44,9 @@ export interface StartInstanceInput {
   readonly parentInstanceId?: string;
   readonly startedByUserId?: string | null;
   readonly startedBySystem?: string | null;
+  // Pre-generated instance id (spawn_child_workflow uses this so the parent's
+  // child_workflow_spawned event can record the id before the child runs).
+  readonly instanceId?: string;
 }
 
 export interface SubmitSignalInput {
@@ -158,7 +161,7 @@ export class WorkflowEngine {
       );
     }
 
-    const instanceId = this.ids.generate("wfi");
+    const instanceId = input.instanceId ?? this.ids.generate("wfi");
     const occurredAt = this.clock.nowIso();
     const timeoutAt = new Date(
       this.clock.now().getTime() + definition.timeoutSeconds * 1000,
@@ -492,6 +495,7 @@ export class WorkflowEngine {
         state.status === "waiting_for_timer" ||
         state.status === "waiting_for_activity" ||
         state.status === "waiting_for_manual" ||
+        state.status === "waiting_for_child" ||
         state.status === "suspended"
       ) {
         return;
@@ -604,7 +608,8 @@ export class WorkflowEngine {
         await this.applySendSignal(instanceId, tenantId, action);
         return;
       case "spawn_child_workflow":
-        throw new Error("action kind spawn_child_workflow is not yet implemented");
+        await this.applySpawnChildWorkflow(instanceId, tenantId, action);
+        return;
     }
     void signalId;
     void timerId;
@@ -1033,6 +1038,154 @@ export class WorkflowEngine {
     });
   }
 
+  private findPublishedDefinitionByKey(
+    definitionKey: string,
+    tenantId: string,
+  ): WorkflowDefinition | undefined {
+    for (const def of this.definitions.values()) {
+      if (
+        def.definitionKey === definitionKey &&
+        def.status === "published" &&
+        (def.tenantId === null || def.tenantId === tenantId)
+      ) {
+        return def;
+      }
+    }
+    return undefined;
+  }
+
+  // spawn_child_workflow: start a child instance of the definition named by the
+  // action's childDefinitionKey, linked to this (parent) instance. The parent's
+  // child_workflow_spawned event (with the child's id) is appended BEFORE the
+  // child runs, so a synchronously-terminating child's completion notification
+  // sees the spawn already logged. No-op when childDefinitionKey is missing or
+  // no published definition in the parent's tenant has that key.
+  private async applySpawnChildWorkflow(
+    parentInstanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const childDefinitionKey =
+      typeof action.parameters["childDefinitionKey"] === "string"
+        ? (action.parameters["childDefinitionKey"] as string)
+        : null;
+    if (childDefinitionKey === null) return;
+    const childDef = this.findPublishedDefinitionByKey(childDefinitionKey, tenantId);
+    if (childDef === undefined) return;
+    const rawInput = action.parameters["input"];
+    const childVariables =
+      typeof rawInput === "object" && rawInput !== null && !Array.isArray(rawInput)
+        ? (rawInput as Record<string, unknown>)
+        : undefined;
+    const childCorrelationKey =
+      typeof action.parameters["correlationKey"] === "string"
+        ? (action.parameters["correlationKey"] as string)
+        : undefined;
+
+    const childInstanceId = this.ids.generate("wfi");
+    await this.emitInstrumentation("child_workflow_spawned", {
+      tenantId,
+      instanceId: parentInstanceId,
+      definitionId: this.instanceDefinition.get(parentInstanceId) ?? null,
+      correlationId: this.instanceCorrelation.get(parentInstanceId) ?? null,
+      attributes: { childInstanceId, childDefinitionId: childDef.id, childDefinitionKey },
+    });
+    const nextSeq = (await this.eventLog.latestSequence(parentInstanceId))!;
+    await this.appendEvent({
+      instanceId: parentInstanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "child_workflow_spawned",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId,
+      variableName: null,
+      payload: { childDefinitionId: childDef.id, childDefinitionKey },
+      correlationId: null,
+      causationEventId: null,
+    });
+
+    await this.startInstance({
+      definitionId: childDef.id,
+      tenantId,
+      instanceId: childInstanceId,
+      parentInstanceId,
+      ...(childVariables !== undefined ? { variables: childVariables } : {}),
+      ...(childCorrelationKey !== undefined ? { correlationKey: childCorrelationKey } : {}),
+    });
+  }
+
+  // When a child instance reaches a terminal state, record child_workflow_completed
+  // on its parent and fire the parent's matching child_workflow_completed
+  // transition (matched by the child's definitionKey). Reuses submitSignal's
+  // drive pattern. Skips a parent that no longer exists or is already terminal.
+  private async notifyParentOfChildCompletion(
+    parentInstanceId: string,
+    childInstanceId: string,
+    childState: ProjectedInstance,
+    childKind: "terminal_success" | "terminal_failure" | "terminal_cancelled",
+  ): Promise<void> {
+    const parentState = await this.getInstanceState(parentInstanceId);
+    if (parentState === null) return;
+    if (
+      parentState.status === "completed" ||
+      parentState.status === "failed" ||
+      parentState.status === "cancelled" ||
+      parentState.status === "compensated"
+    ) {
+      return;
+    }
+    const parentDef = this.definitions.get(parentState.definitionId);
+    if (parentDef === undefined) return;
+    const childDefinitionKey = childState.definitionKey;
+
+    await this.emitInstrumentation("child_workflow_completed", {
+      tenantId: parentState.tenantId,
+      instanceId: parentInstanceId,
+      definitionId: parentState.definitionId,
+      correlationId: this.instanceCorrelation.get(parentInstanceId) ?? null,
+      attributes: { childInstanceId, childDefinitionKey, childTerminalKind: childKind },
+    });
+    const nextSeq = (await this.eventLog.latestSequence(parentInstanceId))!;
+    await this.appendEvent({
+      instanceId: parentInstanceId,
+      tenantId: parentState.tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "child_workflow_completed",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId,
+      variableName: null,
+      payload: { childDefinitionKey, childTerminalKind: childKind },
+      correlationId: null,
+      causationEventId: null,
+    });
+
+    const transition = evaluateNextTransition({
+      definition: parentDef,
+      fromState: parentState.currentState,
+      trigger: { kind: "child_workflow_completed", childDefinitionKey },
+      variables: parentState.variables,
+      evaluator: this.guardEvaluator,
+    });
+    if (transition !== null) {
+      await this.applyTransition(parentInstanceId, parentDef, transition, parentState, null, null);
+      await this.runStepLoop(parentInstanceId, parentDef);
+    }
+  }
+
   private async emitTerminalForStateKind(
     instanceId: string,
     state: ProjectedInstance,
@@ -1120,6 +1273,10 @@ export class WorkflowEngine {
         correlationId: null,
         causationEventId: null,
       });
+    }
+
+    if (state.parentInstanceId !== null) {
+      await this.notifyParentOfChildCompletion(state.parentInstanceId, instanceId, state, kind);
     }
   }
 

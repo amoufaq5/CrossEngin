@@ -6254,7 +6254,7 @@ export const META_WORKFLOW_INSTANCES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "status IN ('created', 'running', 'waiting_for_signal', 'waiting_for_timer', 'waiting_for_activity', 'waiting_for_manual', 'suspended', 'completed', 'failed', 'cancelled', 'compensating', 'compensated')",
+        "status IN ('created', 'running', 'waiting_for_signal', 'waiting_for_timer', 'waiting_for_activity', 'waiting_for_manual', 'waiting_for_child', 'suspended', 'completed', 'failed', 'cancelled', 'compensating', 'compensated')",
     },
     {
       name: "current_state",
@@ -6796,7 +6796,7 @@ export const META_WORKFLOW_TRACES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'state_transitioned', 'signal_received', 'signal_consumed', 'signal_emitted', 'timer_set', 'timer_fired', 'timer_cancelled', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'action_applied', 'engine_error')",
+        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'state_transitioned', 'signal_received', 'signal_consumed', 'signal_emitted', 'timer_set', 'timer_fired', 'timer_cancelled', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'child_workflow_spawned', 'child_workflow_completed', 'action_applied', 'engine_error')",
     },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
     {

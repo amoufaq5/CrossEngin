@@ -1805,3 +1805,347 @@ describe("send_signal action (M8.4)", () => {
     expect(WORKFLOW_INSTRUMENTATION_KINDS as readonly string[]).toContain("signal_emitted");
   });
 });
+
+describe("spawn_child_workflow action (M8.5)", () => {
+  // Async child: parent_start →(auto) awaiting_child [on-entry: spawn childflow]
+  // →(child_workflow_completed) parent_done. The child waits for a "finish"
+  // signal, so it does NOT complete during spawn — the parent quiesces at
+  // waiting_for_child and is driven to parent_done when the child completes.
+  function childFlowDef(): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_childflow1",
+      definitionKey: "childflow",
+      initialState: "child_start",
+      states: [
+        {
+          name: "child_start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "child_wait",
+          kind: "waiting",
+          label: "W",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "child_done",
+          kind: "terminal_success",
+          label: "D",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "begin",
+          fromState: "child_start",
+          toState: "child_wait",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "finish",
+          fromState: "child_wait",
+          toState: "child_done",
+          trigger: { kind: "signal_received", signalName: "finish" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+  }
+
+  function parentFlowDef(spawnParams: Record<string, unknown>): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_parentfl1",
+      definitionKey: "parentflow",
+      initialState: "parent_start",
+      states: [
+        {
+          name: "parent_start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "awaiting_child",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [{ kind: "spawn_child_workflow", parameters: spawnParams }],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "parent_done",
+          kind: "terminal_success",
+          label: "D",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "spawn",
+          fromState: "parent_start",
+          toState: "awaiting_child",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "child_done",
+          fromState: "awaiting_child",
+          toState: "parent_done",
+          trigger: { kind: "child_workflow_completed", childDefinitionKey: "childflow" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+  }
+
+  const DEFAULT_SPAWN = {
+    childDefinitionKey: "childflow",
+    correlationKey: "child-corr",
+    input: { ticket: "T1" },
+  };
+
+  function engineWith(
+    defs: readonly WorkflowDefinition[],
+    instrumentation?: WorkflowInstrumentation,
+  ) {
+    const engine = new WorkflowEngine({
+      eventLog: new InMemoryEventLog(),
+      definitions: new Map(defs.map((d) => [d.id, d])),
+      activityRegistry: createDefaultRegistry(),
+      clock: new FixedClock(new Date("2026-05-26T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+      ...(instrumentation !== undefined ? { instrumentation } : {}),
+    });
+    return { engine };
+  }
+
+  async function childIdOf(engine: WorkflowEngine, parentInstanceId: string): Promise<string> {
+    const spawned = (await engine.listEvents(parentInstanceId)).find(
+      (e) => e.kind === "child_workflow_spawned",
+    );
+    if (spawned?.childInstanceId == null) throw new Error("no child_workflow_spawned event");
+    return spawned.childInstanceId;
+  }
+
+  it("parent waits at waiting_for_child, then completes when the child completes", async () => {
+    const { engine } = engineWith([parentFlowDef(DEFAULT_SPAWN), childFlowDef()]);
+    const parent = await engine.startInstance({
+      definitionId: "wfd_parentfl1",
+      tenantId: TENANT,
+      correlationKey: "parent-corr",
+    });
+    expect(parent.status).toBe("waiting_for_child");
+    expect(parent.currentState).toBe("awaiting_child");
+
+    await engine.submitSignal({
+      signalName: "finish",
+      correlationKey: "child-corr",
+      tenantId: TENANT,
+    });
+
+    const final = await engine.getInstanceState(parent.instanceId);
+    expect(final?.status).toBe("completed");
+    expect(final?.currentState).toBe("parent_done");
+  });
+
+  it("records child_workflow_spawned + child_workflow_completed on the parent", async () => {
+    const { engine } = engineWith([parentFlowDef(DEFAULT_SPAWN), childFlowDef()]);
+    const parent = await engine.startInstance({
+      definitionId: "wfd_parentfl1",
+      tenantId: TENANT,
+    });
+    await engine.submitSignal({
+      signalName: "finish",
+      correlationKey: "child-corr",
+      tenantId: TENANT,
+    });
+    const kinds = (await engine.listEvents(parent.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("child_workflow_spawned");
+    expect(kinds).toContain("child_workflow_completed");
+  });
+
+  it("links the child to the parent and threads input variables", async () => {
+    const { engine } = engineWith([parentFlowDef(DEFAULT_SPAWN), childFlowDef()]);
+    const parent = await engine.startInstance({
+      definitionId: "wfd_parentfl1",
+      tenantId: TENANT,
+    });
+    const childId = await childIdOf(engine, parent.instanceId);
+    const child = await engine.getInstanceState(childId);
+    expect(child?.parentInstanceId).toBe(parent.instanceId);
+    expect(child?.definitionKey).toBe("childflow");
+    expect(child?.currentState).toBe("child_wait");
+    expect(child?.variables["ticket"]).toBe("T1");
+  });
+
+  it("emits child_workflow_spawned + child_workflow_completed instrumentation on the parent", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = engineWith(
+      [parentFlowDef(DEFAULT_SPAWN), childFlowDef()],
+      cap.instrumentation,
+    );
+    const parent = await engine.startInstance({
+      definitionId: "wfd_parentfl1",
+      tenantId: TENANT,
+    });
+    await engine.submitSignal({
+      signalName: "finish",
+      correlationKey: "child-corr",
+      tenantId: TENANT,
+    });
+    const spawned = cap.events.find((e) => e.kind === "child_workflow_spawned");
+    expect(spawned?.instanceId).toBe(parent.instanceId);
+    expect(spawned?.attributes["childDefinitionKey"]).toBe("childflow");
+    const completed = cap.events.find((e) => e.kind === "child_workflow_completed");
+    expect(completed?.instanceId).toBe(parent.instanceId);
+    expect(completed?.attributes["childTerminalKind"]).toBe("terminal_success");
+  });
+
+  it("no-ops (no child spawned) when childDefinitionKey is missing", async () => {
+    const { engine } = engineWith([parentFlowDef({}), childFlowDef()]);
+    const parent = await engine.startInstance({
+      definitionId: "wfd_parentfl1",
+      tenantId: TENANT,
+    });
+    const kinds = (await engine.listEvents(parent.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("child_workflow_spawned");
+    expect(parent.status).toBe("waiting_for_child");
+  });
+
+  it("no-ops when no published definition has the child key", async () => {
+    const { engine } = engineWith([
+      parentFlowDef({ childDefinitionKey: "ghostflow" }),
+      childFlowDef(),
+    ]);
+    const parent = await engine.startInstance({
+      definitionId: "wfd_parentfl1",
+      tenantId: TENANT,
+    });
+    const kinds = (await engine.listEvents(parent.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("child_workflow_spawned");
+  });
+
+  it("a synchronously-terminating child drives the parent to completion within startInstance", async () => {
+    const trivChild = definitionFixture({
+      id: "wfd_trivchild",
+      definitionKey: "trivchild",
+      initialState: "t_start",
+      states: [
+        {
+          name: "t_start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "t_done",
+          kind: "terminal_success",
+          label: "D",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "go",
+          fromState: "t_start",
+          toState: "t_done",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+    const trivParent = definitionFixture({
+      id: "wfd_trivparen",
+      definitionKey: "trivparent",
+      initialState: "tp_start",
+      states: [
+        {
+          name: "tp_start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "tp_wait",
+          kind: "waiting",
+          label: "W",
+          onEntryActions: [
+            { kind: "spawn_child_workflow", parameters: { childDefinitionKey: "trivchild" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "tp_done",
+          kind: "terminal_success",
+          label: "D",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "spawn",
+          fromState: "tp_start",
+          toState: "tp_wait",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "done",
+          fromState: "tp_wait",
+          toState: "tp_done",
+          trigger: { kind: "child_workflow_completed", childDefinitionKey: "trivchild" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+    const { engine } = engineWith([trivParent, trivChild]);
+    const parent = await engine.startInstance({ definitionId: "wfd_trivparen", tenantId: TENANT });
+    expect(parent.status).toBe("completed");
+    expect(parent.currentState).toBe("tp_done");
+    const kinds = (await engine.listEvents(parent.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("child_workflow_spawned");
+    expect(kinds).toContain("child_workflow_completed");
+  });
+
+  it("includes child_workflow_spawned + child_workflow_completed in the kinds enum", () => {
+    const enabled = WORKFLOW_INSTRUMENTATION_KINDS as readonly string[];
+    expect(enabled).toContain("child_workflow_spawned");
+    expect(enabled).toContain("child_workflow_completed");
+  });
+});
