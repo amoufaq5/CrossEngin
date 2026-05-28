@@ -2149,3 +2149,350 @@ describe("spawn_child_workflow action (M8.5)", () => {
     expect(enabled).toContain("child_workflow_completed");
   });
 });
+
+describe("multi-trigger wait drivers — signals + timers cross-reach (M8.6)", () => {
+  // The "deadline + early-completion" pattern: a state with kind="waiting",
+  // both signal_received and timer_fired outgoing triggers, and an on-entry
+  // schedule_timer. The timer_scheduled event projects the instance to
+  // status="waiting_for_timer" (the timer set overrides refineStatus), so the
+  // deadline drives via tickTimers (always worked). M8.6 widens submitSignal
+  // to ALSO reach a waiting_for_timer instance — a signal can now pre-empt
+  // the deadline directly without waiting for the timer to fire. The
+  // symmetric widening lets tickTimers reach a waiting_for_signal instance
+  // (for long-lived cross-state timers that outlive their scheduling state).
+  function deadlineSignalDef(): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_deadline1",
+      definitionKey: "deadline_signal",
+      initialState: "start",
+      states: [
+        {
+          name: "start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "active",
+          kind: "waiting",
+          label: "Active",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "deadline", relativeSeconds: 60 },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "aborted",
+          kind: "terminal_success",
+          label: "Aborted",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "expired",
+          kind: "terminal_failure",
+          label: "Expired",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "begin",
+          fromState: "start",
+          toState: "active",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "abort",
+          fromState: "active",
+          toState: "aborted",
+          trigger: { kind: "signal_received", signalName: "abort" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "expire",
+          fromState: "active",
+          toState: "expired",
+          trigger: { kind: "timer_fired", timerName: "deadline" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+  }
+
+  // A state with ONLY a timer trigger (no signal) — status waiting_for_timer.
+  // Used to prove submitSignal now reaches such instances (signal events
+  // appended; no transition fires because the state has no signal_received
+  // trigger).
+  function timerOnlyDef(): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_timeronly",
+      definitionKey: "timer_only",
+      initialState: "start",
+      states: [
+        {
+          name: "start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "wait",
+          kind: "waiting",
+          label: "Wait",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "tick", relativeSeconds: 60 },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "Done",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "begin",
+          fromState: "start",
+          toState: "wait",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "tick",
+          fromState: "wait",
+          toState: "done",
+          trigger: { kind: "timer_fired", timerName: "tick" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+  }
+
+  // A cross-state timer: a long-lived timer is scheduled in "prep", a signal
+  // moves the instance to "mid" (waiting on a different signal), but the
+  // timer is still active. Used to prove tickTimers' widening to
+  // waiting_for_signal — the cross-state timer fires on the new state.
+  function crossStateTimerDef(): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_crossstat",
+      definitionKey: "cross_state_timer",
+      initialState: "start",
+      states: [
+        {
+          name: "start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "prep",
+          kind: "waiting",
+          label: "Prep",
+          onEntryActions: [
+            {
+              kind: "schedule_timer",
+              parameters: { timerName: "sla", relativeSeconds: 60 },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "mid",
+          kind: "waiting",
+          label: "Mid",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "done",
+          kind: "terminal_success",
+          label: "Done",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "expired",
+          kind: "terminal_failure",
+          label: "Expired",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "begin",
+          fromState: "start",
+          toState: "prep",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "kick",
+          fromState: "prep",
+          toState: "mid",
+          trigger: { kind: "signal_received", signalName: "kick" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "finish",
+          fromState: "mid",
+          toState: "done",
+          trigger: { kind: "signal_received", signalName: "finish" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "sla_in_mid",
+          fromState: "mid",
+          toState: "expired",
+          trigger: { kind: "timer_fired", timerName: "sla" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+  }
+
+  it("submitSignal reaches a waiting_for_timer instance and pre-empts the deadline", async () => {
+    // The on-entry schedule_timer forces status=waiting_for_timer. Before
+    // M8.6, submitSignal SKIPPED such instances → the signal couldn't pre-empt
+    // the deadline. With the widening, the signal_received transition fires
+    // and the instance transitions before the timer would have fired.
+    const { engine } = makeEngine({ definition: deadlineSignalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_deadline1",
+      tenantId: TENANT,
+      correlationKey: "x",
+    });
+    expect(state.status).toBe("waiting_for_timer");
+    expect(state.currentState).toBe("active");
+
+    const result = await engine.submitSignal({
+      signalName: "abort",
+      correlationKey: "x",
+      tenantId: TENANT,
+    });
+    expect(result.matchedInstanceIds).toEqual([state.instanceId]);
+
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("completed");
+    expect(final?.currentState).toBe("aborted");
+  });
+
+  it("tickTimers still fires the deadline on the same multi-trigger state (sanity, behavior preserved)", async () => {
+    const clock = new FixedClock(new Date("2026-05-26T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: deadlineSignalDef(), clock });
+    const state = await engine.startInstance({
+      definitionId: "wfd_deadline1",
+      tenantId: TENANT,
+      correlationKey: "x",
+    });
+    clock.advance(120_000);
+    const result = await engine.tickTimers(clock.now().getTime());
+    expect(result.firedTimerIds.length).toBe(1);
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("failed");
+    expect(final?.currentState).toBe("expired");
+  });
+
+  it("tickTimers reaches a waiting_for_signal instance with a cross-state active timer", async () => {
+    // prep schedules a long timer T → status waiting_for_timer. submitSignal
+    // 'kick' moves the instance to mid (waiting on a different signal) — after
+    // refineStatus on mid (signal_received outgoing only) the status flips to
+    // waiting_for_signal, but T is still active (never fired/cancelled). With
+    // M8.6's widening, tickTimers picks up the waiting_for_signal instance,
+    // fires T, and drives mid's timer_fired transition to expired.
+    const clock = new FixedClock(new Date("2026-05-26T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: crossStateTimerDef(), clock });
+    const state = await engine.startInstance({
+      definitionId: "wfd_crossstat",
+      tenantId: TENANT,
+      correlationKey: "x",
+    });
+    expect(state.status).toBe("waiting_for_timer"); // timer scheduled in prep
+
+    await engine.submitSignal({
+      signalName: "kick",
+      correlationKey: "x",
+      tenantId: TENANT,
+    });
+    const afterKick = await engine.getInstanceState(state.instanceId);
+    expect(afterKick?.currentState).toBe("mid");
+    expect(afterKick?.status).toBe("waiting_for_signal"); // mid has only signal triggers in refineStatus
+
+    clock.advance(120_000);
+    const tick = await engine.tickTimers(clock.now().getTime());
+    expect(tick.firedTimerIds.length).toBe(1);
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("failed");
+    expect(final?.currentState).toBe("expired");
+  });
+
+  it("submitSignal reaches a waiting_for_timer instance even without a matching trigger (signal events recorded; no transition)", async () => {
+    const { engine } = makeEngine({ definition: timerOnlyDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_timeronly",
+      tenantId: TENANT,
+      correlationKey: "x",
+    });
+    expect(state.status).toBe("waiting_for_timer");
+
+    const result = await engine.submitSignal({
+      signalName: "anything",
+      correlationKey: "x",
+      tenantId: TENANT,
+    });
+    expect(result.matchedInstanceIds).toEqual([state.instanceId]);
+
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("signal_received");
+    expect(kinds).toContain("signal_consumed");
+
+    const after = await engine.getInstanceState(state.instanceId);
+    expect(after?.status).toBe("waiting_for_timer");
+    expect(after?.currentState).toBe("wait");
+  });
+});

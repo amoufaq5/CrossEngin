@@ -248,7 +248,12 @@ export class WorkflowEngine {
       if (corr !== input.correlationKey) continue;
       const state = await this.getInstanceState(instanceId);
       if (state === null) continue;
-      if (state.status !== "running" && state.status !== "waiting_for_signal") continue;
+      if (
+        state.status !== "running" &&
+        state.status !== "waiting_for_signal" &&
+        state.status !== "waiting_for_timer"
+      )
+        continue;
       const definition = this.definitions.get(state.definitionId);
       if (definition === undefined) continue;
 
@@ -340,7 +345,12 @@ export class WorkflowEngine {
     for (const [instanceId] of this.instanceTenant) {
       const state = await this.getInstanceState(instanceId);
       if (state === null) continue;
-      if (state.status !== "waiting_for_timer" && state.status !== "running") continue;
+      if (
+        state.status !== "waiting_for_timer" &&
+        state.status !== "running" &&
+        state.status !== "waiting_for_signal"
+      )
+        continue;
       const definition = this.definitions.get(state.definitionId);
       if (definition === undefined) continue;
       const events = await this.eventLog.listByInstance(instanceId);
