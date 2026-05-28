@@ -49,7 +49,7 @@ function policyRow(
 }
 
 describe("PostgresTraceRetention.knownPrunableTables", () => {
-  it("exposes the four trace tables the adapter knows how to prune", () => {
+  it("exposes the five trace tables the adapter knows how to prune", () => {
     const tables = PostgresTraceRetention.knownPrunableTables();
     expect(new Set(tables)).toEqual(
       new Set([
@@ -57,6 +57,7 @@ describe("PostgresTraceRetention.knownPrunableTables", () => {
         "llm_latency_samples",
         "llm_call_traces",
         "tenant_retention_opt_out_history",
+        "gateway_pipeline_executions",
       ]),
     );
   });
@@ -317,7 +318,7 @@ describe("PostgresTraceRetention — safety properties", () => {
     // This is a documentation test: the allowlist is private but exposed via
     // knownPrunableTables(). Any change to the allowlist requires source edits.
     const allowed = PostgresTraceRetention.knownPrunableTables();
-    expect(allowed.length).toBe(4);
+    expect(allowed.length).toBe(5);
     for (const t of allowed) {
       expect(t).toMatch(/^[a-z_]+$/);
     }
@@ -797,7 +798,12 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
   it("tablesWithTenantId exposes the prunable tables that can have per-tenant policies", () => {
     const tables = PostgresTraceRetention.tablesWithTenantId();
     expect(new Set(tables)).toEqual(
-      new Set(["workflow_traces", "llm_call_traces", "tenant_retention_opt_out_history"]),
+      new Set([
+        "workflow_traces",
+        "llm_call_traces",
+        "tenant_retention_opt_out_history",
+        "gateway_pipeline_executions",
+      ]),
     );
     expect(tables).not.toContain("llm_latency_samples");
   });
@@ -3301,6 +3307,181 @@ describe("PostgresTraceRetention history-table retention (M6.7.zz.tenant.opt-out
     const result = results.find((x) => x.tableName === "tenant_retention_opt_out_history");
     expect(result?.status).toBe("previewed");
     expect(result?.wouldDeleteCount).toBe(42);
+  });
+});
+
+describe("PostgresTraceRetention gateway-pipeline-executions retention (M4.11)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  it("prune issues DELETE against meta.gateway_pipeline_executions using started_at column", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "gateway_pipeline_executions",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn, clock: () => 1_700_000_000_000 });
+    await r.prune();
+    const delCall = capture.find((c) =>
+      c.sql.startsWith("DELETE FROM meta.gateway_pipeline_executions"),
+    );
+    expect(delCall?.sql).toContain("started_at < to_timestamp");
+  });
+
+  it("platform-default DELETE includes 'tenant_id IS NULL OR' branch (nullableTenantId=true) so platform-level rows are swept", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "gateway_pipeline_executions",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const delCall = capture.find((c) =>
+      c.sql.startsWith("DELETE FROM meta.gateway_pipeline_executions"),
+    );
+    expect(delCall?.sql).toContain("tenant_id IS NULL OR tenant_id NOT IN");
+  });
+
+  it("the three pre-existing tenant-bearing tables still use NOT IN without the IS NULL prefix (backward compat)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "workflow_traces",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const delCall = capture.find((c) => c.sql.startsWith("DELETE FROM meta.workflow_traces"));
+    expect(delCall?.sql).not.toContain("tenant_id IS NULL OR");
+    expect(delCall?.sql).toContain("tenant_id NOT IN");
+  });
+
+  it("per-tenant retention applies to gateway_pipeline_executions (hasTenantId=true)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "gateway_pipeline_executions",
+              retention_days: 365,
+              enabled: true,
+              opt_out: false,
+              opt_out_reason: null,
+              opt_out_until: null,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find(
+      (x) => x.tenantId === TENANT_A && x.tableName === "gateway_pipeline_executions",
+    );
+    expect(tenantResult?.status).toBe("pruned");
+    const tenantDelete = capture.find(
+      (c) =>
+        c.sql.startsWith("DELETE FROM meta.gateway_pipeline_executions") &&
+        c.sql.includes("tenant_id = $1"),
+    );
+    expect(tenantDelete).toBeDefined();
+    expect(tenantDelete?.params?.[0]).toBe(TENANT_A);
+  });
+
+  it("effectiveRetention resolves for gateway_pipeline_executions when platform policy is set", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "gateway_pipeline_executions",
+              retention_days: 90,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "gateway_pipeline_executions");
+    expect(result.source).toBe("platform");
+    if (result.source === "platform") {
+      expect(result.retentionDays).toBe(90);
+    }
+  });
+
+  it("previewPrune renders count for gateway_pipeline_executions and uses the IS NULL OR branch in the COUNT subquery", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "gateway_pipeline_executions",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("COUNT(*)") && sql.includes("gateway_pipeline_executions")) {
+        return { rows: [{ count: "1042" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.previewPrune();
+    const result = results.find((x) => x.tableName === "gateway_pipeline_executions");
+    expect(result?.status).toBe("previewed");
+    expect(result?.wouldDeleteCount).toBe(1042);
+    const countCall = capture.find(
+      (c) => c.sql.includes("COUNT(*)") && c.sql.includes("gateway_pipeline_executions"),
+    );
+    expect(countCall?.sql).toContain("tenant_id IS NULL OR tenant_id NOT IN");
   });
 });
 

@@ -90,6 +90,12 @@ export function computeFieldVariations(
 interface PrunableTableSpec {
   readonly timeColumn: string;
   readonly hasTenantId: boolean;
+  // True when tenant_id column is NULLABLE (platform-level rows have tenant_id IS NULL).
+  // Affects ONLY the platform-default DELETE/COUNT: with NOT IN (...), PG silently
+  // excludes NULL rows so we must explicitly OR `tenant_id IS NULL` to sweep them.
+  // Per-tenant DELETE (`WHERE tenant_id = $1`) is unaffected since null-tenant rows
+  // can never match a per-tenant policy.
+  readonly nullableTenantId?: boolean;
 }
 
 const PRUNABLE_TABLES: Readonly<Record<string, PrunableTableSpec>> = {
@@ -99,6 +105,11 @@ const PRUNABLE_TABLES: Readonly<Record<string, PrunableTableSpec>> = {
   tenant_retention_opt_out_history: {
     timeColumn: "occurred_at",
     hasTenantId: true,
+  },
+  gateway_pipeline_executions: {
+    timeColumn: "started_at",
+    hasTenantId: true,
+    nullableTenantId: true,
   },
 };
 
@@ -772,13 +783,13 @@ export class PostgresTraceRetention {
         ? await this.conn.query(
             `DELETE FROM ${SCHEMA}.${policy.tableName}
              WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
-               AND tenant_id NOT IN (
+               AND (${spec.nullableTenantId ? "tenant_id IS NULL OR " : ""}tenant_id NOT IN (
                  SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
                  WHERE table_name = $2
                    AND (enabled = true
                         OR (opt_out = true
                             AND (opt_out_until IS NULL OR opt_out_until > now())))
-               )`,
+               ))`,
             [cutoffMs, policy.tableName],
           )
         : await this.conn.query(
@@ -895,13 +906,13 @@ export class PostgresTraceRetention {
             `SELECT COUNT(*)::TEXT AS count
              FROM ${SCHEMA}.${policy.tableName}
              WHERE ${spec.timeColumn} < to_timestamp($1 / 1000.0)
-               AND tenant_id NOT IN (
+               AND (${spec.nullableTenantId ? "tenant_id IS NULL OR " : ""}tenant_id NOT IN (
                  SELECT tenant_id FROM ${SCHEMA}.${TENANT_POLICIES_TABLE}
                  WHERE table_name = $2
                    AND (enabled = true
                         OR (opt_out = true
                             AND (opt_out_until IS NULL OR opt_out_until > now())))
-               )`,
+               ))`,
             [cutoffMs, policy.tableName],
           )
         : await this.conn.query<{ count: string }>(

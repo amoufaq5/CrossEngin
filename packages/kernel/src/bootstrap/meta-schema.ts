@@ -9193,7 +9193,7 @@ export const META_RETENTION_POLICIES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "table_name IN ('workflow_traces', 'llm_latency_samples', 'llm_call_traces', 'tenant_retention_opt_out_history')",
+        "table_name IN ('workflow_traces', 'llm_latency_samples', 'llm_call_traces', 'tenant_retention_opt_out_history', 'gateway_pipeline_executions')",
     },
     {
       name: "retention_days",
@@ -9218,7 +9218,7 @@ export const META_TENANT_RETENTION_POLICIES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "table_name IN ('workflow_traces', 'llm_call_traces', 'tenant_retention_opt_out_history')",
+        "table_name IN ('workflow_traces', 'llm_call_traces', 'tenant_retention_opt_out_history', 'gateway_pipeline_executions')",
     },
     {
       name: "retention_days",
