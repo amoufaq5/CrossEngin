@@ -111,6 +111,11 @@ const PRUNABLE_TABLES: Readonly<Record<string, PrunableTableSpec>> = {
     hasTenantId: true,
     nullableTenantId: true,
   },
+  rate_limit_decisions: {
+    timeColumn: "decided_at",
+    hasTenantId: true,
+    nullableTenantId: true,
+  },
 };
 
 export interface PostgresTraceRetentionOptions {

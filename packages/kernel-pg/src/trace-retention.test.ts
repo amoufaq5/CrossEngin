@@ -49,7 +49,7 @@ function policyRow(
 }
 
 describe("PostgresTraceRetention.knownPrunableTables", () => {
-  it("exposes the five trace tables the adapter knows how to prune", () => {
+  it("exposes the six trace tables the adapter knows how to prune", () => {
     const tables = PostgresTraceRetention.knownPrunableTables();
     expect(new Set(tables)).toEqual(
       new Set([
@@ -58,6 +58,7 @@ describe("PostgresTraceRetention.knownPrunableTables", () => {
         "llm_call_traces",
         "tenant_retention_opt_out_history",
         "gateway_pipeline_executions",
+        "rate_limit_decisions",
       ]),
     );
   });
@@ -318,7 +319,7 @@ describe("PostgresTraceRetention — safety properties", () => {
     // This is a documentation test: the allowlist is private but exposed via
     // knownPrunableTables(). Any change to the allowlist requires source edits.
     const allowed = PostgresTraceRetention.knownPrunableTables();
-    expect(allowed.length).toBe(5);
+    expect(allowed.length).toBe(6);
     for (const t of allowed) {
       expect(t).toMatch(/^[a-z_]+$/);
     }
@@ -803,6 +804,7 @@ describe("PostgresTraceRetention — per-tenant policies (M6.7.zz.tenant)", () =
         "llm_call_traces",
         "tenant_retention_opt_out_history",
         "gateway_pipeline_executions",
+        "rate_limit_decisions",
       ]),
     );
     expect(tables).not.toContain("llm_latency_samples");
@@ -3480,6 +3482,152 @@ describe("PostgresTraceRetention gateway-pipeline-executions retention (M4.11)",
     expect(result?.wouldDeleteCount).toBe(1042);
     const countCall = capture.find(
       (c) => c.sql.includes("COUNT(*)") && c.sql.includes("gateway_pipeline_executions"),
+    );
+    expect(countCall?.sql).toContain("tenant_id IS NULL OR tenant_id NOT IN");
+  });
+});
+
+describe("PostgresTraceRetention rate-limit-decisions retention (M4.11.x)", () => {
+  const TENANT_A = "00000000-0000-4000-8000-00000000000A";
+
+  it("prune issues DELETE against meta.rate_limit_decisions using decided_at column", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "rate_limit_decisions",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn, clock: () => 1_700_000_000_000 });
+    await r.prune();
+    const delCall = capture.find((c) => c.sql.startsWith("DELETE FROM meta.rate_limit_decisions"));
+    expect(delCall?.sql).toContain("decided_at < to_timestamp");
+  });
+
+  it("platform-default DELETE includes the 'tenant_id IS NULL OR' branch — nullableTenantId sweeps anonymous-principal rows", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "rate_limit_decisions",
+              retention_days: 30,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    await r.prune();
+    const delCall = capture.find((c) => c.sql.startsWith("DELETE FROM meta.rate_limit_decisions"));
+    expect(delCall?.sql).toContain("tenant_id IS NULL OR tenant_id NOT IN");
+  });
+
+  it("per-tenant retention applies to rate_limit_decisions (standard tenant_id=$1 DELETE)", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.tenant_retention_policies")) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT_A,
+              table_name: "rate_limit_decisions",
+              retention_days: 365,
+              enabled: true,
+              opt_out: false,
+              opt_out_reason: null,
+              opt_out_until: null,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.prune();
+    const tenantResult = results.find(
+      (x) => x.tenantId === TENANT_A && x.tableName === "rate_limit_decisions",
+    );
+    expect(tenantResult?.status).toBe("pruned");
+    const tenantDelete = capture.find(
+      (c) =>
+        c.sql.startsWith("DELETE FROM meta.rate_limit_decisions") &&
+        c.sql.includes("tenant_id = $1"),
+    );
+    expect(tenantDelete).toBeDefined();
+    expect(tenantDelete?.params?.[0]).toBe(TENANT_A);
+  });
+
+  it("effectiveRetention resolves for rate_limit_decisions when platform policy is set", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "rate_limit_decisions",
+              retention_days: 90,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const r = new PostgresTraceRetention({ conn });
+    const result = await r.effectiveRetention(TENANT_A, "rate_limit_decisions");
+    expect(result.source).toBe("platform");
+    if (result.source === "platform") {
+      expect(result.retentionDays).toBe(90);
+    }
+  });
+
+  it("previewPrune COUNT subquery includes the 'IS NULL OR' nullableTenantId branch + renders count", async () => {
+    const capture: Capture[] = [];
+    const conn = mockConnection((sql) => {
+      if (sql.startsWith("SELECT") && sql.includes("FROM meta.retention_policies")) {
+        return {
+          rows: [
+            {
+              table_name: "rate_limit_decisions",
+              retention_days: 7,
+              enabled: true,
+              last_pruned_at: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("COUNT(*)") && sql.includes("rate_limit_decisions")) {
+        return { rows: [{ count: "5234" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }, capture);
+    const r = new PostgresTraceRetention({ conn });
+    const results = await r.previewPrune();
+    const result = results.find((x) => x.tableName === "rate_limit_decisions");
+    expect(result?.status).toBe("previewed");
+    expect(result?.wouldDeleteCount).toBe(5234);
+    const countCall = capture.find(
+      (c) => c.sql.includes("COUNT(*)") && c.sql.includes("rate_limit_decisions"),
     );
     expect(countCall?.sql).toContain("tenant_id IS NULL OR tenant_id NOT IN");
   });
