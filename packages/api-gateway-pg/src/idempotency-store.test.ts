@@ -207,6 +207,128 @@ describe("PostgresIdempotencyStore.previewDeleteExpired (M4.12)", () => {
   });
 });
 
+describe("PostgresIdempotencyStore prune scope options (M4.13)", () => {
+  const NOW = new Date("2026-05-26T12:00:00.000Z");
+
+  it("deleteExpired() with no options preserves the byte-identical M4.12 SQL shape", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    await store.deleteExpired(NOW);
+    expect(captured[0]?.sql).toBe(
+      "DELETE FROM meta.gateway_idempotency_records WHERE expires_at < $1",
+    );
+    expect(captured[0]?.params).toEqual([NOW.toISOString()]);
+  });
+
+  it("deleteExpired threads operationId as AND operation_id = $2", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [], rowCount: 3 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    const deleted = await store.deleteExpired(NOW, { operationId: "tenants.create" });
+    expect(deleted).toBe(3);
+    expect(captured[0]?.sql).toContain("AND operation_id = $2");
+    expect(captured[0]?.sql).not.toContain("method =");
+    expect(captured[0]?.sql).not.toContain("LIMIT");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), "tenants.create"]);
+  });
+
+  it("deleteExpired threads method as AND method = $2", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [], rowCount: 4 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    await store.deleteExpired(NOW, { method: "POST" });
+    expect(captured[0]?.sql).toContain("AND method = $2");
+    expect(captured[0]?.sql).not.toContain("operation_id =");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), "POST"]);
+  });
+
+  it("deleteExpired threads both operationId + method in $2 / $3 with operationId first", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [], rowCount: 2 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    await store.deleteExpired(NOW, { operationId: "files.upload", method: "PUT" });
+    expect(captured[0]?.sql).toContain("AND operation_id = $2");
+    expect(captured[0]?.sql).toContain("AND method = $3");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), "files.upload", "PUT"]);
+  });
+
+  it("deleteExpired with --limit uses id IN (SELECT ... LIMIT) subquery + binds the limit last", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [], rowCount: 100 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    await store.deleteExpired(NOW, { limit: 100 });
+    expect(captured[0]?.sql).toContain("DELETE FROM meta.gateway_idempotency_records");
+    expect(captured[0]?.sql).toContain("WHERE record_id IN (");
+    expect(captured[0]?.sql).toContain("LIMIT $2");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), 100]);
+  });
+
+  it("deleteExpired with all three options binds in order: now, operationId, method, limit", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [], rowCount: 50 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    await store.deleteExpired(NOW, {
+      operationId: "orders.create",
+      method: "POST",
+      limit: 50,
+    });
+    expect(captured[0]?.sql).toContain("AND operation_id = $2");
+    expect(captured[0]?.sql).toContain("AND method = $3");
+    expect(captured[0]?.sql).toContain("LIMIT $4");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), "orders.create", "POST", 50]);
+  });
+
+  it("previewDeleteExpired with limit wraps the inner LIMIT in a sub-SELECT so the count is capped", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [{ count: "100" }], rowCount: 1 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    const wouldDelete = await store.previewDeleteExpired(NOW, {
+      operationId: "tenants.create",
+      limit: 100,
+    });
+    expect(wouldDelete).toBe(100);
+    expect(captured[0]?.sql).toContain("SELECT COUNT(*)::TEXT AS count FROM (");
+    expect(captured[0]?.sql).toContain("LIMIT $3");
+    expect(captured[0]?.sql).toContain(") sub");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), "tenants.create", 100]);
+  });
+
+  it("previewDeleteExpired without limit but with method emits the simpler SELECT shape", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [{ count: "8" }], rowCount: 1 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    await store.previewDeleteExpired(NOW, { method: "DELETE" });
+    expect(captured[0]?.sql).not.toContain("FROM (");
+    expect(captured[0]?.sql).toContain("AND method = $2");
+    expect(captured[0]?.params).toEqual([NOW.toISOString(), "DELETE"]);
+  });
+});
+
 function recordToRow(r: IdempotencyRecord): Record<string, unknown> {
   return {
     record_id: r.id,

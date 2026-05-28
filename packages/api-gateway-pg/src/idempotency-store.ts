@@ -121,21 +121,80 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     return updated;
   }
 
-  async deleteExpired(now: Date): Promise<number> {
-    const result = await this.conn.query(`DELETE FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1`, [
-      now.toISOString(),
-    ]);
+  async deleteExpired(now: Date, options?: PruneExpiredOptions): Promise<number> {
+    const { whereTail, params } = buildExpiredScope(now, options);
+    const limit = options?.limit;
+    let result;
+    if (limit !== undefined) {
+      // PG DELETE doesn't support LIMIT; use id IN (SELECT ... LIMIT) so the
+      // capped count is honored without a separate transaction loop.
+      result = await this.conn.query(
+        `DELETE FROM ${SCHEMA}.${TABLE}
+         WHERE record_id IN (
+           SELECT record_id FROM ${SCHEMA}.${TABLE}
+           WHERE expires_at < $1${whereTail}
+           LIMIT $${params.length + 1}
+         )`,
+        [...params, limit],
+      );
+    } else {
+      result = await this.conn.query(
+        `DELETE FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1${whereTail}`,
+        params,
+      );
+    }
     return result.rowCount;
   }
 
   // Read-only counterpart of deleteExpired (M4.12). SELECT COUNT(*) of expired
   // records without deletion. Symmetric to ADR-0153's previewPrune pattern —
   // operators inspect what would be swept before running the live DELETE.
-  async previewDeleteExpired(now: Date): Promise<number> {
-    const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1`,
-      [now.toISOString()],
-    );
+  // M4.13: optional operationId / method / limit scope filters mirror
+  // deleteExpired; the preview honors LIMIT so wouldDeleteCount reflects what
+  // the corresponding live DELETE would actually remove.
+  async previewDeleteExpired(now: Date, options?: PruneExpiredOptions): Promise<number> {
+    const { whereTail, params } = buildExpiredScope(now, options);
+    const limit = options?.limit;
+    let result;
+    if (limit !== undefined) {
+      result = await this.conn.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM (
+           SELECT 1 FROM ${SCHEMA}.${TABLE}
+           WHERE expires_at < $1${whereTail}
+           LIMIT $${params.length + 1}
+         ) sub`,
+        [...params, limit],
+      );
+    } else {
+      result = await this.conn.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1${whereTail}`,
+        params,
+      );
+    }
     return Number(result.rows[0]?.count ?? 0);
   }
+}
+
+// M4.13 scope options for the prune actions.
+export interface PruneExpiredOptions {
+  readonly operationId?: string;
+  readonly method?: string;
+  readonly limit?: number;
+}
+
+function buildExpiredScope(
+  now: Date,
+  options: PruneExpiredOptions | undefined,
+): { whereTail: string; params: unknown[] } {
+  const params: unknown[] = [now.toISOString()];
+  let tail = "";
+  if (options?.operationId !== undefined) {
+    params.push(options.operationId);
+    tail += ` AND operation_id = $${params.length}`;
+  }
+  if (options?.method !== undefined) {
+    params.push(options.method);
+    tail += ` AND method = $${params.length}`;
+  }
+  return { whereTail: tail, params };
 }

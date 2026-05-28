@@ -660,3 +660,188 @@ describe("runGateway prune-idempotency (M4.12)", () => {
     expect(errChunks.join("")).toMatch(/PG env/);
   });
 });
+
+describe("runGateway prune-idempotency scope flags (M4.13)", () => {
+  const fixedNow = new Date("2026-05-26T12:00:00.000Z");
+
+  it("threads --operation-id through to deleteExpired + echoes the scope in human output", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 3 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--operation-id", "tenants.create"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(captured[0]?.sql).toContain("AND operation_id = $2");
+    expect(captured[0]?.params?.[1]).toBe("tenants.create");
+    const stdout = outChunks.join("");
+    expect(stdout).toContain("deleted 3 expired idempotency record(s)");
+    expect(stdout).toContain("operationId=tenants.create");
+  });
+
+  it("threads --method through to deleteExpired", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 7 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency", "--method", "POST"), ctx);
+    expect(code).toBe(0);
+    expect(captured[0]?.sql).toContain("AND method = $2");
+    expect(captured[0]?.params?.[1]).toBe("POST");
+    expect(outChunks.join("")).toContain("method=POST");
+  });
+
+  it("rejects --method with an invalid HTTP verb (exit 2, no PG call)", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 0 }));
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency", "--method", "GET"), ctx);
+    expect(code).toBe(2);
+    expect(captured).toHaveLength(0);
+    expect(errChunks.join("")).toMatch(/--method must be one of POST, PUT, PATCH, DELETE/);
+  });
+
+  it("threads --limit as a positive integer + uses the LIMIT subquery SQL shape", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 100 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency", "--limit", "100"), ctx);
+    expect(code).toBe(0);
+    expect(captured[0]?.sql).toContain("LIMIT $2");
+    expect(captured[0]?.params?.[1]).toBe(100);
+    expect(outChunks.join("")).toContain("limit=100");
+  });
+
+  it("rejects --limit when not a positive integer (exit 2, no PG call)", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 0 }));
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const codeZero = await runGateway(parseGatewayArgs("prune-idempotency", "--limit", "0"), ctx);
+    expect(codeZero).toBe(2);
+    const codeNaN = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--limit", "not-a-number"),
+      ctx,
+    );
+    expect(codeNaN).toBe(2);
+    const codeFloat = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--limit", "1.5"),
+      ctx,
+    );
+    expect(codeFloat).toBe(2);
+    expect(captured).toHaveLength(0);
+    expect(errChunks.join("")).toMatch(/--limit must be a positive integer/);
+  });
+
+  it("combines all three scope flags through deleteExpired with bind order now, op, method, limit", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 50 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "prune-idempotency",
+        "--operation-id",
+        "orders.create",
+        "--method",
+        "POST",
+        "--limit",
+        "50",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(captured[0]?.params).toEqual([fixedNow.toISOString(), "orders.create", "POST", 50]);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain("operationId=orders.create");
+    expect(stdout).toContain("method=POST");
+    expect(stdout).toContain("limit=50");
+  });
+
+  it("JSON envelope echoes operationId / method / limit (null when not set)", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [], rowCount: 5 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--operation-id", "tenants.create", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as Record<string, unknown>;
+    expect(env).toMatchObject({
+      action: "gateway.prune-idempotency",
+      dryRun: false,
+      deletedCount: 5,
+      operationId: "tenants.create",
+      method: null,
+      limit: null,
+    });
+  });
+
+  it("dry-run JSON envelope echoes scope and uses wouldDeleteCount", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [{ count: "12" }], rowCount: 1 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "prune-idempotency",
+        "--dry-run",
+        "--method",
+        "PATCH",
+        "--limit",
+        "12",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as Record<string, unknown>;
+    expect(env).toMatchObject({
+      action: "gateway.prune-idempotency",
+      dryRun: true,
+      wouldDeleteCount: 12,
+      operationId: null,
+      method: "PATCH",
+      limit: 12,
+    });
+  });
+});

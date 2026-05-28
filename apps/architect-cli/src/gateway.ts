@@ -80,11 +80,51 @@ export async function runGateway(command: ParsedCommand, ctx: GatewayContext): P
   return 2;
 }
 
+const IDEMPOTENCY_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
+type IdempotencyMethod = (typeof IDEMPOTENCY_METHODS)[number];
+function isIdempotencyMethod(v: string): v is IdempotencyMethod {
+  return (IDEMPOTENCY_METHODS as readonly string[]).includes(v);
+}
+
 async function runGatewayPruneIdempotency(
   command: ParsedCommand,
   ctx: GatewayContext,
 ): Promise<number> {
   const dryRun = getBooleanFlag(command, "dry-run");
+  const operationId = getStringFlag(command, "operation-id");
+  const methodFlag = getStringFlag(command, "method");
+  const limitFlag = getStringFlag(command, "limit");
+
+  let method: IdempotencyMethod | undefined;
+  if (methodFlag !== null) {
+    if (!isIdempotencyMethod(methodFlag)) {
+      printError(
+        ctx.io,
+        `gateway prune-idempotency: --method must be one of ${IDEMPOTENCY_METHODS.join(", ")} (got '${methodFlag}')`,
+      );
+      return 2;
+    }
+    method = methodFlag;
+  }
+
+  let limit: number | undefined;
+  if (limitFlag !== null) {
+    const parsed = Number(limitFlag);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      printError(
+        ctx.io,
+        `gateway prune-idempotency: --limit must be a positive integer (got '${limitFlag}')`,
+      );
+      return 2;
+    }
+    limit = parsed;
+  }
+
+  const scope: { operationId?: string; method?: IdempotencyMethod; limit?: number } = {};
+  if (operationId !== null) scope.operationId = operationId;
+  if (method !== undefined) scope.method = method;
+  if (limit !== undefined) scope.limit = limit;
+
   let store: PostgresIdempotencyStore;
   if (ctx.idempotencyStoreOverride !== undefined) {
     store = ctx.idempotencyStoreOverride;
@@ -102,36 +142,43 @@ async function runGatewayPruneIdempotency(
     store = new PostgresIdempotencyStore(conn);
   }
   const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+  const scopeSuffix = renderScopeSuffix(scope);
   try {
     if (dryRun) {
-      const count = await store.previewDeleteExpired(now);
+      const count = await store.previewDeleteExpired(now, scope);
       if (command.format === "json") {
         printJson(ctx.io, {
           action: "gateway.prune-idempotency",
           dryRun: true,
           asOf: now.toISOString(),
           wouldDeleteCount: count,
+          operationId: operationId ?? null,
+          method: method ?? null,
+          limit: limit ?? null,
         });
       } else {
         printSuccess(
           ctx.io,
-          `${count} expired idempotency record(s) would be deleted (dry-run; as of ${now.toISOString()})`,
+          `${count} expired idempotency record(s) would be deleted (dry-run; as of ${now.toISOString()}${scopeSuffix})`,
         );
       }
       return 0;
     }
-    const deleted = await store.deleteExpired(now);
+    const deleted = await store.deleteExpired(now, scope);
     if (command.format === "json") {
       printJson(ctx.io, {
         action: "gateway.prune-idempotency",
         dryRun: false,
         asOf: now.toISOString(),
         deletedCount: deleted,
+        operationId: operationId ?? null,
+        method: method ?? null,
+        limit: limit ?? null,
       });
     } else {
       printSuccess(
         ctx.io,
-        `deleted ${deleted} expired idempotency record(s) (as of ${now.toISOString()})`,
+        `deleted ${deleted} expired idempotency record(s) (as of ${now.toISOString()}${scopeSuffix})`,
       );
     }
     return 0;
@@ -142,6 +189,18 @@ async function runGatewayPruneIdempotency(
     );
     return 1;
   }
+}
+
+function renderScopeSuffix(scope: {
+  operationId?: string;
+  method?: IdempotencyMethod;
+  limit?: number;
+}): string {
+  const parts: string[] = [];
+  if (scope.operationId !== undefined) parts.push(`operationId=${scope.operationId}`);
+  if (scope.method !== undefined) parts.push(`method=${scope.method}`);
+  if (scope.limit !== undefined) parts.push(`limit=${scope.limit}`);
+  return parts.length === 0 ? "" : `; scope: ${parts.join(", ")}`;
 }
 
 interface BuiltRuntime {
