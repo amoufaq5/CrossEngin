@@ -16,6 +16,7 @@ export const WORKFLOW_INSTRUMENTATION_KINDS = [
   "activity_failed",
   "child_workflow_spawned",
   "child_workflow_completed",
+  "manual_action_taken",
   "action_applied",
   "engine_error",
 ] as const;

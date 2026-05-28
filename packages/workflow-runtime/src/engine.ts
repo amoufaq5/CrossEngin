@@ -69,6 +69,23 @@ export interface TickTimersResult {
   readonly affectedInstanceIds: readonly string[];
 }
 
+export interface SubmitManualActionInput {
+  readonly instanceId: string;
+  readonly tenantId: string;
+  readonly actionName: string;
+  // Required: the manual_action_taken event schema requires a non-null actor.
+  readonly actorPrincipalId: string;
+  readonly actorRoles?: readonly string[];
+  readonly secondApproverPrincipalId?: string;
+  readonly reason?: string;
+  readonly attributes?: Record<string, unknown>;
+}
+
+export interface SubmitManualActionResult {
+  readonly applied: boolean;
+  readonly transitionName: string | null;
+}
+
 export class WorkflowEngine {
   private readonly eventLog: EventLog;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -337,6 +354,136 @@ export class WorkflowEngine {
     }
 
     return { deduplicated: false, matchedInstanceIds: matched, signalId };
+  }
+
+  // Driver for the manual_action transition trigger — the human / external-system
+  // counterpart to submitSignal / tickTimers / child completion. Operator targets
+  // a specific instance + action; the engine enforces the trigger's
+  // requiredRole + requiresFourEyes (rejects with throw), records the
+  // manual_action_taken event (audit, regardless of match), and fires the
+  // matching transition if one passes guards. Accepts running or
+  // waiting_for_manual statuses (terminal/other-waiting statuses throw).
+  async submitManualAction(input: SubmitManualActionInput): Promise<SubmitManualActionResult> {
+    const tenantId = this.instanceTenant.get(input.instanceId);
+    if (tenantId === undefined) {
+      throw new Error(`manual action: unknown instance ${input.instanceId}`);
+    }
+    if (tenantId !== input.tenantId) {
+      throw new Error(`manual action: instance ${input.instanceId} belongs to a different tenant`);
+    }
+    const state = await this.getInstanceState(input.instanceId);
+    if (state === null) {
+      throw new Error(`manual action: instance ${input.instanceId} has no projected state`);
+    }
+    if (
+      state.status === "completed" ||
+      state.status === "failed" ||
+      state.status === "cancelled" ||
+      state.status === "compensated"
+    ) {
+      throw new Error(
+        `manual action: instance ${input.instanceId} is in terminal status ${state.status}`,
+      );
+    }
+    if (state.status !== "running" && state.status !== "waiting_for_manual") {
+      throw new Error(
+        `manual action: instance ${input.instanceId} is in status ${state.status} (must be running or waiting_for_manual)`,
+      );
+    }
+    const definition = this.definitions.get(state.definitionId);
+    if (definition === undefined) {
+      throw new Error(`manual action: definition ${state.definitionId} not found`);
+    }
+
+    // Match by trigger kind+actionName and evaluate guards (role_required uses
+    // input.actorRoles via the default evaluator). Null = no transition matched.
+    const transition = evaluateNextTransition({
+      definition,
+      fromState: state.currentState,
+      trigger: { kind: "manual_action", actionName: input.actionName },
+      variables: state.variables,
+      ...(input.actorRoles !== undefined ? { principalRoles: input.actorRoles } : {}),
+      evaluator: this.guardEvaluator,
+    });
+
+    // If a candidate matched, enforce the trigger's own preconditions
+    // (separate from transition guards) before appending the audit event.
+    if (transition !== null && transition.trigger.kind === "manual_action") {
+      if (transition.trigger.requiresFourEyes) {
+        if (input.secondApproverPrincipalId === undefined) {
+          throw new Error(
+            `manual action ${input.actionName}: four-eyes required (secondApproverPrincipalId)`,
+          );
+        }
+        if (input.secondApproverPrincipalId === input.actorPrincipalId) {
+          throw new Error(
+            `manual action ${input.actionName}: four-eyes requires a distinct second approver`,
+          );
+        }
+      }
+      if (
+        transition.trigger.requiredRole !== undefined &&
+        !(input.actorRoles?.includes(transition.trigger.requiredRole) ?? false)
+      ) {
+        throw new Error(
+          `manual action ${input.actionName}: actor lacks required role ${transition.trigger.requiredRole}`,
+        );
+      }
+    }
+
+    const occurredAt = this.clock.nowIso();
+    const eventPayload: Record<string, unknown> = { actionName: input.actionName };
+    if (input.secondApproverPrincipalId !== undefined) {
+      eventPayload["secondApproverPrincipalId"] = input.secondApproverPrincipalId;
+    }
+    if (input.reason !== undefined) eventPayload["reason"] = input.reason;
+    if (input.attributes !== undefined) eventPayload["attributes"] = input.attributes;
+
+    const instrAttrs: Record<string, unknown> = {
+      actionName: input.actionName,
+      actorPrincipalId: input.actorPrincipalId,
+      transitionApplied: transition !== null,
+    };
+    if (transition !== null) instrAttrs["transitionName"] = transition.name;
+    if (input.secondApproverPrincipalId !== undefined) {
+      instrAttrs["secondApproverPrincipalId"] = input.secondApproverPrincipalId;
+    }
+    if (input.reason !== undefined) instrAttrs["reason"] = input.reason;
+
+    await this.emitInstrumentation("manual_action_taken", {
+      tenantId,
+      instanceId: input.instanceId,
+      definitionId: state.definitionId,
+      correlationId: this.instanceCorrelation.get(input.instanceId) ?? null,
+      attributes: instrAttrs,
+    });
+    const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
+    await this.appendEvent({
+      instanceId: input.instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "manual_action_taken",
+      occurredAt,
+      actorPrincipalId: input.actorPrincipalId,
+      actorSystemId: null,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: eventPayload,
+      correlationId: null,
+      causationEventId: null,
+    });
+
+    if (transition === null) {
+      return { applied: false, transitionName: null };
+    }
+    await this.applyTransition(input.instanceId, definition, transition, state, null, null);
+    await this.runStepLoop(input.instanceId, definition);
+    return { applied: true, transitionName: transition.name };
   }
 
   async tickTimers(nowMs: number): Promise<TickTimersResult> {

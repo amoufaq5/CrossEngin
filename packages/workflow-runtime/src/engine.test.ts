@@ -2496,3 +2496,284 @@ describe("multi-trigger wait drivers — signals + timers cross-reach (M8.6)", (
     expect(after?.currentState).toBe("wait");
   });
 });
+
+describe("submitManualAction — manual_action trigger driver (M8.7)", () => {
+  const ACTOR_A = "00000000-0000-4000-8000-0000000000a1";
+  const ACTOR_B = "00000000-0000-4000-8000-0000000000a2";
+  const TENANT_B = "00000000-0000-4000-8000-000000000002";
+
+  // pending is a manual_approval-kind state → status waiting_for_manual.
+  // "approve" requires both the manager role AND four-eyes (distinct second
+  // approver). "reject" has no prerequisites. An unknown actionName audits
+  // without firing a transition.
+  function approvalDef(): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_approvals",
+      definitionKey: "approvals",
+      initialState: "start",
+      states: [
+        {
+          name: "start",
+          kind: "initial",
+          label: "S",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "pending",
+          kind: "manual_approval",
+          label: "Pending",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "approved",
+          kind: "terminal_success",
+          label: "Approved",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "rejected",
+          kind: "terminal_failure",
+          label: "Rejected",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "begin",
+          fromState: "start",
+          toState: "pending",
+          trigger: { kind: "automatic" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "approve",
+          fromState: "pending",
+          toState: "approved",
+          trigger: {
+            kind: "manual_action",
+            actionName: "approve",
+            requiredRole: "manager",
+            requiresFourEyes: true,
+          },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "reject",
+          fromState: "pending",
+          toState: "rejected",
+          trigger: { kind: "manual_action", actionName: "reject", requiresFourEyes: false },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+    });
+  }
+
+  it("fires the matching manual_action transition (reject)", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-1",
+    });
+    expect(state.status).toBe("waiting_for_manual");
+    expect(state.currentState).toBe("pending");
+
+    const result = await engine.submitManualAction({
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      actionName: "reject",
+      actorPrincipalId: ACTOR_A,
+      reason: "incomplete documentation",
+    });
+    expect(result.applied).toBe(true);
+    expect(result.transitionName).toBe("reject");
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("failed");
+    expect(final?.currentState).toBe("rejected");
+  });
+
+  it("enforces requiredRole + requiresFourEyes on approve", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-2",
+    });
+    const result = await engine.submitManualAction({
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      actionName: "approve",
+      actorPrincipalId: ACTOR_A,
+      actorRoles: ["manager"],
+      secondApproverPrincipalId: ACTOR_B,
+    });
+    expect(result.applied).toBe(true);
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("completed");
+    expect(final?.currentState).toBe("approved");
+  });
+
+  it("rejects approve when four-eyes second approver is missing", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-3",
+    });
+    await expect(
+      engine.submitManualAction({
+        instanceId: state.instanceId,
+        tenantId: TENANT,
+        actionName: "approve",
+        actorPrincipalId: ACTOR_A,
+        actorRoles: ["manager"],
+      }),
+    ).rejects.toThrow(/four-eyes required/);
+    // No manual_action_taken event was appended (throw is BEFORE the append).
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("manual_action_taken");
+  });
+
+  it("rejects approve when four-eyes second approver equals the actor", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-4",
+    });
+    await expect(
+      engine.submitManualAction({
+        instanceId: state.instanceId,
+        tenantId: TENANT,
+        actionName: "approve",
+        actorPrincipalId: ACTOR_A,
+        actorRoles: ["manager"],
+        secondApproverPrincipalId: ACTOR_A,
+      }),
+    ).rejects.toThrow(/distinct second approver/);
+  });
+
+  it("rejects approve when actor lacks the required role", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-5",
+    });
+    await expect(
+      engine.submitManualAction({
+        instanceId: state.instanceId,
+        tenantId: TENANT,
+        actionName: "approve",
+        actorPrincipalId: ACTOR_A,
+        // actorRoles omitted — actor has no roles
+        secondApproverPrincipalId: ACTOR_B,
+      }),
+    ).rejects.toThrow(/required role manager/);
+  });
+
+  it("audits an unknown actionName without firing a transition", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-6",
+    });
+    const result = await engine.submitManualAction({
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      actionName: "no_such_action",
+      actorPrincipalId: ACTOR_A,
+      reason: "test",
+    });
+    expect(result.applied).toBe(false);
+    expect(result.transitionName).toBeNull();
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("manual_action_taken");
+    const after = await engine.getInstanceState(state.instanceId);
+    expect(after?.status).toBe("waiting_for_manual");
+  });
+
+  it("throws on a cross-tenant submission", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-7",
+    });
+    await expect(
+      engine.submitManualAction({
+        instanceId: state.instanceId,
+        tenantId: TENANT_B,
+        actionName: "reject",
+        actorPrincipalId: ACTOR_A,
+      }),
+    ).rejects.toThrow(/different tenant/);
+  });
+
+  it("throws on a terminal instance", async () => {
+    const { engine } = makeEngine({ definition: approvalDef() });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-8",
+    });
+    await engine.submitManualAction({
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      actionName: "reject",
+      actorPrincipalId: ACTOR_A,
+    });
+    await expect(
+      engine.submitManualAction({
+        instanceId: state.instanceId,
+        tenantId: TENANT,
+        actionName: "reject",
+        actorPrincipalId: ACTOR_A,
+      }),
+    ).rejects.toThrow(/terminal status/);
+  });
+
+  it("emits manual_action_taken instrumentation with actor + transitionApplied", async () => {
+    const cap = captureInstrumentation();
+    const { engine } = makeEngine({
+      definition: approvalDef(),
+      instrumentation: cap.instrumentation,
+    });
+    const state = await engine.startInstance({
+      definitionId: "wfd_approvals",
+      tenantId: TENANT,
+      correlationKey: "po-9",
+    });
+    await engine.submitManualAction({
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      actionName: "reject",
+      actorPrincipalId: ACTOR_A,
+    });
+    const taken = cap.events.find((e) => e.kind === "manual_action_taken");
+    expect(taken?.instanceId).toBe(state.instanceId);
+    expect(taken?.attributes["actionName"]).toBe("reject");
+    expect(taken?.attributes["actorPrincipalId"]).toBe(ACTOR_A);
+    expect(taken?.attributes["transitionApplied"]).toBe(true);
+    expect(taken?.attributes["transitionName"]).toBe("reject");
+  });
+
+  it("includes manual_action_taken in the instrumentation kinds enum", () => {
+    expect(WORKFLOW_INSTRUMENTATION_KINDS as readonly string[]).toContain("manual_action_taken");
+  });
+});
