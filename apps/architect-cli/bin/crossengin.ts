@@ -17,6 +17,7 @@ import {
 import { runGateway } from "../src/gateway.js";
 import { runRetention } from "../src/retention.js";
 import { runSessions } from "../src/sessions.js";
+import { runWorkflow } from "../src/workflow.js";
 import { printError } from "../src/format.js";
 
 const CLI_VERSION = "0.0.0";
@@ -67,6 +68,8 @@ async function main(): Promise<number> {
       return runGateway(command, ctx);
     case "retention":
       return runRetention(command, ctx);
+    case "workflow":
+      return runWorkflow(command, ctx);
   }
 }
 

@@ -21,14 +21,14 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
 M4.8.x + M4.8.y + M4.10 + M4.10.x + M5 + M5.5 + M5.6 + M5.7 +
 M5.8 + M5.9 + M5.11 + M6 + M6.5 + M6.5.5 + M6.5.6 + M6.6 + M7 + M7-wire
 + M7.5 + M7.6.5 + M7.7 + M7.8 + M7.9 landed:
-**56 packages + 1 app, 129 meta-schema tables, 9,462 tests**,
+**56 packages + 1 app, 129 meta-schema tables, 9,475 tests**,
 all green, no type errors — in src AND in `*.test.ts` files
 (M-maint.typecheck-tests closed the last gap; see below).
 M-maint.typecheck-test-debt restored
@@ -15315,6 +15315,71 @@ documents the design + 6 rejected alternatives + 6 future Qs (cross-
 registry validator, CLI `crossengin workflow validate` gate, engine
 opt-in pre-flight, cyclic automatic-loop detection, value-type
 validation, four-eyes-without-role warning).
+M8.8.x adds the `crossengin workflow validate <def.json>` CLI gate
+exposing the ADR-0256 validator at the operator surface — closes
+ADR-0256 Q2. Substrate gains a structured authoring-time validator
+but operators didn't have a one-command path to invoke it; today
+they wrote TypeScript scripts importing `@crossengin/workflow-
+engine` directly or bespoke per-CI re-implementations of file-
+read + JSON-parse + schema-parse + render boilerplate. New
+`workflow` top-level subcommand joins the existing 10 entries
+(SUBCOMMANDS grows 11 → 12); action-verb dispatch matches the
+established sessions/gateway-routes/retention pattern with `validate`
+as the first action (reserves namespace for future `workflow lint`,
+`workflow inspect`, `workflow apply` when M9 brings engine-side
+publication CRUD). New `apps/architect-cli/src/workflow.ts` houses
+the `runWorkflow` dispatcher + `runWorkflowValidate` worker; binary
+dispatcher in `bin/crossengin.ts` adds the case branch.
+architect-cli package gains `@crossengin/workflow-engine` workspace
+dep (was previously absent). Pipeline — `readFile → JSON.parse →
+WorkflowDefinitionSchema.safeParse → validateDefinition → render`;
+exit codes follow ADR-0181's distinguishable convention: 0 ok, 1
+I/O failure (runtime), 2 CLI misuse OR schema rejection (parse-
+time errors with `{schemaError: true}` JSON envelope branch
+distinct from validator), 3 validation errors (ADR-0256 issues
+with severity=error) OR `--strict` with any warning. The exit-3
+convention keeps validation signal distinguishable from runtime
+errors (CI scripts route by status code — case $? in 0/1/2/3
+branches). `--strict` promotes warnings to exit-3 territory
+(default treats `unreachable_state` warning as non-fatal; ops
+preferring zero-tolerance enable strict). Two output formats —
+human one-line `ok` on success / multi-line `error[code] path:
+message` per-issue on failure with header summary "N error(s), M
+warning(s)"; JSON `{action: "workflow.validate", path, ok,
+definitionId, definitionKey, errorCount, warningCount, issues[]}`
+envelope for pipeline integration with distinct `{schemaError:
+true, issues: [{code: "schema_error", ...}]}` shape on parse-time
+rejection so consumers branch on cause. Schema rejection happens
+BEFORE the validator runs — operators see zod issue paths +
+messages in the same structured shape as ADR-0256 issues with
+`code: "schema_error"`. SUBCOMMANDS test in cli.test.ts updated
+11 → 12 entries with "workflow". 13 new tests in `apps/architect-
+cli/src/workflow.test.ts` covering: dispatch missing action exits
+2; unknown action exits 2; validate missing path exits 2;
+unreadable file exits 1 with "failed to read"; invalid JSON exits
+2 with "not valid JSON"; schema rejection exits 2 with "schema
+rejected" + "schema_error"; clean ok exits 0 with "ok" message +
+id + key; validator errors exit 3 with "error[unknown_variable_in_action]"
++ ghost name in stdout + "1 error(s)"; unreachable state warning
+exits 0 by default + "warning[unreachable_state]" + "1 warning(s)";
+`--strict` promotes warning to exit 3; `--format json` on success
+emits envelope with ok:true + zero counts + empty issues; on
+failure emits envelope with ok:false + errorCount:1 + issues
+including stable path string; on schema rejection emits
+envelope with `schemaError: true` discriminator + schema_error
+issues. CLI smoke-tested end-to-end against a real sample-def.json
+— exit 0 + ok message + valid JSON envelope. architect-cli test
+count 1,214 → 1,227 (+13). Workspace test count 9,462 → 9,475.
+ADR-0257 documents the design + 6 rejected alternatives (flat
+subcommand, fold into existing `validate`, exit 1 not 3, --quiet
+flag, auto-invoke on apply --pack, multi-path positional input)
++ 6 future Qs (bulk glob path, per-rule severity overrides, auto-
+detect workflow vs manifest format, separate `workflow lint`
+stylistic action, integration with apply --pack when M9 lands,
+`--diff <baseline>` for breaking-change detection). The workflow
+namespace is now established as the natural home for engine-
+adjacent operator actions; ADR-0256 is the API and ADR-0257 is
+the CLI complement.
 
 ## Architecture in 90 seconds
 

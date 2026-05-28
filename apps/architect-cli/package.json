@@ -39,6 +39,7 @@
     "@crossengin/pack-erp-core": "workspace:*",
     "@crossengin/pack-erp-healthcare": "workspace:*",
     "@crossengin/pack-erp-payments": "workspace:*",
+    "@crossengin/workflow-engine": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
