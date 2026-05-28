@@ -50,6 +50,9 @@ export interface GatewayContext extends RunContext, GatewayRoutesContext {
   readonly waitForShutdown?: () => Promise<void>;
   readonly jwksFetch?: FetchLike;
   readonly registerReloadHandler?: (handler: () => void) => () => void;
+  // M4.12 — idempotency-prune action injection points.
+  readonly idempotencyStoreOverride?: PostgresIdempotencyStore;
+  readonly clockOverride?: () => Date;
 }
 
 export async function runGateway(command: ParsedCommand, ctx: GatewayContext): Promise<number> {
@@ -57,7 +60,7 @@ export async function runGateway(command: ParsedCommand, ctx: GatewayContext): P
   if (action === undefined) {
     printError(
       ctx.io,
-      "gateway: missing action. usage: crossengin gateway <start|routes> [options]",
+      "gateway: missing action. usage: crossengin gateway <start|routes|prune-idempotency> [options]",
     );
     return 2;
   }
@@ -67,8 +70,78 @@ export async function runGateway(command: ParsedCommand, ctx: GatewayContext): P
   if (action === "routes") {
     return runGatewayRoutes(command, ctx);
   }
-  printError(ctx.io, `gateway: unknown action '${action}'. expected one of: start, routes`);
+  if (action === "prune-idempotency") {
+    return runGatewayPruneIdempotency(command, ctx);
+  }
+  printError(
+    ctx.io,
+    `gateway: unknown action '${action}'. expected one of: start, routes, prune-idempotency`,
+  );
   return 2;
+}
+
+async function runGatewayPruneIdempotency(
+  command: ParsedCommand,
+  ctx: GatewayContext,
+): Promise<number> {
+  const dryRun = getBooleanFlag(command, "dry-run");
+  let store: PostgresIdempotencyStore;
+  if (ctx.idempotencyStoreOverride !== undefined) {
+    store = ctx.idempotencyStoreOverride;
+  } else {
+    let conn: PgConnection;
+    try {
+      conn = ctx.pgConnectionOverride ?? createNodePgConnection(parsePgEnvConfig(ctx.env));
+    } catch (err) {
+      printError(
+        ctx.io,
+        `gateway prune-idempotency: requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+    store = new PostgresIdempotencyStore(conn);
+  }
+  const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+  try {
+    if (dryRun) {
+      const count = await store.previewDeleteExpired(now);
+      if (command.format === "json") {
+        printJson(ctx.io, {
+          action: "gateway.prune-idempotency",
+          dryRun: true,
+          asOf: now.toISOString(),
+          wouldDeleteCount: count,
+        });
+      } else {
+        printSuccess(
+          ctx.io,
+          `${count} expired idempotency record(s) would be deleted (dry-run; as of ${now.toISOString()})`,
+        );
+      }
+      return 0;
+    }
+    const deleted = await store.deleteExpired(now);
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        action: "gateway.prune-idempotency",
+        dryRun: false,
+        asOf: now.toISOString(),
+        deletedCount: deleted,
+      });
+    } else {
+      printSuccess(
+        ctx.io,
+        `deleted ${deleted} expired idempotency record(s) (as of ${now.toISOString()})`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    printError(
+      ctx.io,
+      `gateway prune-idempotency: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 1;
+  }
 }
 
 interface BuiltRuntime {

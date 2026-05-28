@@ -168,6 +168,45 @@ describe("PostgresIdempotencyStore.deleteExpired", () => {
   });
 });
 
+describe("PostgresIdempotencyStore.previewDeleteExpired (M4.12)", () => {
+  it("issues a SELECT COUNT(*) with the same cutoff + does NOT delete", async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection((sql, params) => {
+      captured.push({ sql, params });
+      return { rows: [{ count: "42" }], rowCount: 1 };
+    });
+    const store = new PostgresIdempotencyStore(conn);
+    const wouldDelete = await store.previewDeleteExpired(new Date("2026-05-16T12:00:00.000Z"));
+    expect(wouldDelete).toBe(42);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.sql).toContain("SELECT COUNT(*)");
+    expect(captured[0]?.sql).toContain("expires_at < $1");
+    expect(captured[0]?.sql).not.toContain("DELETE");
+    expect(captured[0]?.params?.[0]).toBe("2026-05-16T12:00:00.000Z");
+  });
+
+  it("returns 0 when no rows match", async () => {
+    const conn = mockConnection(() => ({ rows: [{ count: "0" }], rowCount: 1 }));
+    const store = new PostgresIdempotencyStore(conn);
+    expect(await store.previewDeleteExpired(new Date())).toBe(0);
+  });
+
+  it("parses the PG bigint ::TEXT cast safely for large counts", async () => {
+    const conn = mockConnection(() => ({
+      rows: [{ count: "9876543210" }],
+      rowCount: 1,
+    }));
+    const store = new PostgresIdempotencyStore(conn);
+    expect(await store.previewDeleteExpired(new Date())).toBe(9_876_543_210);
+  });
+
+  it("returns 0 on empty result row (defensive)", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }));
+    const store = new PostgresIdempotencyStore(conn);
+    expect(await store.previewDeleteExpired(new Date())).toBe(0);
+  });
+});
+
 function recordToRow(r: IdempotencyRecord): Record<string, unknown> {
   return {
     record_id: r.id,

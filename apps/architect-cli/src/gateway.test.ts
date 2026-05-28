@@ -1,3 +1,4 @@
+import { PostgresIdempotencyStore } from "@crossengin/api-gateway-pg";
 import {
   GatewayRuntime,
   InMemoryIdempotencyStore,
@@ -6,6 +7,7 @@ import {
   InMemoryRouteRegistry,
   type HandleResult,
 } from "@crossengin/api-gateway-runtime";
+import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import { parseArgs } from "./cli.js";
@@ -519,5 +521,142 @@ describe("runGateway start (in-memory + runtime override)", () => {
     const code = await runGateway(command, ctx);
     expect(code).toBe(0);
     expect(capture.value?.options.runtime).toBe(runtime);
+  });
+});
+
+function fakePgConnection(
+  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult,
+): {
+  conn: PgConnection;
+  captured: Array<{ sql: string; params: readonly unknown[] | undefined }>;
+} {
+  const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+  const conn: PgConnection = {
+    query: async <T>(sql: string, params?: readonly unknown[]) => {
+      captured.push({ sql, params });
+      return handler(sql, params) as PgQueryResult<T>;
+    },
+    transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn),
+    withAdvisoryLock: async <T>(_lockKey: bigint, fn: () => Promise<T>) => fn(),
+    close: async () => undefined,
+  };
+  return { conn, captured };
+}
+
+describe("runGateway prune-idempotency (M4.12)", () => {
+  const fixedNow = new Date("2026-05-26T12:00:00.000Z");
+
+  it("default mode calls deleteExpired + prints deletion count in human format", async () => {
+    const { conn, captured } = fakePgConnection(() => ({ rows: [], rowCount: 17 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency"), ctx);
+    expect(code).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.sql).toContain("DELETE FROM");
+    expect(captured[0]?.sql).toContain("expires_at < $1");
+    expect(captured[0]?.params?.[0]).toBe(fixedNow.toISOString());
+    expect(outChunks.join("")).toContain("deleted 17 expired idempotency record");
+    expect(outChunks.join("")).toContain(fixedNow.toISOString());
+  });
+
+  it("--dry-run mode calls previewDeleteExpired + does NOT delete", async () => {
+    const { conn, captured } = fakePgConnection(() => ({
+      rows: [{ count: "42" }],
+      rowCount: 1,
+    }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency", "--dry-run"), ctx);
+    expect(code).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.sql).toContain("SELECT COUNT(*)");
+    expect(captured[0]?.sql).not.toContain("DELETE");
+    expect(outChunks.join("")).toContain(
+      "42 expired idempotency record(s) would be deleted (dry-run",
+    );
+  });
+
+  it("JSON envelope on deletion includes action + dryRun:false + asOf + deletedCount", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [], rowCount: 5 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as Record<string, unknown>;
+    expect(env).toMatchObject({
+      action: "gateway.prune-idempotency",
+      dryRun: false,
+      asOf: fixedNow.toISOString(),
+      deletedCount: 5,
+    });
+  });
+
+  it("JSON envelope on dry-run uses wouldDeleteCount + dryRun:true", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [{ count: "0" }], rowCount: 1 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--dry-run", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as Record<string, unknown>;
+    expect(env).toMatchObject({
+      action: "gateway.prune-idempotency",
+      dryRun: true,
+      asOf: fixedNow.toISOString(),
+      wouldDeleteCount: 0,
+    });
+    expect(env).not.toHaveProperty("deletedCount");
+  });
+
+  it("propagates adapter errors as exit 1 with a clear message", async () => {
+    const conn: PgConnection = {
+      query: async () => {
+        throw new Error("PG connection refused");
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency"), ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toContain("PG connection refused");
+  });
+
+  it("exits 1 with PG-missing error when no override + no PG env", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(parseGatewayArgs("prune-idempotency"), ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toMatch(/PG env/);
   });
 });

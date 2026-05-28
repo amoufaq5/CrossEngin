@@ -127,4 +127,15 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     ]);
     return result.rowCount;
   }
+
+  // Read-only counterpart of deleteExpired (M4.12). SELECT COUNT(*) of expired
+  // records without deletion. Symmetric to ADR-0153's previewPrune pattern —
+  // operators inspect what would be swept before running the live DELETE.
+  async previewDeleteExpired(now: Date): Promise<number> {
+    const result = await this.conn.query<{ count: string }>(
+      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE expires_at < $1`,
+      [now.toISOString()],
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
 }
