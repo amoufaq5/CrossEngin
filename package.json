@@ -15,6 +15,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "turbo run test",
+    "coverage": "pnpm build && pnpm -r --filter \"!@crossengin/config\" exec vitest run --coverage",
     "typecheck": "turbo run typecheck",
     "typecheck:tests": "pnpm build && tsc -p tsconfig.typecheck-tests.json",
     "dev": "turbo run dev",
@@ -22,6 +23,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@vitest/coverage-v8": "^2.1.0",
     "eslint": "^9.0.0",
     "prettier": "^3.3.0",
     "turbo": "^2.1.0",

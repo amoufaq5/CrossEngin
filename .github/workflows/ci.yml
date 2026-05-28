@@ -12,9 +12,9 @@ concurrency:
 
 jobs:
   verify:
-    name: build · lint · format · typecheck · typecheck:tests · test
+    name: build · lint · format · typecheck · typecheck:tests · test · coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,3 +55,14 @@ jobs:
 
       - name: Test all packages
         run: pnpm -r test
+
+      # Workspace-wide coverage gate (ADR-0261). Vitest V8 with thresholds
+      # configured in `@crossengin/testing`'s vitestPreset: statements 80%,
+      # branches 70%, functions 80%, lines 80%. Per-package Vitest exits
+      # non-zero when any threshold fails; `pnpm -r` propagates that. Re-runs
+      # the full suite under V8 instrumentation — the coverage flag is the
+      # gate, the test step above is the smoke. Filter excludes
+      # @crossengin/config (no vitest dep — typescript/eslint/prettier configs
+      # only); every other workspace package has a vitest.config.ts.
+      - name: Coverage gate (V8, workspace-wide)
+        run: pnpm coverage
