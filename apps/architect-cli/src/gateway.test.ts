@@ -1741,3 +1741,290 @@ describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     expect(removeCalls.count).toBe(0);
   });
 });
+
+describe("runGateway housekeeping --tenant (M4.14.v)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+  const TENANT_A = "11111111-2222-3333-4444-555555555555";
+  const TENANT_B = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+
+  function fakeStatsConnection(): PgConnection {
+    return {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        if (sql.includes("FROM meta.gateway_pipeline_executions")) {
+          return {
+            rows: [{ total: "50000", oldest: "2026-04-01T00:00:00.000Z" }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        if (sql.includes("FROM meta.gateway_idempotency_records")) {
+          return {
+            rows: [{ total: "1200", oldest: "2026-05-25T00:00:00.000Z" }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        if (sql.includes("FROM meta.rate_limit_decisions")) {
+          return {
+            rows: [{ total: "987654", oldest: "2026-03-15T00:00:00.000Z" }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  function fakeRetention(): PostgresTraceRetention {
+    return {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          lastPrunedAt: "2026-05-28T00:00:00.000Z",
+        },
+        {
+          tableName: "rate_limit_decisions",
+          retentionDays: 7,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      listTenantPolicies: async () => [
+        // TENANT_A has a custom 365-day retention override on
+        // gateway_pipeline_executions (legal-hold scenario), no override on
+        // rate_limit_decisions (inherits 7-day platform default).
+        {
+          tenantId: TENANT_A,
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+        // TENANT_B has an active opt-out on rate_limit_decisions for an
+        // ongoing investigation; no override on gateway_pipeline_executions.
+        {
+          tenantId: TENANT_B,
+          tableName: "rate_limit_decisions",
+          retentionDays: 7,
+          enabled: false,
+          optOut: true,
+          optOutReason: "investigation:case#42",
+          optOutUntil: "2099-01-01T00:00:00.000Z",
+          lastPrunedAt: null,
+        },
+      ],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 1042,
+          cutoffMs: 0,
+        },
+        {
+          tableName: "rate_limit_decisions",
+          status: "previewed",
+          retentionDays: 7,
+          wouldDeleteCount: 9876,
+          cutoffMs: 0,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+  }
+
+  function fakeIdempotencyStore(wouldDelete: number): PostgresIdempotencyStore {
+    return {
+      previewDeleteExpired: async () => wouldDelete,
+    } as unknown as PostgresIdempotencyStore;
+  }
+
+  it("invalid --tenant value exits 2 BEFORE PG resolution", async () => {
+    const conn = fakeStatsConnection();
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--tenant", "not-a-uuid"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/must be a UUID/);
+  });
+
+  it("valid --tenant surfaces per-table tenantPolicy in human output (with override + without)", async () => {
+    const conn = fakeStatsConnection();
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(300),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--tenant", TENANT_A), ctx);
+    expect(code).toBe(0);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain(`filtered to tenant ${TENANT_A}`);
+    // gateway_pipeline_executions: TENANT_A has 365-day override.
+    expect(stdout).toContain("365 day(s) (enabled)");
+    // rate_limit_decisions: no override for TENANT_A → inherits platform.
+    expect(stdout).toContain("(no override — inherits platform default)");
+    // gateway_idempotency_records: expires_at-managed → not applicable.
+    expect(stdout).toContain("(not applicable — expires_at-managed)");
+  });
+
+  it("filter discriminates between tenants — TENANT_A and TENANT_B see different tenantPolicy fields", async () => {
+    const conn = fakeStatsConnection();
+    const { io: ioA, outChunks: outA } = makeIo();
+    const ctxA: GatewayContext = {
+      io: ioA,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+      // M4.14.v doesn't compose with --watch in this fixture, so no
+      // watchOverride needed; single-shot covers the filter discrimination.
+    };
+    const codeA = await runGateway(
+      parseGatewayArgs("housekeeping", "--tenant", TENANT_A, "--format", "json"),
+      ctxA,
+    );
+    expect(codeA).toBe(0);
+    const envA = JSON.parse(outA.join("")) as {
+      tenantId: string;
+      tables: Array<{ tableName: string; tenantPolicy: { retentionDays: number } | null }>;
+    };
+    expect(envA.tenantId).toBe(TENANT_A);
+    const pipeA = envA.tables.find((t) => t.tableName === "gateway_pipeline_executions")!;
+    expect(pipeA.tenantPolicy).not.toBeNull();
+    expect(pipeA.tenantPolicy!.retentionDays).toBe(365);
+    const rlA = envA.tables.find((t) => t.tableName === "rate_limit_decisions")!;
+    expect(rlA.tenantPolicy).toBeNull();
+
+    const { io: ioB, outChunks: outB } = makeIo();
+    const ctxB: GatewayContext = {
+      io: ioB,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const codeB = await runGateway(
+      parseGatewayArgs("housekeeping", "--tenant", TENANT_B, "--format", "json"),
+      ctxB,
+    );
+    expect(codeB).toBe(0);
+    const envB = JSON.parse(outB.join("")) as {
+      tenantId: string;
+      tables: Array<{
+        tableName: string;
+        tenantPolicy: { retentionDays: number; optOut: boolean; optOutReason: string } | null;
+      }>;
+    };
+    expect(envB.tenantId).toBe(TENANT_B);
+    const pipeB = envB.tables.find((t) => t.tableName === "gateway_pipeline_executions")!;
+    expect(pipeB.tenantPolicy).toBeNull();
+    const rlB = envB.tables.find((t) => t.tableName === "rate_limit_decisions")!;
+    expect(rlB.tenantPolicy).not.toBeNull();
+    expect(rlB.tenantPolicy!.optOut).toBe(true);
+    expect(rlB.tenantPolicy!.optOutReason).toBe("investigation:case#42");
+  });
+
+  it("JSON envelope includes tenantFilter + tenantPolicy on every table (with null for non-overridden)", async () => {
+    const conn = fakeStatsConnection();
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--tenant", TENANT_A, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as {
+      action: string;
+      tenantId: string;
+      tables: Array<{ tableName: string; tenantPolicy: unknown }>;
+    };
+    expect(env.action).toBe("gateway.housekeeping");
+    expect(env.tenantId).toBe(TENANT_A);
+    // tenantPolicy is set on ALL three tables under --tenant (null on
+    // expires_at table reflects "(not applicable)" semantic + null on
+    // retention tables reflects "no override on this table").
+    for (const t of env.tables) {
+      expect("tenantPolicy" in t).toBe(true);
+    }
+    expect(
+      env.tables.find((t) => t.tableName === "gateway_idempotency_records")!.tenantPolicy,
+    ).toBeNull();
+  });
+
+  it("omitting --tenant preserves backward-compat envelope shape verbatim (no tenantId, no tenantPolicy)", async () => {
+    const conn = fakeStatsConnection();
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as {
+      tenantId?: string;
+      tables: Array<{ tableName: string; tenantPolicy?: unknown }>;
+    };
+    expect(env.tenantId).toBeUndefined();
+    for (const t of env.tables) {
+      expect("tenantPolicy" in t).toBe(false);
+    }
+  });
+
+  it("composes with --threshold-alert — drill-down preserves CI-gate semantic (exit 3 on trip)", async () => {
+    const conn = fakeStatsConnection();
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    // totalRowCount on rate_limit_decisions = 987,654 — alert trips at >1M
+    // is FALSE (the table is below the threshold). Use > 500k so it trips.
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--tenant",
+        TENANT_A,
+        "--threshold-alert",
+        "totalRowCount:>500000",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain("THRESHOLD ALERTS");
+    expect(stdout).toContain(`filtered to tenant ${TENANT_A}`);
+  });
+});

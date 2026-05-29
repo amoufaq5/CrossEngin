@@ -1,8 +1,8 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, TenantRetentionPolicyRow } from "@crossengin/kernel-pg";
 import { PostgresIdempotencyStore } from "@crossengin/api-gateway-pg";
 import { PostgresTraceRetention } from "@crossengin/kernel-pg";
 
-import { getMultiFlag, type ParsedCommand } from "./cli.js";
+import { getMultiFlag, getStringFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
@@ -75,11 +75,22 @@ export interface HousekeepingTableReport {
   // For retention-substrate tables: the platform policy's last_pruned_at.
   // For idempotency: always null (no policy table).
   readonly lastPrunedAt: string | null;
+  // M4.14.v — only present when `--tenant <uuid>` is set. For retention-
+  // governed tables: the tenant's override row when one exists, else `null`
+  // (the tenant inherits the platform default for this table). For the
+  // expires_at-governed idempotency table: always `null` and explicitly
+  // surfaced as "(not applicable — expires_at-managed)" in human output
+  // since per-tenant overrides don't exist on the TTL surface.
+  readonly tenantPolicy?: TenantRetentionPolicyRow | null;
 }
 
 export interface HousekeepingReport {
   readonly asOf: string;
   readonly tables: ReadonlyArray<HousekeepingTableReport>;
+  // M4.14.v — present only under `--tenant <uuid>`, echoes the filter so
+  // downstream JSON consumers know which tenant the tenantPolicy fields
+  // correspond to.
+  readonly tenantId?: string;
 }
 
 export interface GatherHousekeepingInput {
@@ -87,6 +98,10 @@ export interface GatherHousekeepingInput {
   readonly retention: PostgresTraceRetention;
   readonly idempotencyStore: PostgresIdempotencyStore;
   readonly now: Date;
+  // M4.14.v — when set, every table report includes a `tenantPolicy` field
+  // (Option B: drill-down only; aggregates stay cross-tenant for mental-
+  // model continuity, zero new substrate queries).
+  readonly tenantId?: string;
 }
 
 export async function gatherHousekeepingReport(
@@ -105,6 +120,19 @@ export async function gatherHousekeepingReport(
     previewByTable.set(entry.tableName, entry.wouldDeleteCount);
   }
 
+  // M4.14.v — when --tenant is set, build a per-table lookup of THIS
+  // tenant's overrides. listTenantPolicies returns ALL tenants' rows; we
+  // filter client-side because the substrate doesn't expose a tenant-
+  // scoped variant and the table is bounded (~2N rows where N = tenant
+  // count, sub-millisecond at the typical 10K-tenant scale).
+  const tenantPolicyByTable = new Map<string, TenantRetentionPolicyRow>();
+  if (input.tenantId !== undefined) {
+    const tenantPolicies = await input.retention.listTenantPolicies();
+    for (const p of tenantPolicies) {
+      if (p.tenantId === input.tenantId) tenantPolicyByTable.set(p.tableName, p);
+    }
+  }
+
   const tables: HousekeepingTableReport[] = [];
   for (const spec of HOUSEKEEPING_TABLES) {
     const stats = await queryTableStats(input.conn, spec);
@@ -119,7 +147,7 @@ export async function gatherHousekeepingReport(
       lastPrunedAt = platformPolicy?.lastPrunedAt ?? null;
       wouldPrune = previewByTable.get(spec.tableName) ?? 0;
     }
-    tables.push({
+    const baseRow: HousekeepingTableReport = {
       tableName: spec.tableName,
       pruneSemantic: spec.pruneSemantic,
       totalRowCount: stats.totalRowCount,
@@ -127,9 +155,30 @@ export async function gatherHousekeepingReport(
       wouldPruneCount: wouldPrune,
       retentionDays,
       lastPrunedAt,
-    });
+    };
+    // M4.14.v — under --tenant, tenantPolicy is always set:
+    //   - retention-governed tables: the matched override row or `null`
+    //     (the tenant inherits platform default for this table)
+    //   - expires_at-governed idempotency: `null` always — per-tenant
+    //     overrides don't exist on the TTL surface; renderer surfaces
+    //     the "(not applicable)" semantic to operators.
+    tables.push(
+      input.tenantId !== undefined
+        ? {
+            ...baseRow,
+            tenantPolicy:
+              spec.pruneSemantic === "expires_at"
+                ? null
+                : (tenantPolicyByTable.get(spec.tableName) ?? null),
+          }
+        : baseRow,
+    );
   }
-  return { asOf: input.now.toISOString(), tables };
+  return {
+    asOf: input.now.toISOString(),
+    tables,
+    ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
+  };
 }
 
 async function queryTableStats(
@@ -178,6 +227,19 @@ export async function runGatewayHousekeeping(
   );
   if (typeof alerts === "number") return alerts;
 
+  // M4.14.v — `--tenant <uuid>` drill-down filter. Validate at CLI boundary
+  // (UUID syntax) so misuse exits 2 BEFORE PG resolution (same fail-fast
+  // discipline as --watch + --threshold-alert).
+  const tenantFlag = getStringFlag(command, "tenant");
+  if (tenantFlag !== null && !isValidUuid(tenantFlag)) {
+    printError(
+      ctx.io,
+      `gateway housekeeping: --tenant '${tenantFlag}' must be a UUID (e.g., 11111111-2222-3333-4444-555555555555)`,
+    );
+    return 2;
+  }
+  const tenantId = tenantFlag ?? undefined;
+
   let conn: PgConnection;
   try {
     conn = ctx.pgConnectionOverride ?? buildConnection();
@@ -194,7 +256,13 @@ export async function runGatewayHousekeeping(
   // Shared gather closure for both single-shot + watch modes.
   const gather = async (): Promise<HousekeepingReport> => {
     const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
-    return await gatherHousekeepingReport({ conn, retention, idempotencyStore, now });
+    return await gatherHousekeepingReport({
+      conn,
+      retention,
+      idempotencyStore,
+      now,
+      tenantId,
+    });
   };
 
   // Per-tick render + alert evaluation. Returns "halt" if any alert tripped.
@@ -324,7 +392,11 @@ function renderTrippedAlertsHuman(
 }
 
 function renderHumanReport(ctx: HousekeepingContext, report: HousekeepingReport): void {
-  ctx.io.stdout.write(`gateway housekeeping (as of ${report.asOf}):\n`);
+  const header =
+    report.tenantId !== undefined
+      ? `gateway housekeeping (as of ${report.asOf}, filtered to tenant ${report.tenantId}):\n`
+      : `gateway housekeeping (as of ${report.asOf}):\n`;
+  ctx.io.stdout.write(header);
   for (const t of report.tables) {
     ctx.io.stdout.write(`\n  ${t.tableName}\n`);
     ctx.io.stdout.write(`    semantic:       ${t.pruneSemantic}\n`);
@@ -337,5 +409,50 @@ function renderHumanReport(ctx: HousekeepingContext, report: HousekeepingReport)
       );
       ctx.io.stdout.write(`    last pruned:    ${t.lastPrunedAt ?? "never"}\n`);
     }
+    // M4.14.v — tenantPolicy is set only when --tenant filter is active.
+    // null on retention-governed tables = "this tenant has no override on
+    // this table" (inherits platform default); null on the expires_at table
+    // = "(not applicable — expires_at-managed)". A populated row shows the
+    // override detail.
+    if (t.tenantPolicy !== undefined) {
+      renderTenantPolicyHuman(ctx, t.tenantPolicy, t.pruneSemantic);
+    }
   }
+}
+
+function renderTenantPolicyHuman(
+  ctx: HousekeepingContext,
+  policy: TenantRetentionPolicyRow | null,
+  semantic: PruneSemantic,
+): void {
+  if (policy === null) {
+    if (semantic === "expires_at") {
+      ctx.io.stdout.write(`    tenant policy:   (not applicable — expires_at-managed)\n`);
+    } else {
+      ctx.io.stdout.write(`    tenant policy:   (no override — inherits platform default)\n`);
+    }
+    return;
+  }
+  ctx.io.stdout.write(`    tenant policy:\n`);
+  ctx.io.stdout.write(
+    `      retention:     ${policy.retentionDays} day(s) (${policy.enabled ? "enabled" : "disabled"})\n`,
+  );
+  if (policy.optOut) {
+    const until = policy.optOutUntil ?? "indefinite";
+    const reason = policy.optOutReason ?? "<no reason>";
+    ctx.io.stdout.write(`      opt-out:       yes (until ${until}, reason: ${reason})\n`);
+  } else {
+    ctx.io.stdout.write(`      opt-out:       no\n`);
+  }
+  ctx.io.stdout.write(`      last pruned:   ${policy.lastPrunedAt ?? "never"}\n`);
+}
+
+// CLI-side UUID format check. The kernel/PG layer enforces strict
+// validation at INSERT/SELECT time; this is just an operator-friendly
+// guard against typos so misuse exits 2 cleanly without burning a PG
+// connection.
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUuid(value: string): boolean {
+  return UUID_REGEX.test(value);
 }
