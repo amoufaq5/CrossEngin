@@ -218,6 +218,28 @@ export async function runRetentionHousekeeping(
       return tripped.length > 0 ? "halt" : undefined;
     };
 
+    // M4.14.s — error rendering used only under --watch-keep-going. Renders
+    // the error in place of the report so the dashboard keeps refreshing
+    // through transient PG blips; without keep-going the error propagates
+    // to the existing exit-1 catch path.
+    const renderError = (err: Error): void => {
+      const message = err.message;
+      if (command.format === "json") {
+        const nowIso = (
+          ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date()
+        ).toISOString();
+        ctx.io.stdout.write(
+          JSON.stringify({
+            action: "retention.housekeeping",
+            asOf: nowIso,
+            error: { message },
+          }) + "\n",
+        );
+      } else {
+        ctx.io.stdout.write(`retention housekeeping: (error this tick: ${message})\n`);
+      }
+    };
+
     try {
       if (watchFlags.watch) {
         const isJson = command.format === "json";
@@ -233,10 +255,13 @@ export async function runRetentionHousekeeping(
             setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
             clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
           },
+          keepGoing: watchFlags.keepGoing,
+          errorRender: renderError,
         });
         // CI-gate semantic: a halted loop means an alert tripped (ADR-0181
         // exit-3 for "completed successfully but a configurable gate
-        // failed"). Natural termination (maxIterations / abortSignal) → 0.
+        // failed"). Under keep-going, halted=true is sticky across the
+        // whole run. Natural termination without trips → exit 0.
         return result.halted ? 3 : 0;
       }
       // Single-shot path. JSON envelope is pretty-printed for human

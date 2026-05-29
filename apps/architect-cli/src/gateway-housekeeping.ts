@@ -210,6 +210,25 @@ export async function runGatewayHousekeeping(
     return tripped.length > 0 ? "halt" : undefined;
   };
 
+  // M4.14.s — error rendering used only under --watch-keep-going.
+  const renderError = (err: Error): void => {
+    const message = err.message;
+    if (command.format === "json") {
+      const nowIso = (
+        ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date()
+      ).toISOString();
+      ctx.io.stdout.write(
+        JSON.stringify({
+          action: "gateway.housekeeping",
+          asOf: nowIso,
+          error: { message },
+        }) + "\n",
+      );
+    } else {
+      ctx.io.stdout.write(`gateway housekeeping: (error this tick: ${message})\n`);
+    }
+  };
+
   try {
     if (watchFlags.watch) {
       const isJson = command.format === "json";
@@ -225,6 +244,8 @@ export async function runGatewayHousekeeping(
           setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
           clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
         },
+        keepGoing: watchFlags.keepGoing,
+        errorRender: renderError,
       });
       return result.halted ? 3 : 0;
     }

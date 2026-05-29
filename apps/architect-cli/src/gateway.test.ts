@@ -1444,3 +1444,185 @@ describe("runGateway housekeeping --threshold-alert (M4.14.t)", () => {
     expect(outChunks.join("")).toContain("THRESHOLD ALERTS");
   });
 });
+
+describe("runGateway housekeeping --watch-keep-going (M4.14.s)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  const immediateSetTimeout = (cb: () => void, _ms: number) => {
+    cb();
+    return 1 as unknown;
+  };
+
+  function cleanFixtures() {
+    const conn = fakePgConnection(() => ({
+      rows: [{ total: "0", oldest: null }],
+      rowCount: 1,
+    }));
+    const retention = {
+      listPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const idempotencyStore = {
+      previewDeleteExpired: async () => 0,
+    } as unknown as PostgresIdempotencyStore;
+    return { conn: conn.conn, retention, idempotencyStore };
+  }
+
+  it("--watch-keep-going requires --watch (exit 2 otherwise)", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch-keep-going"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("--watch-keep-going requires --watch");
+  });
+
+  it("exits 0 when N ticks complete cleanly", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = cleanFixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--watch", "--watch-keep-going"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("").match(/gateway housekeeping \(as of /g)!.length).toBe(3);
+  });
+
+  it("catches gather errors + renders them + continues (exit 0 if no trip)", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, idempotencyStore } = cleanFixtures();
+    let callCount = 0;
+    const flakyRetention = {
+      listPolicies: async () => {
+        callCount++;
+        if (callCount === 2) throw new Error("PG connection lost");
+        return [];
+      },
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: flakyRetention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--watch", "--watch-keep-going"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).toContain("error this tick: PG connection lost");
+  });
+
+  it("WITHOUT --watch-keep-going, errors still propagate exit 1", async () => {
+    const { io, errChunks } = makeIo();
+    const { conn, idempotencyStore } = cleanFixtures();
+    const throwingRetention = {
+      listPolicies: async () => {
+        throw new Error("boom");
+      },
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: throwingRetention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 5, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toContain("boom");
+  });
+
+  it("threshold alert under keep-going loops through all ticks + exits 3 (sticky)", async () => {
+    const { io, outChunks } = makeIo();
+    const trippyConn = fakePgConnection(() => ({
+      rows: [{ total: "5000000", oldest: null }],
+      rowCount: 1,
+    }));
+    const retention = {
+      listPolicies: async () => [],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed" as const,
+          wouldDeleteCount: 2_000_000,
+          retentionDays: 30,
+          cutoffMs: 0,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+    const idempotencyStore = {
+      previewDeleteExpired: async () => 0,
+    } as unknown as PostgresIdempotencyStore;
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: trippyConn.conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--watch",
+        "--watch-keep-going",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+    // All 3 ticks should render the alert.
+    const sections = outChunks.join("").match(/THRESHOLD ALERTS/g);
+    expect(sections!.length).toBe(3);
+  });
+
+  it("under keep-going + json, error tick emits compact NDJSON error envelope", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, idempotencyStore } = cleanFixtures();
+    let callCount = 0;
+    const flakyRetention = {
+      listPolicies: async () => {
+        callCount++;
+        if (callCount === 1) throw new Error("transient PG glitch");
+        return [];
+      },
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: flakyRetention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 2, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--watch", "--watch-keep-going", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines.length).toBe(2);
+    const env1 = JSON.parse(lines[0]!) as { error?: { message: string } };
+    expect(env1.error?.message).toBe("transient PG glitch");
+  });
+});

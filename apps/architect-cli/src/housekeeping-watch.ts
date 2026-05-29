@@ -41,6 +41,8 @@ export interface WatchLoopInput<R> {
   // The loop handles screen-clearing separately via clearScreenBeforeRender.
   // Return "halt" to break the loop after this tick (used by threshold-alert
   // CI-gate semantics — first tick that trips an alert exits the loop).
+  // Under keepGoing=true the "halt" return is RECORDED into the result's
+  // `halted` field (sticky) but does NOT exit the loop.
   readonly render: (report: R) => "halt" | void;
   // Whether to emit ANSI clear-screen + cursor-home BEFORE each render.
   // True for human format (live single-screen UX); false for json
@@ -48,13 +50,24 @@ export interface WatchLoopInput<R> {
   readonly clearScreenBeforeRender: boolean;
   readonly io: IoStreams;
   readonly options: WatchLoopOptions;
+  // M4.14.s — keep-going mode. When true:
+  //   - render's "halt" return is RECORDED into result.halted but does NOT
+  //     exit the loop (sticky tracking across all ticks).
+  //   - gather() errors are caught and passed to errorRender + loop continues.
+  // When false (default): errors propagate, "halt" exits the loop immediately.
+  readonly keepGoing?: boolean;
+  // Required when keepGoing=true and gather() may throw — caller renders the
+  // error in place of the report (e.g., "(error: ...)" line or JSON envelope
+  // with error field). When keepGoing=false, errors propagate so this is
+  // ignored.
+  readonly errorRender?: (err: Error) => void;
 }
 
-// Result of a watch loop run. `halted` indicates the loop exited via the
-// render callback's "halt" return value (e.g., threshold-alert CI gate)
-// vs natural termination (maxIterations / abortSignal). Callers map
-// halted=true to an appropriate exit code (typically 3 for CI gates per
-// ADR-0181).
+// Result of a watch loop run. `halted` indicates the render callback returned
+// "halt" AT LEAST ONCE during this run. Under default mode that means the
+// loop exited early; under keepGoing=true it means at least one tick tripped
+// (sticky). Callers map halted=true to an appropriate exit code (typically
+// 3 for CI gates per ADR-0181).
 export interface WatchLoopResult {
   readonly halted: boolean;
 }
@@ -63,20 +76,39 @@ export async function runHousekeepingWatchLoop<R>(
   input: WatchLoopInput<R>,
 ): Promise<WatchLoopResult> {
   let iteration = 0;
+  let everHalted = false;
   while (true) {
     iteration++;
-    const report = await input.gather();
+    let report: R | undefined;
+    let gatherError: Error | undefined;
+    try {
+      report = await input.gather();
+    } catch (err) {
+      if (!input.keepGoing) throw err;
+      gatherError = err instanceof Error ? err : new Error(String(err));
+    }
     if (input.clearScreenBeforeRender) {
       input.io.stdout.write(ANSI_CLEAR_SCREEN);
     }
-    const haltSignal = input.render(report);
-    if (haltSignal === "halt") return { halted: true };
-    if (input.options.maxIterations !== undefined && iteration >= input.options.maxIterations) {
-      return { halted: false };
+    if (gatherError !== undefined) {
+      // keep-going + error: defer to caller's errorRender. If they didn't
+      // supply one, swallow silently (still record nothing — only "halt"
+      // marks halted).
+      input.errorRender?.(gatherError);
+    } else {
+      // Non-null assertion safe — gather() succeeded so report is defined.
+      const haltSignal = input.render(report as R);
+      if (haltSignal === "halt") {
+        everHalted = true;
+        if (!input.keepGoing) return { halted: true };
+      }
     }
-    if (input.options.abortSignal?.aborted) return { halted: false };
+    if (input.options.maxIterations !== undefined && iteration >= input.options.maxIterations) {
+      return { halted: everHalted };
+    }
+    if (input.options.abortSignal?.aborted) return { halted: everHalted };
     await waitInterval(input.options);
-    if (input.options.abortSignal?.aborted) return { halted: false };
+    if (input.options.abortSignal?.aborted) return { halted: everHalted };
   }
 }
 
@@ -117,6 +149,12 @@ export interface WatchOverride {
 export interface ParsedWatchFlags {
   readonly watch: boolean;
   readonly intervalSeconds: number;
+  // M4.14.s — resilient watch mode. When true, errors are caught + rendered
+  // (the loop keeps running) and threshold-alert trips don't halt early
+  // (they're recorded as "ever tripped" but the loop continues until
+  // maxIterations / abortSignal / SIGINT). Useful for long-running incident
+  // monitoring where transient PG blips shouldn't kill the dashboard.
+  readonly keepGoing: boolean;
 }
 
 // Returns the parsed flag values OR an exit code (2) on validation failure.
@@ -129,8 +167,13 @@ export function parseWatchFlags(
 ): ParsedWatchFlags | number {
   const watch = getBooleanFlag(command, "watch");
   const intervalFlag = getStringFlag(command, "watch-interval");
+  const keepGoing = getBooleanFlag(command, "watch-keep-going");
   if (!watch && intervalFlag !== null) {
     printError(io, `${actionLabel}: --watch-interval requires --watch`);
+    return 2;
+  }
+  if (!watch && keepGoing) {
+    printError(io, `${actionLabel}: --watch-keep-going requires --watch`);
     return 2;
   }
   let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
@@ -158,7 +201,7 @@ export function parseWatchFlags(
     );
     return 2;
   }
-  return { watch, intervalSeconds };
+  return { watch, intervalSeconds, keepGoing };
 }
 
 function isWatchCompatibleFormat(format: OutputFormat): format is "human" | "json" {

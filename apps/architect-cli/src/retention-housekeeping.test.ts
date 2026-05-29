@@ -852,3 +852,241 @@ describe("runRetention housekeeping --threshold-alert (M4.14.t)", () => {
     expect(out()).toContain("THRESHOLD ALERTS");
   });
 });
+
+describe("runRetention housekeeping --watch-keep-going (M4.14.s)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  const immediateSetTimeout = (cb: () => void, _ms: number) => {
+    cb();
+    return 1 as unknown;
+  };
+
+  function cleanFixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "100", oldest: null },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+    return { conn, retention };
+  }
+
+  function trippingFixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "5000000", oldest: null },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const preview = [
+      {
+        tableName: "workflow_traces",
+        status: "previewed" as const,
+        wouldDeleteCount: 2_000_000,
+        retentionDays: 30,
+        cutoffMs: 0,
+      },
+    ];
+    const retention = fakeRetention({ platform: [], tenant: [], preview });
+    return { conn, retention };
+  }
+
+  it("--watch-keep-going requires --watch (exit 2 otherwise)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch-keep-going"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--watch-keep-going requires --watch");
+  });
+
+  it("exits 0 when no errors + no trips occur across N ticks", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = cleanFixtures();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch", "--watch-keep-going"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+        watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    // Three ticks rendered.
+    const headers = out().match(/retention housekeeping \(as of /g);
+    expect(headers!.length).toBe(3);
+  });
+
+  it("does NOT halt on first trip — loops through maxIterations + exits 3 (sticky)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = trippingFixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--watch",
+        "--watch-keep-going",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+        watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    // All 3 ticks should have run + all 3 should render the alert.
+    const headers = out().match(/retention housekeeping \(as of /g);
+    expect(headers!.length).toBe(3);
+    const alertSections = out().match(/THRESHOLD ALERTS/g);
+    expect(alertSections!.length).toBe(3);
+  });
+
+  it("catches gather() errors + renders them + continues looping (exit 0 when no trip)", async () => {
+    const { ctx, out } = buffers();
+    const { conn } = cleanFixtures();
+    let callCount = 0;
+    const flakyRetention = {
+      listPolicies: async () => {
+        callCount++;
+        // Error on the 2nd tick to simulate a transient PG blip.
+        if (callCount === 2) throw new Error("connection terminated unexpectedly");
+        return [];
+      },
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch", "--watch-keep-going"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: flakyRetention,
+        clockOverride: () => fixedNow,
+        watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    // Tick 1 and 3 should render the full report; tick 2 renders the error.
+    expect(out()).toContain("error this tick: connection terminated unexpectedly");
+    const headers = out().match(/retention housekeeping \(as of /g);
+    // Ticks 1 + 3 render the full "as of" header; tick 2 renders the error line.
+    // (The error line uses a different prefix.)
+    expect(headers!.length).toBe(2);
+  });
+
+  it("WITHOUT --watch-keep-going, gather errors still propagate as exit 1", async () => {
+    const { ctx, err } = buffers();
+    const { conn } = cleanFixtures();
+    const throwingRetention = {
+      listPolicies: async () => {
+        throw new Error("boom");
+      },
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    // No --watch-keep-going flag → existing exit-1 behavior preserved.
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: throwingRetention,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 5, setTimeoutFn: immediateSetTimeout },
+    } as RetentionContext);
+    expect(code).toBe(1);
+    expect(err()).toContain("boom");
+  });
+
+  it("under --watch-keep-going + json, errors render as compact NDJSON envelope per tick", async () => {
+    const { ctx, out } = buffers();
+    const { conn } = cleanFixtures();
+    let callCount = 0;
+    const flakyRetention = {
+      listPolicies: async () => {
+        callCount++;
+        if (callCount === 2) throw new Error("transient PG blip");
+        return [];
+      },
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch", "--watch-keep-going", "--format", "json"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: flakyRetention,
+        clockOverride: () => fixedNow,
+        watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines.length).toBe(3);
+    // Tick 2 is an error envelope.
+    const env2 = JSON.parse(lines[1]!) as { error?: { message: string }; tables?: unknown };
+    expect(env2.error?.message).toBe("transient PG blip");
+    expect(env2.tables).toBeUndefined();
+    // Ticks 1 and 3 have the normal envelope.
+    const env1 = JSON.parse(lines[0]!) as { tables?: unknown };
+    expect(env1.tables).toBeDefined();
+  });
+
+  it("trip in middle tick survives a later non-tripping tick (sticky halted=true)", async () => {
+    const { ctx, out } = buffers();
+    const { conn } = cleanFixtures();
+    // First call returns trip-worthy preview; subsequent calls return empty.
+    let callCount = 0;
+    const oscillatingRetention = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+      previewPrune: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return [
+            {
+              tableName: "workflow_traces",
+              status: "previewed" as const,
+              wouldDeleteCount: 5_000_000,
+              retentionDays: 30,
+              cutoffMs: 0,
+            },
+          ];
+        }
+        return [];
+      },
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--watch",
+        "--watch-keep-going",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: oscillatingRetention,
+        clockOverride: () => fixedNow,
+        watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+      } as RetentionContext,
+    );
+    // Tick 1 trips; ticks 2 + 3 don't. With sticky tracking, exit = 3.
+    expect(code).toBe(3);
+    // First THRESHOLD ALERTS appears once (tick 1).
+    expect(out().match(/THRESHOLD ALERTS/g)!.length).toBe(1);
+  });
+});
