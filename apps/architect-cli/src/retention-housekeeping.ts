@@ -6,7 +6,7 @@ import {
   type TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 
-import { getMultiFlag, getStringFlag, type ParsedCommand } from "./cli.js";
+import { getBooleanFlag, getMultiFlag, getStringFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
@@ -76,6 +76,12 @@ export interface RetentionHousekeepingTableReport {
   // when the tenant has no override (inherits platform default). Absent
   // (undefined) when --tenant is not set.
   readonly tenantPolicy?: TenantRetentionPolicyRow | null;
+  // M4.14.q — populated only when `--all-tenants` matrix mode is set. Lists
+  // every per-tenant override on this table sorted by tenantId for stable
+  // output. Absent (undefined) when --all-tenants is not set. Mutually
+  // exclusive with tenantPolicy at the CLI boundary (both flags can't be
+  // set simultaneously).
+  readonly tenantOverrides?: ReadonlyArray<TenantRetentionPolicyRow>;
 }
 
 export interface RetentionHousekeepingReport {
@@ -83,6 +89,10 @@ export interface RetentionHousekeepingReport {
   // M4.14.u — echoed when `--tenant <uuid>` filter is set so JSON consumers
   // know which tenant the per-table tenantPolicy fields correspond to.
   readonly tenantId?: string;
+  // M4.14.q — echoed when `--all-tenants` matrix mode is set so JSON
+  // consumers can discriminate single-tenant vs matrix shapes without
+  // probing per-table fields.
+  readonly allTenants?: true;
   readonly tables: ReadonlyArray<RetentionHousekeepingTableReport>;
 }
 
@@ -96,6 +106,11 @@ export interface GatherRetentionHousekeepingInput {
   // regardless of filter) — the filter is a drill-down on tenant-specific
   // policy state, not an aggregate scope.
   readonly tenantId?: string;
+  // M4.14.q — when set, the report includes a per-table tenantOverrides
+  // array listing every per-tenant override on that table. Mutually
+  // exclusive with tenantId; aggregate fields stay cross-tenant for the
+  // same mental-model reason as the single-tenant drill-down.
+  readonly allTenants?: true;
 }
 
 export async function gatherRetentionHousekeepingReport(
@@ -116,6 +131,22 @@ export async function gatherRetentionHousekeepingReport(
   if (input.tenantId !== undefined) {
     for (const p of tenantPolicies) {
       if (p.tenantId === input.tenantId) tenantPolicyByTable.set(p.tableName, p);
+    }
+  }
+  // M4.14.q — when `--all-tenants` is set, group every per-tenant override
+  // by tableName for matrix output. Each table's override list is sorted by
+  // tenantId for stable output across runs (important for diff-able JSON
+  // exports in compliance audits). Reuses the same listTenantPolicies fetch
+  // as M4.14.u — zero new substrate queries.
+  const tenantOverridesByTable = new Map<string, TenantRetentionPolicyRow[]>();
+  if (input.allTenants === true) {
+    for (const p of tenantPolicies) {
+      const bucket = tenantOverridesByTable.get(p.tableName) ?? [];
+      bucket.push(p);
+      tenantOverridesByTable.set(p.tableName, bucket);
+    }
+    for (const bucket of tenantOverridesByTable.values()) {
+      bucket.sort((a, b) => a.tenantId.localeCompare(b.tenantId));
     }
   }
   const previewEntries = await input.retention.previewPrune();
@@ -147,15 +178,24 @@ export async function gatherRetentionHousekeepingReport(
     // M4.14.u — under --tenant, tenantPolicy is always set (either the
     // override row or null when no override). Without --tenant, the field
     // is omitted entirely from the per-table report.
-    const row =
-      input.tenantId !== undefined
-        ? { ...baseRow, tenantPolicy: tenantPolicyByTable.get(spec.tableName) ?? null }
-        : baseRow;
+    // M4.14.q — under --all-tenants, tenantOverrides is always set (every
+    // per-tenant override on this table, sorted by tenantId; empty array
+    // means no overrides on this table). Without --all-tenants, the field
+    // is omitted entirely. Mutually exclusive with --tenant at CLI boundary
+    // so the two never coexist on the same row.
+    let row: RetentionHousekeepingTableReport = baseRow;
+    if (input.tenantId !== undefined) {
+      row = { ...row, tenantPolicy: tenantPolicyByTable.get(spec.tableName) ?? null };
+    }
+    if (input.allTenants === true) {
+      row = { ...row, tenantOverrides: tenantOverridesByTable.get(spec.tableName) ?? [] };
+    }
     tables.push(row);
   }
   return {
     asOf: input.now.toISOString(),
     ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
+    ...(input.allTenants === true ? { allTenants: true as const } : {}),
     tables,
   };
 }
@@ -207,6 +247,19 @@ export async function runRetentionHousekeeping(
   }
   const tenantId = tenantFlag ?? undefined;
 
+  // M4.14.q — parse --all-tenants boolean flag + enforce mutual exclusivity
+  // with --tenant <uuid>. The two flags answer different operator
+  // questions (one tenant vs every tenant); combining is ambiguous.
+  const allTenantsFlag = getBooleanFlag(command, "all-tenants");
+  if (allTenantsFlag && tenantId !== undefined) {
+    printError(
+      ctx.io,
+      `retention housekeeping: --tenant and --all-tenants are mutually exclusive (use one or the other)`,
+    );
+    return 2;
+  }
+  const allTenants = allTenantsFlag ? (true as const) : undefined;
+
   // Parse --threshold-alert flags. Same fail-fast-on-validation discipline
   // as --watch flags.
   const alertRaws = getMultiFlag(command, "threshold-alert");
@@ -251,6 +304,7 @@ export async function runRetentionHousekeeping(
         retention,
         now,
         tenantId,
+        allTenants,
       });
     };
 
@@ -415,10 +469,14 @@ function renderHumanReport(
   ctx: RetentionHousekeepingContext,
   report: RetentionHousekeepingReport,
 ): void {
-  const header =
-    report.tenantId !== undefined
-      ? `retention housekeeping (as of ${report.asOf}, filtered to tenant ${report.tenantId}):\n`
-      : `retention housekeeping (as of ${report.asOf}):\n`;
+  let header: string;
+  if (report.tenantId !== undefined) {
+    header = `retention housekeeping (as of ${report.asOf}, filtered to tenant ${report.tenantId}):\n`;
+  } else if (report.allTenants === true) {
+    header = `retention housekeeping (as of ${report.asOf}, matrix mode — all tenants):\n`;
+  } else {
+    header = `retention housekeeping (as of ${report.asOf}):\n`;
+  }
   ctx.io.stdout.write(header);
   for (const t of report.tables) {
     ctx.io.stdout.write(`\n  ${t.tableName}\n`);
@@ -442,6 +500,31 @@ function renderHumanReport(
     if (t.tenantPolicy !== undefined) {
       renderTenantPolicyHuman(ctx, t.tenantPolicy);
     }
+    // M4.14.q — tenantOverrides is set only when --all-tenants is active.
+    // Empty array means no overrides on this table; populated means one
+    // line per overriding tenant for the long-format matrix view.
+    if (t.tenantOverrides !== undefined) {
+      renderTenantOverridesHuman(ctx, t.tenantOverrides);
+    }
+  }
+}
+
+function renderTenantOverridesHuman(
+  ctx: RetentionHousekeepingContext,
+  overrides: ReadonlyArray<TenantRetentionPolicyRow>,
+): void {
+  if (overrides.length === 0) {
+    ctx.io.stdout.write(`    matrix:          (no per-tenant overrides on this table)\n`);
+    return;
+  }
+  ctx.io.stdout.write(`    matrix (${overrides.length}):\n`);
+  for (const p of overrides) {
+    const optOut = p.optOut
+      ? ` opt-out=yes (until ${p.optOutUntil ?? "indefinite"}, reason: ${p.optOutReason ?? "<no reason>"})`
+      : "";
+    ctx.io.stdout.write(
+      `      ${p.tenantId}  retention=${p.retentionDays}d (${p.enabled ? "enabled" : "disabled"})${optOut}\n`,
+    );
   }
 }
 

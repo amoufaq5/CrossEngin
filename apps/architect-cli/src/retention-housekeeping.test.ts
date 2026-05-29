@@ -1468,3 +1468,170 @@ describe("runRetention housekeeping --tenant (M4.14.u)", () => {
     expect(out()).toContain("365 day(s)");
   });
 });
+
+describe("runRetention housekeeping --all-tenants (M4.14.q)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function fixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "1000000", oldest: "2026-04-01T00:00:00.000Z" },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    // Mix of overrides — TENANT_A overrides workflow_traces + llm_call_traces;
+    // TENANT_B overrides workflow_traces. rate_limit_decisions has zero
+    // overrides (exercises the empty-array placeholder). Unsorted input
+    // verifies the gather sorts by tenantId for stable output.
+    const tenant: TenantRetentionPolicyRow[] = [
+      {
+        tenantId: TENANT_B,
+        tableName: "workflow_traces",
+        retentionDays: 60,
+        enabled: true,
+        optOut: false,
+        optOutReason: null,
+        optOutUntil: null,
+        lastPrunedAt: null,
+      },
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 365,
+        enabled: true,
+        optOut: false,
+        optOutReason: null,
+        optOutUntil: null,
+        lastPrunedAt: null,
+      },
+      {
+        tenantId: TENANT_A,
+        tableName: "llm_call_traces",
+        retentionDays: 30,
+        enabled: false,
+        optOut: true,
+        optOutReason: "legal_hold:case#42",
+        optOutUntil: "2099-01-01T00:00:00.000Z",
+        lastPrunedAt: null,
+      },
+    ];
+    const retention = fakeRetention({ platform: [], tenant, preview: [] });
+    return { conn, retention };
+  }
+
+  it("exits 2 when --tenant and --all-tenants are both set (mutual exclusivity)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--tenant", TENANT_A, "--all-tenants"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("renders per-table matrix block in human output with overrides sorted by tenantId", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--all-tenants"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const stdout = out();
+    expect(stdout).toContain("matrix mode — all tenants");
+    // workflow_traces has 2 overrides → "matrix (2):" header + both lines.
+    expect(stdout).toMatch(/workflow_traces[\s\S]*?matrix \(2\):/);
+    // TENANT_A (...000A) sorts before TENANT_B (...000B) — verify the
+    // tenants appear in sorted order via a single regex spanning the table
+    // block.
+    expect(stdout).toMatch(
+      new RegExp(
+        `workflow_traces[\\s\\S]*?${TENANT_A}\\s+retention=365d[\\s\\S]*?${TENANT_B}\\s+retention=60d`,
+      ),
+    );
+    // llm_call_traces has 1 override (TENANT_A opt-out).
+    expect(stdout).toMatch(
+      /llm_call_traces[\s\S]*?matrix \(1\):[\s\S]*?retention=30d \(disabled\) opt-out=yes/,
+    );
+    // Tables with no overrides surface the empty-matrix placeholder.
+    expect(stdout).toMatch(
+      /rate_limit_decisions[\s\S]*?matrix:\s+\(no per-tenant overrides on this table\)/,
+    );
+  });
+
+  it("JSON envelope includes allTenants:true + each table has tenantOverrides[] (sorted)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--all-tenants", "--format", "json"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      action: string;
+      allTenants: boolean;
+      tenantId?: string;
+      tables: Array<{ tableName: string; tenantOverrides: Array<{ tenantId: string }> }>;
+    };
+    expect(env.allTenants).toBe(true);
+    expect(env.tenantId).toBeUndefined();
+    const wt = env.tables.find((t) => t.tableName === "workflow_traces")!;
+    expect(wt.tenantOverrides).toHaveLength(2);
+    expect(wt.tenantOverrides[0]!.tenantId).toBe(TENANT_A);
+    expect(wt.tenantOverrides[1]!.tenantId).toBe(TENANT_B);
+    const rl = env.tables.find((t) => t.tableName === "rate_limit_decisions")!;
+    expect(rl.tenantOverrides).toEqual([]);
+  });
+
+  it("omitting --all-tenants preserves backward-compat envelope shape (no tenantOverrides field)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--format", "json"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      allTenants?: boolean;
+      tables: Array<{ tableName: string; tenantOverrides?: unknown }>;
+    };
+    expect(env.allTenants).toBeUndefined();
+    for (const t of env.tables) {
+      expect("tenantOverrides" in t).toBe(false);
+    }
+  });
+
+  it("composes with --threshold-alert — drill-down preserves CI-gate semantic (exit 3 on trip)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--all-tenants",
+        "--threshold-alert",
+        "totalRowCount:>500000",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    expect(out()).toContain("THRESHOLD ALERTS");
+    expect(out()).toContain("matrix mode — all tenants");
+  });
+});
