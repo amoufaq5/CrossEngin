@@ -82,17 +82,24 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export async function runTenant(command: ParsedCommand, ctx: TenantContext): Promise<number> {
   const action = command.positional[0];
   if (action === undefined) {
-    printError(ctx.io, "tenant: missing action. usage: crossengin tenant <housekeeping> [flags]");
-    return 2;
-  }
-  if (action !== "housekeeping") {
     printError(
       ctx.io,
-      `tenant: unknown action '${action}'. usage: crossengin tenant <housekeeping> [flags]`,
+      "tenant: missing action. usage: crossengin tenant <housekeeping|policies> [args] [flags]",
     );
     return 2;
   }
-  return await runTenantHousekeeping(command, ctx);
+  switch (action) {
+    case "housekeeping":
+      return await runTenantHousekeeping(command, ctx);
+    case "policies":
+      return await runTenantPolicies(command, ctx);
+    default:
+      printError(
+        ctx.io,
+        `tenant: unknown action '${action}'. usage: crossengin tenant <housekeeping|policies> [args] [flags]`,
+      );
+      return 2;
+  }
 }
 
 async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext): Promise<number> {
@@ -356,4 +363,275 @@ function renderRetentionSection(ctx: TenantContext, report: RetentionHousekeepin
       `    tenant overrides: ${t.perTenantPolicyCount.toLocaleString("en-US")}\n`,
     );
   }
+}
+
+// M4.14.h — `tenant policies <slug|uuid>` — per-tenant cross-substrate
+// policy summary. Closes ADR-0276 Q3 + ADR-0277 Q2.
+//
+// Aggregates what's configured for ONE tenant across three policy axes
+// with substrate-level support today:
+//
+//   1. Retention overrides (meta.tenant_retention_policies) — per-table
+//      retention_days + enabled + opt_out state. Reuses
+//      PostgresTraceRetention.listTenantPolicies filtered by tenantId.
+//   2. Cost ceiling (meta.llm_cost_ceilings) — per-tenant ceiling
+//      override that takes precedence over tier + global. One row max
+//      per tenant.
+//   3. Tier membership (meta.llm_tenant_tier_memberships join
+//      meta.llm_cost_tiers) — tier assignment + the tier's policy
+//      shape. The fallback path when no per-tenant ceiling override is
+//      set. One row max per tenant.
+//
+// Rate-limit per-tenant overrides are intentionally NOT included in v1
+// because no per-tenant override table exists in the substrate today
+// (rate-limit policy is platform-defined; tenant variation goes
+// through tiers). Documented as a future Q in ADR-0280.
+export interface TenantPolicyRetentionEntry {
+  readonly tableName: string;
+  readonly retentionDays: number;
+  readonly enabled: boolean;
+  readonly optOut: boolean;
+  readonly optOutReason: string | null;
+  readonly optOutUntil: string | null;
+  readonly lastPrunedAt: string | null;
+}
+
+export interface TenantCostCeilingRow {
+  // NUMERIC(18,8) preserved as strings to avoid JS number precision loss.
+  readonly maxUsdPerRequest: string | null;
+  readonly maxUsdPerWindow: string | null;
+  readonly windowSeconds: number | null;
+  readonly effectiveFrom: string;
+}
+
+export interface TenantTierMembershipRow {
+  readonly tierId: string;
+  readonly displayName: string;
+  // Tier policy fields — same NUMERIC(18,8) string preservation.
+  readonly maxUsdPerRequest: string | null;
+  readonly maxUsdPerWindow: string | null;
+  readonly windowSeconds: number | null;
+}
+
+export interface TenantPoliciesReport {
+  readonly tenantId: string;
+  readonly input: string;
+  readonly retention: { readonly tables: ReadonlyArray<TenantPolicyRetentionEntry> };
+  readonly costCeiling: TenantCostCeilingRow | null;
+  readonly tier: TenantTierMembershipRow | null;
+}
+
+async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Promise<number> {
+  const input = command.positional[1];
+  if (input === undefined) {
+    printError(
+      ctx.io,
+      "tenant policies: missing positional argument. usage: crossengin tenant policies <slug|uuid>",
+    );
+    return 2;
+  }
+
+  // PG conn setup mirrors runTenantHousekeeping. Tests inject via
+  // pgConnectionOverride; production builds from env.
+  let conn: PgConnection;
+  let closeConn: () => Promise<void> = async () => undefined;
+  if (ctx.pgConnectionOverride !== undefined) {
+    conn = ctx.pgConnectionOverride;
+  } else {
+    try {
+      const config = parsePgEnvConfig(ctx.env);
+      conn = createNodePgConnection(config);
+      closeConn = async () => {
+        await conn.close().catch(() => undefined);
+      };
+    } catch (err) {
+      printError(
+        ctx.io,
+        `tenant policies: requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
+
+  try {
+    // Slug→UUID resolution inherits M4.14.j "did you mean" suggestions.
+    const resolved = await resolveTenantIdentifier(conn, input);
+    if (!resolved.ok) {
+      printError(ctx.io, `tenant policies: ${resolved.error}`);
+      return 2;
+    }
+    const tenantId = resolved.tenantId;
+
+    // Gather all three policy axes. Run concurrently — they share the
+    // connection but each fires its own SELECT; PG connection is
+    // request-serial so this effectively interleaves rather than
+    // parallelizes, but the code shape stays clean.
+    let report: TenantPoliciesReport;
+    try {
+      const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
+      const [retentionEntries, costCeiling, tier] = await Promise.all([
+        gatherRetentionEntriesForTenant(retention, tenantId),
+        gatherCostCeilingForTenant(conn, tenantId),
+        gatherTierMembershipForTenant(conn, tenantId),
+      ]);
+      report = {
+        tenantId,
+        input,
+        retention: { tables: retentionEntries },
+        costCeiling,
+        tier,
+      };
+    } catch (err) {
+      printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+
+    if (command.format === "json") {
+      printJson(ctx.io, { action: "tenant.policies", ...report });
+    } else {
+      renderPoliciesHuman(ctx, report);
+    }
+    return 0;
+  } finally {
+    await closeConn();
+  }
+}
+
+async function gatherRetentionEntriesForTenant(
+  retention: PostgresTraceRetention,
+  tenantId: string,
+): Promise<ReadonlyArray<TenantPolicyRetentionEntry>> {
+  // listTenantPolicies returns ALL per-tenant rows across all tenants;
+  // filter client-side by tenantId. Mirrors the retention housekeeping
+  // pattern. At typical scale (≤ 1K per-tenant policy rows) the filter
+  // cost is negligible vs the SELECT round-trip.
+  const all = await retention.listTenantPolicies();
+  return all
+    .filter((r) => r.tenantId === tenantId)
+    .map((r) => ({
+      tableName: r.tableName,
+      retentionDays: r.retentionDays,
+      enabled: r.enabled,
+      optOut: r.optOut,
+      optOutReason: r.optOutReason,
+      optOutUntil: r.optOutUntil,
+      lastPrunedAt: r.lastPrunedAt,
+    }));
+}
+
+async function gatherCostCeilingForTenant(
+  conn: PgConnection,
+  tenantId: string,
+): Promise<TenantCostCeilingRow | null> {
+  // NUMERIC(18,8)::TEXT cast preserves sub-cent precision across the
+  // node-postgres boundary (the driver returns NUMERIC as strings by
+  // default but the explicit cast keeps the contract obvious + matches
+  // the pattern from PostgresCostCeilingResolver).
+  const result = await conn.query<{
+    max_usd_per_request: string | null;
+    max_usd_per_window: string | null;
+    window_seconds: number | null;
+    effective_from: string;
+  }>(
+    `SELECT max_usd_per_request::TEXT AS max_usd_per_request,
+            max_usd_per_window::TEXT AS max_usd_per_window,
+            window_seconds,
+            to_char(effective_from AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from
+     FROM meta.llm_cost_ceilings WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return null;
+  return {
+    maxUsdPerRequest: row.max_usd_per_request,
+    maxUsdPerWindow: row.max_usd_per_window,
+    windowSeconds: row.window_seconds,
+    effectiveFrom: row.effective_from,
+  };
+}
+
+async function gatherTierMembershipForTenant(
+  conn: PgConnection,
+  tenantId: string,
+): Promise<TenantTierMembershipRow | null> {
+  // INNER JOIN against llm_cost_tiers — tier_id FK has ON DELETE
+  // RESTRICT (ADR-0144) so a membership row's tier always resolves.
+  const result = await conn.query<{
+    tier_id: string;
+    display_name: string;
+    max_usd_per_request: string | null;
+    max_usd_per_window: string | null;
+    window_seconds: number | null;
+  }>(
+    `SELECT t.tier_id, t.display_name,
+            t.max_usd_per_request::TEXT AS max_usd_per_request,
+            t.max_usd_per_window::TEXT AS max_usd_per_window,
+            t.window_seconds
+     FROM meta.llm_tenant_tier_memberships m
+     JOIN meta.llm_cost_tiers t ON t.tier_id = m.tier_id
+     WHERE m.tenant_id = $1`,
+    [tenantId],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return null;
+  return {
+    tierId: row.tier_id,
+    displayName: row.display_name,
+    maxUsdPerRequest: row.max_usd_per_request,
+    maxUsdPerWindow: row.max_usd_per_window,
+    windowSeconds: row.window_seconds,
+  };
+}
+
+function renderPoliciesHuman(ctx: TenantContext, report: TenantPoliciesReport): void {
+  ctx.io.stdout.write(`tenant policies (tenantId: ${report.tenantId}):\n`);
+
+  // Retention block.
+  ctx.io.stdout.write(`\n=== Retention overrides (${report.retention.tables.length}) ===\n`);
+  if (report.retention.tables.length === 0) {
+    ctx.io.stdout.write(`  (no per-tenant retention overrides — inherits platform defaults)\n`);
+  } else {
+    for (const t of report.retention.tables) {
+      ctx.io.stdout.write(`\n  ${t.tableName}\n`);
+      ctx.io.stdout.write(
+        `    retention:   ${t.retentionDays} day(s) (${t.enabled ? "enabled" : "disabled"})\n`,
+      );
+      if (t.optOut) {
+        const until = t.optOutUntil ?? "indefinite";
+        const reason = t.optOutReason ?? "<no reason>";
+        ctx.io.stdout.write(`    opt-out:     active (until ${until}, reason: ${reason})\n`);
+      } else {
+        ctx.io.stdout.write(`    opt-out:     no\n`);
+      }
+      ctx.io.stdout.write(`    last pruned: ${t.lastPrunedAt ?? "never"}\n`);
+    }
+  }
+
+  // Cost ceiling block.
+  ctx.io.stdout.write(`\n=== Cost ceiling override ===\n`);
+  if (report.costCeiling === null) {
+    ctx.io.stdout.write(`  (no per-tenant override — inherits from tier or global)\n`);
+  } else {
+    ctx.io.stdout.write(`  max per request: ${renderUsd(report.costCeiling.maxUsdPerRequest)}\n`);
+    ctx.io.stdout.write(`  max per window:  ${renderUsd(report.costCeiling.maxUsdPerWindow)}\n`);
+    ctx.io.stdout.write(
+      `  window seconds:  ${report.costCeiling.windowSeconds ?? "(unbounded)"}\n`,
+    );
+    ctx.io.stdout.write(`  effective from:  ${report.costCeiling.effectiveFrom}\n`);
+  }
+
+  // Tier membership block.
+  ctx.io.stdout.write(`\n=== Tier membership ===\n`);
+  if (report.tier === null) {
+    ctx.io.stdout.write(`  (no tier membership — inherits global ceiling)\n`);
+  } else {
+    ctx.io.stdout.write(`  tier:            ${report.tier.tierId} (${report.tier.displayName})\n`);
+    ctx.io.stdout.write(`  max per request: ${renderUsd(report.tier.maxUsdPerRequest)}\n`);
+    ctx.io.stdout.write(`  max per window:  ${renderUsd(report.tier.maxUsdPerWindow)}\n`);
+    ctx.io.stdout.write(`  window seconds:  ${report.tier.windowSeconds ?? "(unbounded)"}\n`);
+  }
+}
+
+function renderUsd(value: string | null): string {
+  return value === null ? "(unbounded)" : `$${value} USD`;
 }

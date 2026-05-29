@@ -377,3 +377,354 @@ describe("runTenant housekeeping (M4.14.l)", () => {
     expect(env.retention.tenantId).toBeUndefined();
   });
 });
+
+// M4.14.h — tenant policies aggregated view tests.
+interface FakePoliciesOpts {
+  readonly slugMap?: Record<string, string>;
+  readonly costCeilingRows?: Record<
+    string,
+    Array<{
+      max_usd_per_request: string | null;
+      max_usd_per_window: string | null;
+      window_seconds: number | null;
+      effective_from: string;
+    }>
+  >;
+  readonly tierRows?: Record<
+    string,
+    Array<{
+      tier_id: string;
+      display_name: string;
+      max_usd_per_request: string | null;
+      max_usd_per_window: string | null;
+      window_seconds: number | null;
+    }>
+  >;
+}
+
+function fakePoliciesConn(opts: FakePoliciesOpts): PgConnection {
+  return {
+    query: async <T>(sql: string, params?: readonly unknown[]) => {
+      if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+        const slug = String(params?.[0] ?? "");
+        const id = opts.slugMap?.[slug];
+        return id !== undefined
+          ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+          : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+      }
+      if (sql.includes("FROM meta.llm_cost_ceilings WHERE tenant_id = $1")) {
+        const tenantId = String(params?.[0] ?? "");
+        const rows = opts.costCeilingRows?.[tenantId] ?? [];
+        return { rows: rows as unknown as T[], rowCount: rows.length } as PgQueryResult<T>;
+      }
+      if (sql.includes("FROM meta.llm_tenant_tier_memberships m")) {
+        const tenantId = String(params?.[0] ?? "");
+        const rows = opts.tierRows?.[tenantId] ?? [];
+        return { rows: rows as unknown as T[], rowCount: rows.length } as PgQueryResult<T>;
+      }
+      // Unknown slug → candidates query for M4.14.j suggestions.
+      // Empty result means no suggestions surface.
+      if (sql.includes("SELECT slug FROM meta.tenants ORDER BY slug")) {
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      }
+      return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+    },
+    transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+    withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+    close: async () => undefined,
+  };
+}
+
+function fakeRetentionForPolicies(
+  rowsByTenant: Record<
+    string,
+    ReadonlyArray<{
+      tableName: string;
+      retentionDays: number;
+      enabled: boolean;
+      optOut: boolean;
+      optOutReason: string | null;
+      optOutUntil: string | null;
+      lastPrunedAt: string | null;
+    }>
+  >,
+): PostgresTraceRetention {
+  return {
+    listTenantPolicies: async () =>
+      Object.entries(rowsByTenant).flatMap(([tenantId, rows]) =>
+        rows.map((r) => ({ tenantId, ...r })),
+      ),
+  } as unknown as PostgresTraceRetention;
+}
+
+describe("runTenant policies (M4.14.h)", () => {
+  it("missing positional argument exits 2 with usage error", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantContext = { io, env: {} };
+    const code = await runTenant(parsed("tenant", "policies"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing positional argument");
+    expect(err()).toContain("<slug|uuid>");
+  });
+
+  it("unknown slug exits 2 with 'no tenant with slug' (inherits M4.14.j suggestions)", async () => {
+    const conn = fakePoliciesConn({ slugMap: {} });
+    const { io, err } = makeIo();
+    const ctx: TenantContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenant(parsed("tenant", "policies", "no-such-tenant"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("tenant policies:");
+    expect(err()).toContain("no tenant with slug 'no-such-tenant'");
+  });
+
+  it("UUID input renders empty-policy envelope when tenant has no overrides", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      action: string;
+      tenantId: string;
+      input: string;
+      retention: { tables: unknown[] };
+      costCeiling: unknown;
+      tier: unknown;
+    };
+    expect(env.action).toBe("tenant.policies");
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect(env.input).toBe(RESOLVED_UUID);
+    expect(env.retention.tables).toEqual([]);
+    expect(env.costCeiling).toBeNull();
+    expect(env.tier).toBeNull();
+  });
+
+  it("aggregates retention + cost ceiling + tier across the three queries", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise Plan",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: "2026-05-15T00:00:00.000Z",
+        },
+      ],
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      action: string;
+      tenantId: string;
+      retention: { tables: Array<{ tableName: string; retentionDays: number }> };
+      costCeiling: { maxUsdPerRequest: string; windowSeconds: number };
+      tier: { tierId: string; displayName: string };
+    };
+    expect(env.action).toBe("tenant.policies");
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect(env.retention.tables).toHaveLength(1);
+    expect(env.retention.tables[0]!.tableName).toBe("workflow_traces");
+    expect(env.retention.tables[0]!.retentionDays).toBe(365);
+    expect(env.costCeiling.maxUsdPerRequest).toBe("0.10000000");
+    expect(env.costCeiling.windowSeconds).toBe(3600);
+    expect(env.tier.tierId).toBe("enterprise");
+    expect(env.tier.displayName).toBe("Enterprise Plan");
+  });
+
+  it("filters retention by tenantId so other tenants' rows don't leak in", async () => {
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+      [TENANT_B]: [
+        {
+          tableName: "rate_limit_decisions",
+          retentionDays: 60,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+    });
+    const conn = fakePoliciesConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      retention: { tables: Array<{ tableName: string }> };
+    };
+    expect(env.retention.tables).toHaveLength(1);
+    expect(env.retention.tables[0]!.tableName).toBe("workflow_traces");
+    // TENANT_B's rate_limit_decisions row must NOT appear.
+    expect(env.retention.tables.map((t) => t.tableName)).not.toContain("rate_limit_decisions");
+  });
+
+  it("slug input resolves first then aggregates by resolved UUID", async () => {
+    const retention = fakeRetentionForPolicies({});
+    const conn = fakePoliciesConn({ slugMap: { "acme-prod": RESOLVED_UUID } });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", "acme-prod", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { tenantId: string; input: string };
+    // Envelope echoes the RESOLVED UUID for diff-stability + the original
+    // operator input for correlation.
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect(env.input).toBe("acme-prod");
+  });
+
+  it("human format renders three sections with placeholders for empty axes", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("tenant policies");
+    expect(output).toContain("=== Retention overrides (0) ===");
+    expect(output).toContain("(no per-tenant retention overrides");
+    expect(output).toContain("=== Cost ceiling override ===");
+    expect(output).toContain("(no per-tenant override");
+    expect(output).toContain("=== Tier membership ===");
+    expect(output).toContain("(no tier membership");
+  });
+
+  it("human format renders cost-ceiling fields with USD formatting and effective-from timestamp", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.50000000",
+            max_usd_per_window: "100.00000000",
+            window_seconds: 7200,
+            effective_from: "2026-03-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("max per request: $0.50000000 USD");
+    expect(output).toContain("max per window:  $100.00000000 USD");
+    expect(output).toContain("window seconds:  7200");
+    expect(output).toContain("effective from:  2026-03-01T00:00:00.000Z");
+  });
+
+  it("human format renders opt-out detail when an active opt-out exists", async () => {
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: false,
+          optOut: true,
+          optOutReason: "legal_hold:case#42",
+          optOutUntil: "2099-01-01T00:00:00.000Z",
+          lastPrunedAt: null,
+        },
+      ],
+    });
+    const conn = fakePoliciesConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("workflow_traces");
+    expect(output).toContain("retention:   365 day(s) (disabled)");
+    expect(output).toContain(
+      "opt-out:     active (until 2099-01-01T00:00:00.000Z, reason: legal_hold:case#42)",
+    );
+  });
+});
