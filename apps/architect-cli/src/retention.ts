@@ -42,6 +42,7 @@ import {
   printSuccess,
   printTsv,
 } from "./format.js";
+import { runRetentionHousekeeping } from "./retention-housekeeping.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
@@ -132,6 +133,11 @@ function findContradictoryValues<T>(
 
 export interface RetentionContext extends RunContext {
   readonly retentionOverride?: PostgresTraceRetention;
+  // M4.14.x housekeeping action injects raw PG + clock too. Optional + only
+  // consumed by housekeeping so the other 15 actions are unaffected (they
+  // build their connection via resolveRetention).
+  readonly pgConnectionOverride?: PgConnection;
+  readonly clockOverride?: () => Date;
 }
 
 interface ResolvedHandle {
@@ -144,9 +150,16 @@ export async function runRetention(command: ParsedCommand, ctx: RetentionContext
   if (action === undefined) {
     printError(
       ctx.io,
-      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|summary|restore|diff-history|diff-timeline|diff|prune> [args]",
+      "retention: missing action. usage: crossengin retention <expiring|effective|effective-batch|opt-out|opt-in|set|delete|list-policies|history|summary|restore|diff-history|diff-timeline|diff|prune|housekeeping> [args]",
     );
     return 2;
+  }
+  // housekeeping is the substrate-centric dashboard that needs BOTH the
+  // retention adapter AND raw PG connection for per-table COUNT/MIN queries
+  // — it manages its own resolution lifecycle, so short-circuit before
+  // resolveRetention.
+  if (action === "housekeeping") {
+    return await runRetentionHousekeeping(command, ctx);
   }
   const handle = await resolveRetention(ctx);
   if (handle === null) return 1;
@@ -185,7 +198,7 @@ export async function runRetention(command: ParsedCommand, ctx: RetentionContext
       default:
         printError(
           ctx.io,
-          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, summary, restore, diff-history, diff-timeline, diff, prune`,
+          `retention: unknown action '${action}'. expected one of: expiring, effective, effective-batch, opt-out, opt-in, set, delete, list-policies, history, summary, restore, diff-history, diff-timeline, diff, prune, housekeeping`,
         );
         return 2;
     }
