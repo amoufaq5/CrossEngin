@@ -1245,3 +1245,226 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     expect(removeCalls.count).toBe(1);
   });
 });
+
+describe("runRetention housekeeping --tenant (M4.14.u)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function fixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "1000000", oldest: "2026-04-01T00:00:00.000Z" },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const tenant: TenantRetentionPolicyRow[] = [
+      // TENANT_A has overrides on workflow_traces + llm_call_traces.
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 365,
+        enabled: true,
+        optOut: false,
+        optOutReason: null,
+        optOutUntil: null,
+        lastPrunedAt: "2026-05-20T00:00:00.000Z",
+      },
+      {
+        tenantId: TENANT_A,
+        tableName: "llm_call_traces",
+        retentionDays: 30,
+        enabled: false,
+        optOut: true,
+        optOutReason: "legal_hold:case#42",
+        optOutUntil: "2099-01-01T00:00:00.000Z",
+        lastPrunedAt: null,
+      },
+      // TENANT_B has only one override (workflow_traces) — used to verify
+      // the filter discriminates correctly between tenants.
+      {
+        tenantId: TENANT_B,
+        tableName: "workflow_traces",
+        retentionDays: 60,
+        enabled: true,
+        optOut: false,
+        optOutReason: null,
+        optOutUntil: null,
+        lastPrunedAt: null,
+      },
+    ];
+    const retention = fakeRetention({ platform: [], tenant, preview: [] });
+    return { conn, retention };
+  }
+
+  it("exits 2 on invalid --tenant value (non-UUID)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--tenant", "not-a-uuid"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --tenant");
+    expect(err()).toContain("must be a UUID");
+  });
+
+  it("accepts a valid UUID and renders tenantPolicy sections for the filtered tenant", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--tenant", TENANT_A), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const stdout = out();
+    // Header includes the tenant filter callout.
+    expect(stdout).toContain(`filtered to tenant ${TENANT_A}`);
+    // workflow_traces shows TENANT_A's override (365d, enabled, no opt-out).
+    expect(stdout).toMatch(
+      /workflow_traces[\s\S]*?tenant policy:[\s\S]*?retention:\s+365 day\(s\) \(enabled\)[\s\S]*?opt-out:\s+no/,
+    );
+    // llm_call_traces shows TENANT_A's opt-out with reason + until.
+    expect(stdout).toMatch(
+      /llm_call_traces[\s\S]*?tenant policy:[\s\S]*?opt-out:\s+yes \(until 2099-01-01T00:00:00\.000Z, reason: legal_hold:case#42\)/,
+    );
+    // Tables where TENANT_A has no override show the no-override message.
+    expect(stdout).toMatch(
+      /rate_limit_decisions[\s\S]*?tenant policy:\s+\(no override — inherits platform default\)/,
+    );
+  });
+
+  it("filter discriminates between tenants — TENANT_B sees its own override", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--tenant", TENANT_B), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const stdout = out();
+    // TENANT_B's override is 60d (NOT TENANT_A's 365d).
+    expect(stdout).toMatch(
+      /workflow_traces[\s\S]*?tenant policy:[\s\S]*?retention:\s+60 day\(s\) \(enabled\)/,
+    );
+    expect(stdout).not.toContain("365 day(s)");
+    // TENANT_B has no override on llm_call_traces.
+    expect(stdout).toMatch(
+      /llm_call_traces[\s\S]*?tenant policy:\s+\(no override — inherits platform default\)/,
+    );
+  });
+
+  it("JSON envelope includes top-level tenantId + per-table tenantPolicy", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--format", "json", "--tenant", TENANT_A),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantId: string;
+      tables: Array<{
+        tableName: string;
+        tenantPolicy: TenantRetentionPolicyRow | null | undefined;
+      }>;
+    };
+    expect(env.tenantId).toBe(TENANT_A);
+    const wt = env.tables.find((t) => t.tableName === "workflow_traces")!;
+    expect(wt.tenantPolicy).not.toBeNull();
+    expect(wt.tenantPolicy!.retentionDays).toBe(365);
+    expect(wt.tenantPolicy!.tenantId).toBe(TENANT_A);
+    const lct = env.tables.find((t) => t.tableName === "llm_call_traces")!;
+    expect(lct.tenantPolicy!.optOut).toBe(true);
+    // No override = explicit null (not undefined) so JSON consumers can
+    // distinguish "filter active, no policy" from "filter not active."
+    const rl = env.tables.find((t) => t.tableName === "rate_limit_decisions")!;
+    expect(rl.tenantPolicy).toBeNull();
+  });
+
+  it("WITHOUT --tenant, the envelope omits tenantId + per-table tenantPolicy entirely", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--format", "json"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantId?: string;
+      tables: Array<{ tableName: string; tenantPolicy?: unknown }>;
+    };
+    expect(env.tenantId).toBeUndefined();
+    for (const table of env.tables) {
+      expect(table.tenantPolicy).toBeUndefined();
+    }
+  });
+
+  it("composes with --threshold-alert (tenant filter is drill-down; alerts still evaluate against cross-tenant fields)", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "1000000", oldest: null },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const platform: RetentionPolicyRow[] = [];
+    const tenant: TenantRetentionPolicyRow[] = [
+      {
+        tenantId: TENANT_A,
+        tableName: "workflow_traces",
+        retentionDays: 365,
+        enabled: true,
+        optOut: false,
+        optOutReason: null,
+        optOutUntil: null,
+        lastPrunedAt: null,
+      },
+    ];
+    const preview = [
+      {
+        tableName: "workflow_traces",
+        status: "previewed" as const,
+        wouldDeleteCount: 2_000_000,
+        retentionDays: 30,
+        cutoffMs: 0,
+      },
+    ];
+    const retention = fakeRetention({ platform, tenant, preview });
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--tenant",
+        TENANT_A,
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    // Alert still trips (cross-tenant aggregate of 2M > 1M).
+    expect(out()).toContain("THRESHOLD ALERTS");
+    // Tenant filter still active in the header.
+    expect(out()).toContain(`filtered to tenant ${TENANT_A}`);
+    // tenant policy rendered for workflow_traces too.
+    expect(out()).toContain("365 day(s)");
+  });
+});
