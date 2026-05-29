@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { parseArgs } from "./cli.js";
 import type { IoStreams } from "./format.js";
-import { runTenants, type TenantsContext, type TenantRow } from "./tenants.js";
+import { runTenants, type TenantRow, type TenantRowFull, type TenantsContext } from "./tenants.js";
 
 function makeIo(): { io: IoStreams; out: () => string; err: () => string } {
   const outChunks: string[] = [];
@@ -46,6 +46,20 @@ const TENANT_C: TenantRow = {
   tier: "regulated",
 };
 
+const TENANT_A_FULL: TenantRowFull = {
+  id: TENANT_A.id,
+  slug: TENANT_A.slug,
+  name: TENANT_A.name,
+  status: TENANT_A.status,
+  tier: TENANT_A.tier,
+  region: "us",
+  schema_name: "tenant_acme_prod",
+  residency: { primary: "us-east-1", failover: "us-west-2" },
+  search_locale: "english",
+  created_at: "2026-04-15T10:30:00.000Z",
+  updated_at: "2026-05-15T14:45:00.000Z",
+};
+
 interface CapturedQuery {
   readonly sql: string;
   readonly params: readonly unknown[] | undefined;
@@ -58,6 +72,7 @@ interface CapturedQuery {
 function fakeConn(opts: {
   tenantRows?: ReadonlyArray<TenantRow>;
   slugMap?: Record<string, string>;
+  getMap?: Record<string, TenantRowFull>;
 }): { conn: PgConnection; queries: CapturedQuery[] } {
   const queries: CapturedQuery[] = [];
   const conn: PgConnection = {
@@ -68,6 +83,13 @@ function fakeConn(opts: {
         const id = opts.slugMap?.[slug];
         return id !== undefined
           ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+          : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+      }
+      if (sql.includes("FROM meta.tenants WHERE id = $1")) {
+        const id = String(params?.[0] ?? "");
+        const row = opts.getMap?.[id];
+        return row !== undefined
+          ? ({ rows: [row], rowCount: 1 } as unknown as PgQueryResult<T>)
           : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
       }
       if (sql.includes("FROM meta.tenants t")) {
@@ -261,5 +283,107 @@ describe("runTenants resolve (M4.14.k)", () => {
     expect(env.action).toBe("tenants.resolve");
     expect(env.input).toBe("acme-prod");
     expect(env.tenantId).toBe(TENANT_A.id);
+  });
+});
+
+describe("runTenants get (M4.14.i)", () => {
+  it("missing positional argument exits 2 with usage error", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "get"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("missing positional argument");
+    expect(err()).toContain("<slug|uuid>");
+  });
+
+  it("UUID input short-circuits resolve and SELECTs by id directly", async () => {
+    const { conn, queries } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", TENANT_A.id, "--format", "json"), ctx);
+    expect(code).toBe(0);
+    // Only one query — the WHERE id = $1 SELECT. The resolver short-circuited.
+    expect(queries).toHaveLength(1);
+    expect(queries[0]!.sql).toContain("FROM meta.tenants WHERE id = $1");
+    expect(queries[0]!.params).toEqual([TENANT_A.id]);
+  });
+
+  it("slug input resolves first then SELECTs the full row by resolved id", async () => {
+    const { conn, queries } = fakeConn({
+      slugMap: { "acme-prod": TENANT_A.id },
+      getMap: { [TENANT_A.id]: TENANT_A_FULL },
+    });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", "acme-prod", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    // Two queries: slug→UUID resolve + full-row SELECT.
+    expect(queries).toHaveLength(2);
+    expect(queries[0]!.sql).toContain("SELECT id FROM meta.tenants WHERE slug");
+    expect(queries[1]!.sql).toContain("FROM meta.tenants WHERE id = $1");
+    expect(queries[1]!.params).toEqual([TENANT_A.id]);
+  });
+
+  it("unknown slug exits 2 with 'no tenant with slug' (and inherits M4.14.j suggestions)", async () => {
+    // No slug match + no candidates → bare error.
+    const { conn } = fakeConn({ slugMap: {} });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", "no-such-tenant"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("tenants get:");
+    expect(err()).toContain("no tenant with slug 'no-such-tenant'");
+  });
+
+  it("UUID input that doesn't exist exits 2 with 'no tenant with id' (distinct from slug error)", async () => {
+    const { conn } = fakeConn({ getMap: {} });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const unknownUuid = "99999999-0000-4000-8000-000000000000";
+    const code = await runTenants(parsed("tenants", "get", unknownUuid), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("tenants get:");
+    expect(err()).toContain(`no tenant with id '${unknownUuid}'`);
+    // Distinct from slug error so operators can tell the failure modes apart.
+    expect(err()).not.toContain("did you mean");
+  });
+
+  it("JSON envelope includes action + full TenantRow with all 11 META columns", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", TENANT_A.id, "--format", "json"), ctx);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { action: string; tenant: TenantRowFull };
+    expect(env.action).toBe("tenants.get");
+    expect(env.tenant.id).toBe(TENANT_A.id);
+    expect(env.tenant.slug).toBe(TENANT_A.slug);
+    expect(env.tenant.name).toBe(TENANT_A.name);
+    expect(env.tenant.status).toBe(TENANT_A.status);
+    expect(env.tenant.tier).toBe(TENANT_A.tier);
+    expect(env.tenant.region).toBe("us");
+    expect(env.tenant.schema_name).toBe("tenant_acme_prod");
+    expect(env.tenant.residency).toEqual({ primary: "us-east-1", failover: "us-west-2" });
+    expect(env.tenant.search_locale).toBe("english");
+    expect(env.tenant.created_at).toBe("2026-04-15T10:30:00.000Z");
+    expect(env.tenant.updated_at).toBe("2026-05-15T14:45:00.000Z");
+  });
+
+  it("human format renders the 9 essential fields in a key:value block", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", TENANT_A.id), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`tenant: ${TENANT_A.slug}`);
+    expect(output).toContain(`id:          ${TENANT_A.id}`);
+    expect(output).toContain(`name:        ${TENANT_A.name}`);
+    expect(output).toContain("status:      active");
+    expect(output).toContain("tier:        enterprise");
+    expect(output).toContain("region:      us");
+    expect(output).toContain("schema:      tenant_acme_prod");
+    expect(output).toContain("created_at:  2026-04-15T10:30:00.000Z");
+    expect(output).toContain("updated_at:  2026-05-15T14:45:00.000Z");
   });
 });

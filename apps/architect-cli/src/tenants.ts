@@ -17,6 +17,10 @@
 // - `tenants resolve <slug>` — one-shot UUID lookup helper for shell
 //   scripting. Output: just the UUID + newline (pipeline-friendly) or
 //   JSON envelope.
+// - `tenants get <slug|uuid>` — full TenantRow for one tenant (M4.14.i).
+//   Resolves slug→UUID via resolveTenantIdentifier (inherits M4.14.j's
+//   "did you mean" suggestions on slug miss), then SELECTs the full row
+//   by id. Output: multi-line key:value or JSON envelope.
 
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 
@@ -45,12 +49,25 @@ export interface TenantRow {
   readonly tier: string;
 }
 
+// M4.14.i — full row shape for `tenants get`. Extends TenantRow with the
+// remaining META_TENANTS columns (region + schema_name + residency JSONB +
+// search_locale + timestamps). Operators auditing tenants need the full
+// view; list keeps the compact 5-field shape for table-friendly output.
+export interface TenantRowFull extends TenantRow {
+  readonly region: string;
+  readonly schema_name: string;
+  readonly residency: unknown;
+  readonly search_locale: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 export async function runTenants(command: ParsedCommand, ctx: TenantsContext): Promise<number> {
   const action = command.positional[0];
   if (action === undefined) {
     printError(
       ctx.io,
-      "tenants: missing action. usage: crossengin tenants <list|resolve> [args] [flags]",
+      "tenants: missing action. usage: crossengin tenants <list|resolve|get> [args] [flags]",
     );
     return 2;
   }
@@ -59,10 +76,12 @@ export async function runTenants(command: ParsedCommand, ctx: TenantsContext): P
       return await runTenantsList(command, ctx);
     case "resolve":
       return await runTenantsResolve(command, ctx);
+    case "get":
+      return await runTenantsGet(command, ctx);
     default:
       printError(
         ctx.io,
-        `tenants: unknown action '${action}'. usage: crossengin tenants <list|resolve> [args] [flags]`,
+        `tenants: unknown action '${action}'. usage: crossengin tenants <list|resolve|get> [args] [flags]`,
       );
       return 2;
   }
@@ -136,6 +155,72 @@ async function runTenantsResolve(command: ParsedCommand, ctx: TenantsContext): P
   } finally {
     await conn.close();
   }
+}
+
+// M4.14.i — `tenants get <slug|uuid>` returns the full TenantRow for one
+// tenant. Resolves slug→UUID via resolveTenantIdentifier (inherits the
+// M4.14.j "did you mean" suggestion path on slug miss), then SELECTs the
+// full row by id. UUID-shaped input short-circuits the resolve step but
+// still must pass the id-existence check — a typo'd UUID surfaces as
+// "no tenant with id 'X'" (exit 2) distinct from the slug-not-found
+// "no tenant with slug 'X' — did you mean ..." (also exit 2) so
+// operators can tell the failure modes apart.
+async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promise<number> {
+  const input = command.positional[1];
+  if (input === undefined) {
+    printError(
+      ctx.io,
+      "tenants get: missing positional argument. usage: crossengin tenants get <slug|uuid>",
+    );
+    return 2;
+  }
+
+  const conn = await resolveConn(ctx, "tenants get");
+  if (conn === null) return 1;
+
+  try {
+    const resolved = await resolveTenantIdentifier(conn.exec, input);
+    if (!resolved.ok) {
+      printError(ctx.io, `tenants get: ${resolved.error}`);
+      return 2;
+    }
+    const result = await conn.exec.query<TenantRowFull>(
+      `SELECT id, slug, name, status, tier, region, schema_name, residency, search_locale,
+              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+              to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
+       FROM meta.tenants WHERE id = $1`,
+      [resolved.tenantId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      // UUID short-circuit + missing row: operator's UUID doesn't match
+      // any tenant. Slug input that fell through to this branch is
+      // impossible (resolveTenantIdentifier would have returned ok:false
+      // first), so we can confidently report by id.
+      printError(ctx.io, `tenants get: no tenant with id '${resolved.tenantId}'`);
+      return 2;
+    }
+    if (command.format === "json") {
+      printJson(ctx.io, { action: "tenants.get", tenant: row });
+    } else {
+      renderHumanTenant(ctx, row);
+    }
+    return 0;
+  } finally {
+    await conn.close();
+  }
+}
+
+function renderHumanTenant(ctx: TenantsContext, row: TenantRowFull): void {
+  ctx.io.stdout.write(`tenant: ${row.slug}\n`);
+  ctx.io.stdout.write(`  id:          ${row.id}\n`);
+  ctx.io.stdout.write(`  name:        ${row.name}\n`);
+  ctx.io.stdout.write(`  status:      ${row.status}\n`);
+  ctx.io.stdout.write(`  tier:        ${row.tier}\n`);
+  ctx.io.stdout.write(`  region:      ${row.region}\n`);
+  ctx.io.stdout.write(`  schema:      ${row.schema_name}\n`);
+  ctx.io.stdout.write(`  created_at:  ${row.created_at}\n`);
+  ctx.io.stdout.write(`  updated_at:  ${row.updated_at}\n`);
 }
 
 interface ConnHandle {

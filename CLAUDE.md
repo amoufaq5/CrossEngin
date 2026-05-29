@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,142 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.14.i adds `crossengin tenants get <slug|uuid>`
+— third standard verb on the tenants namespace after
+M4.14.k's list + resolve, closing ADR-0277 Q1. After
+the standalone tenants subcommand shipped operators
+running compliance audits had three workflows that
+couldn't be served by list+jq filtering: one-tenant
+full-row audit (the 5-column list shape omits region/
+schema_name/residency/search_locale/timestamps),
+programmatic dashboard consumers wanting a structured
+single-row envelope they can correlate by action
+discriminator, and resource-fingerprint diff
+(`tenants get --format json` snapshots piped through
+diff to track row drift across staging vs prod).
+`tenants list --status active | jq '.tenants[] |
+select(.slug == "acme-prod")'` worked but fetched all
+active tenants to project one, lost the 6 columns
+list omits, and gave no slug-typo detection. New
+runTenantsGet wires resolveTenantIdentifier (inherits
+M4.14.j's "did you mean" suggestions automatically on
+slug miss) then SELECTs the full row by id. UUID
+input short-circuits the resolver and hits the SELECT
+directly (1 query, ~1ms); slug input does the resolve
+SELECT then the get SELECT (2 queries, ~2ms). Single-
+query alternative `WHERE id = $1 OR slug = $1`
+rejected — forces CASE WHEN ambiguity at the UUID
+discriminator boundary; the two-query approach reuses
+the resolver across all 7 callers consistently. New
+exported TenantRowFull extends TenantRow with the 6
+columns list omits (region + schema_name + residency
+JSONB + search_locale + created_at + updated_at) so
+operators consuming both surfaces write generic code
+against TenantRow and discriminate to TenantRowFull
+when they need full-row details. Timestamps cast via
+SQL `to_char(... AT TIME ZONE 'UTC',
+'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` pins format across
+environments (Node version + locale + ISO 8601
+representation choice would otherwise drift). Human
+format renders 9 essential fields in a key:value
+block with the slug as the header line —
+`tenant: acme-prod\n  id:          ...\n  name:
+...\n  status:      active\n  tier:        enterprise
+\n  region:      us\n  schema:      tenant_acme_prod
+\n  created_at:  ISO\n  updated_at:  ISO`. Residency
++ search_locale deliberately omitted from human
+output (JSONB would wreck the compact block);
+operators wanting those use --format json. JSON
+envelope `{action: "tenants.get", tenant:
+TenantRowFull}` includes all 11 columns. Failure
+modes deliberately distinct per input shape — slug
+input not found → `no tenant with slug 'X' — did you
+mean 'Y', 'Z'?` (M4.14.j path); UUID input not found
+→ `no tenant with id 'X'` (new error after the
+UUID-shape short-circuit + missing SELECT row).
+Both exit 2; the distinction lets operators tell
+typo-input from absent-data failures apart. Rejected
+— single SQL query (CASE WHEN ambiguity at the
+discriminator boundary), tenants get returns only 5
+list-columns (would force operators to JOIN against
+meta.tenants directly for region/residency/
+timestamps; the whole point of get is full-row
+audit), render residency inline in human (JSONB
+shape varies by tenant; pretty-print wrecks the block
+or one-liner JSON is unreadable at 100+ chars),
+tenants show as the verb name (kubectl precedent but
+get is the canonical REST + kubectl get + gh
+convention), always emit JSON regardless of --format
+(breaks cross-CLI human-default convention), exit 1
+for "no tenant with id" (exit 1 conventionally means
+runtime/I/O failure; exit 2 means operator misuse +
+invalid identifier; unknown UUID is the latter), CSV
+output for tenants get (single-row CSV is 2 lines
+with zero value over human format; tabular use
+tenants list), no distinct UUID-not-found error
+(would fold both errors into one and fork the
+resolver shape for one caller; operators value the
+distinction), render Date objects via JSON.stringify
+default (environment-dependent serialization; SQL
+to_char cast pins the format). Drawbacks — two PG
+queries for slug input (minor ~1ms extra on
+interactive audit path), help text grows 7 lines
+(acceptable; per-action descriptions help operators),
+TenantRowFull shape exposed publicly so future
+META_TENANTS column changes ripple to the envelope
+(documented as stability commitment), residency typed
+as unknown since JSONB shape is tenant-defined
+(operators narrow on their own schema), distinct
+UUID-not-found error means two error strings for the
+same conceptual failure (but operators tell typo-slug
+from typo-uuid apart). 7 new CLI tests in
+tenants.test.ts under "runTenants get (M4.14.i)" —
+missing positional exit 2 with usage error, UUID
+input short-circuits resolve (only 1 query: the
+WHERE id = $1 SELECT verified via capture length),
+slug input resolves first then SELECTs (2 queries:
+slug→UUID + full-row), unknown slug exits 2 with
+"no tenant with slug" inheriting M4.14.j suggestion
+path, UUID input that doesn't exist exits 2 with
+"no tenant with id" distinct from slug error +
+no "did you mean" appended, JSON envelope includes
+all 11 META columns including residency JSONB +
+search_locale + ISO 8601 timestamps, human format
+renders 9 essential fields in key:value block with
+proper padding. fakeConn extended with optional
+getMap?: Record<string, TenantRowFull> mapping id →
+full row matched on SQL substring "FROM meta.tenants
+WHERE id = $1"; new TENANT_A_FULL test data with
+all 11 columns including residency {primary,
+failover} + search_locale + ISO 8601 timestamps.
+cli.ts helpText extended between tenants resolve
+and workflow validate with 7-line description of
+get action covering full-record semantic + slug-
+resolution inheritance + distinct UUID-not-found
+error. Test count: tenants.test.ts grows 15 → 22
+tests (+7). Workspace test count 9,717 → 9,724.
+Coverage gate passes — tenants.ts at 91.46%
+statements / 92.64% branches / 90.9% functions /
+91.46% lines (above the 80/70/80/80 thresholds;
+uncovered lines are the PG-env fallback path of
+resolveConn which all unit tests bypass via
+override + the missing-arg+unknown-action exit
+paths of the dispatcher already covered by other
+tests). ADR-0279 documents the design + 9 rejected
+alternatives + 8 future Qs (--include field
+projection, --output yaml for residency block,
+--watch for live refresh during incident monitoring,
+--previous-revision via deferred tenants_history
+substrate, batch get returning multiple rows, RFC
+9457 problem detail JSON envelope, tenants describe
+verbose alias, apply resolver pattern to pack slugs
+and workflow definition keys pairing with ADR-0278
+Q6). The tenants namespace now has its complete
+v1 surface — list (enumerate with filters) +
+resolve (slug→UUID for shell pipelines) + get
+(full-row for one tenant); compliance audit
+workflows + dashboard programmatic consumers +
+resource-fingerprint diff all CLI-native.
 M4.14.j adds slug-typo suggestions to the
 `resolveTenantIdentifier` error path — closes
 ADR-0273 Q6 + ADR-0275 Q3 + ADR-0276 Q8 + ADR-0277
