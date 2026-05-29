@@ -13,10 +13,11 @@ import {
 } from "./housekeeping-watch.js";
 import { resolveTenantIdentifier } from "./tenant-resolver.js";
 import {
-  evaluateAlertOnRow,
+  evaluateAlertCompound,
   parseThresholdAlertFlags,
   renderTrippedAlert,
   type AlertableFieldSpec,
+  type AlertableFieldType,
   type ThresholdAlertSpec,
   type TrippedAlert,
 } from "./threshold-alert.js";
@@ -419,12 +420,19 @@ function evaluateAlertsForReport(
 ): TrippedAlert[] {
   const asOfMs = Date.parse(report.asOf);
   const tripped: TrippedAlert[] = [];
+  const fieldTypeOf = (field: string): AlertableFieldType | undefined =>
+    GATEWAY_ALERTABLE_FIELDS.find((f) => f.name === field)?.type;
   for (const tableRow of report.tables) {
     for (const alert of alerts) {
-      const fieldSpec = GATEWAY_ALERTABLE_FIELDS.find((f) => f.name === alert.field);
-      if (fieldSpec === undefined) continue;
-      const fieldValue = readField(tableRow, alert.field);
-      const hit = evaluateAlertOnRow(alert, tableRow.tableName, fieldValue, fieldSpec.type, asOfMs);
+      // M4.14.n — evaluateAlertCompound owns per-clause iteration +
+      // AND/OR combinator logic.
+      const hit = evaluateAlertCompound(
+        alert,
+        tableRow.tableName,
+        (field) => readField(tableRow, field),
+        fieldTypeOf,
+        asOfMs,
+      );
       if (hit !== null) tripped.push(hit);
     }
   }

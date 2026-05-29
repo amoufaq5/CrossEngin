@@ -46,25 +46,64 @@ export type ThresholdValue =
   | { readonly kind: "duration"; readonly ms: number; readonly raw: string }
   | { readonly kind: "timestamp"; readonly iso: string };
 
-export interface ThresholdAlertSpec {
+// M4.14.n — compound alert support. A ThresholdAlertSpec now consists
+// of N clauses combined by AND/OR (or SINGLE for the original single-
+// clause case). Backward compat: field/op/value at the top level mirror
+// `clauses[0]` for SINGLE alerts AND act as the first-clause convenience
+// accessor for compound alerts. Consumers wanting all clauses iterate
+// `clauses` directly.
+export interface ThresholdAlertClause {
   readonly raw: string;
   readonly field: string;
   readonly op: ThresholdOp;
   readonly value: ThresholdValue;
 }
 
-export interface TrippedAlert {
-  readonly spec: string; // operator's original input string
-  readonly tableName: string;
+export type ThresholdCombinator = "SINGLE" | "AND" | "OR";
+
+export interface ThresholdAlertSpec {
+  readonly raw: string;
+  // M4.14.n — combinator + clauses describe the compound expression.
+  // SINGLE: clauses.length === 1; field/op/value mirror clauses[0].
+  // AND: all clauses must trip for the alert to trip.
+  // OR: any clause tripping causes the alert to trip (equivalent to
+  // running each clause as a separate alert; OR within a flag is a
+  // syntactic convenience).
+  readonly combinator: ThresholdCombinator;
+  readonly clauses: ReadonlyArray<ThresholdAlertClause>;
+  // Backward-compat convenience accessors (mirror clauses[0]).
+  readonly field: string;
+  readonly op: ThresholdOp;
+  readonly value: ThresholdValue;
+}
+
+// M4.14.n — per-clause evaluation result. Mirrors what `evaluateAlertOnRow`
+// used to return for the single-clause case; surfaces individually in the
+// `TrippedAlert.trippedClauses` array.
+export interface TrippedClause {
+  readonly clauseRaw: string;
   readonly fieldName: string;
   readonly op: ThresholdOp;
-  readonly thresholdRaw: string; // human-readable threshold value
-  // Actual field value at evaluation time. Numeric for number fields,
-  // ISO 8601 for timestamps. `null` if the field was null AND null
-  // triggers (timestamp + GT/GTE with duration).
+  readonly thresholdRaw: string;
   readonly actual: number | string | null;
-  // For timestamp fields only — the computed "age" in milliseconds
-  // (now - lastPrunedAt). Useful for human-readable rendering.
+  readonly ageMs?: number;
+}
+
+export interface TrippedAlert {
+  readonly spec: string; // operator's original input string (full compound expression)
+  readonly tableName: string;
+  // M4.14.n — combinator-aware tripping. For AND, every clause must trip
+  // for the alert to be considered tripped (all entries in trippedClauses).
+  // For OR/SINGLE, at least one clause tripped (the entries that did).
+  readonly combinator: ThresholdCombinator;
+  readonly trippedClauses: ReadonlyArray<TrippedClause>;
+  // Backward-compat convenience: first tripped clause's data. Consumers
+  // wanting all clauses iterate `trippedClauses`. For SINGLE alerts these
+  // mirror the only tripped clause.
+  readonly fieldName: string;
+  readonly op: ThresholdOp;
+  readonly thresholdRaw: string;
+  readonly actual: number | string | null;
   readonly ageMs?: number;
 }
 
@@ -88,6 +127,88 @@ export interface ParseThresholdAlertResult {
 }
 
 export function parseThresholdAlert(raw: string): ParseThresholdAlertResult {
+  // M4.14.n — compound expression support. Detect AND/OR keywords (case-
+  // sensitive uppercase with surrounding spaces) to disambiguate from
+  // values that might contain "and"/"or" substrings. Mixed AND+OR in one
+  // flag is rejected to keep grammar unambiguous; operators wanting
+  // mixed semantics use separate --threshold-alert flags (cross-flag is
+  // implicit OR).
+  const hasAnd = raw.includes(" AND ");
+  const hasOr = raw.includes(" OR ");
+  if (hasAnd && hasOr) {
+    return {
+      ok: false,
+      error: `invalid threshold alert '${raw}' — mixed AND/OR in one --threshold-alert is not supported (use multiple flags for OR composition)`,
+    };
+  }
+  if (hasAnd || hasOr) {
+    const combinator: ThresholdCombinator = hasAnd ? "AND" : "OR";
+    const separator = hasAnd ? " AND " : " OR ";
+    const parts = raw.split(separator);
+    const clauses: ThresholdAlertClause[] = [];
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (trimmed.length === 0) {
+        return {
+          ok: false,
+          error: `invalid threshold alert '${raw}' — empty clause around '${separator.trim()}'`,
+        };
+      }
+      const clauseResult = parseSingleClause(trimmed);
+      if (!clauseResult.ok || clauseResult.clause === undefined) {
+        return { ok: false, error: clauseResult.error };
+      }
+      clauses.push(clauseResult.clause);
+    }
+    if (clauses.length < 2) {
+      return {
+        ok: false,
+        error: `invalid threshold alert '${raw}' — compound expression must have at least 2 clauses`,
+      };
+    }
+    const first = clauses[0]!;
+    return {
+      ok: true,
+      alert: {
+        raw,
+        combinator,
+        clauses,
+        field: first.field,
+        op: first.op,
+        value: first.value,
+      },
+    };
+  }
+
+  // Single-clause path (existing behavior).
+  const clauseResult = parseSingleClause(raw);
+  if (!clauseResult.ok || clauseResult.clause === undefined) {
+    return { ok: false, error: clauseResult.error };
+  }
+  const clause = clauseResult.clause;
+  return {
+    ok: true,
+    alert: {
+      raw,
+      combinator: "SINGLE",
+      clauses: [clause],
+      field: clause.field,
+      op: clause.op,
+      value: clause.value,
+    },
+  };
+}
+
+interface ParseClauseResult {
+  readonly ok: boolean;
+  readonly clause?: ThresholdAlertClause;
+  readonly error?: string;
+}
+
+// Parses a single `<field>:<op><value>` clause. Extracted from the
+// pre-M4.14.n single-clause parser body verbatim so the compound parser
+// reuses the same value-kind detection.
+function parseSingleClause(raw: string): ParseClauseResult {
   const colonIdx = raw.indexOf(":");
   if (colonIdx < 1) {
     return {
@@ -136,7 +257,7 @@ export function parseThresholdAlert(raw: string): ParseThresholdAlertResult {
         error: `invalid threshold alert '${raw}' — value '${valueStr}' is not finite`,
       };
     }
-    return { ok: true, alert: { raw, field, op, value: { kind: "number", value: num } } };
+    return { ok: true, clause: { raw, field, op, value: { kind: "number", value: num } } };
   }
 
   // Duration: digits + unit letter.
@@ -153,7 +274,7 @@ export function parseThresholdAlert(raw: string): ParseThresholdAlertResult {
     }
     return {
       ok: true,
-      alert: { raw, field, op, value: { kind: "duration", ms: num * unitMs, raw: valueStr } },
+      clause: { raw, field, op, value: { kind: "duration", ms: num * unitMs, raw: valueStr } },
     };
   }
 
@@ -162,7 +283,7 @@ export function parseThresholdAlert(raw: string): ParseThresholdAlertResult {
   if (Number.isFinite(parsed)) {
     return {
       ok: true,
-      alert: { raw, field, op, value: { kind: "timestamp", iso: valueStr } },
+      clause: { raw, field, op, value: { kind: "timestamp", iso: valueStr } },
     };
   }
 
@@ -172,19 +293,32 @@ export function parseThresholdAlert(raw: string): ParseThresholdAlertResult {
   };
 }
 
+// M4.14.t / M4.14.n — value-kind validation. The signature accepts a
+// ThresholdAlertSpec for backward compat with the M4.14.t API but
+// validates the SPEC's first clause; consumers wanting per-clause
+// validation on compound alerts use `validateClauseAgainstField`.
+// `parseThresholdAlertFlags` iterates clauses and calls the per-clause
+// variant for compound specs.
 export function validateAlertAgainstField(
   alert: ThresholdAlertSpec,
   field: AlertableFieldSpec,
 ): { ok: true } | { ok: false; error: string } {
-  const isNumberKind = alert.value.kind === "number";
-  const isDurationKind = alert.value.kind === "duration";
-  const isTimestampKind = alert.value.kind === "timestamp";
+  return validateClauseAgainstField(alert.clauses[0] ?? alert, field);
+}
+
+export function validateClauseAgainstField(
+  clause: ThresholdAlertClause | ThresholdAlertSpec,
+  field: AlertableFieldSpec,
+): { ok: true } | { ok: false; error: string } {
+  const isNumberKind = clause.value.kind === "number";
+  const isDurationKind = clause.value.kind === "duration";
+  const isTimestampKind = clause.value.kind === "timestamp";
 
   if (field.type === "number" || field.type === "number_nullable") {
     if (!isNumberKind) {
       return {
         ok: false,
-        error: `threshold alert '${alert.raw}' — field '${field.name}' is numeric; value must be a number (not a duration or timestamp)`,
+        error: `threshold alert '${clause.raw}' — field '${field.name}' is numeric; value must be a number (not a duration or timestamp)`,
       };
     }
     return { ok: true };
@@ -193,7 +327,7 @@ export function validateAlertAgainstField(
   if (!isDurationKind && !isTimestampKind) {
     return {
       ok: false,
-      error: `threshold alert '${alert.raw}' — field '${field.name}' is a timestamp; value must be a duration (e.g. 24h) or an ISO 8601 timestamp`,
+      error: `threshold alert '${clause.raw}' — field '${field.name}' is a timestamp; value must be a duration (e.g. 24h) or an ISO 8601 timestamp`,
     };
   }
   return { ok: true };
@@ -212,36 +346,68 @@ export function evaluateAlertOnRow(
   fieldType: AlertableFieldType,
   asOfMs: number,
 ): TrippedAlert | null {
+  // M4.14.t / M4.14.n — backward-compat single-clause path. Operates on
+  // the spec's first clause (or only clause for SINGLE). For compound
+  // AND/OR alerts use `evaluateAlertCompound` instead.
+  const clause = alert.clauses[0] ?? {
+    raw: alert.raw,
+    field: alert.field,
+    op: alert.op,
+    value: alert.value,
+  };
+  const trippedClause = evaluateClauseOnRow(clause, fieldValue, fieldType, asOfMs);
+  if (trippedClause === null) return null;
+  return {
+    spec: alert.raw,
+    tableName,
+    combinator: alert.combinator,
+    trippedClauses: [trippedClause],
+    fieldName: trippedClause.fieldName,
+    op: trippedClause.op,
+    thresholdRaw: trippedClause.thresholdRaw,
+    actual: trippedClause.actual,
+    ...(trippedClause.ageMs !== undefined ? { ageMs: trippedClause.ageMs } : {}),
+  };
+}
+
+// M4.14.n — per-clause primitive used by both the backward-compat
+// evaluateAlertOnRow and the new compound evaluateAlertCompound. Returns
+// a TrippedClause if the clause trips on this row's field value, else
+// null.
+function evaluateClauseOnRow(
+  clause: ThresholdAlertClause,
+  fieldValue: number | string | null,
+  fieldType: AlertableFieldType,
+  asOfMs: number,
+): TrippedClause | null {
   // number / number_nullable fields
   if (fieldType === "number" || fieldType === "number_nullable") {
     if (fieldValue === null) return null; // null skips numeric alerts
     if (typeof fieldValue !== "number") return null;
-    if (alert.value.kind !== "number") return null;
-    if (!compareNumeric(fieldValue, alert.op, alert.value.value)) return null;
+    if (clause.value.kind !== "number") return null;
+    if (!compareNumeric(fieldValue, clause.op, clause.value.value)) return null;
     return {
-      spec: alert.raw,
-      tableName,
-      fieldName: alert.field,
-      op: alert.op,
-      thresholdRaw: String(alert.value.value),
+      clauseRaw: clause.raw,
+      fieldName: clause.field,
+      op: clause.op,
+      thresholdRaw: String(clause.value.value),
       actual: fieldValue,
     };
   }
 
   // timestamp_nullable fields
   if (fieldType === "timestamp_nullable") {
-    if (alert.value.kind === "duration") {
+    if (clause.value.kind === "duration") {
       // Duration check: compare (asOf - fieldValue) against threshold.
       // For null fields, treat as "infinitely old" — trips for GT/GTE,
       // never trips for LT/LTE/EQ.
       if (fieldValue === null) {
-        if (alert.op === "GT" || alert.op === "GTE") {
+        if (clause.op === "GT" || clause.op === "GTE") {
           return {
-            spec: alert.raw,
-            tableName,
-            fieldName: alert.field,
-            op: alert.op,
-            thresholdRaw: alert.value.raw,
+            clauseRaw: clause.raw,
+            fieldName: clause.field,
+            op: clause.op,
+            thresholdRaw: clause.value.raw,
             actual: null,
           };
         }
@@ -251,39 +417,79 @@ export function evaluateAlertOnRow(
       const fieldMs = Date.parse(fieldValue);
       if (!Number.isFinite(fieldMs)) return null;
       const ageMs = asOfMs - fieldMs;
-      if (!compareNumeric(ageMs, alert.op, alert.value.ms)) return null;
+      if (!compareNumeric(ageMs, clause.op, clause.value.ms)) return null;
       return {
-        spec: alert.raw,
-        tableName,
-        fieldName: alert.field,
-        op: alert.op,
-        thresholdRaw: alert.value.raw,
+        clauseRaw: clause.raw,
+        fieldName: clause.field,
+        op: clause.op,
+        thresholdRaw: clause.value.raw,
         actual: fieldValue,
         ageMs,
       };
     }
 
-    if (alert.value.kind === "timestamp") {
-      // Absolute timestamp check — compare row's field timestamp against
-      // the threshold instant.
+    if (clause.value.kind === "timestamp") {
       if (fieldValue === null) return null;
       if (typeof fieldValue !== "string") return null;
       const fieldMs = Date.parse(fieldValue);
-      const thresholdMs = Date.parse(alert.value.iso);
+      const thresholdMs = Date.parse(clause.value.iso);
       if (!Number.isFinite(fieldMs) || !Number.isFinite(thresholdMs)) return null;
-      if (!compareNumeric(fieldMs, alert.op, thresholdMs)) return null;
+      if (!compareNumeric(fieldMs, clause.op, thresholdMs)) return null;
       return {
-        spec: alert.raw,
-        tableName,
-        fieldName: alert.field,
-        op: alert.op,
-        thresholdRaw: alert.value.iso,
+        clauseRaw: clause.raw,
+        fieldName: clause.field,
+        op: clause.op,
+        thresholdRaw: clause.value.iso,
         actual: fieldValue,
       };
     }
   }
 
   return null;
+}
+
+// M4.14.n — compound-aware evaluator. Iterates each clause against the
+// row (via the caller-supplied `readField` closure), then combines per
+// the spec's combinator (AND requires every clause to trip; OR/SINGLE
+// require at least one).
+//
+// The dispatcher calls this once per (table, alert) pair; the evaluator
+// owns the per-clause iteration so the dispatcher doesn't need to know
+// about compound semantics.
+export function evaluateAlertCompound(
+  alert: ThresholdAlertSpec,
+  tableName: string,
+  readField: (field: string) => number | string | null,
+  fieldTypeOf: (field: string) => AlertableFieldType | undefined,
+  asOfMs: number,
+): TrippedAlert | null {
+  const trippedClauses: TrippedClause[] = [];
+  for (const clause of alert.clauses) {
+    const fieldType = fieldTypeOf(clause.field);
+    if (fieldType === undefined) continue;
+    const fieldValue = readField(clause.field);
+    const tripped = evaluateClauseOnRow(clause, fieldValue, fieldType, asOfMs);
+    if (tripped !== null) trippedClauses.push(tripped);
+  }
+  // AND: every clause must trip.
+  // OR / SINGLE: at least one clause tripping is enough.
+  const trips =
+    alert.combinator === "AND"
+      ? trippedClauses.length === alert.clauses.length
+      : trippedClauses.length > 0;
+  if (!trips) return null;
+  const first = trippedClauses[0]!;
+  return {
+    spec: alert.raw,
+    tableName,
+    combinator: alert.combinator,
+    trippedClauses,
+    fieldName: first.fieldName,
+    op: first.op,
+    thresholdRaw: first.thresholdRaw,
+    actual: first.actual,
+    ...(first.ageMs !== undefined ? { ageMs: first.ageMs } : {}),
+  };
 }
 
 function compareNumeric(actual: number, op: ThresholdOp, threshold: number): boolean {
@@ -335,19 +541,24 @@ export function parseThresholdAlertFlags(
       printError(io, `${actionLabel}: ${parsed.error ?? "invalid threshold alert"}`);
       return 2;
     }
-    const fieldSpec = fieldByName.get(parsed.alert.field);
-    if (fieldSpec === undefined) {
-      const allowed = fields.map((f) => f.name).join(", ");
-      printError(
-        io,
-        `${actionLabel}: threshold alert '${raw}' — unknown field '${parsed.alert.field}' (expected one of: ${allowed})`,
-      );
-      return 2;
-    }
-    const valid = validateAlertAgainstField(parsed.alert, fieldSpec);
-    if (!valid.ok) {
-      printError(io, `${actionLabel}: ${valid.error}`);
-      return 2;
+    // M4.14.n — validate EACH clause's field + value-kind. First failing
+    // clause exits 2 with its specific error (operators reading errors
+    // know which clause in a compound expression is broken).
+    for (const clause of parsed.alert.clauses) {
+      const fieldSpec = fieldByName.get(clause.field);
+      if (fieldSpec === undefined) {
+        const allowed = fields.map((f) => f.name).join(", ");
+        printError(
+          io,
+          `${actionLabel}: threshold alert '${raw}' — unknown field '${clause.field}' (expected one of: ${allowed})`,
+        );
+        return 2;
+      }
+      const valid = validateClauseAgainstField(clause, fieldSpec);
+      if (!valid.ok) {
+        printError(io, `${actionLabel}: ${valid.error}`);
+        return 2;
+      }
     }
     alerts.push(parsed.alert);
   }
@@ -357,6 +568,25 @@ export function parseThresholdAlertFlags(
 // Render a single tripped alert as a human-readable line (used in the
 // "THRESHOLD ALERTS" section after the main report).
 export function renderTrippedAlert(alert: TrippedAlert): string {
+  // M4.14.n — compound alerts render the spec plus the per-clause "what
+  // was actual" detail so operators can see exactly which clauses tripped
+  // (AND tripping requires all clauses; OR/SINGLE may have fewer).
+  if (alert.combinator !== "SINGLE" && alert.trippedClauses.length > 1) {
+    const clauseLines = alert.trippedClauses
+      .map((c) => {
+        const actualStr =
+          c.actual === null
+            ? "null (never set)"
+            : typeof c.actual === "number"
+              ? c.actual.toLocaleString("en-US")
+              : c.actual;
+        const ageSuffix = c.ageMs !== undefined ? ` (age ${formatDurationMs(c.ageMs)})` : "";
+        return `      - ${c.fieldName}=${actualStr}${ageSuffix} [${c.clauseRaw}]`;
+      })
+      .join("\n");
+    return `  ! ${alert.tableName} trips compound threshold "${alert.spec}"\n${clauseLines}`;
+  }
+  // Single-clause / single-tripped-clause rendering (backward compat).
   const actualStr =
     alert.actual === null
       ? "null (never set)"

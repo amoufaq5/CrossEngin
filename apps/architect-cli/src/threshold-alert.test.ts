@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { IoStreams } from "./format.js";
 import {
+  evaluateAlertCompound,
   evaluateAlertOnRow,
   opSymbol,
   parseThresholdAlert,
   parseThresholdAlertFlags,
   renderTrippedAlert,
   type AlertableFieldSpec,
+  type AlertableFieldType,
 } from "./threshold-alert.js";
 
 function makeIo(): { io: IoStreams; err: () => string } {
@@ -285,5 +287,267 @@ describe("renderTrippedAlert + opSymbol (M4.14.t)", () => {
     expect(opSymbol("LT")).toBe("<");
     expect(opSymbol("LTE")).toBe("<=");
     expect(opSymbol("EQ")).toBe("=");
+  });
+});
+
+describe("parseThresholdAlert compound expressions (M4.14.n)", () => {
+  it("single-clause alerts have combinator='SINGLE' + clauses array with one entry", () => {
+    const result = parseThresholdAlert("wouldPruneCount:>1000");
+    expect(result.ok).toBe(true);
+    expect(result.alert!.combinator).toBe("SINGLE");
+    expect(result.alert!.clauses).toHaveLength(1);
+    expect(result.alert!.clauses[0]!.field).toBe("wouldPruneCount");
+    // Backward-compat convenience accessors still populated.
+    expect(result.alert!.field).toBe("wouldPruneCount");
+    expect(result.alert!.op).toBe("GT");
+  });
+
+  it("AND combinator parses every clause + populates first-clause convenience accessors", () => {
+    const result = parseThresholdAlert("wouldPruneCount:>1000 AND lastPrunedAt:>24h");
+    expect(result.ok).toBe(true);
+    expect(result.alert!.combinator).toBe("AND");
+    expect(result.alert!.clauses).toHaveLength(2);
+    expect(result.alert!.clauses[0]!.field).toBe("wouldPruneCount");
+    expect(result.alert!.clauses[0]!.op).toBe("GT");
+    expect(result.alert!.clauses[1]!.field).toBe("lastPrunedAt");
+    expect(result.alert!.clauses[1]!.value.kind).toBe("duration");
+    // Convenience accessor mirrors first clause.
+    expect(result.alert!.field).toBe("wouldPruneCount");
+  });
+
+  it("OR combinator parses every clause + populates first-clause convenience accessors", () => {
+    const result = parseThresholdAlert("totalRowCount:>1000000 OR wouldPruneCount:>500000");
+    expect(result.ok).toBe(true);
+    expect(result.alert!.combinator).toBe("OR");
+    expect(result.alert!.clauses).toHaveLength(2);
+  });
+
+  it("3-clause AND chain", () => {
+    const result = parseThresholdAlert(
+      "totalRowCount:>1000 AND wouldPruneCount:>100 AND lastPrunedAt:>1d",
+    );
+    expect(result.ok).toBe(true);
+    expect(result.alert!.combinator).toBe("AND");
+    expect(result.alert!.clauses).toHaveLength(3);
+  });
+
+  it("mixed AND + OR in one flag exits with explanatory error", () => {
+    const result = parseThresholdAlert("a:>1 AND b:>2 OR c:>3");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("mixed AND/OR");
+    expect(result.error).toContain("use multiple flags for OR composition");
+  });
+
+  it("empty clause around AND keyword exits with error", () => {
+    const result = parseThresholdAlert("a:>1 AND  AND b:>2");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("empty clause");
+  });
+
+  it("a single bad clause in a compound expression fails the whole parse", () => {
+    const result = parseThresholdAlert("wouldPruneCount:>1000 AND not-a-clause");
+    expect(result.ok).toBe(false);
+    // Inner parser error surfaces — the bad clause's parse failure rolls
+    // up to the compound parser's caller.
+    expect(result.error).toContain("not-a-clause");
+  });
+
+  it("substring 'AND' inside a value doesn't trigger compound parsing (requires surrounding spaces)", () => {
+    // The grammar requires " AND " (spaces) to separate clauses; a value
+    // like "ANDover" wouldn't match. Use ISO 8601 to demonstrate — the
+    // 'T' separator is uppercase but not preceded by a space.
+    const result = parseThresholdAlert("lastPrunedAt:>2026-01-01T00:00:00Z");
+    expect(result.ok).toBe(true);
+    expect(result.alert!.combinator).toBe("SINGLE");
+  });
+});
+
+describe("evaluateAlertCompound (M4.14.n)", () => {
+  const asOfMs = Date.parse("2026-05-29T12:00:00.000Z");
+
+  const FIELDS: ReadonlyArray<AlertableFieldSpec> = [
+    { name: "totalRowCount", type: "number" },
+    { name: "wouldPruneCount", type: "number" },
+    { name: "lastPrunedAt", type: "timestamp_nullable" },
+  ];
+  const fieldTypeOf = (field: string): AlertableFieldType | undefined =>
+    FIELDS.find((f) => f.name === field)?.type;
+
+  function rowReader(
+    row: Record<string, number | string | null>,
+  ): (field: string) => number | string | null {
+    return (field) => (field in row ? row[field]! : null);
+  }
+
+  it("AND trips only when EVERY clause trips", () => {
+    const parsed = parseThresholdAlert("totalRowCount:>1000 AND wouldPruneCount:>100");
+    expect(parsed.ok).toBe(true);
+    const alert = parsed.alert!;
+    // Both trip.
+    const bothTrip = evaluateAlertCompound(
+      alert,
+      "workflow_traces",
+      rowReader({ totalRowCount: 5000, wouldPruneCount: 500 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(bothTrip).not.toBeNull();
+    expect(bothTrip!.combinator).toBe("AND");
+    expect(bothTrip!.trippedClauses).toHaveLength(2);
+    // Only first trips → AND does NOT trip.
+    const firstOnly = evaluateAlertCompound(
+      alert,
+      "workflow_traces",
+      rowReader({ totalRowCount: 5000, wouldPruneCount: 50 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(firstOnly).toBeNull();
+    // Only second trips → AND does NOT trip.
+    const secondOnly = evaluateAlertCompound(
+      alert,
+      "workflow_traces",
+      rowReader({ totalRowCount: 500, wouldPruneCount: 500 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(secondOnly).toBeNull();
+  });
+
+  it("OR trips when ANY clause trips (and trippedClauses contains only the tripping ones)", () => {
+    const parsed = parseThresholdAlert("totalRowCount:>1000 OR wouldPruneCount:>100");
+    const alert = parsed.alert!;
+    // Only first trips.
+    const firstOnly = evaluateAlertCompound(
+      alert,
+      "t",
+      rowReader({ totalRowCount: 5000, wouldPruneCount: 50 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(firstOnly).not.toBeNull();
+    expect(firstOnly!.combinator).toBe("OR");
+    expect(firstOnly!.trippedClauses).toHaveLength(1);
+    expect(firstOnly!.trippedClauses[0]!.fieldName).toBe("totalRowCount");
+    // Both trip → trippedClauses has both.
+    const bothTrip = evaluateAlertCompound(
+      alert,
+      "t",
+      rowReader({ totalRowCount: 5000, wouldPruneCount: 500 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(bothTrip!.trippedClauses).toHaveLength(2);
+    // Neither trips → null.
+    const neither = evaluateAlertCompound(
+      alert,
+      "t",
+      rowReader({ totalRowCount: 500, wouldPruneCount: 50 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(neither).toBeNull();
+  });
+
+  it("AND with mixed numeric + timestamp clauses (would-prune + lastPrunedAt staleness)", () => {
+    const parsed = parseThresholdAlert("wouldPruneCount:>1000 AND lastPrunedAt:>24h");
+    const alert = parsed.alert!;
+    // Both trip: 5000 rows would-prune AND last pruned 48h ago (>24h).
+    const past48h = new Date(asOfMs - 48 * 3600 * 1000).toISOString();
+    const bothTrip = evaluateAlertCompound(
+      alert,
+      "t",
+      rowReader({ wouldPruneCount: 5000, lastPrunedAt: past48h }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(bothTrip).not.toBeNull();
+    expect(bothTrip!.trippedClauses).toHaveLength(2);
+    // Numeric trips, timestamp doesn't (last pruned 1h ago).
+    const past1h = new Date(asOfMs - 1 * 3600 * 1000).toISOString();
+    const numOnly = evaluateAlertCompound(
+      alert,
+      "t",
+      rowReader({ wouldPruneCount: 5000, lastPrunedAt: past1h }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(numOnly).toBeNull();
+  });
+
+  it("SINGLE combinator (single-clause compound) trips when its only clause trips", () => {
+    const parsed = parseThresholdAlert("totalRowCount:>1000");
+    const alert = parsed.alert!;
+    expect(alert.combinator).toBe("SINGLE");
+    const hit = evaluateAlertCompound(
+      alert,
+      "t",
+      rowReader({ totalRowCount: 5000 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    expect(hit).not.toBeNull();
+    expect(hit!.trippedClauses).toHaveLength(1);
+  });
+
+  it("renderTrippedAlert emits per-clause detail for compound AND tripping", () => {
+    const parsed = parseThresholdAlert("totalRowCount:>1000 AND wouldPruneCount:>100");
+    const alert = parsed.alert!;
+    const hit = evaluateAlertCompound(
+      alert,
+      "workflow_traces",
+      rowReader({ totalRowCount: 5000, wouldPruneCount: 500 }),
+      fieldTypeOf,
+      asOfMs,
+    );
+    const rendered = renderTrippedAlert(hit!);
+    expect(rendered).toContain("compound threshold");
+    expect(rendered).toContain("workflow_traces");
+    expect(rendered).toContain("totalRowCount=5,000");
+    expect(rendered).toContain("wouldPruneCount=500");
+  });
+});
+
+describe("parseThresholdAlertFlags compound validation (M4.14.n)", () => {
+  const FIELDS: ReadonlyArray<AlertableFieldSpec> = [
+    { name: "totalRowCount", type: "number" },
+    { name: "lastPrunedAt", type: "timestamp_nullable" },
+  ];
+
+  it("validates EVERY clause's field exists + first failure exits 2 with clause-specific error", () => {
+    const { io, err } = makeIo();
+    const result = parseThresholdAlertFlags(
+      ["totalRowCount:>1000 AND unknownField:>100"],
+      FIELDS,
+      io,
+      "test",
+    );
+    expect(result).toBe(2);
+    expect(err()).toContain("unknown field 'unknownField'");
+  });
+
+  it("validates EVERY clause's value-kind against its field type", () => {
+    const { io, err } = makeIo();
+    const result = parseThresholdAlertFlags(
+      ["totalRowCount:>1000 AND lastPrunedAt:>100"],
+      FIELDS,
+      io,
+      "test",
+    );
+    expect(result).toBe(2);
+    expect(err()).toContain("lastPrunedAt");
+    expect(err()).toContain("timestamp");
+  });
+
+  it("accepts valid compound AND expression with mixed types", () => {
+    const { io } = makeIo();
+    const result = parseThresholdAlertFlags(
+      ["totalRowCount:>1000 AND lastPrunedAt:>24h"],
+      FIELDS,
+      io,
+      "test",
+    );
+    expect(typeof result).not.toBe("number");
+    expect((result as ReadonlyArray<unknown>).length).toBe(1);
   });
 });

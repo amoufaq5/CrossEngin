@@ -2456,3 +2456,197 @@ describe("runGateway housekeeping --tenant <slug> (M4.14.o)", () => {
     expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
   });
 });
+
+describe("runGateway housekeeping --threshold-alert compound AND/OR (M4.14.n)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function fakeStatsConnection(
+    perTable: Record<string, { total: string; oldest: string | null }>,
+  ): PgConnection {
+    return {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        for (const [name, stats] of Object.entries(perTable)) {
+          if (sql.includes(`FROM meta.${name}`)) {
+            return { rows: [stats], rowCount: 1 } as unknown as PgQueryResult<T>;
+          }
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  function fakeRetentionWithPolicies(lastPrunedDaysAgo: number | null): PostgresTraceRetention {
+    const lastPrunedAt =
+      lastPrunedDaysAgo === null
+        ? null
+        : new Date(fixedNow.getTime() - lastPrunedDaysAgo * 24 * 3600 * 1000).toISOString();
+    return {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          lastPrunedAt,
+        },
+        { tableName: "rate_limit_decisions", retentionDays: 7, enabled: true, lastPrunedAt },
+      ],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 5000000,
+          cutoffMs: 0,
+        },
+        {
+          tableName: "rate_limit_decisions",
+          status: "previewed",
+          retentionDays: 7,
+          wouldDeleteCount: 100,
+          cutoffMs: 0,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+  }
+
+  function fakeIdempotencyStore(wouldDelete: number): PostgresIdempotencyStore {
+    return { previewDeleteExpired: async () => wouldDelete } as unknown as PostgresIdempotencyStore;
+  }
+
+  it("compound AND trips only when BOTH clauses match (would-prune AND lastPrunedAt stale)", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: { total: "10000000", oldest: "2026-04-01T00:00:00.000Z" },
+      gateway_idempotency_records: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "100", oldest: null },
+    });
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      // Pruned 48h ago + would-prune 5M rows → both clauses match → AND trips.
+      retentionOverride: fakeRetentionWithPolicies(2),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000 AND lastPrunedAt:>24h",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain("compound threshold");
+    expect(stdout).toContain("wouldPruneCount=5,000,000");
+    expect(stdout).toContain("lastPrunedAt=");
+  });
+
+  it("compound AND does NOT trip when only one clause matches (would-prune high BUT recently pruned)", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: { total: "10000000", oldest: "2026-04-01T00:00:00.000Z" },
+      gateway_idempotency_records: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "100", oldest: null },
+    });
+    const { io } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      // Pruned 1h ago + would-prune 5M rows → numeric trips BUT timestamp doesn't → AND does NOT trip.
+      retentionOverride: {
+        listPolicies: async () => [
+          {
+            tableName: "gateway_pipeline_executions",
+            retentionDays: 30,
+            enabled: true,
+            lastPrunedAt: new Date(fixedNow.getTime() - 3600 * 1000).toISOString(),
+          },
+        ],
+        previewPrune: async () => [
+          {
+            tableName: "gateway_pipeline_executions",
+            status: "previewed",
+            retentionDays: 30,
+            wouldDeleteCount: 5000000,
+            cutoffMs: 0,
+          },
+        ],
+      } as unknown as PostgresTraceRetention,
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000 AND lastPrunedAt:>24h",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+  });
+
+  it("compound OR within a single flag is equivalent to multiple OR-implicit flags", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: { total: "10000000", oldest: "2026-04-01T00:00:00.000Z" },
+      gateway_idempotency_records: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "100", oldest: null },
+    });
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetentionWithPolicies(2),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--threshold-alert",
+        "totalRowCount:>100000000 OR wouldPruneCount:>100000",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain("THRESHOLD ALERTS");
+    // Only the second clause trips (totalRowCount=10M is below 100M;
+    // wouldPruneCount=5M is above 100k).
+    expect(stdout).toContain("wouldPruneCount=5,000,000");
+  });
+
+  it("mixed AND + OR in one flag exits 2 with explanatory error", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      gateway_idempotency_records: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetentionWithPolicies(null),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--threshold-alert",
+        "totalRowCount:>1000 AND wouldPruneCount:>100 OR retentionDays:<30",
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("mixed AND/OR");
+  });
+});
