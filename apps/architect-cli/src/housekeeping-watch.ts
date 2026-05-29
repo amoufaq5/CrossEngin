@@ -144,6 +144,43 @@ export interface WatchOverride {
   readonly abortSignal?: AbortSignal;
   readonly setTimeoutFn?: (cb: () => void, ms: number) => unknown;
   readonly clearTimeoutFn?: (handle: unknown) => void;
+  // M4.14.r — test-injection for the SIGINT-to-AbortController bridge.
+  // Production uses real process.on/off; tests pass a recording stub that
+  // captures the handler for synchronous invocation.
+  readonly signalRegistrar?: SignalRegistrar;
+}
+
+// Function that registers a signal handler and returns a removal closure.
+// Default production implementation uses Node's process events. Tests
+// supply a stub that captures the handler so tests can simulate SIGINT
+// without poisoning the test runner's own signal handlers.
+export type SignalRegistrar = (signal: string, handler: () => void) => () => void;
+
+// M4.14.r — SIGINT-to-AbortController bridge. Production: installs a
+// SIGINT handler that aborts an internal AbortController, returns the
+// signal + cleanup closure. The watch loop exits cleanly (via the
+// existing abortSignal path) when the operator hits Ctrl-C; the
+// caller's finally block runs (closes PG, etc.) before process exit.
+// Without this bridge, SIGINT exits the process at 130 with PG
+// connection dropped abruptly — PG handles it but the operator gets no
+// graceful shutdown signal.
+//
+// Tests pass a custom `register` that records the handler for manual
+// invocation; production omits it and gets `process.on("SIGINT", ...)`.
+export function installSigintBridge(register?: SignalRegistrar): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const handler = (): void => controller.abort();
+  const defaultRegister: SignalRegistrar = (sig, h) => {
+    process.on(sig, h);
+    return () => {
+      process.removeListener(sig, h);
+    };
+  };
+  const removeHandler = (register ?? defaultRegister)("SIGINT", handler);
+  return { signal: controller.signal, cleanup: removeHandler };
 }
 
 export interface ParsedWatchFlags {

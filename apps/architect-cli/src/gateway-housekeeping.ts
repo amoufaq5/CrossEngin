@@ -6,6 +6,7 @@ import { getMultiFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
+  installSigintBridge,
   parseWatchFlags,
   runHousekeepingWatchLoop,
   type WatchOverride,
@@ -232,22 +233,33 @@ export async function runGatewayHousekeeping(
   try {
     if (watchFlags.watch) {
       const isJson = command.format === "json";
-      const result = await runHousekeepingWatchLoop<HousekeepingReport>({
-        gather,
-        render: renderTick,
-        clearScreenBeforeRender: !isJson,
-        io: ctx.io,
-        options: {
-          intervalMs: watchFlags.intervalSeconds * 1000,
-          maxIterations: ctx.watchOverride?.maxIterations,
-          abortSignal: ctx.watchOverride?.abortSignal,
-          setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
-          clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
-        },
-        keepGoing: watchFlags.keepGoing,
-        errorRender: renderError,
-      });
-      return result.halted ? 3 : 0;
+      // M4.14.r — SIGINT-to-AbortController bridge for graceful Ctrl-C
+      // shutdown (skips when caller supplies abortSignal directly, e.g.,
+      // in tests).
+      const sigintBridge =
+        ctx.watchOverride?.abortSignal === undefined
+          ? installSigintBridge(ctx.watchOverride?.signalRegistrar)
+          : undefined;
+      try {
+        const result = await runHousekeepingWatchLoop<HousekeepingReport>({
+          gather,
+          render: renderTick,
+          clearScreenBeforeRender: !isJson,
+          io: ctx.io,
+          options: {
+            intervalMs: watchFlags.intervalSeconds * 1000,
+            maxIterations: ctx.watchOverride?.maxIterations,
+            abortSignal: ctx.watchOverride?.abortSignal ?? sigintBridge?.signal,
+            setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
+            clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
+          },
+          keepGoing: watchFlags.keepGoing,
+          errorRender: renderError,
+        });
+        return result.halted ? 3 : 0;
+      } finally {
+        sigintBridge?.cleanup();
+      }
     }
     const report = await gather();
     const tripped = alerts.length > 0 ? evaluateAlertsForReport(report, alerts) : [];

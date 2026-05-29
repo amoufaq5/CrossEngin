@@ -9,6 +9,7 @@ import { getMultiFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
+  installSigintBridge,
   parseWatchFlags,
   runHousekeepingWatchLoop,
   type WatchOverride,
@@ -243,26 +244,38 @@ export async function runRetentionHousekeeping(
     try {
       if (watchFlags.watch) {
         const isJson = command.format === "json";
-        const result = await runHousekeepingWatchLoop<RetentionHousekeepingReport>({
-          gather,
-          render: renderTick,
-          clearScreenBeforeRender: !isJson,
-          io: ctx.io,
-          options: {
-            intervalMs: watchFlags.intervalSeconds * 1000,
-            maxIterations: ctx.watchOverride?.maxIterations,
-            abortSignal: ctx.watchOverride?.abortSignal,
-            setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
-            clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
-          },
-          keepGoing: watchFlags.keepGoing,
-          errorRender: renderError,
-        });
-        // CI-gate semantic: a halted loop means an alert tripped (ADR-0181
-        // exit-3 for "completed successfully but a configurable gate
-        // failed"). Under keep-going, halted=true is sticky across the
-        // whole run. Natural termination without trips → exit 0.
-        return result.halted ? 3 : 0;
+        // M4.14.r — install SIGINT-to-AbortController bridge unless the
+        // caller already supplied an abortSignal (tests typically do). The
+        // bridge ensures the watch loop exits cleanly on Ctrl-C and the
+        // outer `finally` runs closeConn() before process exit.
+        const sigintBridge =
+          ctx.watchOverride?.abortSignal === undefined
+            ? installSigintBridge(ctx.watchOverride?.signalRegistrar)
+            : undefined;
+        try {
+          const result = await runHousekeepingWatchLoop<RetentionHousekeepingReport>({
+            gather,
+            render: renderTick,
+            clearScreenBeforeRender: !isJson,
+            io: ctx.io,
+            options: {
+              intervalMs: watchFlags.intervalSeconds * 1000,
+              maxIterations: ctx.watchOverride?.maxIterations,
+              abortSignal: ctx.watchOverride?.abortSignal ?? sigintBridge?.signal,
+              setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
+              clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
+            },
+            keepGoing: watchFlags.keepGoing,
+            errorRender: renderError,
+          });
+          // CI-gate semantic: a halted loop means an alert tripped (ADR-0181
+          // exit-3 for "completed successfully but a configurable gate
+          // failed"). Under keep-going, halted=true is sticky across the
+          // whole run. Natural termination without trips → exit 0.
+          return result.halted ? 3 : 0;
+        } finally {
+          sigintBridge?.cleanup();
+        }
       }
       // Single-shot path. JSON envelope is pretty-printed for human
       // inspection (NDJSON streaming is reserved for --watch).

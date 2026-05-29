@@ -72,6 +72,9 @@ export interface GatewayWatchOverride {
   readonly abortSignal?: AbortSignal;
   readonly setTimeoutFn?: (cb: () => void, ms: number) => unknown;
   readonly clearTimeoutFn?: (handle: unknown) => void;
+  // M4.14.r — test-injection for the SIGINT bridge. Production omits this
+  // and the bridge uses process.on/off directly.
+  readonly signalRegistrar?: (signal: string, handler: () => void) => () => void;
 }
 
 export async function runGateway(command: ParsedCommand, ctx: GatewayContext): Promise<number> {

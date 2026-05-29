@@ -1626,3 +1626,118 @@ describe("runGateway housekeeping --watch-keep-going (M4.14.s)", () => {
     expect(env1.error?.message).toBe("transient PG glitch");
   });
 });
+
+describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function fixtures() {
+    const conn = fakePgConnection(() => ({
+      rows: [{ total: "0", oldest: null }],
+      rowCount: 1,
+    }));
+    const retention = {
+      listPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const idempotencyStore = {
+      previewDeleteExpired: async () => 0,
+    } as unknown as PostgresIdempotencyStore;
+    return { conn: conn.conn, retention, idempotencyStore };
+  }
+
+  function captureSignalRegistrar() {
+    const captured: { handler: (() => void) | null } = { handler: null };
+    const removeCalls = { count: 0 };
+    const registrar = (signal: string, handler: () => void): (() => void) => {
+      if (signal !== "SIGINT") throw new Error(`unexpected signal: ${signal}`);
+      captured.handler = handler;
+      return () => {
+        removeCalls.count++;
+      };
+    };
+    return { registrar, captured, removeCalls };
+  }
+
+  it("installs the SIGINT bridge under --watch + cleans up on natural exit", async () => {
+    const { io } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const { registrar, captured, removeCalls } = captureSignalRegistrar();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 1,
+        setTimeoutFn: (cb: () => void) => {
+          cb();
+          return 1 as unknown;
+        },
+        signalRegistrar: registrar,
+      },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    expect(captured.handler).not.toBeNull();
+    expect(removeCalls.count).toBe(1);
+  });
+
+  it("firing the captured SIGINT handler aborts the loop cleanly (exit 0)", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const { registrar, captured } = captureSignalRegistrar();
+    let tickCount = 0;
+    const setTimeoutFiringSigint = (cb: () => void, _ms: number) => {
+      tickCount++;
+      if (tickCount === 1 && captured.handler !== null) captured.handler();
+      cb();
+      return 1 as unknown;
+    };
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 10,
+        setTimeoutFn: setTimeoutFiringSigint,
+        signalRegistrar: registrar,
+      },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    expect(outChunks.join("").match(/gateway housekeeping \(as of /g)!.length).toBe(1);
+  });
+
+  it("does NOT install the SIGINT bridge when abortSignal override is supplied", async () => {
+    const { io } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const { registrar, captured, removeCalls } = captureSignalRegistrar();
+    const controller = new AbortController();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 1,
+        setTimeoutFn: (cb: () => void) => {
+          cb();
+          return 1 as unknown;
+        },
+        abortSignal: controller.signal,
+        signalRegistrar: registrar,
+      },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    expect(captured.handler).toBeNull();
+    expect(removeCalls.count).toBe(0);
+  });
+});

@@ -150,6 +150,8 @@ export interface RetentionWatchOverride {
   readonly abortSignal?: AbortSignal;
   readonly setTimeoutFn?: (cb: () => void, ms: number) => unknown;
   readonly clearTimeoutFn?: (handle: unknown) => void;
+  // M4.14.r — test-injection for the SIGINT bridge. Production omits this.
+  readonly signalRegistrar?: (signal: string, handler: () => void) => () => void;
 }
 
 interface ResolvedHandle {

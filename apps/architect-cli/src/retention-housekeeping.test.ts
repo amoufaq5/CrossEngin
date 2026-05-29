@@ -1090,3 +1090,158 @@ describe("runRetention housekeeping --watch-keep-going (M4.14.s)", () => {
     expect(out().match(/THRESHOLD ALERTS/g)!.length).toBe(1);
   });
 });
+
+describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function fixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "0", oldest: null },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+    return { conn, retention };
+  }
+
+  // Test-injection signal registrar that captures the handler so the test
+  // can synchronously simulate SIGINT without actually sending the signal
+  // to the test runner. Production callers omit this and get
+  // process.on("SIGINT", ...).
+  function captureSignalRegistrar() {
+    const captured: { handler: (() => void) | null } = { handler: null };
+    const removeCalls = { count: 0 };
+    const registrar = (signal: string, handler: () => void): (() => void) => {
+      if (signal !== "SIGINT") throw new Error(`unexpected signal: ${signal}`);
+      captured.handler = handler;
+      return () => {
+        removeCalls.count++;
+      };
+    };
+    return { registrar, captured, removeCalls };
+  }
+
+  it("installs the SIGINT bridge under --watch when no abortSignal override is supplied", async () => {
+    const { ctx } = buffers();
+    const { conn, retention } = fixtures();
+    const { registrar, captured, removeCalls } = captureSignalRegistrar();
+    let tickCount = 0;
+    const immediateSetTimeout = (cb: () => void, _ms: number) => {
+      tickCount++;
+      cb();
+      return 1 as unknown;
+    };
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 1, // exit cleanly after 1 tick (no setTimeout call)
+        setTimeoutFn: immediateSetTimeout,
+        signalRegistrar: registrar,
+      },
+    } as RetentionContext);
+    expect(code).toBe(0);
+    // The registrar was called → bridge installed.
+    expect(captured.handler).not.toBeNull();
+    // Cleanup ran in the action's finally block.
+    expect(removeCalls.count).toBe(1);
+    // maxIterations=1 + immediate setTimeout → 0 setTimeout calls because
+    // the loop exited after tick 1 before waitInterval was called.
+    expect(tickCount).toBe(0);
+  });
+
+  it("firing the captured SIGINT handler aborts the loop cleanly (exit 0)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const { registrar, captured } = captureSignalRegistrar();
+    let tickCount = 0;
+    // setTimeout that fires SIGINT on its first call (simulating Ctrl-C
+    // during the wait between ticks).
+    const setTimeoutFiringSigint = (cb: () => void, _ms: number) => {
+      tickCount++;
+      if (tickCount === 1 && captured.handler !== null) {
+        // Trigger SIGINT abort before the timeout fires.
+        captured.handler();
+      }
+      cb();
+      return 1 as unknown;
+    };
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 10, // would loop 10x if SIGINT didn't abort
+        setTimeoutFn: setTimeoutFiringSigint,
+        signalRegistrar: registrar,
+      },
+    } as RetentionContext);
+    // Clean exit (NOT exit 130 — the bridge intercepts SIGINT cleanly).
+    expect(code).toBe(0);
+    // Tick 1 rendered; SIGINT fired during wait; loop exited.
+    expect(out().match(/retention housekeeping \(as of /g)!.length).toBe(1);
+  });
+
+  it("does NOT install the SIGINT bridge when abortSignal override is supplied", async () => {
+    const { ctx } = buffers();
+    const { conn, retention } = fixtures();
+    const { registrar, captured, removeCalls } = captureSignalRegistrar();
+    const controller = new AbortController();
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 1,
+        setTimeoutFn: (cb: () => void) => {
+          cb();
+          return 1 as unknown;
+        },
+        abortSignal: controller.signal,
+        signalRegistrar: registrar,
+      },
+    } as RetentionContext);
+    expect(code).toBe(0);
+    // Registrar was NOT called — the bridge was skipped because the
+    // caller supplied an abortSignal directly.
+    expect(captured.handler).toBeNull();
+    expect(removeCalls.count).toBe(0);
+  });
+
+  it("cleans up the SIGINT handler even when the loop throws (gather error without keep-going)", async () => {
+    const { ctx } = buffers();
+    const { conn } = fixtures();
+    const { registrar, removeCalls } = captureSignalRegistrar();
+    const throwingRetention = {
+      listPolicies: async () => {
+        throw new Error("simulated PG failure");
+      },
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: throwingRetention,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 5,
+        setTimeoutFn: (cb: () => void) => {
+          cb();
+          return 1 as unknown;
+        },
+        signalRegistrar: registrar,
+      },
+    } as RetentionContext);
+    expect(code).toBe(1);
+    // Cleanup still ran even though the loop threw out.
+    expect(removeCalls.count).toBe(1);
+  });
+});
