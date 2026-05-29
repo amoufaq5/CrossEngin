@@ -43,6 +43,7 @@ import {
   printTsv,
 } from "./format.js";
 import { runRetentionHousekeeping } from "./retention-housekeeping.js";
+import { resolveTenantIdentifier } from "./tenant-resolver.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
@@ -156,6 +157,13 @@ export interface RetentionWatchOverride {
 
 interface ResolvedHandle {
   readonly retention: PostgresTraceRetention;
+  // M4.14.m — the raw PG conn is exposed so the slug-aware --tenant
+  // resolver in list-policies / history / summary can issue
+  // `SELECT id FROM meta.tenants WHERE slug = $1` via the same conn the
+  // retention adapter uses. `undefined` when ctx.retentionOverride is set
+  // without an accompanying ctx.pgConnectionOverride (test path that
+  // doesn't exercise slug resolution).
+  readonly conn: PgConnection | undefined;
   readonly close: () => Promise<void>;
 }
 
@@ -194,11 +202,11 @@ export async function runRetention(command: ParsedCommand, ctx: RetentionContext
       case "delete":
         return await runRetentionDelete(command, ctx, handle.retention);
       case "list-policies":
-        return await runRetentionListPolicies(command, ctx, handle.retention);
+        return await runRetentionListPolicies(command, ctx, handle.retention, handle.conn);
       case "history":
-        return await runRetentionHistory(command, ctx, handle.retention);
+        return await runRetentionHistory(command, ctx, handle.retention, handle.conn);
       case "summary":
-        return await runRetentionSummary(command, ctx, handle.retention);
+        return await runRetentionSummary(command, ctx, handle.retention, handle.conn);
       case "restore":
         return await runRetentionRestore(command, ctx, handle.retention);
       case "diff-history":
@@ -223,7 +231,11 @@ export async function runRetention(command: ParsedCommand, ctx: RetentionContext
 
 async function resolveRetention(ctx: RetentionContext): Promise<ResolvedHandle | null> {
   if (ctx.retentionOverride !== undefined) {
-    return { retention: ctx.retentionOverride, close: async () => undefined };
+    return {
+      retention: ctx.retentionOverride,
+      conn: ctx.pgConnectionOverride,
+      close: async () => undefined,
+    };
   }
   let conn: PgConnection;
   try {
@@ -238,6 +250,7 @@ async function resolveRetention(ctx: RetentionContext): Promise<ResolvedHandle |
   }
   return {
     retention: new PostgresTraceRetention({ conn }),
+    conn,
     close: async () => {
       await conn.close().catch(() => undefined);
     },
@@ -690,12 +703,44 @@ export function formatPolicyChange(action: string, policy: TenantRetentionPolicy
   return lines.join("\n") + "\n";
 }
 
+// M4.14.m — shared `--tenant <uuid|slug>` resolver for the three
+// non-housekeeping retention actions (list-policies / history / summary).
+// UUID-shaped values short-circuit (zero PG cost preserved for scripted
+// callers); slug-shaped values resolve via meta.tenants. Returns
+// {ok:true, tenantId} on success or {ok:false, exitCode} on misuse
+// (caller forwards the exit code). When conn is undefined (test path
+// without pgConnectionOverride), slug-shaped values fall through with
+// the original raw value — operators in those tests need to use UUIDs.
+async function resolveTenantFlagFor(
+  raw: string | null,
+  conn: PgConnection | undefined,
+  ctx: RunContext,
+  actionLabel: string,
+): Promise<{ ok: true; tenantId: string | null } | { ok: false; exitCode: number }> {
+  if (raw === null) return { ok: true, tenantId: null };
+  if (conn === undefined) {
+    // Test path that supplied retentionOverride without pgConnectionOverride.
+    // Pass through verbatim — operators in this path must use UUIDs.
+    return { ok: true, tenantId: raw };
+  }
+  const resolved = await resolveTenantIdentifier(conn, raw);
+  if (!resolved.ok) {
+    printError(ctx.io, `${actionLabel}: ${resolved.error}`);
+    return { ok: false, exitCode: 2 };
+  }
+  return { ok: true, tenantId: resolved.tenantId };
+}
+
 async function runRetentionListPolicies(
   command: ParsedCommand,
   ctx: RunContext,
   retention: PostgresTraceRetention,
+  conn: PgConnection | undefined,
 ): Promise<number> {
-  const tenantFilter = getStringFlag(command, "tenant");
+  const tenantRaw = getStringFlag(command, "tenant");
+  const resolved = await resolveTenantFlagFor(tenantRaw, conn, ctx, "retention list-policies");
+  if (!resolved.ok) return resolved.exitCode;
+  const tenantFilter = resolved.tenantId;
   const tableFilter = getStringFlag(command, "table");
 
   let platform: ReadonlyArray<RetentionPolicyRow>;
@@ -882,8 +927,12 @@ async function runRetentionHistory(
   command: ParsedCommand,
   ctx: RunContext,
   retention: PostgresTraceRetention,
+  conn: PgConnection | undefined,
 ): Promise<number> {
-  const tenantFilter = getStringFlag(command, "tenant");
+  const tenantRaw = getStringFlag(command, "tenant");
+  const resolvedTenant = await resolveTenantFlagFor(tenantRaw, conn, ctx, "retention history");
+  if (!resolvedTenant.ok) return resolvedTenant.exitCode;
+  const tenantFilter = resolvedTenant.tenantId;
   const tableFilter = getStringFlag(command, "table");
   const kindFlags = getMultiFlag(command, "kind");
   const kindNotFlags = getMultiFlag(command, "kind-not");
@@ -1254,8 +1303,12 @@ async function runRetentionSummary(
   command: ParsedCommand,
   ctx: RunContext,
   retention: PostgresTraceRetention,
+  conn: PgConnection | undefined,
 ): Promise<number> {
-  const tenantFilter = getStringFlag(command, "tenant");
+  const tenantRaw = getStringFlag(command, "tenant");
+  const resolvedTenant = await resolveTenantFlagFor(tenantRaw, conn, ctx, "retention summary");
+  if (!resolvedTenant.ok) return resolvedTenant.exitCode;
+  const tenantFilter = resolvedTenant.tenantId;
   const tableFilter = getStringFlag(command, "table");
   const kindFlags = getMultiFlag(command, "kind");
   const kindNotFlags = getMultiFlag(command, "kind-not");

@@ -37,6 +37,8 @@ import type {
   SetTenantRetentionInput,
   SummarizeOptOutHistoryInput,
   TenantRetentionPolicyRow,
+  PgConnection,
+  PgQueryResult,
 } from "@crossengin/kernel-pg";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16407,5 +16409,209 @@ describe("runRetention summary (M6.7.zz.tenant.opt-out.cli.summary)", () => {
       expect(code).toBe(0);
       expect(out()).toContain("explainAnalyze: true");
     });
+  });
+});
+
+describe("--tenant <uuid|slug> slug resolution across list-policies / history / summary (M4.14.m)", () => {
+  const RESOLVED_UUID = "00000000-0000-4000-8000-00000000000a";
+
+  function fakeConnWithSlug(slugMap: Record<string, string>): PgConnection {
+    return {
+      query: async <T>(sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+          const slug = String(params?.[0] ?? "");
+          const id = slugMap[slug];
+          return id !== undefined
+            ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  // -- retention list-policies --
+
+  it("retention list-policies --tenant <slug> resolves via meta.tenants + filters by resolved UUID", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+    const fakeRetention = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [
+        {
+          tenantId: RESOLVED_UUID,
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+        {
+          tenantId: "99999999-0000-4000-8000-000000000099",
+          tableName: "workflow_traces",
+          retentionDays: 7,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", "acme-prod", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantFilter: string | null;
+      tenantPolicies: Array<{ tenantId: string }>;
+    };
+    // The envelope echoes the RESOLVED UUID, not the slug.
+    expect(env.tenantFilter).toBe(RESOLVED_UUID);
+    expect(env.tenantPolicies).toHaveLength(1);
+    expect(env.tenantPolicies[0]!.tenantId).toBe(RESOLVED_UUID);
+  });
+
+  it("retention list-policies --tenant <unknown-slug> exits 2 with explanatory error", async () => {
+    const { ctx, err } = buffers();
+    const conn = fakeConnWithSlug({});
+    const fakeRetention = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", "no-such-tenant"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("no tenant with slug 'no-such-tenant'");
+  });
+
+  // -- retention history --
+
+  it("retention history --tenant <slug> resolves + threads UUID to adapter", async () => {
+    const { ctx } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+    let captured: ListOptOutHistoryInput | undefined;
+    const fakeRetention = {
+      listOptOutHistory: async (input: ListOptOutHistoryInput) => {
+        captured = input;
+        return [] as ReadonlyArray<OptOutHistoryEntry>;
+      },
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "history", "--tenant", "acme-prod"), {
+      ...ctx,
+      retentionOverride: fakeRetention,
+      pgConnectionOverride: conn,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(captured?.tenantId).toBe(RESOLVED_UUID);
+  });
+
+  it("retention history --tenant <unknown-slug> exits 2 BEFORE calling listOptOutHistory", async () => {
+    const { ctx, err } = buffers();
+    const conn = fakeConnWithSlug({});
+    let called = false;
+    const fakeRetention = {
+      listOptOutHistory: async (_input: ListOptOutHistoryInput) => {
+        called = true;
+        return [] as ReadonlyArray<OptOutHistoryEntry>;
+      },
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "history", "--tenant", "no-such-tenant"), {
+      ...ctx,
+      retentionOverride: fakeRetention,
+      pgConnectionOverride: conn,
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("no tenant with slug 'no-such-tenant'");
+    expect(called).toBe(false);
+  });
+
+  // -- retention summary --
+
+  it("retention summary --tenant <slug> resolves + threads UUID to adapter", async () => {
+    const { ctx } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+    let captured: SummarizeOptOutHistoryInput | undefined;
+    const fakeRetention = {
+      summarizeOptOutHistory: async (input: SummarizeOptOutHistoryInput) => {
+        captured = input;
+        return { groupBy: "kind", totalCount: 0, buckets: [] } as OptOutHistorySummaryResult;
+      },
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "summary", "--tenant", "acme-prod"), {
+      ...ctx,
+      retentionOverride: fakeRetention,
+      pgConnectionOverride: conn,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    expect(captured?.tenantId).toBe(RESOLVED_UUID);
+  });
+
+  it("retention summary --tenant <unknown-slug> exits 2 BEFORE calling summarizeOptOutHistory", async () => {
+    const { ctx, err } = buffers();
+    const conn = fakeConnWithSlug({});
+    let called = false;
+    const fakeRetention = {
+      summarizeOptOutHistory: async (_input: SummarizeOptOutHistoryInput) => {
+        called = true;
+        return { groupBy: "kind", totalCount: 0, buckets: [] } as OptOutHistorySummaryResult;
+      },
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "summary", "--tenant", "no-such-tenant"), {
+      ...ctx,
+      retentionOverride: fakeRetention,
+      pgConnectionOverride: conn,
+    } as RetentionContext);
+    expect(code).toBe(2);
+    expect(err()).toContain("no tenant with slug 'no-such-tenant'");
+    expect(called).toBe(false);
+  });
+
+  it("UUID-shaped --tenant bypasses slug lookup on all three surfaces", async () => {
+    const { ctx } = buffers();
+    const queries: string[] = [];
+    const trackingConn: PgConnection = {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        queries.push(sql);
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(trackingConn),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const fakeRetention = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+      listOptOutHistory: async () => [] as ReadonlyArray<OptOutHistoryEntry>,
+      summarizeOptOutHistory: async () =>
+        ({ groupBy: "kind", totalCount: 0, buckets: [] }) as OptOutHistorySummaryResult,
+    } as unknown as PostgresTraceRetention;
+    for (const action of ["list-policies", "history", "summary"]) {
+      const code = await runRetention(parsed("retention", action, "--tenant", RESOLVED_UUID), {
+        ...ctx,
+        retentionOverride: fakeRetention,
+        pgConnectionOverride: trackingConn,
+      } as RetentionContext);
+      expect(code).toBe(0);
+    }
+    // NO meta.tenants SELECT issued across all three actions — UUID
+    // short-circuit preserved end-to-end.
+    expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
   });
 });
