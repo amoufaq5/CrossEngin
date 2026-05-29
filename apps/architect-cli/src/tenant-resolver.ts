@@ -20,6 +20,59 @@ export type TenantResolverResult =
   | { readonly ok: true; readonly tenantId: string }
   | { readonly ok: false; readonly error: string };
 
+// M4.14.j — typo-suggestion threshold. Distance ≤ 2 catches single-char
+// insert/delete/substitute and most transpositions — the same threshold
+// git and npm use for "did you mean". Limit 3 keeps the error message
+// readable on narrow terminals.
+const MAX_SUGGESTION_DISTANCE = 2;
+const MAX_SUGGESTIONS = 3;
+
+// M4.14.j — Levenshtein distance. Standard two-row DP O(m×n). Pure
+// helper exported for test reuse + future surfaces that need fuzzy slug
+// matching. Counts a single transposition as distance 2 (insert + delete);
+// for slug-typo detection that's fine — the threshold catches both.
+export function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  const m = a.length;
+  const n = b.length;
+  // Arrays are densely initialized up to index n; the `!` assertions below
+  // reflect that the loop indices stay in [0, n] and never see undefined.
+  let prev = new Array<number>(n + 1);
+  let curr = new Array<number>(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n]!;
+}
+
+// M4.14.j — pick slugs within MAX_SUGGESTION_DISTANCE of input, sorted by
+// distance ascending then alphabetically for stable output, capped at
+// MAX_SUGGESTIONS. Distance 0 (exact match) is excluded since the caller
+// already checked exact lookup.
+export function findSimilarSlugs(input: string, candidates: ReadonlyArray<string>): string[] {
+  const scored: Array<{ slug: string; distance: number }> = [];
+  for (const slug of candidates) {
+    const distance = levenshteinDistance(input, slug);
+    if (distance > 0 && distance <= MAX_SUGGESTION_DISTANCE) {
+      scored.push({ slug, distance });
+    }
+  }
+  scored.sort((a, b) =>
+    a.distance !== b.distance ? a.distance - b.distance : a.slug.localeCompare(b.slug),
+  );
+  return scored.slice(0, MAX_SUGGESTIONS).map((s) => s.slug);
+}
+
 export async function resolveTenantIdentifier(
   conn: PgConnection,
   value: string,
@@ -32,9 +85,31 @@ export async function resolveTenantIdentifier(
   ]);
   const row = result.rows[0];
   if (row === undefined) {
+    // M4.14.j — slug lookup failed; fetch all slugs and offer "did you
+    // mean" suggestions for typos within Levenshtein-2. Extra query on
+    // the error path only; at typical deployment scale (≤ 100K tenants)
+    // the round-trip is bounded and the typo-recovery win is large vs
+    // operators re-typing UUIDs or paging through meta.tenants manually.
+    // ORDER BY slug for deterministic output across runs (matters when
+    // multiple candidates share the same distance score).
+    const candidatesResult = await conn.query<{ slug: string }>(
+      `SELECT slug FROM meta.tenants ORDER BY slug`,
+    );
+    // M4.14.j — defensive filter: fake connections + degraded DB states may
+    // return rows without a string `slug` field. Skip those silently rather
+    // than throwing inside levenshteinDistance; the worst case is no
+    // suggestion which still gives operators the base error.
+    const candidates = candidatesResult.rows
+      .map((r) => r.slug)
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
+    const suggestions = findSimilarSlugs(value, candidates);
+    const hint =
+      suggestions.length > 0
+        ? ` — did you mean ${suggestions.map((s) => `'${s}'`).join(", ")}?`
+        : "";
     return {
       ok: false,
-      error: `no tenant with slug '${value}' (use --tenant <uuid> or a valid slug from meta.tenants)`,
+      error: `no tenant with slug '${value}'${hint} (use --tenant <uuid> or a valid slug from meta.tenants)`,
     };
   }
   return { ok: true, tenantId: row.id };
