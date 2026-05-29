@@ -15,7 +15,12 @@ import {
   type PrincipalResolver,
   type RateLimitChecker,
 } from "@crossengin/api-gateway-runtime";
-import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  createNodePgConnection,
+  parsePgEnvConfig,
+  type PgConnection,
+  type PostgresTraceRetention,
+} from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
@@ -30,6 +35,7 @@ import {
   type JwtFlagsResult,
   type RefreshableJwksProvider,
 } from "./gateway-jwks.js";
+import { runGatewayHousekeeping } from "./gateway-housekeeping.js";
 import { runGatewayRoutes, type GatewayRoutesContext } from "./gateway-routes.js";
 import {
   startGatewayServer,
@@ -53,6 +59,8 @@ export interface GatewayContext extends RunContext, GatewayRoutesContext {
   // M4.12 — idempotency-prune action injection points.
   readonly idempotencyStoreOverride?: PostgresIdempotencyStore;
   readonly clockOverride?: () => Date;
+  // M4.14 — housekeeping dashboard injection point.
+  readonly retentionOverride?: PostgresTraceRetention;
 }
 
 export async function runGateway(command: ParsedCommand, ctx: GatewayContext): Promise<number> {
@@ -60,7 +68,7 @@ export async function runGateway(command: ParsedCommand, ctx: GatewayContext): P
   if (action === undefined) {
     printError(
       ctx.io,
-      "gateway: missing action. usage: crossengin gateway <start|routes|prune-idempotency> [options]",
+      "gateway: missing action. usage: crossengin gateway <start|routes|prune-idempotency|housekeeping> [options]",
     );
     return 2;
   }
@@ -73,9 +81,14 @@ export async function runGateway(command: ParsedCommand, ctx: GatewayContext): P
   if (action === "prune-idempotency") {
     return runGatewayPruneIdempotency(command, ctx);
   }
+  if (action === "housekeeping") {
+    return runGatewayHousekeeping(command, ctx, () =>
+      createNodePgConnection(parsePgEnvConfig(ctx.env)),
+    );
+  }
   printError(
     ctx.io,
-    `gateway: unknown action '${action}'. expected one of: start, routes, prune-idempotency`,
+    `gateway: unknown action '${action}'. expected one of: start, routes, prune-idempotency, housekeeping`,
   );
   return 2;
 }

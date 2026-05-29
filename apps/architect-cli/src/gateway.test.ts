@@ -7,7 +7,7 @@ import {
   InMemoryRouteRegistry,
   type HandleResult,
 } from "@crossengin/api-gateway-runtime";
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import type { PgConnection, PgQueryResult, PostgresTraceRetention } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import { parseArgs } from "./cli.js";
@@ -843,5 +843,241 @@ describe("runGateway prune-idempotency scope flags (M4.13)", () => {
       method: "PATCH",
       limit: 12,
     });
+  });
+});
+
+describe("runGateway housekeeping (M4.14)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  // The housekeeping action calls 3 sources per table:
+  // - retention.listPolicies() once for retention-governed tables
+  // - retention.previewPrune() once for would-prune count on retention tables
+  // - idempotencyStore.previewDeleteExpired() for the idempotency table
+  // - direct SELECT COUNT(*) / MIN(time_col) on each of the 3 tables
+  // A dispatching mock connection wraps all the SELECTs.
+  function fakeStatsConnection(
+    perTable: Record<string, { total: string; oldest: string | null }>,
+  ): PgConnection {
+    return {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        for (const [name, stats] of Object.entries(perTable)) {
+          if (sql.includes(`FROM meta.${name}`)) {
+            return { rows: [stats], rowCount: 1 } as unknown as PgQueryResult<T>;
+          }
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  function fakeRetention(): PostgresTraceRetention {
+    return {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          lastPrunedAt: "2026-05-28T00:00:00.000Z",
+        },
+        {
+          tableName: "rate_limit_decisions",
+          retentionDays: 7,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 1042,
+          cutoffMs: 0,
+        },
+        {
+          tableName: "rate_limit_decisions",
+          status: "previewed",
+          retentionDays: 7,
+          wouldDeleteCount: 9876,
+          cutoffMs: 0,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+  }
+
+  function fakeIdempotencyStore(wouldDelete: number): PostgresIdempotencyStore {
+    return {
+      previewDeleteExpired: async () => wouldDelete,
+    } as unknown as PostgresIdempotencyStore;
+  }
+
+  it("default mode renders the three-table dashboard in human format", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: {
+        total: "50000",
+        oldest: "2026-04-01T00:00:00.000Z",
+      },
+      gateway_idempotency_records: {
+        total: "1200",
+        oldest: "2026-05-25T00:00:00.000Z",
+      },
+      rate_limit_decisions: {
+        total: "987654",
+        oldest: "2026-03-15T00:00:00.000Z",
+      },
+    });
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(300),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping"), ctx);
+    expect(code).toBe(0);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain(`gateway housekeeping (as of ${fixedNow.toISOString()})`);
+    expect(stdout).toContain("gateway_pipeline_executions");
+    expect(stdout).toContain("gateway_idempotency_records");
+    expect(stdout).toContain("rate_limit_decisions");
+    // Total counts are locale-formatted with commas.
+    expect(stdout).toContain("50,000");
+    expect(stdout).toContain("987,654");
+    // wouldPrune counts surface for each table.
+    expect(stdout).toContain("1,042");
+    expect(stdout).toContain("9,876");
+    expect(stdout).toContain("300");
+    // Retention-governed tables show retention days + lastPrunedAt.
+    expect(stdout).toContain("30 day(s)");
+    expect(stdout).toContain("7 day(s)");
+    expect(stdout).toContain("2026-05-28T00:00:00.000Z");
+    expect(stdout).toContain("never");
+    // The idempotency-records section uses expires_at semantic — no retention
+    // policy line.
+    expect(stdout).toContain("semantic:       expires_at");
+    expect(stdout).toContain("semantic:       retention_days");
+  });
+
+  it("JSON envelope includes asOf + tables[] with all three tables", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: { total: "100", oldest: null },
+      gateway_idempotency_records: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "5", oldest: "2026-05-01T00:00:00.000Z" },
+    });
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as {
+      action: string;
+      asOf: string;
+      tables: Array<{
+        tableName: string;
+        pruneSemantic: string;
+        totalRowCount: number;
+        oldestAt: string | null;
+        wouldPruneCount: number;
+        retentionDays: number | null;
+        lastPrunedAt: string | null;
+      }>;
+    };
+    expect(env.action).toBe("gateway.housekeeping");
+    expect(env.asOf).toBe(fixedNow.toISOString());
+    expect(env.tables).toHaveLength(3);
+    const byName = new Map(env.tables.map((t) => [t.tableName, t]));
+    const pipe = byName.get("gateway_pipeline_executions")!;
+    expect(pipe.pruneSemantic).toBe("retention_days");
+    expect(pipe.totalRowCount).toBe(100);
+    expect(pipe.retentionDays).toBe(30);
+    expect(pipe.lastPrunedAt).toBe("2026-05-28T00:00:00.000Z");
+    expect(pipe.wouldPruneCount).toBe(1042);
+    const idem = byName.get("gateway_idempotency_records")!;
+    expect(idem.pruneSemantic).toBe("expires_at");
+    expect(idem.totalRowCount).toBe(0);
+    expect(idem.oldestAt).toBeNull();
+    expect(idem.retentionDays).toBeNull();
+    expect(idem.lastPrunedAt).toBeNull();
+    expect(idem.wouldPruneCount).toBe(0);
+    const rl = byName.get("rate_limit_decisions")!;
+    expect(rl.pruneSemantic).toBe("retention_days");
+    expect(rl.retentionDays).toBe(7);
+    expect(rl.lastPrunedAt).toBeNull();
+  });
+
+  it("renders '(empty)' for tables with zero rows + null oldest, and '(no platform policy configured)' for missing retention", async () => {
+    const conn = fakeStatsConnection({
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      gateway_idempotency_records: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const noPoliciesRetention = {
+      listPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: noPoliciesRetention,
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping"), ctx);
+    expect(code).toBe(0);
+    const stdout = outChunks.join("");
+    expect(stdout).toContain("(empty)");
+    expect(stdout).toContain("(no platform policy configured)");
+  });
+
+  it("propagates adapter errors as exit 1 with a clear message", async () => {
+    const throwingConn: PgConnection = {
+      query: async () => {
+        throw new Error('relation "meta.gateway_pipeline_executions" does not exist');
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(throwingConn),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: throwingConn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(0),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping"), ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toContain("does not exist");
+  });
+
+  it("exits 1 with PG-missing error when no PG env and no override", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(parseGatewayArgs("housekeeping"), ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toMatch(/PG env/);
+  });
+
+  it("dispatcher includes housekeeping in the unknown-action error message", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(parseGatewayArgs("nuke"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toMatch(/housekeeping/);
   });
 });
