@@ -1645,20 +1645,24 @@ describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     return { conn: conn.conn, retention, idempotencyStore };
   }
 
+  // M4.14.r captured SIGINT only; M4.14.p extends the bridge to register
+  // BOTH SIGINT and SIGTERM under a shared AbortController. The capture
+  // tracks each signal's handler separately so tests can assert both are
+  // registered + verify per-signal abort semantics.
   function captureSignalRegistrar() {
-    const captured: { handler: (() => void) | null } = { handler: null };
-    const removeCalls = { count: 0 };
+    const captured: { handlers: Map<string, () => void> } = { handlers: new Map() };
+    const removeCalls: { count: number; signals: string[] } = { count: 0, signals: [] };
     const registrar = (signal: string, handler: () => void): (() => void) => {
-      if (signal !== "SIGINT") throw new Error(`unexpected signal: ${signal}`);
-      captured.handler = handler;
+      captured.handlers.set(signal, handler);
       return () => {
         removeCalls.count++;
+        removeCalls.signals.push(signal);
       };
     };
     return { registrar, captured, removeCalls };
   }
 
-  it("installs the SIGINT bridge under --watch + cleans up on natural exit", async () => {
+  it("installs the shutdown bridge under --watch + cleans up on natural exit (both signals)", async () => {
     const { io } = makeIo();
     const { conn, retention, idempotencyStore } = fixtures();
     const { registrar, captured, removeCalls } = captureSignalRegistrar();
@@ -1680,8 +1684,11 @@ describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     };
     const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
     expect(code).toBe(0);
-    expect(captured.handler).not.toBeNull();
-    expect(removeCalls.count).toBe(1);
+    // M4.14.p — both SIGINT and SIGTERM handlers registered + both removed.
+    expect(captured.handlers.has("SIGINT")).toBe(true);
+    expect(captured.handlers.has("SIGTERM")).toBe(true);
+    expect(removeCalls.count).toBe(2);
+    expect(removeCalls.signals.sort()).toEqual(["SIGINT", "SIGTERM"]);
   });
 
   it("firing the captured SIGINT handler aborts the loop cleanly (exit 0)", async () => {
@@ -1691,7 +1698,8 @@ describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     let tickCount = 0;
     const setTimeoutFiringSigint = (cb: () => void, _ms: number) => {
       tickCount++;
-      if (tickCount === 1 && captured.handler !== null) captured.handler();
+      const sigintHandler = captured.handlers.get("SIGINT");
+      if (tickCount === 1 && sigintHandler !== undefined) sigintHandler();
       cb();
       return 1 as unknown;
     };
@@ -1713,7 +1721,7 @@ describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     expect(outChunks.join("").match(/gateway housekeeping \(as of /g)!.length).toBe(1);
   });
 
-  it("does NOT install the SIGINT bridge when abortSignal override is supplied", async () => {
+  it("does NOT install the bridge when abortSignal override is supplied (neither signal registered)", async () => {
     const { io } = makeIo();
     const { conn, retention, idempotencyStore } = fixtures();
     const { registrar, captured, removeCalls } = captureSignalRegistrar();
@@ -1737,8 +1745,45 @@ describe("runGateway housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     };
     const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
     expect(code).toBe(0);
-    expect(captured.handler).toBeNull();
+    expect(captured.handlers.size).toBe(0);
     expect(removeCalls.count).toBe(0);
+  });
+
+  // M4.14.p — Kubernetes / systemd / container-manager graceful shutdown
+  // typically sends SIGTERM (not SIGINT). The bridge handles both
+  // uniformly: SIGTERM-triggered abort exits cleanly with the same
+  // semantic as SIGINT (PG closed via finally, sticky-trip exit codes
+  // preserved). This block exercises the SIGTERM path in isolation.
+
+  it("M4.14.p — firing the captured SIGTERM handler aborts the loop cleanly (Kubernetes shutdown)", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const { registrar, captured } = captureSignalRegistrar();
+    let tickCount = 0;
+    const setTimeoutFiringSigterm = (cb: () => void, _ms: number) => {
+      tickCount++;
+      const sigtermHandler = captured.handlers.get("SIGTERM");
+      if (tickCount === 1 && sigtermHandler !== undefined) sigtermHandler();
+      cb();
+      return 1 as unknown;
+    };
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 10,
+        setTimeoutFn: setTimeoutFiringSigterm,
+        signalRegistrar: registrar,
+      },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    // Exactly one tick rendered before the SIGTERM handler aborted.
+    expect(outChunks.join("").match(/gateway housekeeping \(as of /g)!.length).toBe(1);
   });
 });
 

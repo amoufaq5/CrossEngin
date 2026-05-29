@@ -156,18 +156,30 @@ export interface WatchOverride {
 // without poisoning the test runner's own signal handlers.
 export type SignalRegistrar = (signal: string, handler: () => void) => () => void;
 
-// M4.14.r — SIGINT-to-AbortController bridge. Production: installs a
-// SIGINT handler that aborts an internal AbortController, returns the
-// signal + cleanup closure. The watch loop exits cleanly (via the
-// existing abortSignal path) when the operator hits Ctrl-C; the
-// caller's finally block runs (closes PG, etc.) before process exit.
-// Without this bridge, SIGINT exits the process at 130 with PG
-// connection dropped abruptly — PG handles it but the operator gets no
-// graceful shutdown signal.
+// M4.14.r / M4.14.p — graceful-shutdown-to-AbortController bridge.
+// Production: installs handlers for BOTH SIGINT (Ctrl-C from operators)
+// AND SIGTERM (Kubernetes / systemd / container managers sending the
+// "stop gracefully" signal) that abort a shared AbortController.
+// Returns the signal + cleanup closure that removes both handlers.
 //
-// Tests pass a custom `register` that records the handler for manual
-// invocation; production omits it and gets `process.on("SIGINT", ...)`.
-export function installSigintBridge(register?: SignalRegistrar): {
+// The watch loop exits cleanly (via the existing abortSignal path)
+// regardless of which signal fired; the caller's finally block runs
+// (closes PG, etc.) before process exit. Without this bridge:
+//   - SIGINT exits at 130 with PG connection dropped abruptly
+//   - SIGTERM exits at 143 (default Node behavior) similarly
+// PG handles both correctly but the operator gets no graceful shutdown
+// pathway and the watch-state (sticky-trip exit 3 from M4.14.s) is
+// lost.
+//
+// Both signals share the same shutdown semantic in housekeeping
+// dashboards — there's no operational reason to distinguish "operator
+// pressed Ctrl-C" from "Kubernetes scaled down the pod"; both should
+// drain cleanly. The single-controller design reflects this.
+//
+// Tests pass a custom `register` that records handlers for manual
+// invocation; production omits it and gets the default
+// process.on/removeListener pair.
+export function installShutdownBridge(register?: SignalRegistrar): {
   signal: AbortSignal;
   cleanup: () => void;
 } {
@@ -179,9 +191,23 @@ export function installSigintBridge(register?: SignalRegistrar): {
       process.removeListener(sig, h);
     };
   };
-  const removeHandler = (register ?? defaultRegister)("SIGINT", handler);
-  return { signal: controller.signal, cleanup: removeHandler };
+  const reg = register ?? defaultRegister;
+  const removeSigint = reg("SIGINT", handler);
+  const removeSigterm = reg("SIGTERM", handler);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      removeSigint();
+      removeSigterm();
+    },
+  };
 }
+
+// Deprecated alias preserved for any external callers reading the
+// M4.14.r-era export name. New code should use installShutdownBridge.
+// Both names point at the same implementation handling SIGINT + SIGTERM
+// uniformly — the renamed function does NOT regress to SIGINT-only.
+export const installSigintBridge = installShutdownBridge;
 
 export interface ParsedWatchFlags {
   readonly watch: boolean;

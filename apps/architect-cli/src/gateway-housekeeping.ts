@@ -6,7 +6,7 @@ import { getBooleanFlag, getMultiFlag, getStringFlag, type ParsedCommand } from 
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
-  installSigintBridge,
+  installShutdownBridge,
   parseWatchFlags,
   runHousekeepingWatchLoop,
   type WatchOverride,
@@ -362,9 +362,9 @@ export async function runGatewayHousekeeping(
       // M4.14.r — SIGINT-to-AbortController bridge for graceful Ctrl-C
       // shutdown (skips when caller supplies abortSignal directly, e.g.,
       // in tests).
-      const sigintBridge =
+      const shutdownBridge =
         ctx.watchOverride?.abortSignal === undefined
-          ? installSigintBridge(ctx.watchOverride?.signalRegistrar)
+          ? installShutdownBridge(ctx.watchOverride?.signalRegistrar)
           : undefined;
       try {
         const result = await runHousekeepingWatchLoop<HousekeepingReport>({
@@ -375,7 +375,7 @@ export async function runGatewayHousekeeping(
           options: {
             intervalMs: watchFlags.intervalSeconds * 1000,
             maxIterations: ctx.watchOverride?.maxIterations,
-            abortSignal: ctx.watchOverride?.abortSignal ?? sigintBridge?.signal,
+            abortSignal: ctx.watchOverride?.abortSignal ?? shutdownBridge?.signal,
             setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
             clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
           },
@@ -384,7 +384,7 @@ export async function runGatewayHousekeeping(
         });
         return result.halted ? 3 : 0;
       } finally {
-        sigintBridge?.cleanup();
+        shutdownBridge?.cleanup();
       }
     }
     const report = await gather();

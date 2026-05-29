@@ -10,7 +10,7 @@ import { getBooleanFlag, getMultiFlag, getStringFlag, type ParsedCommand } from 
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
-  installSigintBridge,
+  installShutdownBridge,
   parseWatchFlags,
   runHousekeepingWatchLoop,
   type WatchOverride,
@@ -358,9 +358,9 @@ export async function runRetentionHousekeeping(
         // caller already supplied an abortSignal (tests typically do). The
         // bridge ensures the watch loop exits cleanly on Ctrl-C and the
         // outer `finally` runs closeConn() before process exit.
-        const sigintBridge =
+        const shutdownBridge =
           ctx.watchOverride?.abortSignal === undefined
-            ? installSigintBridge(ctx.watchOverride?.signalRegistrar)
+            ? installShutdownBridge(ctx.watchOverride?.signalRegistrar)
             : undefined;
         try {
           const result = await runHousekeepingWatchLoop<RetentionHousekeepingReport>({
@@ -371,7 +371,7 @@ export async function runRetentionHousekeeping(
             options: {
               intervalMs: watchFlags.intervalSeconds * 1000,
               maxIterations: ctx.watchOverride?.maxIterations,
-              abortSignal: ctx.watchOverride?.abortSignal ?? sigintBridge?.signal,
+              abortSignal: ctx.watchOverride?.abortSignal ?? shutdownBridge?.signal,
               setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
               clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
             },
@@ -384,7 +384,7 @@ export async function runRetentionHousekeeping(
           // whole run. Natural termination without trips → exit 0.
           return result.halted ? 3 : 0;
         } finally {
-          sigintBridge?.cleanup();
+          shutdownBridge?.cleanup();
         }
       }
       // Single-shot path. JSON envelope is pretty-printed for human

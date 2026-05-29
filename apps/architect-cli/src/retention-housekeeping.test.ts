@@ -1107,24 +1107,24 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     return { conn, retention };
   }
 
-  // Test-injection signal registrar that captures the handler so the test
-  // can synchronously simulate SIGINT without actually sending the signal
-  // to the test runner. Production callers omit this and get
-  // process.on("SIGINT", ...).
+  // M4.14.r captured SIGINT only; M4.14.p extends the bridge to register
+  // BOTH SIGINT and SIGTERM under a shared AbortController. The capture
+  // tracks each signal's handler separately so tests can assert both are
+  // registered + verify per-signal abort semantics.
   function captureSignalRegistrar() {
-    const captured: { handler: (() => void) | null } = { handler: null };
-    const removeCalls = { count: 0 };
+    const captured: { handlers: Map<string, () => void> } = { handlers: new Map() };
+    const removeCalls: { count: number; signals: string[] } = { count: 0, signals: [] };
     const registrar = (signal: string, handler: () => void): (() => void) => {
-      if (signal !== "SIGINT") throw new Error(`unexpected signal: ${signal}`);
-      captured.handler = handler;
+      captured.handlers.set(signal, handler);
       return () => {
         removeCalls.count++;
+        removeCalls.signals.push(signal);
       };
     };
     return { registrar, captured, removeCalls };
   }
 
-  it("installs the SIGINT bridge under --watch when no abortSignal override is supplied", async () => {
+  it("installs the shutdown bridge under --watch when no abortSignal override is supplied (both signals)", async () => {
     const { ctx } = buffers();
     const { conn, retention } = fixtures();
     const { registrar, captured, removeCalls } = captureSignalRegistrar();
@@ -1146,10 +1146,11 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
       },
     } as RetentionContext);
     expect(code).toBe(0);
-    // The registrar was called → bridge installed.
-    expect(captured.handler).not.toBeNull();
-    // Cleanup ran in the action's finally block.
-    expect(removeCalls.count).toBe(1);
+    // M4.14.p — both SIGINT and SIGTERM handlers registered + both removed.
+    expect(captured.handlers.has("SIGINT")).toBe(true);
+    expect(captured.handlers.has("SIGTERM")).toBe(true);
+    expect(removeCalls.count).toBe(2);
+    expect(removeCalls.signals.sort()).toEqual(["SIGINT", "SIGTERM"]);
     // maxIterations=1 + immediate setTimeout → 0 setTimeout calls because
     // the loop exited after tick 1 before waitInterval was called.
     expect(tickCount).toBe(0);
@@ -1164,9 +1165,10 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     // during the wait between ticks).
     const setTimeoutFiringSigint = (cb: () => void, _ms: number) => {
       tickCount++;
-      if (tickCount === 1 && captured.handler !== null) {
+      const sigintHandler = captured.handlers.get("SIGINT");
+      if (tickCount === 1 && sigintHandler !== undefined) {
         // Trigger SIGINT abort before the timeout fires.
-        captured.handler();
+        sigintHandler();
       }
       cb();
       return 1 as unknown;
@@ -1188,7 +1190,7 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     expect(out().match(/retention housekeeping \(as of /g)!.length).toBe(1);
   });
 
-  it("does NOT install the SIGINT bridge when abortSignal override is supplied", async () => {
+  it("does NOT install the bridge when abortSignal override is supplied (neither signal registered)", async () => {
     const { ctx } = buffers();
     const { conn, retention } = fixtures();
     const { registrar, captured, removeCalls } = captureSignalRegistrar();
@@ -1211,11 +1213,11 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
     expect(code).toBe(0);
     // Registrar was NOT called — the bridge was skipped because the
     // caller supplied an abortSignal directly.
-    expect(captured.handler).toBeNull();
+    expect(captured.handlers.size).toBe(0);
     expect(removeCalls.count).toBe(0);
   });
 
-  it("cleans up the SIGINT handler even when the loop throws (gather error without keep-going)", async () => {
+  it("cleans up both signal handlers even when the loop throws (gather error without keep-going)", async () => {
     const { ctx } = buffers();
     const { conn } = fixtures();
     const { registrar, removeCalls } = captureSignalRegistrar();
@@ -1241,8 +1243,44 @@ describe("runRetention housekeeping --watch SIGINT bridge (M4.14.r)", () => {
       },
     } as RetentionContext);
     expect(code).toBe(1);
-    // Cleanup still ran even though the loop threw out.
-    expect(removeCalls.count).toBe(1);
+    // M4.14.p — both signal handlers cleaned up even when the loop threw.
+    expect(removeCalls.count).toBe(2);
+    expect(removeCalls.signals.sort()).toEqual(["SIGINT", "SIGTERM"]);
+  });
+
+  // M4.14.p — Kubernetes / systemd / container managers send SIGTERM for
+  // graceful shutdown. The bridge handles SIGTERM with the same semantic
+  // as SIGINT — clean exit code 0 (or 3 under sticky-trip from M4.14.s)
+  // with PG closed via the action's finally block.
+
+  it("M4.14.p — firing the captured SIGTERM handler aborts the loop cleanly (Kubernetes shutdown)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const { registrar, captured } = captureSignalRegistrar();
+    let tickCount = 0;
+    const setTimeoutFiringSigterm = (cb: () => void, _ms: number) => {
+      tickCount++;
+      const sigtermHandler = captured.handlers.get("SIGTERM");
+      if (tickCount === 1 && sigtermHandler !== undefined) {
+        sigtermHandler();
+      }
+      cb();
+      return 1 as unknown;
+    };
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 10,
+        setTimeoutFn: setTimeoutFiringSigterm,
+        signalRegistrar: registrar,
+      },
+    } as RetentionContext);
+    // Clean exit (NOT 143 — the bridge intercepts SIGTERM cleanly).
+    expect(code).toBe(0);
+    expect(out().match(/retention housekeeping \(as of /g)!.length).toBe(1);
   });
 });
 
