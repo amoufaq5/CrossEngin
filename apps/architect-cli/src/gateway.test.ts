@@ -1889,7 +1889,12 @@ describe("runGateway housekeeping --tenant (M4.14.v)", () => {
     } as unknown as PostgresIdempotencyStore;
   }
 
-  it("invalid --tenant value exits 2 BEFORE PG resolution", async () => {
+  it("--tenant value that doesn't resolve exits 2 (M4.14.o slug lookup)", async () => {
+    // M4.14.o widened --tenant to accept slugs; non-UUID values that don't
+    // resolve via meta.tenants surface as "no tenant with slug" rather
+    // than the old CLI-boundary UUID-shape error. The fakeStatsConnection
+    // returns no rows for the meta.tenants SELECT, so "not-a-uuid" fails
+    // to resolve.
     const conn = fakeStatsConnection();
     const { io, errChunks } = makeIo();
     const ctx: GatewayContext = {
@@ -1902,7 +1907,7 @@ describe("runGateway housekeeping --tenant (M4.14.v)", () => {
     };
     const code = await runGateway(parseGatewayArgs("housekeeping", "--tenant", "not-a-uuid"), ctx);
     expect(code).toBe(2);
-    expect(errChunks.join("")).toMatch(/must be a UUID/);
+    expect(errChunks.join("")).toMatch(/no tenant with slug 'not-a-uuid'/);
   });
 
   it("valid --tenant surfaces per-table tenantPolicy in human output (with override + without)", async () => {
@@ -2309,5 +2314,145 @@ describe("runGateway housekeeping --all-tenants (M4.14.q)", () => {
     const stdout = outChunks.join("");
     expect(stdout).toContain("THRESHOLD ALERTS");
     expect(stdout).toContain("matrix mode — all tenants");
+  });
+});
+
+describe("runGateway housekeeping --tenant <slug> (M4.14.o)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+  const RESOLVED_UUID = "00000000-0000-4000-8000-00000000000a";
+
+  function fakeConnWithSlug(slugMap: Record<string, string>): PgConnection {
+    return {
+      query: async <T>(sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+          const slug = String(params?.[0] ?? "");
+          const id = slugMap[slug];
+          return id !== undefined
+            ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        if (sql.includes("FROM meta.gateway_pipeline_executions")) {
+          return {
+            rows: [{ total: "50000", oldest: "2026-04-01T00:00:00.000Z" }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        if (sql.includes("FROM meta.gateway_idempotency_records")) {
+          return {
+            rows: [{ total: "0", oldest: null }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        if (sql.includes("FROM meta.rate_limit_decisions")) {
+          return {
+            rows: [{ total: "0", oldest: null }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  function fakeRetention(): PostgresTraceRetention {
+    return {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [
+        {
+          tenantId: RESOLVED_UUID,
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+  }
+
+  function fakeIdempotencyStore(): PostgresIdempotencyStore {
+    return { previewDeleteExpired: async () => 0 } as unknown as PostgresIdempotencyStore;
+  }
+
+  it("--tenant <slug> resolves via meta.tenants and renders dashboard with resolved UUID", async () => {
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--tenant", "acme-prod", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(outChunks.join("")) as {
+      tenantId: string;
+      tables: Array<{ tableName: string; tenantPolicy?: { retentionDays: number } | null }>;
+    };
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    const pipe = env.tables.find((t) => t.tableName === "gateway_pipeline_executions")!;
+    expect(pipe.tenantPolicy).not.toBeNull();
+    expect(pipe.tenantPolicy!.retentionDays).toBe(365);
+  });
+
+  it("unknown slug exits 2 with explanatory error", async () => {
+    const conn = fakeConnWithSlug({});
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--tenant", "no-such-tenant"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("no tenant with slug 'no-such-tenant'");
+  });
+
+  it("UUID-shaped --tenant value bypasses slug lookup (no SELECT meta.tenants issued)", async () => {
+    const queries: string[] = [];
+    const trackingConn: PgConnection = {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        queries.push(sql);
+        if (sql.includes("FROM meta.")) {
+          return {
+            rows: [{ total: "0", oldest: null }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(trackingConn),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const { io } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: trackingConn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--tenant", RESOLVED_UUID), ctx);
+    expect(code).toBe(0);
+    expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
   });
 });

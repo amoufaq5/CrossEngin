@@ -1335,15 +1335,25 @@ describe("runRetention housekeeping --tenant (M4.14.u)", () => {
     return { conn, retention };
   }
 
-  it("exits 2 on invalid --tenant value (non-UUID)", async () => {
+  it("exits 2 on --tenant value that doesn't resolve to a tenant (M4.14.o slug lookup)", async () => {
     const { ctx, err } = buffers();
-    const code = await runRetention(
-      parsed("retention", "housekeeping", "--tenant", "not-a-uuid"),
-      ctx as RetentionContext,
-    );
+    // M4.14.o widened --tenant to accept slugs; non-UUID values are now
+    // looked up via meta.tenants. An unknown value (no matching slug)
+    // surfaces as exit 2 with "no tenant with slug" rather than the old
+    // CLI-boundary UUID-shape error.
+    const conn: PgConnection = {
+      query: async <T>(_sql: string, _params?: readonly unknown[]) =>
+        ({ rows: [], rowCount: 0 }) as unknown as PgQueryResult<T>,
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const code = await runRetention(parsed("retention", "housekeeping", "--tenant", "not-a-uuid"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+    } as RetentionContext);
     expect(code).toBe(2);
-    expect(err()).toContain("invalid --tenant");
-    expect(err()).toContain("must be a UUID");
+    expect(err()).toContain("no tenant with slug 'not-a-uuid'");
   });
 
   it("accepts a valid UUID and renders tenantPolicy sections for the filtered tenant", async () => {
@@ -1671,5 +1681,143 @@ describe("runRetention housekeeping --all-tenants (M4.14.q)", () => {
     expect(code).toBe(3);
     expect(out()).toContain("THRESHOLD ALERTS");
     expect(out()).toContain("matrix mode — all tenants");
+  });
+});
+
+describe("runRetention housekeeping --tenant <slug> (M4.14.o)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+  const RESOLVED_UUID = "00000000-0000-4000-8000-00000000000a";
+
+  // Connection that handles BOTH the slug lookup AND the per-table stats
+  // queries. Slug "acme-prod" resolves to RESOLVED_UUID; everything else
+  // returns no rows (unknown slug).
+  function fakeConnWithSlug(slugMap: Record<string, string>): PgConnection {
+    return {
+      query: async <T>(sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+          const slug = String(params?.[0] ?? "");
+          const id = slugMap[slug];
+          return id !== undefined
+            ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        // Per-table stats fallback for the housekeeping gather queries.
+        if (sql.includes("FROM meta.")) {
+          return {
+            rows: [{ total: "0", oldest: null }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  it("--tenant <slug> resolves via meta.tenants and renders dashboard with resolved UUID", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+    const retention = fakeRetention({
+      platform: [],
+      tenant: [
+        {
+          tenantId: RESOLVED_UUID,
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+      preview: [],
+    });
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--tenant", "acme-prod", "--format", "json"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantId: string;
+      tables: Array<{ tableName: string; tenantPolicy?: { retentionDays: number } | null }>;
+    };
+    // The envelope echoes the RESOLVED UUID, not the slug — operators see
+    // the canonical identifier in JSON exports for diff-stability.
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    const wt = env.tables.find((t) => t.tableName === "workflow_traces")!;
+    expect(wt.tenantPolicy).not.toBeNull();
+    expect(wt.tenantPolicy!.retentionDays).toBe(365);
+  });
+
+  it("unknown slug exits 2 with explanatory error before any gather query", async () => {
+    const { ctx, err } = buffers();
+    const conn = fakeConnWithSlug({}); // empty slug map → no resolution
+    const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--tenant", "no-such-tenant"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("no tenant with slug 'no-such-tenant'");
+  });
+
+  it("UUID-shaped --tenant value bypasses slug lookup (no SELECT meta.tenants issued)", async () => {
+    const { ctx } = buffers();
+    const queries: string[] = [];
+    const trackingConn: PgConnection = {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        queries.push(sql);
+        return {
+          rows: [{ total: "0", oldest: null }],
+          rowCount: 1,
+        } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(trackingConn),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--tenant", RESOLVED_UUID),
+      {
+        ...ctx,
+        pgConnectionOverride: trackingConn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    // No SELECT against meta.tenants — the UUID short-circuited.
+    expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
+  });
+
+  it("slug + --all-tenants still exits 2 (mutual exclusivity preserved across slug input)", async () => {
+    const { ctx, err } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+    const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--tenant", "acme-prod", "--all-tenants"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("mutually exclusive");
   });
 });

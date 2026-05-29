@@ -15,6 +15,7 @@ import {
   runHousekeepingWatchLoop,
   type WatchOverride,
 } from "./housekeeping-watch.js";
+import { resolveTenantIdentifier } from "./tenant-resolver.js";
 import {
   evaluateAlertOnRow,
   parseThresholdAlertFlags,
@@ -233,25 +234,19 @@ export async function runRetentionHousekeeping(
   const watchFlags = parseWatchFlags(command, ctx.io, "retention housekeeping");
   if (typeof watchFlags === "number") return watchFlags;
 
-  // M4.14.u — parse + validate --tenant <uuid> BEFORE PG resolution.
-  // Lightweight CLI-side regex check; PG validates again at query time so
-  // a slightly malformed but regex-matching UUID would error at query
-  // boundary not here. This guards against the bulk of operator typos.
+  // M4.14.u / M4.14.o — parse --tenant <uuid|slug>. UUID-shaped values
+  // pass through directly; slug-shaped values are resolved via meta.tenants
+  // AFTER the PG connection is established (one extra SELECT, one-shot per
+  // command or per --watch session). Mutual exclusivity with --all-tenants
+  // is enforced HERE at the boundary (no PG round-trip needed) so misuse
+  // exits 2 cleanly without burning a connection.
   const tenantFlag = getStringFlag(command, "tenant");
-  if (tenantFlag !== null && !isValidUuid(tenantFlag)) {
-    printError(
-      ctx.io,
-      `retention housekeeping: invalid --tenant '${tenantFlag}' (must be a UUID like 00000000-0000-0000-0000-000000000000)`,
-    );
-    return 2;
-  }
-  const tenantId = tenantFlag ?? undefined;
 
   // M4.14.q — parse --all-tenants boolean flag + enforce mutual exclusivity
-  // with --tenant <uuid>. The two flags answer different operator
-  // questions (one tenant vs every tenant); combining is ambiguous.
+  // with --tenant. The two flags answer different operator questions (one
+  // tenant vs every tenant); combining is ambiguous.
   const allTenantsFlag = getBooleanFlag(command, "all-tenants");
-  if (allTenantsFlag && tenantId !== undefined) {
+  if (allTenantsFlag && tenantFlag !== null) {
     printError(
       ctx.io,
       `retention housekeeping: --tenant and --all-tenants are mutually exclusive (use one or the other)`,
@@ -292,6 +287,21 @@ export async function runRetentionHousekeeping(
       }
     }
     const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
+
+    // M4.14.o — resolve --tenant <uuid|slug> via meta.tenants for slug
+    // inputs. UUID-shaped values pass through directly; slug-shaped values
+    // require one PG round-trip BEFORE the gather closure runs. Under
+    // --watch this happens ONCE before the loop starts — slug→UUID mapping
+    // is stable for the duration of the watch session.
+    let tenantId: string | undefined;
+    if (tenantFlag !== null) {
+      const resolved = await resolveTenantIdentifier(conn, tenantFlag);
+      if (!resolved.ok) {
+        printError(ctx.io, `retention housekeeping: ${resolved.error}`);
+        return 2;
+      }
+      tenantId = resolved.tenantId;
+    }
 
     // Shared gather/render closures used by both single-shot and watch modes.
     // gather() reads the clock per call so each watch tick reflects current
@@ -550,12 +560,8 @@ function renderTenantPolicyHuman(
   ctx.io.stdout.write(`      last pruned:   ${policy.lastPrunedAt ?? "never"}\n`);
 }
 
-// CLI-side UUID format check. The kernel/PG layer enforces strict
-// validation at INSERT/SELECT time; this is just an operator-friendly
-// guard against typos so misuse exits 2 cleanly without burning a PG
-// connection.
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isValidUuid(value: string): boolean {
-  return UUID_REGEX.test(value);
-}
+// M4.14.o — UUID vs slug discrimination + slug resolution moved to the
+// shared `tenant-resolver.ts` module since both housekeeping dispatchers
+// now go through it. The CLI-side UUID regex used to live here in
+// M4.14.u; resolveTenantIdentifier now owns the discriminator and the
+// slug-lookup PG round-trip.
