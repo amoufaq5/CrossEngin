@@ -27,6 +27,7 @@ describe("SUBCOMMANDS", () => {
       "gateway",
       "retention",
       "tenant",
+      "tenants",
       "workflow",
       "version",
       "help",
