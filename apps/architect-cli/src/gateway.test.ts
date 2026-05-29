@@ -1081,3 +1081,189 @@ describe("runGateway housekeeping (M4.14)", () => {
     expect(errChunks.join("")).toMatch(/housekeeping/);
   });
 });
+
+describe("runGateway housekeeping --watch (M4.14.w)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  // Test-only setTimeout that fires synchronously so watch loops drain
+  // instantly. Production uses real setTimeout.
+  const immediateSetTimeout = (cb: () => void, _ms: number) => {
+    cb();
+    return 1 as unknown;
+  };
+
+  function fixtures() {
+    const conn = fakePgConnection(() => ({
+      rows: [{ total: "0", oldest: null }],
+      rowCount: 1,
+    }));
+    const retention = {
+      listPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const idempotencyStore = {
+      previewDeleteExpired: async () => 0,
+    } as unknown as PostgresIdempotencyStore;
+    return { conn: conn.conn, retention, idempotencyStore };
+  }
+
+  it("loops N times when --watch + watchOverride.maxIterations is set", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    const stdout = outChunks.join("");
+    const headerMatches = stdout.match(/gateway housekeeping \(as of /g);
+    expect(headerMatches).not.toBeNull();
+    expect(headerMatches!.length).toBe(3);
+    expect(stdout).toContain("\x1b[2J\x1b[H");
+  });
+
+  it("--watch with --format json streams NDJSON-of-envelopes", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 2, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--watch", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines.length).toBe(2);
+    for (const line of lines) {
+      const env = JSON.parse(line) as { action: string };
+      expect(env.action).toBe("gateway.housekeeping");
+    }
+    expect(outChunks.join("")).not.toContain("\x1b[2J");
+  });
+
+  it("--watch-interval threads custom interval", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const delays: number[] = [];
+    const fakeSetTimeout = (cb: () => void, ms: number) => {
+      delays.push(ms);
+      cb();
+      return 1 as unknown;
+    };
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: fakeSetTimeout },
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--watch", "--watch-interval", "15"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("").match(/gateway housekeeping \(as of /g)!.length).toBe(3);
+    expect(delays).toEqual([15000, 15000]);
+  });
+
+  it("--watch-interval requires --watch (exit 2)", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch-interval", "10"), ctx);
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("--watch-interval requires --watch");
+  });
+
+  it("--watch-interval rejects invalid values (exit 2)", async () => {
+    for (const bad of ["0", "3601", "abc", "1.5"]) {
+      const { io, errChunks } = makeIo();
+      const ctx: GatewayContext = { io, env: {} };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--watch", "--watch-interval", bad),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(errChunks.join("")).toContain("invalid --watch-interval");
+    }
+  });
+
+  it("--watch rejects --format csv/tsv/ndjson/yaml", async () => {
+    for (const fmt of ["csv", "tsv", "ndjson", "yaml"]) {
+      const { io, errChunks } = makeIo();
+      const ctx: GatewayContext = { io, env: {} };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--watch", "--format", fmt),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(errChunks.join("")).toContain("--watch requires --format human or json");
+    }
+  });
+
+  it("--watch with abortSignal cancels the loop", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = fixtures();
+    const controller = new AbortController();
+    let tickCount = 0;
+    const fakeSetTimeout = (cb: () => void, _ms: number) => {
+      tickCount++;
+      if (tickCount === 1) controller.abort();
+      cb();
+      return 1 as unknown;
+    };
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 5,
+        abortSignal: controller.signal,
+        setTimeoutFn: fakeSetTimeout,
+      },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    expect(outChunks.join("").match(/gateway housekeeping \(as of /g)!.length).toBe(1);
+  });
+
+  it("--watch propagates gather errors as exit 1", async () => {
+    const { io, errChunks } = makeIo();
+    const { conn, idempotencyStore } = fixtures();
+    const throwingRetention = {
+      listPolicies: async () => {
+        throw new Error('relation "meta.retention_policies" does not exist');
+      },
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: throwingRetention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 5, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runGateway(parseGatewayArgs("housekeeping", "--watch"), ctx);
+    expect(code).toBe(1);
+    expect(errChunks.join("")).toContain("does not exist");
+  });
+});

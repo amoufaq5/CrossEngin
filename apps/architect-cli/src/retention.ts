@@ -138,6 +138,18 @@ export interface RetentionContext extends RunContext {
   // build their connection via resolveRetention).
   readonly pgConnectionOverride?: PgConnection;
   readonly clockOverride?: () => Date;
+  // M4.14.w — `--watch` mode test-injection hooks for housekeeping action.
+  readonly watchOverride?: RetentionWatchOverride;
+}
+
+// Mirror of WatchOverride from housekeeping-watch.ts re-declared structurally
+// to avoid a public re-export footprint on RetentionContext. Tests pass
+// these through; production callers leave undefined.
+export interface RetentionWatchOverride {
+  readonly maxIterations?: number;
+  readonly abortSignal?: AbortSignal;
+  readonly setTimeoutFn?: (cb: () => void, ms: number) => unknown;
+  readonly clearTimeoutFn?: (handle: unknown) => void;
 }
 
 interface ResolvedHandle {

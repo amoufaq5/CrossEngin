@@ -61,6 +61,17 @@ export interface GatewayContext extends RunContext, GatewayRoutesContext {
   readonly clockOverride?: () => Date;
   // M4.14 — housekeeping dashboard injection point.
   readonly retentionOverride?: PostgresTraceRetention;
+  // M4.14.w — `--watch` mode test-injection hooks for housekeeping action.
+  readonly watchOverride?: GatewayWatchOverride;
+}
+
+// Mirror of WatchOverride from housekeeping-watch.ts re-declared structurally
+// to avoid a public re-export footprint on GatewayContext.
+export interface GatewayWatchOverride {
+  readonly maxIterations?: number;
+  readonly abortSignal?: AbortSignal;
+  readonly setTimeoutFn?: (cb: () => void, ms: number) => unknown;
+  readonly clearTimeoutFn?: (handle: unknown) => void;
 }
 
 export async function runGateway(command: ParsedCommand, ctx: GatewayContext): Promise<number> {

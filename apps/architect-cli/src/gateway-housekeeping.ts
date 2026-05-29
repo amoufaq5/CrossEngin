@@ -5,6 +5,11 @@ import { PostgresTraceRetention } from "@crossengin/kernel-pg";
 import type { ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
+import {
+  parseWatchFlags,
+  runHousekeepingWatchLoop,
+  type WatchOverride,
+} from "./housekeeping-watch.js";
 
 // The three gateway housekeeping tables. Each has a single canonical row-
 // reduction mechanism: retention-policy-based for the audit surfaces, TTL-
@@ -127,6 +132,8 @@ export interface HousekeepingContext extends RunContext {
   readonly retentionOverride?: PostgresTraceRetention;
   readonly idempotencyStoreOverride?: PostgresIdempotencyStore;
   readonly clockOverride?: () => Date;
+  // M4.14.w — `--watch` mode test-injection hooks.
+  readonly watchOverride?: WatchOverride;
 }
 
 export async function runGatewayHousekeeping(
@@ -136,6 +143,11 @@ export async function runGatewayHousekeeping(
   // adapter wiring + cleanup. Tests inject the overrides instead.
   buildConnection: () => PgConnection,
 ): Promise<number> {
+  // Parse --watch + --watch-interval BEFORE PG resolution so misuse exits
+  // cleanly without burning a connection.
+  const watchFlags = parseWatchFlags(command, ctx.io, "gateway housekeeping");
+  if (typeof watchFlags === "number") return watchFlags;
+
   let conn: PgConnection;
   try {
     conn = ctx.pgConnectionOverride ?? buildConnection();
@@ -148,19 +160,41 @@ export async function runGatewayHousekeeping(
   }
   const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
   const idempotencyStore = ctx.idempotencyStoreOverride ?? new PostgresIdempotencyStore(conn);
-  const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+
+  // Shared gather closure for both single-shot + watch modes.
+  const gather = async (): Promise<HousekeepingReport> => {
+    const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+    return await gatherHousekeepingReport({ conn, retention, idempotencyStore, now });
+  };
+
   try {
-    const report = await gatherHousekeepingReport({
-      conn,
-      retention,
-      idempotencyStore,
-      now,
-    });
-    if (command.format === "json") {
-      printJson(ctx.io, {
-        action: "gateway.housekeeping",
-        ...report,
+    if (watchFlags.watch) {
+      const isJson = command.format === "json";
+      await runHousekeepingWatchLoop<HousekeepingReport>({
+        gather,
+        // JSON streaming = compact NDJSON-of-envelopes; human = multi-section
+        // text with screen-clearing handled by the loop.
+        render: isJson
+          ? (report) =>
+              ctx.io.stdout.write(
+                JSON.stringify({ action: "gateway.housekeeping", ...report }) + "\n",
+              )
+          : (report) => renderHumanReport(ctx, report),
+        clearScreenBeforeRender: !isJson,
+        io: ctx.io,
+        options: {
+          intervalMs: watchFlags.intervalSeconds * 1000,
+          maxIterations: ctx.watchOverride?.maxIterations,
+          abortSignal: ctx.watchOverride?.abortSignal,
+          setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
+          clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
+        },
       });
+      return 0;
+    }
+    const report = await gather();
+    if (command.format === "json") {
+      printJson(ctx.io, { action: "gateway.housekeeping", ...report });
     } else {
       renderHumanReport(ctx, report);
     }

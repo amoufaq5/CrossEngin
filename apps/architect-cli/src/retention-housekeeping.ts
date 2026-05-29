@@ -8,6 +8,11 @@ import {
 import type { ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
+import {
+  parseWatchFlags,
+  runHousekeepingWatchLoop,
+  type WatchOverride,
+} from "./housekeeping-watch.js";
 
 // The 6 PRUNABLE_TABLES entries that PostgresTraceRetention.knownPrunableTables()
 // surfaces. Hardcoded with their time columns so the helper can issue
@@ -115,12 +120,20 @@ export interface RetentionHousekeepingContext extends RunContext {
   readonly pgConnectionOverride?: PgConnection;
   readonly retentionOverride?: PostgresTraceRetention;
   readonly clockOverride?: () => Date;
+  // M4.14.w — `--watch` mode test-injection hooks (production-side leaves
+  // undefined and the watch loop uses real setTimeout + runs forever).
+  readonly watchOverride?: WatchOverride;
 }
 
 export async function runRetentionHousekeeping(
   command: ParsedCommand,
   ctx: RetentionHousekeepingContext,
 ): Promise<number> {
+  // Parse --watch + --watch-interval BEFORE PG resolution so misuse exits
+  // cleanly without burning a connection.
+  const watchFlags = parseWatchFlags(command, ctx.io, "retention housekeeping");
+  if (typeof watchFlags === "number") return watchFlags;
+
   let conn: PgConnection | null = null;
   let closeConn: () => Promise<void> = async () => undefined;
   try {
@@ -142,23 +155,57 @@ export async function runRetentionHousekeeping(
       }
     }
     const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
-    const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
-    const report = await gatherRetentionHousekeepingReport({ conn, retention, now });
-    if (command.format === "json") {
-      printJson(ctx.io, {
-        action: "retention.housekeeping",
-        ...report,
-      });
-    } else {
-      renderHumanReport(ctx, report);
+
+    // Shared gather/render closures used by both single-shot and watch modes.
+    // gather() reads the clock per call so each watch tick reflects current
+    // time (operators expect `asOf` to move).
+    const activeConn = conn;
+    const gather = async (): Promise<RetentionHousekeepingReport> => {
+      const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+      return await gatherRetentionHousekeepingReport({ conn: activeConn, retention, now });
+    };
+
+    try {
+      if (watchFlags.watch) {
+        const isJson = command.format === "json";
+        await runHousekeepingWatchLoop<RetentionHousekeepingReport>({
+          gather,
+          // JSON streaming uses compact one-line NDJSON-of-envelopes
+          // (no indent). Human format uses the same multi-section text
+          // renderer as single-shot but with screen-clearing handled by
+          // the loop itself.
+          render: isJson
+            ? (report) =>
+                ctx.io.stdout.write(
+                  JSON.stringify({ action: "retention.housekeeping", ...report }) + "\n",
+                )
+            : (report) => renderHumanReport(ctx, report),
+          clearScreenBeforeRender: !isJson,
+          io: ctx.io,
+          options: {
+            intervalMs: watchFlags.intervalSeconds * 1000,
+            maxIterations: ctx.watchOverride?.maxIterations,
+            abortSignal: ctx.watchOverride?.abortSignal,
+            setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
+            clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
+          },
+        });
+        return 0;
+      }
+      const report = await gather();
+      if (command.format === "json") {
+        printJson(ctx.io, { action: "retention.housekeeping", ...report });
+      } else {
+        renderHumanReport(ctx, report);
+      }
+      return 0;
+    } catch (err) {
+      printError(
+        ctx.io,
+        `retention housekeeping: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
     }
-    return 0;
-  } catch (err) {
-    printError(
-      ctx.io,
-      `retention housekeeping: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return 1;
   } finally {
     await closeConn();
   }

@@ -409,3 +409,205 @@ describe("runRetention housekeeping (M4.14.x)", () => {
     expect(err()).toMatch(/housekeeping/);
   });
 });
+
+describe("runRetention housekeeping --watch (M4.14.w)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  // Stable connection + retention adapter for watch-mode tests (no PG
+  // side effects).
+  function fixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "100", oldest: null },
+      llm_call_traces: { total: "0", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+    return { conn, retention };
+  }
+
+  // Test-only setTimeout that fires synchronously without waiting — lets the
+  // watch loop drain N iterations instantly. Production uses real setTimeout.
+  const immediateSetTimeout = (cb: () => void, _ms: number) => {
+    cb();
+    return 1 as unknown;
+  };
+
+  it("loops N times when --watch + watchOverride.maxIterations is set", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const stdout = out();
+    // Three renders → three "retention housekeeping (as of ...)" headers.
+    const headerMatches = stdout.match(/retention housekeeping \(as of /g);
+    expect(headerMatches).not.toBeNull();
+    expect(headerMatches!.length).toBe(3);
+    // Human format clears the screen between renders via ANSI escape.
+    expect(stdout).toContain("\x1b[2J\x1b[H");
+  });
+
+  it("--watch with --format json streams NDJSON-of-envelopes (one per tick)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch", "--format", "json"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+        watchOverride: { maxIterations: 2, setTimeoutFn: immediateSetTimeout },
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    // Two ticks → two JSON envelopes, each on its own line.
+    const lines = out().trim().split("\n");
+    expect(lines.length).toBe(2);
+    for (const line of lines) {
+      const env = JSON.parse(line) as { action: string; asOf: string };
+      expect(env.action).toBe("retention.housekeeping");
+      expect(env.asOf).toBe(fixedNow.toISOString());
+    }
+    // JSON streaming should NOT clear the screen between ticks.
+    expect(out()).not.toContain("\x1b[2J");
+  });
+
+  it("--watch-interval threads custom interval (verified via setTimeout injection)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const recordedDelays: number[] = [];
+    const fakeSetTimeout = (cb: () => void, ms: number) => {
+      recordedDelays.push(ms);
+      // Fire immediately so the loop doesn't block in tests.
+      cb();
+      return 1 as unknown;
+    };
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch", "--watch-interval", "10"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+        watchOverride: {
+          maxIterations: 3,
+          setTimeoutFn: fakeSetTimeout,
+        },
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out().match(/retention housekeeping \(as of /g)!.length).toBe(3);
+    // Two waits between three renders, both at the custom interval (10s = 10000ms).
+    expect(recordedDelays).toEqual([10000, 10000]);
+  });
+
+  it("--watch-interval requires --watch (exit 2)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch-interval", "10"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--watch-interval requires --watch");
+  });
+
+  it("--watch-interval rejects non-integer / out-of-range / non-numeric values (exit 2)", async () => {
+    for (const bad of ["0", "3601", "abc", "1.5", "-1"]) {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "housekeeping", "--watch", "--watch-interval", bad),
+        ctx as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("invalid --watch-interval");
+    }
+  });
+
+  it("--watch rejects --format csv/tsv/ndjson/yaml (exit 2 with format note)", async () => {
+    for (const fmt of ["csv", "tsv", "ndjson", "yaml"]) {
+      const { ctx, err } = buffers();
+      const code = await runRetention(
+        parsed("retention", "housekeeping", "--watch", "--format", fmt),
+        ctx as RetentionContext,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--watch requires --format human or json");
+      expect(err()).toContain(fmt);
+    }
+  });
+
+  it("--watch validation fires BEFORE PG resolution (no connection burned on misuse)", async () => {
+    // No pgConnectionOverride + no PG env → would normally exit 1 with
+    // "PG env vars" error. But --watch validation fails first with exit 2.
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--watch", "--format", "csv"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--watch requires --format");
+    expect(err()).not.toMatch(/PG env/);
+  });
+
+  it("--watch with abortSignal cancels the loop between ticks", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = fixtures();
+    const controller = new AbortController();
+    // Abort after the first tick — the loop should exit cleanly.
+    let tickCount = 0;
+    const fakeSetTimeout = (cb: () => void, _ms: number) => {
+      tickCount++;
+      if (tickCount === 1) controller.abort();
+      cb();
+      return 1 as unknown;
+    };
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        // Cap at 5 so abort is the actual termination — if abort fails we'd
+        // see 5 renders rather than 2.
+        maxIterations: 5,
+        abortSignal: controller.signal,
+        setTimeoutFn: fakeSetTimeout,
+      },
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const headerMatches = out().match(/retention housekeeping \(as of /g);
+    // After tick 1: render, then setTimeout fires + aborts. Loop wakes,
+    // sees aborted, exits before tick 2. So exactly 1 render.
+    expect(headerMatches!.length).toBe(1);
+  });
+
+  it("--watch propagates gather errors as exit 1 (no infinite retry)", async () => {
+    const { ctx, err } = buffers();
+    const throwingRetention = {
+      listPolicies: async () => {
+        throw new Error('relation "meta.retention_policies" does not exist');
+      },
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const { conn } = fixtures();
+    const code = await runRetention(parsed("retention", "housekeeping", "--watch"), {
+      ...ctx,
+      pgConnectionOverride: conn,
+      retentionOverride: throwingRetention,
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 5, setTimeoutFn: immediateSetTimeout },
+    } as RetentionContext);
+    expect(code).toBe(1);
+    expect(err()).toContain("does not exist");
+  });
+});
