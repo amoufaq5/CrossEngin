@@ -611,3 +611,244 @@ describe("runRetention housekeeping --watch (M4.14.w)", () => {
     expect(err()).toContain("does not exist");
   });
 });
+
+describe("runRetention housekeeping --threshold-alert (M4.14.t)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function bigTableFixtures() {
+    const conn = fakeStatsConnection({
+      workflow_traces: { total: "5000000", oldest: "2026-04-01T00:00:00.000Z" },
+      llm_call_traces: { total: "100", oldest: null },
+      llm_latency_samples: { total: "0", oldest: null },
+      tenant_retention_opt_out_history: { total: "0", oldest: null },
+      gateway_pipeline_executions: { total: "0", oldest: null },
+      rate_limit_decisions: { total: "0", oldest: null },
+    });
+    const platform: RetentionPolicyRow[] = [
+      {
+        tableName: "workflow_traces",
+        retentionDays: 30,
+        enabled: true,
+        // 5 days ago — passes <24h threshold but fails >24h threshold.
+        lastPrunedAt: new Date(fixedNow.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+    const preview = [
+      {
+        tableName: "workflow_traces",
+        status: "previewed" as const,
+        wouldDeleteCount: 2_000_000,
+        retentionDays: 30,
+        cutoffMs: 0,
+      },
+    ];
+    const retention = fakeRetention({ platform, preview });
+    return { conn, retention };
+  }
+
+  it("exits 0 + does not print THRESHOLD ALERTS section when no alert trips", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--threshold-alert",
+        "wouldPruneCount:>10000000", // 10M > 2M in fixture; doesn't trip
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    expect(out()).not.toContain("THRESHOLD ALERTS");
+  });
+
+  it("exits 3 + prints THRESHOLD ALERTS section when a numeric alert trips", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000", // 1M < 2M in fixture; trips
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    expect(out()).toContain("THRESHOLD ALERTS (1 tripped):");
+    expect(out()).toContain("workflow_traces wouldPruneCount=2,000,000");
+    expect(out()).toContain('"wouldPruneCount:>1000000"');
+  });
+
+  it("exits 3 when a duration alert trips on a nullable timestamp (lastPrunedAt:>24h)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--threshold-alert",
+        "lastPrunedAt:>24h", // fixture's policy was 5 days ago; trips
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    expect(out()).toContain("THRESHOLD ALERTS");
+    expect(out()).toContain("lastPrunedAt=");
+    expect(out()).toContain("age 5.0d");
+  });
+
+  it("exits 3 for multiple alerts (all tripped lines printed)", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+        "--threshold-alert",
+        "lastPrunedAt:>24h",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    // Both alert specs should appear in the output.
+    expect(out()).toMatch(/THRESHOLD ALERTS \(\d+ tripped\):/);
+    expect(out()).toContain('"wouldPruneCount:>1000000"');
+    expect(out()).toContain('"lastPrunedAt:>24h"');
+  });
+
+  it("exits 2 on invalid alert syntax (no PG call)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--threshold-alert", "bogusSyntax"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid threshold alert");
+  });
+
+  it("exits 2 on unknown field name", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed("retention", "housekeeping", "--threshold-alert", "ghostField:>1"),
+      ctx as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("unknown field");
+    expect(err()).toContain("wouldPruneCount");
+  });
+
+  it("JSON envelope includes 'alerts' array (empty when no alerts pass) and tripped entries", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    // No --threshold-alert → alerts should be empty array (not undefined)
+    const codeNoAlerts = await runRetention(
+      parsed("retention", "housekeeping", "--format", "json"),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(codeNoAlerts).toBe(0);
+    const envNoAlerts = JSON.parse(out()) as { alerts: unknown[] };
+    expect(envNoAlerts.alerts).toEqual([]);
+  });
+
+  it("JSON envelope embeds tripped alert details on hit", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--format",
+        "json",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    const env = JSON.parse(out()) as {
+      alerts: Array<{
+        spec: string;
+        tableName: string;
+        fieldName: string;
+        op: string;
+        actual: number;
+        thresholdRaw: string;
+      }>;
+    };
+    expect(env.alerts).toHaveLength(1);
+    const hit = env.alerts[0]!;
+    expect(hit.spec).toBe("wouldPruneCount:>1000000");
+    expect(hit.tableName).toBe("workflow_traces");
+    expect(hit.fieldName).toBe("wouldPruneCount");
+    expect(hit.op).toBe("GT");
+    expect(hit.actual).toBe(2_000_000);
+  });
+
+  it("composes with --watch — first tripped tick exits 3", async () => {
+    const { ctx, out } = buffers();
+    const { conn, retention } = bigTableFixtures();
+    let tickCount = 0;
+    const immediateSetTimeout = (cb: () => void, _ms: number) => {
+      tickCount++;
+      cb();
+      return 1 as unknown;
+    };
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "housekeeping",
+        "--watch",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      {
+        ...ctx,
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+        clockOverride: () => fixedNow,
+        watchOverride: {
+          maxIterations: 5, // would loop 5x if alerts didn't trip
+          setTimeoutFn: immediateSetTimeout,
+        },
+      } as RetentionContext,
+    );
+    expect(code).toBe(3);
+    // Loop should exit after FIRST tick that trips — no setTimeout call
+    // between tick 1 and exit.
+    expect(tickCount).toBe(0);
+    expect(out()).toContain("THRESHOLD ALERTS");
+  });
+});

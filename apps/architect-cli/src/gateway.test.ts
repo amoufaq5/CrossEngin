@@ -1267,3 +1267,180 @@ describe("runGateway housekeeping --watch (M4.14.w)", () => {
     expect(errChunks.join("")).toContain("does not exist");
   });
 });
+
+describe("runGateway housekeeping --threshold-alert (M4.14.t)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  function trippingFixtures() {
+    const conn = fakePgConnection(() => ({
+      rows: [{ total: "5000000", oldest: "2026-04-01T00:00:00.000Z" }],
+      rowCount: 1,
+    }));
+    const retention = {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          // 5d ago.
+          lastPrunedAt: new Date(fixedNow.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+      ],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed" as const,
+          wouldDeleteCount: 2_000_000,
+          retentionDays: 30,
+          cutoffMs: 0,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+    const idempotencyStore = {
+      previewDeleteExpired: async () => 0,
+    } as unknown as PostgresIdempotencyStore;
+    return { conn: conn.conn, retention, idempotencyStore };
+  }
+
+  it("exits 0 when no alert trips", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = trippingFixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--threshold-alert", "wouldPruneCount:>10000000"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(outChunks.join("")).not.toContain("THRESHOLD ALERTS");
+  });
+
+  it("exits 3 + prints THRESHOLD ALERTS section on a tripping numeric alert", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = trippingFixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--threshold-alert", "wouldPruneCount:>1000000"),
+      ctx,
+    );
+    expect(code).toBe(3);
+    expect(outChunks.join("")).toContain("THRESHOLD ALERTS");
+    expect(outChunks.join("")).toContain("gateway_pipeline_executions wouldPruneCount=2,000,000");
+  });
+
+  it("exits 3 on duration alert (lastPrunedAt:>24h with 5-day-old policy)", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = trippingFixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--threshold-alert", "lastPrunedAt:>24h"),
+      ctx,
+    );
+    expect(code).toBe(3);
+    expect(outChunks.join("")).toContain("THRESHOLD ALERTS");
+    expect(outChunks.join("")).toContain("age 5.0d");
+  });
+
+  it("exits 2 on invalid alert syntax (no PG call needed)", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--threshold-alert", "badSyntax"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("invalid threshold alert");
+  });
+
+  it("exits 2 on unknown field (with helpful suggestion list)", async () => {
+    const { io, errChunks } = makeIo();
+    const ctx: GatewayContext = { io, env: {} };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--threshold-alert", "ghostField:>1"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("unknown field");
+    expect(errChunks.join("")).toContain("totalRowCount");
+  });
+
+  it("JSON envelope embeds tripped alert details on hit", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = trippingFixtures();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--format",
+        "json",
+        "--threshold-alert",
+        "wouldPruneCount:>1000000",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+    const env = JSON.parse(outChunks.join("")) as {
+      alerts: Array<{ tableName: string; actual: number }>;
+    };
+    expect(env.alerts.length).toBeGreaterThanOrEqual(1);
+    const wpcHit = env.alerts.find((a) => a.tableName === "gateway_pipeline_executions");
+    expect(wpcHit?.actual).toBe(2_000_000);
+  });
+
+  it("composes with --watch — first tripped tick exits 3", async () => {
+    const { io, outChunks } = makeIo();
+    const { conn, retention, idempotencyStore } = trippingFixtures();
+    let tickCount = 0;
+    const immediateSetTimeout = (cb: () => void, _ms: number) => {
+      tickCount++;
+      cb();
+      return 1 as unknown;
+    };
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+      idempotencyStoreOverride: idempotencyStore,
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 5,
+        setTimeoutFn: immediateSetTimeout,
+      },
+    };
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--watch", "--threshold-alert", "wouldPruneCount:>1000000"),
+      ctx,
+    );
+    expect(code).toBe(3);
+    expect(tickCount).toBe(0); // exited before any setTimeout was scheduled
+    expect(outChunks.join("")).toContain("THRESHOLD ALERTS");
+  });
+});

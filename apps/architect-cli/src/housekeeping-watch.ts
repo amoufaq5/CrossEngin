@@ -39,7 +39,9 @@ export interface WatchLoopInput<R> {
   // Caller-supplied per-tick render. For human format, the caller renders
   // text; for json streaming, the caller writes compact NDJSON-of-envelope.
   // The loop handles screen-clearing separately via clearScreenBeforeRender.
-  readonly render: (report: R) => void;
+  // Return "halt" to break the loop after this tick (used by threshold-alert
+  // CI-gate semantics — first tick that trips an alert exits the loop).
+  readonly render: (report: R) => "halt" | void;
   // Whether to emit ANSI clear-screen + cursor-home BEFORE each render.
   // True for human format (live single-screen UX); false for json
   // streaming (line-delimited envelopes piped to log aggregators).
@@ -48,7 +50,18 @@ export interface WatchLoopInput<R> {
   readonly options: WatchLoopOptions;
 }
 
-export async function runHousekeepingWatchLoop<R>(input: WatchLoopInput<R>): Promise<void> {
+// Result of a watch loop run. `halted` indicates the loop exited via the
+// render callback's "halt" return value (e.g., threshold-alert CI gate)
+// vs natural termination (maxIterations / abortSignal). Callers map
+// halted=true to an appropriate exit code (typically 3 for CI gates per
+// ADR-0181).
+export interface WatchLoopResult {
+  readonly halted: boolean;
+}
+
+export async function runHousekeepingWatchLoop<R>(
+  input: WatchLoopInput<R>,
+): Promise<WatchLoopResult> {
   let iteration = 0;
   while (true) {
     iteration++;
@@ -56,13 +69,14 @@ export async function runHousekeepingWatchLoop<R>(input: WatchLoopInput<R>): Pro
     if (input.clearScreenBeforeRender) {
       input.io.stdout.write(ANSI_CLEAR_SCREEN);
     }
-    input.render(report);
+    const haltSignal = input.render(report);
+    if (haltSignal === "halt") return { halted: true };
     if (input.options.maxIterations !== undefined && iteration >= input.options.maxIterations) {
-      return;
+      return { halted: false };
     }
-    if (input.options.abortSignal?.aborted) return;
+    if (input.options.abortSignal?.aborted) return { halted: false };
     await waitInterval(input.options);
-    if (input.options.abortSignal?.aborted) return;
+    if (input.options.abortSignal?.aborted) return { halted: false };
   }
 }
 

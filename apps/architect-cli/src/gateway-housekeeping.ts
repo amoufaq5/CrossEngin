@@ -2,7 +2,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import { PostgresIdempotencyStore } from "@crossengin/api-gateway-pg";
 import { PostgresTraceRetention } from "@crossengin/kernel-pg";
 
-import type { ParsedCommand } from "./cli.js";
+import { getMultiFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
@@ -10,6 +10,25 @@ import {
   runHousekeepingWatchLoop,
   type WatchOverride,
 } from "./housekeeping-watch.js";
+import {
+  evaluateAlertOnRow,
+  parseThresholdAlertFlags,
+  renderTrippedAlert,
+  type AlertableFieldSpec,
+  type ThresholdAlertSpec,
+  type TrippedAlert,
+} from "./threshold-alert.js";
+
+// Field registry for gateway housekeeping. Subset of retention's set —
+// no perTenantPolicyCount (gateway housekeeping doesn't expose it).
+// tableName + pruneSemantic excluded (static / non-numeric).
+const GATEWAY_ALERTABLE_FIELDS: ReadonlyArray<AlertableFieldSpec> = [
+  { name: "totalRowCount", type: "number" },
+  { name: "oldestAt", type: "timestamp_nullable" },
+  { name: "wouldPruneCount", type: "number" },
+  { name: "retentionDays", type: "number_nullable" },
+  { name: "lastPrunedAt", type: "timestamp_nullable" },
+];
 
 // The three gateway housekeeping tables. Each has a single canonical row-
 // reduction mechanism: retention-policy-based for the audit surfaces, TTL-
@@ -148,6 +167,16 @@ export async function runGatewayHousekeeping(
   const watchFlags = parseWatchFlags(command, ctx.io, "gateway housekeeping");
   if (typeof watchFlags === "number") return watchFlags;
 
+  // Parse --threshold-alert flags. Same fail-fast-on-validation discipline.
+  const alertRaws = getMultiFlag(command, "threshold-alert");
+  const alerts = parseThresholdAlertFlags(
+    alertRaws,
+    GATEWAY_ALERTABLE_FIELDS,
+    ctx.io,
+    "gateway housekeeping",
+  );
+  if (typeof alerts === "number") return alerts;
+
   let conn: PgConnection;
   try {
     conn = ctx.pgConnectionOverride ?? buildConnection();
@@ -167,19 +196,26 @@ export async function runGatewayHousekeeping(
     return await gatherHousekeepingReport({ conn, retention, idempotencyStore, now });
   };
 
+  // Per-tick render + alert evaluation. Returns "halt" if any alert tripped.
+  const renderTick = (report: HousekeepingReport): "halt" | void => {
+    const tripped = alerts.length > 0 ? evaluateAlertsForReport(report, alerts) : [];
+    if (command.format === "json") {
+      ctx.io.stdout.write(
+        JSON.stringify({ action: "gateway.housekeeping", ...report, alerts: tripped }) + "\n",
+      );
+    } else {
+      renderHumanReport(ctx, report);
+      if (tripped.length > 0) renderTrippedAlertsHuman(ctx, tripped);
+    }
+    return tripped.length > 0 ? "halt" : undefined;
+  };
+
   try {
     if (watchFlags.watch) {
       const isJson = command.format === "json";
-      await runHousekeepingWatchLoop<HousekeepingReport>({
+      const result = await runHousekeepingWatchLoop<HousekeepingReport>({
         gather,
-        // JSON streaming = compact NDJSON-of-envelopes; human = multi-section
-        // text with screen-clearing handled by the loop.
-        render: isJson
-          ? (report) =>
-              ctx.io.stdout.write(
-                JSON.stringify({ action: "gateway.housekeeping", ...report }) + "\n",
-              )
-          : (report) => renderHumanReport(ctx, report),
+        render: renderTick,
         clearScreenBeforeRender: !isJson,
         io: ctx.io,
         options: {
@@ -190,18 +226,67 @@ export async function runGatewayHousekeeping(
           clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
         },
       });
-      return 0;
+      return result.halted ? 3 : 0;
     }
     const report = await gather();
+    const tripped = alerts.length > 0 ? evaluateAlertsForReport(report, alerts) : [];
     if (command.format === "json") {
-      printJson(ctx.io, { action: "gateway.housekeeping", ...report });
+      printJson(ctx.io, { action: "gateway.housekeeping", ...report, alerts: tripped });
     } else {
       renderHumanReport(ctx, report);
+      if (tripped.length > 0) renderTrippedAlertsHuman(ctx, tripped);
     }
-    return 0;
+    return tripped.length > 0 ? 3 : 0;
   } catch (err) {
     printError(ctx.io, `gateway housekeeping: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
+  }
+}
+
+// Evaluate every alert against every table row in the report. asOf drives
+// duration-based timestamp alert checks.
+function evaluateAlertsForReport(
+  report: HousekeepingReport,
+  alerts: ReadonlyArray<ThresholdAlertSpec>,
+): TrippedAlert[] {
+  const asOfMs = Date.parse(report.asOf);
+  const tripped: TrippedAlert[] = [];
+  for (const tableRow of report.tables) {
+    for (const alert of alerts) {
+      const fieldSpec = GATEWAY_ALERTABLE_FIELDS.find((f) => f.name === alert.field);
+      if (fieldSpec === undefined) continue;
+      const fieldValue = readField(tableRow, alert.field);
+      const hit = evaluateAlertOnRow(alert, tableRow.tableName, fieldValue, fieldSpec.type, asOfMs);
+      if (hit !== null) tripped.push(hit);
+    }
+  }
+  return tripped;
+}
+
+function readField(row: HousekeepingTableReport, field: string): number | string | null {
+  switch (field) {
+    case "totalRowCount":
+      return row.totalRowCount;
+    case "oldestAt":
+      return row.oldestAt;
+    case "wouldPruneCount":
+      return row.wouldPruneCount;
+    case "retentionDays":
+      return row.retentionDays;
+    case "lastPrunedAt":
+      return row.lastPrunedAt;
+    default:
+      return null;
+  }
+}
+
+function renderTrippedAlertsHuman(
+  ctx: HousekeepingContext,
+  tripped: ReadonlyArray<TrippedAlert>,
+): void {
+  ctx.io.stdout.write(`\nTHRESHOLD ALERTS (${tripped.length} tripped):\n`);
+  for (const alert of tripped) {
+    ctx.io.stdout.write(renderTrippedAlert(alert) + "\n");
   }
 }
 

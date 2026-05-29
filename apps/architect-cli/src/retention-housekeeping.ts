@@ -5,7 +5,7 @@ import {
   type PgConnection,
 } from "@crossengin/kernel-pg";
 
-import type { ParsedCommand } from "./cli.js";
+import { getMultiFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
 import { printError, printJson } from "./format.js";
 import {
@@ -13,6 +13,27 @@ import {
   runHousekeepingWatchLoop,
   type WatchOverride,
 } from "./housekeeping-watch.js";
+import {
+  evaluateAlertOnRow,
+  parseThresholdAlertFlags,
+  renderTrippedAlert,
+  type AlertableFieldSpec,
+  type ThresholdAlertSpec,
+  type TrippedAlert,
+} from "./threshold-alert.js";
+
+// Field registry for retention housekeeping. The 4 numeric fields +
+// 2 timestamp fields that operators can express alerts on. tableName
+// is intentionally excluded (static, not a CI-gate signal). enabled
+// is excluded (boolean doesn't compose with >/</= numeric semantics).
+const RETENTION_ALERTABLE_FIELDS: ReadonlyArray<AlertableFieldSpec> = [
+  { name: "totalRowCount", type: "number" },
+  { name: "oldestAt", type: "timestamp_nullable" },
+  { name: "wouldPruneCount", type: "number" },
+  { name: "retentionDays", type: "number_nullable" },
+  { name: "lastPrunedAt", type: "timestamp_nullable" },
+  { name: "perTenantPolicyCount", type: "number" },
+];
 
 // The 6 PRUNABLE_TABLES entries that PostgresTraceRetention.knownPrunableTables()
 // surfaces. Hardcoded with their time columns so the helper can issue
@@ -134,6 +155,17 @@ export async function runRetentionHousekeeping(
   const watchFlags = parseWatchFlags(command, ctx.io, "retention housekeeping");
   if (typeof watchFlags === "number") return watchFlags;
 
+  // Parse --threshold-alert flags. Same fail-fast-on-validation discipline
+  // as --watch flags.
+  const alertRaws = getMultiFlag(command, "threshold-alert");
+  const alerts = parseThresholdAlertFlags(
+    alertRaws,
+    RETENTION_ALERTABLE_FIELDS,
+    ctx.io,
+    "retention housekeeping",
+  );
+  if (typeof alerts === "number") return alerts;
+
   let conn: PgConnection | null = null;
   let closeConn: () => Promise<void> = async () => undefined;
   try {
@@ -165,21 +197,33 @@ export async function runRetentionHousekeeping(
       return await gatherRetentionHousekeepingReport({ conn: activeConn, retention, now });
     };
 
+    // Per-tick render + alert evaluation. Returns "halt" if any alert
+    // tripped (signals the watch loop to exit; single-shot path just
+    // checks the return value directly).
+    const renderTick = (report: RetentionHousekeepingReport): "halt" | void => {
+      const tripped = alerts.length > 0 ? evaluateAlertsForReport(report, alerts) : [];
+      if (command.format === "json") {
+        // JSON envelope embeds alerts so consumers parse from one shape.
+        ctx.io.stdout.write(
+          JSON.stringify({
+            action: "retention.housekeeping",
+            ...report,
+            alerts: tripped,
+          }) + "\n",
+        );
+      } else {
+        renderHumanReport(ctx, report);
+        if (tripped.length > 0) renderTrippedAlertsHuman(ctx, tripped);
+      }
+      return tripped.length > 0 ? "halt" : undefined;
+    };
+
     try {
       if (watchFlags.watch) {
         const isJson = command.format === "json";
-        await runHousekeepingWatchLoop<RetentionHousekeepingReport>({
+        const result = await runHousekeepingWatchLoop<RetentionHousekeepingReport>({
           gather,
-          // JSON streaming uses compact one-line NDJSON-of-envelopes
-          // (no indent). Human format uses the same multi-section text
-          // renderer as single-shot but with screen-clearing handled by
-          // the loop itself.
-          render: isJson
-            ? (report) =>
-                ctx.io.stdout.write(
-                  JSON.stringify({ action: "retention.housekeeping", ...report }) + "\n",
-                )
-            : (report) => renderHumanReport(ctx, report),
+          render: renderTick,
           clearScreenBeforeRender: !isJson,
           io: ctx.io,
           options: {
@@ -190,15 +234,26 @@ export async function runRetentionHousekeeping(
             clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
           },
         });
-        return 0;
+        // CI-gate semantic: a halted loop means an alert tripped (ADR-0181
+        // exit-3 for "completed successfully but a configurable gate
+        // failed"). Natural termination (maxIterations / abortSignal) → 0.
+        return result.halted ? 3 : 0;
       }
+      // Single-shot path. JSON envelope is pretty-printed for human
+      // inspection (NDJSON streaming is reserved for --watch).
       const report = await gather();
+      const tripped = alerts.length > 0 ? evaluateAlertsForReport(report, alerts) : [];
       if (command.format === "json") {
-        printJson(ctx.io, { action: "retention.housekeeping", ...report });
+        printJson(ctx.io, {
+          action: "retention.housekeeping",
+          ...report,
+          alerts: tripped,
+        });
       } else {
         renderHumanReport(ctx, report);
+        if (tripped.length > 0) renderTrippedAlertsHuman(ctx, tripped);
       }
-      return 0;
+      return tripped.length > 0 ? 3 : 0;
     } catch (err) {
       printError(
         ctx.io,
@@ -208,6 +263,57 @@ export async function runRetentionHousekeeping(
     }
   } finally {
     await closeConn();
+  }
+}
+
+// Evaluate every alert against every table row in the report, returning the
+// flat list of tripped alerts (one entry per (table, alert) hit). asOf is
+// the report's clock-driven instant used for duration-based timestamp
+// alerts.
+function evaluateAlertsForReport(
+  report: RetentionHousekeepingReport,
+  alerts: ReadonlyArray<ThresholdAlertSpec>,
+): TrippedAlert[] {
+  const asOfMs = Date.parse(report.asOf);
+  const tripped: TrippedAlert[] = [];
+  for (const tableRow of report.tables) {
+    for (const alert of alerts) {
+      const fieldSpec = RETENTION_ALERTABLE_FIELDS.find((f) => f.name === alert.field);
+      if (fieldSpec === undefined) continue;
+      const fieldValue = readField(tableRow, alert.field);
+      const hit = evaluateAlertOnRow(alert, tableRow.tableName, fieldValue, fieldSpec.type, asOfMs);
+      if (hit !== null) tripped.push(hit);
+    }
+  }
+  return tripped;
+}
+
+function readField(row: RetentionHousekeepingTableReport, field: string): number | string | null {
+  switch (field) {
+    case "totalRowCount":
+      return row.totalRowCount;
+    case "oldestAt":
+      return row.oldestAt;
+    case "wouldPruneCount":
+      return row.wouldPruneCount;
+    case "retentionDays":
+      return row.retentionDays;
+    case "lastPrunedAt":
+      return row.lastPrunedAt;
+    case "perTenantPolicyCount":
+      return row.perTenantPolicyCount;
+    default:
+      return null;
+  }
+}
+
+function renderTrippedAlertsHuman(
+  ctx: RetentionHousekeepingContext,
+  tripped: ReadonlyArray<TrippedAlert>,
+): void {
+  ctx.io.stdout.write(`\nTHRESHOLD ALERTS (${tripped.length} tripped):\n`);
+  for (const alert of tripped) {
+    ctx.io.stdout.write(renderTrippedAlert(alert) + "\n");
   }
 }
 
