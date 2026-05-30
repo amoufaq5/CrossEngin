@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,221 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.14.c adds `--format csv` and `--format tsv`
+to `tenant policies` — closes ADR-0280 Q6 +
+ADR-0282 Q4 in one milestone. After M4.14.h →
+M4.14.e shipped the policies aggregate +
+--effective + --diff + --explain via JSON and
+human formats, two deferred Qs remained:
+compliance archival workflows want CSV
+snapshots for Excel/pandas pipelines that
+the JSON envelope doesn't plug into directly,
+AND cohort divergence reporting wants
+fieldDiffs in CSV that auditors triage in
+spreadsheets. Both close together because the
+single-tenant + diff paths share the
+underlying flat-row design — the long-format
+one-row-per-axis schema works equally for
+"snapshot of state" (single-tenant) and "list
+of deltas" (diff). Implementation: single-
+tenant emits a 17-column wide header
+(tenant_id, input, axis, table_name,
+retention_days, enabled, opt_out,
+opt_out_reason, opt_out_until, last_pruned_at,
+max_usd_per_request, max_usd_per_window,
+window_seconds, effective_from, tier_id,
+display_name, effective_source) with one row
+per axis: retention rows (sorted by
+tableName, defense-in-depth though upstream
+listTenantPolicies already alpha-sorts),
+cost_ceiling row (if costCeiling !== null),
+tier row (if tier !== null), effective row
+(under --effective with effective_source =
+override|tier|none), explain.without_override
++ explain.without_tier rows (under --explain
+which implies --effective). Axis-irrelevant
+cells render empty per the formatCsv null=
+empty convention. NUMERIC(18,8) ceiling
+values emit their preserved string
+representation so Excel/pandas round-trips
+don't widen to floats and lose precision —
+the same string discipline that JSON
+envelope uses carries through. Diff path
+emits one row per PolicyFieldDiff with an
+8-column header (tenant_a_id, tenant_a_input,
+tenant_b_id, tenant_b_input, axis, field,
+value_a, value_b); empty fieldDiffs emit
+header-only (still valid CSV — operators
+piping into spreadsheets want header even
+when policies match); --exit-on-divergence
++ --threshold exit-code semantic from ADR-
+0282 preserved across all formats. --csv-
+separator flag reuses retention.ts pattern
+exactly (rejects '"' and newline characters
+to avoid producing ambiguous CSV no parser
+can round-trip); default ',' for CSV; ignored
+under TSV (tab hard-coded). The buildEffective
+CsvRow helper is shared across effective +
+explain.* rows so layout stays consistent;
+effective_source reflects the source of THAT
+walk (override / tier / none). Existing
+--diff + --explain v1 rejection from ADR-
+0283 still applies before the format branch
+— CSV mode gets the same "mutually
+exclusive" error. Pure output formatting
+addition; gather pipeline unchanged so no
+new TenantContext fields needed. cli.ts help
+text extended with a 9-line paragraph
+documenting the row schema, NUMERIC(18,8)
+preservation, empty-fieldDiffs header-row
+behavior, and --csv-separator. Rejected —
+wide format with one column per axis-field
+(requires dynamic columns one per retention
+table breaking header expectation; long
+format is right tradeoff), separate --format
+csv-retention / csv-ceiling / csv-tier
+narrow per-axis tables (N format names
+don't scale + force N commands for full
+policy dump; long format with axis
+discriminator beats), emit 'null' literal
+for empty cells instead of empty string
+(formatCsv convention is empty=null;
+operators reading in Excel/pandas read
+empty as NaN/None naturally), render
+effective_source as numeric enum 0=none
+1=tier 2=override (string is spreadsheet-
+friendly + matches JSON envelope), include
+THRESHOLD ALERTS block in CSV (alerts
+aren't a policy axis they're an evaluation
+result; policies CSV is state snapshot;
+housekeeping CSV future work), denormalized
+diff CSV with full left + right report
+inline (explodes row count + duplicates
+data; fieldDiff-per-row is right
+compactness), header-row-suppression flag
+for empty diff (header is one line;
+suppressing makes CSV invalid no
+spreadsheet can recover columns from empty
+file), NDJSON for policies action (policies
+is single-tenant aggregate not stream;
+NDJSON adds no value), --format yaml
+(operators convert from JSON via jq -y /
+yq; duplicates serialization without
+earning workflow value), auto-detect format
+from output redirection TTY→human pipe→
+JSON or CSV (explicit --format flag is more
+predictable + scriptable; auto-detect
+surprises). Drawbacks — wide header with
+many empty cells per row (~13 empty cells
+out of 17; pandas/Excel handle natively;
+operators wanting compact per-axis tables
+run jq over JSON), axis discriminator
+forces filtering (Excel users filter
+axis="retention" for just retention rows;
+one extra step vs separate per-axis CSV
+outputs but single-command simplicity
+outweighs), --diff CSV doesn't surface full
+left + right report shape only fieldDiffs
+(operators wanting both raw reports run
+two single-tenant CSVs separately + join on
+tenant_id in spreadsheet; acceptable v1
+scope), NUMERIC(18,8) strings render with
+trailing zeros "0.10000000" not "0.1"
+(preserves database representation
+faithfully but cosmetically verbose;
+operators post-process in spreadsheet for
+display), explain.without_* axis names use
+snake_case while JSON envelope uses
+camelCase withoutOverride/withoutTier (CSV
+columns conventionally snake_case JSON
+camelCase; operators reading both formats
+remember the mapping; documented in CLI
+help). 11 new tests under "runTenant
+policies --format csv|tsv (M4.14.c)" —
+single-tenant CSV emits headers + retention
++ cost_ceiling + tier rows (header content
+verified verbatim; data rows contain
+expected axis discriminators + NUMERIC
+string preservation), TSV uses tab
+separator + zero commas + 17 fields per
+row, --csv-separator ';' generates
+semicolon-delimited 17-field rows,
+--csv-separator rejects '"' and newline
+exits 2 (both invalid values exercised),
+--effective adds effective axis row with
+effective_source populated (override
+source verified in output), --explain adds
+effective + explain.without_override +
+explain.without_tier rows (without_override
+walk yields tier source since override
+stripped + without_tier walk yields
+override source since override still wins),
+empty-policy tenant emits headers + zero
+rows (single header line only no data),
+--diff CSV emits one row per fieldDiff
+with tenant_a/tenant_b columns and tier-
+fields-coalesce-to-tier.tierId (header + 1
+row when free vs enterprise tiers differ),
+--diff CSV emits header-only for matching
+policies (single header line), --diff TSV
+with --exit-on-divergence triggers exit 3
+on divergence (CSV/TSV format doesn't
+suppress exit semantic), CSV field
+containing comma is properly quoted
+("Enterprise, Premium" tier display name
+gets quoted). cli.ts helpText extended
+with paragraph documenting row schema +
+NUMERIC preservation + empty-diff header-
+row + --csv-separator. Test count:
+tenant.test.ts grows 62 → 73 tests (+11).
+Workspace test count 9,776 → 9,787.
+Coverage gate passes — tenant.ts at 87.39%
+statements / 82.75% branches / 92.1%
+functions / 87.39% lines (functions UP
+from 91.17% in M4.14.d via the new
+buildPoliciesCsvRows + buildEffectiveCsv
+Row + buildPoliciesDiffCsvRows +
+validatePoliciesCsvSeparator helpers;
+branches UP from 82.17% via the new
+positive-and-negative paths in the CSV/
+TSV format branch + the --csv-separator
+validation rejection paths; all above
+80/70/80/80 thresholds). ADR-0285
+documents the design + 10 rejected
+alternatives + 7 future Qs
+(--csv-effective-only flag emitting only
+effective row for bulk operators dumping
+effective ceilings across many tenants
+pairs with tenants list --policies bulk
+export, --csv-wide mode pivoting retention
+rows into single row with one column per
+table narrow target audience defer, CSV
+header customization snake_case vs
+camelCase vs kebab-case adds API surface
+for niche preference defer, streaming CSV
+for tenants list --has-overrides --format
+csv one row per tenant pairs with future
+bulk-export surface, CSV/TSV for tenant
+housekeeping dashboards have wider field
+set pairs with ADR-0273 Q6 or ADR-0284
+future work defer, --format excel XLSX
+binary adds binary-output complication
+pipes don't work need --output <file>
+operators run CSV through pandas/openpyxl
+defer, row-per-diff with synthesized
+matched rows when value_a===value_b emits
+one row per field-considered matched OR
+diverged for full audit trace larger
+output opt-in via --diff-include-matched
+defer). The tenant policies surface now
+answers all major workflow needs across 4
+output formats (human + JSON + CSV + TSV);
+compliance archival + cohort divergence
+reporting + NUMERIC(18,8) precision-
+preserving spreadsheet round-trips fully
+CLI-native; auditors with Excel +
+operations with pandas pipelines have
+first-class output paths.
 M4.14.d adds `--watch` flag to `tenant
 housekeeping` — closes ADR-0265 Q1 + ADR-0276
 Q1 in one milestone. After ADR-0273 shipped

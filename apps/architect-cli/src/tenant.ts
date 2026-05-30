@@ -35,7 +35,7 @@ import { PostgresIdempotencyStore } from "@crossengin/api-gateway-pg";
 
 import { getBooleanFlag, getMultiFlag, getStringFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printError, printJson } from "./format.js";
+import { printCsv, printError, printJson, printTsv } from "./format.js";
 import {
   gatherHousekeepingReport,
   type HousekeepingReport,
@@ -647,6 +647,22 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
 
     if (command.format === "json") {
       printJson(ctx.io, { action: "tenant.policies", ...report });
+    } else if (command.format === "csv" || command.format === "tsv") {
+      // M4.14.c — CSV/TSV emits one row per axis with all axis-fields
+      // flattened into the same wide header. The separator is
+      // validated INSIDE the format branch so misuse on the
+      // human/json path doesn't trigger the check.
+      const sepResult = validatePoliciesCsvSeparator(command);
+      if (typeof sepResult === "string") {
+        printError(ctx.io, `tenant policies: ${sepResult}`);
+        return 2;
+      }
+      const rows = buildPoliciesCsvRows(report);
+      if (command.format === "tsv") {
+        printTsv(ctx.io, POLICIES_CSV_HEADERS, rows);
+      } else {
+        printCsv(ctx.io, POLICIES_CSV_HEADERS, rows, sepResult.separator);
+      }
     } else {
       renderPoliciesHuman(ctx, report);
     }
@@ -743,6 +759,23 @@ async function runTenantPoliciesDiff(
         right: reportB,
         fieldDiffs,
       });
+    } else if (command.format === "csv" || command.format === "tsv") {
+      // M4.14.c — one row per fieldDiff. Empty fieldDiffs still emit
+      // the header row (valid CSV; spreadsheet workflows want the
+      // header present even when policies match). Divergence exit
+      // code still fires per --exit-on-divergence semantics — CSV
+      // doesn't suppress it.
+      const sepResult = validatePoliciesCsvSeparator(command);
+      if (typeof sepResult === "string") {
+        printError(ctx.io, `tenant policies: ${sepResult}`);
+        return 2;
+      }
+      const rows = buildPoliciesDiffCsvRows(reportA, reportB, fieldDiffs);
+      if (command.format === "tsv") {
+        printTsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows);
+      } else {
+        printCsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows, sepResult.separator);
+      }
     } else {
       renderPoliciesDiffHuman(ctx, reportA, reportB, fieldDiffs);
     }
@@ -1025,6 +1058,218 @@ function deriveExplainView(
     withoutOverride: deriveEffectivePolicy(null, tier),
     withoutTier: deriveEffectivePolicy(costCeiling, null),
   };
+}
+
+// M4.14.c — CSV/TSV row builders. Closes ADR-0280 Q6 + ADR-0282 Q4.
+//
+// Single-tenant layout (one row per axis): retention rows first
+// (sorted by tableName), then cost_ceiling (if any), then tier (if
+// any), then effective (if --effective), then explain.* (if
+// --explain). Lots of NULLs per row — that's the price of the long-
+// format spreadsheet schema; pandas/Excel handle it cleanly. Numeric
+// fields preserve the NUMERIC(18,8) string representation from the
+// underlying axes so spreadsheet round-trips don't lose precision.
+//
+// Diff layout (one row per fieldDiff): tenant_a / tenant_b columns
+// plus axis + field + value_a + value_b. Empty fieldDiffs emit just
+// the header row (still a valid CSV — operators piping into
+// spreadsheets get the header even when policies match).
+const POLICIES_CSV_HEADERS: ReadonlyArray<string> = [
+  "tenant_id",
+  "input",
+  "axis",
+  "table_name",
+  "retention_days",
+  "enabled",
+  "opt_out",
+  "opt_out_reason",
+  "opt_out_until",
+  "last_pruned_at",
+  "max_usd_per_request",
+  "max_usd_per_window",
+  "window_seconds",
+  "effective_from",
+  "tier_id",
+  "display_name",
+  "effective_source",
+];
+
+const POLICIES_DIFF_CSV_HEADERS: ReadonlyArray<string> = [
+  "tenant_a_id",
+  "tenant_a_input",
+  "tenant_b_id",
+  "tenant_b_input",
+  "axis",
+  "field",
+  "value_a",
+  "value_b",
+];
+
+// Each axis emits its sub-fields into a row aligned with the header
+// schema. Fields not relevant to the axis are emitted as `null` (the
+// CSV/TSV formatter renders null as empty string).
+function buildPoliciesCsvRows(report: TenantPoliciesReport): ReadonlyArray<ReadonlyArray<unknown>> {
+  const rows: Array<ReadonlyArray<unknown>> = [];
+  // Stable retention ordering — already alpha-sorted upstream by
+  // PostgresTraceRetention.listTenantPolicies; defense in depth.
+  const retentionTables = [...report.retention.tables].sort((a, b) =>
+    a.tableName.localeCompare(b.tableName),
+  );
+  for (const t of retentionTables) {
+    rows.push([
+      report.tenantId,
+      report.input,
+      "retention",
+      t.tableName,
+      t.retentionDays,
+      t.enabled,
+      t.optOut,
+      t.optOutReason,
+      t.optOutUntil,
+      t.lastPrunedAt,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+  }
+  if (report.costCeiling !== null) {
+    rows.push([
+      report.tenantId,
+      report.input,
+      "cost_ceiling",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      report.costCeiling.maxUsdPerRequest,
+      report.costCeiling.maxUsdPerWindow,
+      report.costCeiling.windowSeconds,
+      report.costCeiling.effectiveFrom,
+      null,
+      null,
+      null,
+    ]);
+  }
+  if (report.tier !== null) {
+    rows.push([
+      report.tenantId,
+      report.input,
+      "tier",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      report.tier.maxUsdPerRequest,
+      report.tier.maxUsdPerWindow,
+      report.tier.windowSeconds,
+      null,
+      report.tier.tierId,
+      report.tier.displayName,
+      null,
+    ]);
+  }
+  if (report.effective !== undefined) {
+    rows.push(buildEffectiveCsvRow(report, "effective", report.effective));
+  }
+  if (report.explain !== undefined) {
+    rows.push(
+      buildEffectiveCsvRow(report, "explain.without_override", report.explain.withoutOverride),
+    );
+    rows.push(buildEffectiveCsvRow(report, "explain.without_tier", report.explain.withoutTier));
+  }
+  return rows;
+}
+
+// Flatten one TenantPolicyEffective (effective OR explain.* sub-walk)
+// into a row. `source="none"` rows have null ceilings — operators
+// reading the CSV can filter on `effective_source = 'none'` to find
+// tenants relying on the router-level global fallback.
+function buildEffectiveCsvRow(
+  report: TenantPoliciesReport,
+  axis: string,
+  eff: TenantPolicyEffective,
+): ReadonlyArray<unknown> {
+  if (eff.source === "none") {
+    return [
+      report.tenantId,
+      report.input,
+      axis,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      "none",
+    ];
+  }
+  return [
+    report.tenantId,
+    report.input,
+    axis,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    eff.ceiling.maxUsdPerRequest,
+    eff.ceiling.maxUsdPerWindow,
+    eff.ceiling.windowSeconds,
+    null,
+    eff.source === "tier" ? eff.tierId : null,
+    null,
+    eff.source,
+  ];
+}
+
+function buildPoliciesDiffCsvRows(
+  reportA: TenantPoliciesReport,
+  reportB: TenantPoliciesReport,
+  fieldDiffs: ReadonlyArray<PolicyFieldDiff>,
+): ReadonlyArray<ReadonlyArray<unknown>> {
+  return fieldDiffs.map((d) => [
+    reportA.tenantId,
+    reportA.input,
+    reportB.tenantId,
+    reportB.input,
+    d.axis,
+    d.field,
+    d.valueA ?? null,
+    d.valueB ?? null,
+  ]);
+}
+
+// Validates --csv-separator. Returns null if separator is valid (or
+// not specified — defaults to ","), or an error message string on
+// invalid input. Mirrors the retention.ts pattern: reject '"' and
+// newlines (would produce ambiguous CSV that no parser can
+// round-trip).
+function validatePoliciesCsvSeparator(command: ParsedCommand): { separator: string } | string {
+  const raw = getStringFlag(command, "csv-separator");
+  if (raw === null) return { separator: "," };
+  if (raw === '"' || /[\n\r]/.test(raw)) {
+    return "--csv-separator cannot be '\"' or newline";
+  }
+  return { separator: raw };
 }
 
 // M4.14.f — field-level diff over the three policy axes. JSON-friendly

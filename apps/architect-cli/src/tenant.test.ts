@@ -2119,3 +2119,430 @@ describe("runTenant housekeeping --watch (M4.14.d)", () => {
     expect(removed).toEqual(["SIGINT", "SIGTERM"]);
   });
 });
+
+// M4.14.c — tenant policies CSV/TSV tests. Closes ADR-0280 Q6 +
+// ADR-0282 Q4. Single-tenant emits one row per axis (retention,
+// cost_ceiling, tier, effective, explain.*) with axis-irrelevant
+// fields as empty cells; --diff emits one row per fieldDiff.
+describe("runTenant policies --format csv|tsv (M4.14.c)", () => {
+  it("single-tenant CSV emits headers + one row per axis (retention, cost_ceiling, tier)", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 365,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: "2026-05-15T00:00:00.000Z",
+        },
+      ],
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // header + 1 retention + 1 cost_ceiling + 1 tier = 4 lines
+    expect(lines.length).toBe(4);
+    expect(lines[0]).toBe(
+      "tenant_id,input,axis,table_name,retention_days,enabled,opt_out,opt_out_reason,opt_out_until,last_pruned_at,max_usd_per_request,max_usd_per_window,window_seconds,effective_from,tier_id,display_name,effective_source",
+    );
+    expect(lines[1]).toContain(",retention,workflow_traces,365,true,false,");
+    expect(lines[2]).toContain(",cost_ceiling,");
+    expect(lines[2]).toContain("0.10000000,50.00000000,3600,2026-04-01T00:00:00.000Z");
+    expect(lines[3]).toContain(",tier,");
+    expect(lines[3]).toContain("5.00000000,1000.00000000,86400,,enterprise,Enterprise,");
+  });
+
+  it("single-tenant TSV uses tab separator", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "tsv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toContain("\t");
+    expect(lines[0]).not.toContain(",");
+    expect(lines[0].split("\t").length).toBe(17);
+    expect(lines[1]).toContain("\tretention\tworkflow_traces\t90\t");
+  });
+
+  it("single-tenant CSV with --csv-separator ';' uses semicolon", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv", "--csv-separator", ";"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toContain(";");
+    expect(lines[0].split(";").length).toBe(17);
+  });
+
+  it("--csv-separator rejects '\"' and newline (exit 2)", async () => {
+    for (const bad of ['"', "\n"]) {
+      const conn = fakePoliciesConn({});
+      const retention = fakeRetentionForPolicies({});
+      const { io, err } = makeIo();
+      const ctx: TenantContext = {
+        io,
+        env: {},
+        pgConnectionOverride: conn,
+        retentionOverride: retention,
+      };
+      const code = await runTenant(
+        parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv", "--csv-separator", bad),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--csv-separator cannot be");
+    }
+  });
+
+  it("--effective adds an 'effective' axis row with effective_source populated", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv", "--effective"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // header + cost_ceiling + effective = 3 lines
+    expect(lines.length).toBe(3);
+    expect(lines[2]).toContain(",effective,");
+    expect(lines[2].endsWith(",override")).toBe(true);
+  });
+
+  it("--explain (implies --effective) adds effective + explain.* rows", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv", "--explain"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(",effective,");
+    expect(output).toContain(",explain.without_override,");
+    expect(output).toContain(",explain.without_tier,");
+    // withoutOverride → falls back to tier (source=tier)
+    const woRow = output.split("\n").find((l) => l.includes(",explain.without_override,"));
+    expect(woRow!.endsWith(",tier")).toBe(true);
+    // withoutTier → override still wins (source=override)
+    const wtRow = output.split("\n").find((l) => l.includes(",explain.without_tier,"));
+    expect(wtRow!.endsWith(",override")).toBe(true);
+  });
+
+  it("empty-policy tenant CSV emits headers + zero rows", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines.length).toBe(1);
+    expect(lines[0].startsWith("tenant_id,input,axis,")).toBe(true);
+  });
+
+  it("--diff CSV emits one row per fieldDiff with tenant_a/tenant_b columns", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--diff", TENANT_B, "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "tenant_a_id,tenant_a_input,tenant_b_id,tenant_b_input,axis,field,value_a,value_b",
+    );
+    // computePolicyFieldDiffs coalesces tier-policy differences into
+    // a single tier.tierId diff when both sides have tiers (same
+    // tierId → same fields by construction). Header + 1 row = 2.
+    expect(lines.length).toBe(2);
+    expect(lines[1]).toBe(
+      `${RESOLVED_UUID},${RESOLVED_UUID},${TENANT_B},${TENANT_B},tier,tier.tierId,free,enterprise`,
+    );
+  });
+
+  it("--diff CSV emits header-only when policies match (empty fieldDiffs)", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "200.00000000",
+            window_seconds: 86400,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "200.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--diff", TENANT_B, "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // Header-only is one line; trim().split("\n") on a string with a
+    // single line returns [line], not [].
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toBe(
+      "tenant_a_id,tenant_a_input,tenant_b_id,tenant_b_input,axis,field,value_a,value_b",
+    );
+  });
+
+  it("--diff TSV with --exit-on-divergence still triggers exit 3 on divergence", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "tsv",
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("CSV field with comma is quoted (cost ceiling row with display name containing comma)", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "ent",
+            display_name: "Enterprise, Premium",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain('"Enterprise, Premium"');
+  });
+});
