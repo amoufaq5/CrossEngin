@@ -402,6 +402,153 @@ describe("runTenants get (M4.14.i)", () => {
   });
 });
 
+// M4.15.j — `tenants get --format csv|tsv|csv-full` single-row export
+// tests. Closes ADR-0293 Q3. Single-row CSV/TSV mirrors `tenants list`
+// column order exactly (5-col for csv/tsv, 11-col for csv-full) so
+// per-tenant fetches can be concat'd into list-bulk output without
+// column realignment. --csv-separator honored on both csv variants.
+describe("runTenants get --format csv|tsv|csv-full (M4.15.j)", () => {
+  it("--format csv emits 5-column header + single data row", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", TENANT_A.id, "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id,slug,name,status,tier");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe(`${TENANT_A.id},acme-prod,Acme Production,active,enterprise`);
+  });
+
+  it("--format tsv emits tab-separated single row", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", TENANT_A.id, "--format", "tsv"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id\tslug\tname\tstatus\ttier");
+    expect(lines[1]).toBe(`${TENANT_A.id}\tacme-prod\tAcme Production\tactive\tenterprise`);
+  });
+
+  it("--format csv-full emits 11-column header + data row with residency as compact JSON", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "id,slug,name,status,tier,region,schema_name,residency,search_locale,created_at,updated_at",
+    );
+    expect(lines).toHaveLength(2);
+    // residency JSONB → compact JSON, quoted by printCsv because of
+    // embedded commas in the JSON object representation.
+    expect(lines[1]).toContain(
+      `${TENANT_A.id},acme-prod,Acme Production,active,enterprise,us,tenant_acme_prod,`,
+    );
+    expect(lines[1]).toContain(`"{""primary"":""us-east-1"",""failover"":""us-west-2""}"`);
+    expect(lines[1]).toContain(",english,2026-04-15T10:30:00.000Z,2026-05-15T14:45:00.000Z");
+  });
+
+  it("--format csv-full honors --csv-separator override (semicolon)", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full", "--csv-separator", ";"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toContain(
+      "id;slug;name;status;tier;region;schema_name;residency;search_locale;created_at;updated_at",
+    );
+    // Cell quoting is independent of separator — printCsv quotes any
+    // cell containing embedded quotes, regardless of which separator
+    // is in use. residency JSON contains `"` chars so it stays quoted.
+    expect(lines[1]).toContain('"{""primary"":""us-east-1"",""failover"":""us-west-2""}"');
+    expect(lines[1]).toContain(";acme-prod;Acme Production;active;enterprise;us;");
+  });
+
+  it("--format csv honors --csv-separator override (pipe)", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv", "--csv-separator", "|"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id|slug|name|status|tier");
+    expect(lines[1]).toBe(`${TENANT_A.id}|acme-prod|Acme Production|active|enterprise`);
+  });
+
+  it("--format csv-full preserves null residency as empty cell", async () => {
+    const tenantWithNullResidency = { ...TENANT_A_FULL, residency: null };
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: tenantWithNullResidency } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // null residency → empty cell between schema_name and search_locale.
+    expect(lines[1]).toContain(",tenant_acme_prod,,english,");
+  });
+
+  it("--format csv resolves slug→UUID first then SELECTs by id (same 2-query path as JSON)", async () => {
+    const { conn, queries } = fakeConn({
+      slugMap: { "acme-prod": TENANT_A.id },
+      getMap: { [TENANT_A.id]: TENANT_A_FULL },
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "get", "acme-prod", "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    // Resolver still runs for slug input — CSV format doesn't change query path.
+    expect(queries).toHaveLength(2);
+    const lines = out().trim().split("\n");
+    expect(lines[1]).toBe(`${TENANT_A.id},acme-prod,Acme Production,active,enterprise`);
+  });
+
+  it("--format csv-full column order matches `tenants list --format csv-full` for concat-able output", async () => {
+    // Verifying column-order equality with list-bulk CSV-full output so
+    // operators can `tenants list --format csv-full > all.csv` then
+    // `tenants get <slug> --format csv-full | tail -1 >> all.csv` without
+    // breaking column alignment.
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const header = out().split("\n")[0]!;
+    const expectedColumns = [
+      "id",
+      "slug",
+      "name",
+      "status",
+      "tier",
+      "region",
+      "schema_name",
+      "residency",
+      "search_locale",
+      "created_at",
+      "updated_at",
+    ];
+    expect(header.split(",")).toEqual(expectedColumns);
+  });
+});
+
 // M4.15.b — `tenants list --format csv|tsv` bulk export tests.
 // Closes ADR-0285 Q4. CSV/TSV output is a 5-column row-per-tenant
 // shape (id, slug, name, status, tier) suitable for spreadsheet /

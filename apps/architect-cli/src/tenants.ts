@@ -302,6 +302,54 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
     }
     if (command.format === "json") {
       printJson(ctx.io, { action: "tenants.get", tenant: row });
+    } else if (command.format === "csv" || command.format === "tsv") {
+      // M4.15.j — single-row CSV/TSV. Column order mirrors `tenants
+      // list --format csv` exactly (id, slug, name, status, tier) so
+      // downstream pipelines can concat per-tenant fetches into the
+      // same shape as list-bulk output without re-aligning columns.
+      const headers = ["id", "slug", "name", "status", "tier"];
+      const csvRows = [[row.id, row.slug, row.name, row.status, row.tier]];
+      if (command.format === "tsv") {
+        printTsv(ctx.io, headers, csvRows);
+      } else {
+        const csvSeparator = getStringFlag(command, "csv-separator");
+        printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",");
+      }
+    } else if (command.format === "csv-full") {
+      // M4.15.j — single-row 11-column TenantRowFull CSV. Mirrors
+      // `tenants list --format csv-full` (M4.15.f) exactly: id, slug,
+      // name, status, tier, region, schema_name, residency (JSONB →
+      // compact JSON), search_locale, created_at, updated_at.
+      const headers = [
+        "id",
+        "slug",
+        "name",
+        "status",
+        "tier",
+        "region",
+        "schema_name",
+        "residency",
+        "search_locale",
+        "created_at",
+        "updated_at",
+      ];
+      const csvRows = [
+        [
+          row.id,
+          row.slug,
+          row.name,
+          row.status,
+          row.tier,
+          row.region,
+          row.schema_name,
+          row.residency === null ? null : JSON.stringify(row.residency),
+          row.search_locale,
+          row.created_at,
+          row.updated_at,
+        ],
+      ];
+      const csvSeparator = getStringFlag(command, "csv-separator");
+      printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",");
     } else {
       renderHumanTenant(ctx, row);
     }

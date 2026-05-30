@@ -34,10 +34,10 @@ export const OUTPUT_FORMATS = [
   // M4.15.f — 11-column CSV variant of `tenants list` emitting the
   // full TenantRowFull shape (id, slug, name, status, tier, region,
   // schema_name, residency, search_locale, created_at, updated_at).
-  // Currently honored by `tenants list` only; other surfaces fall
-  // through to human format (consistent with gh-summary precedent).
-  // The "full" suffix distinguishes from the compact 5-column "csv"
-  // variant from M4.15.b.
+  // Honored by `tenants list` (M4.15.f) and `tenants get` (M4.15.j);
+  // other surfaces fall through to human format (consistent with
+  // gh-summary precedent). The "full" suffix distinguishes from the
+  // compact 5-column "csv" variant from M4.15.b.
   "csv-full",
 ] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
@@ -692,13 +692,18 @@ export function helpText(): string {
     "                          just the UUID + newline so `crossengin tenants resolve acme-prod",
     "                          | xargs -I {} crossengin gateway housekeeping --tenant {}` works.",
     "                          Unknown slug exits 2. (requires PG env)",
-    "  tenants get <slug|uuid>",
+    "  tenants get <slug|uuid> [--format json|csv|tsv|csv-full [--csv-separator <c>]]",
     "                          Fetch one tenant's full record (all 11 META_TENANTS columns:",
     "                          id, slug, name, status, tier, region, schema, residency,",
     "                          search_locale, created_at, updated_at). Resolves slug→UUID via",
     "                          the same path as `tenants resolve` (inherits 'did you mean'",
     "                          suggestions on slug typos). Unknown UUID exits 2 with a distinct",
-    "                          'no tenant with id' error. (requires PG env)",
+    "                          'no tenant with id' error. With --format csv/tsv: 5-column",
+    "                          single-row matching `tenants list --format csv` shape so per-",
+    "                          tenant fetches can be concat'd into list-bulk output without",
+    "                          column realignment. With --format csv-full: 11-column",
+    "                          TenantRowFull shape matching `tenants list --format csv-full`.",
+    "                          (requires PG env)",
     "  workflow validate <def.json> [--strict]",
     "                          Run the workflow definition pre-publish validator (ADR-0256).",
     "                          Schema-parses the JSON, then runs validateDefinition. Exit 0",
