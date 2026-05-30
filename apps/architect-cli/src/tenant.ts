@@ -592,6 +592,14 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   // server-side diff query. Composes with --effective: both reports
   // get the effective field if --effective is set.
   const diffFlag = getStringFlag(command, "diff");
+  // M4.14.a — --add-tenant <slug|uuid> extends --diff into N-way
+  // comparison. Each --add-tenant adds another RHS compared against
+  // the LHS anchor. Requires --diff (--add-tenant alone has no anchor
+  // model; the LHS is the positional argument but the original RHS
+  // comes from --diff). When N>1, the envelope shape changes to a
+  // multi-comparison form with action `tenant.policies.diff.multi`
+  // and a comparisons[] array.
+  const addTenantFlags = getMultiFlag(command, "add-tenant");
   // M4.14.b — --vs-tier <tierId> is a synthetic-RHS comparison: the
   // right side is constructed from the SAME tenant with the same
   // retention + same cost-ceiling override but with the tier replaced
@@ -600,23 +608,40 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   // before committing a membership change. Mutually exclusive with
   // --diff (both define the RHS) and with --explain (matches the
   // existing --diff vs --explain rule from ADR-0283).
-  const vsTierFlag = getStringFlag(command, "vs-tier");
-  if (diffFlag !== null && vsTierFlag !== null) {
+  // M4.14.a — --vs-tier accepts repetition for N-way tier-preview
+  // matrix. Each occurrence is one synthetic comparison; multiple
+  // occurrences trip the multi-comparison envelope shape.
+  const vsTierFlags = getMultiFlag(command, "vs-tier");
+  if (diffFlag !== null && vsTierFlags.length > 0) {
     printError(
       ctx.io,
       "tenant policies: --diff and --vs-tier are mutually exclusive (both define the right-hand-side; pick one)",
     );
     return 2;
   }
-  if (vsTierFlag !== null && explainFlag) {
+  if (addTenantFlags.length > 0 && diffFlag === null) {
+    printError(
+      ctx.io,
+      "tenant policies: --add-tenant requires --diff (the first RHS comes from --diff; --add-tenant adds more)",
+    );
+    return 2;
+  }
+  if (addTenantFlags.length > 0 && vsTierFlags.length > 0) {
+    printError(
+      ctx.io,
+      "tenant policies: --add-tenant and --vs-tier are mutually exclusive (tenant-vs-tenant and tenant-vs-tier comparisons can't mix in one envelope)",
+    );
+    return 2;
+  }
+  if (vsTierFlags.length > 0 && explainFlag) {
     printError(
       ctx.io,
       "tenant policies: --vs-tier and --explain are mutually exclusive in v1 (the synthetic RHS already answers the what-if question --explain provides)",
     );
     return 2;
   }
-  if (vsTierFlag !== null) {
-    return await runTenantPoliciesVsTier(command, ctx, input, vsTierFlag, effectiveFlag);
+  if (vsTierFlags.length > 0) {
+    return await runTenantPoliciesVsTier(command, ctx, input, vsTierFlags, effectiveFlag);
   }
   if (diffFlag !== null) {
     // --explain semantics don't compose cleanly with --diff in v1
@@ -629,7 +654,13 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
       );
       return 2;
     }
-    return await runTenantPoliciesDiff(command, ctx, input, diffFlag, effectiveFlag);
+    return await runTenantPoliciesDiff(
+      command,
+      ctx,
+      input,
+      [diffFlag, ...addTenantFlags],
+      effectiveFlag,
+    );
   }
 
   // PG conn setup mirrors runTenantHousekeeping. Tests inject via
@@ -698,14 +729,20 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   }
 }
 
-// M4.14.f — diff orchestrator. Resolves BOTH tenants (slug→UUID for
-// each independently), gathers BOTH reports concurrently, computes
-// field-level diffs client-side, renders the result.
+// M4.14.f + M4.14.a — diff orchestrator. Resolves the anchor (LHS)
+// + every RHS (slug→UUID for each independently), gathers all
+// reports concurrently, computes pair-wise field-level diffs client-
+// side, renders the result. Accepts a list of RHS inputs to support
+// N-way comparison (M4.14.a): the first element is the `--diff`
+// target, subsequent elements are `--add-tenant` targets. When
+// length(rhsInputs) === 1, emits the single-comparison envelope
+// shape from M4.14.f for backward compatibility; when length > 1,
+// switches to the multi-comparison envelope.
 async function runTenantPoliciesDiff(
   command: ParsedCommand,
   ctx: TenantContext,
   inputA: string,
-  inputB: string,
+  rhsInputs: ReadonlyArray<string>,
   effectiveFlag: boolean,
 ): Promise<number> {
   // --threshold validation (matches retention diff convention).
@@ -736,47 +773,83 @@ async function runTenantPoliciesDiff(
   }
 
   try {
-    // Resolve BOTH tenant identifiers concurrently. Each call gets the
-    // M4.14.j "did you mean" treatment independently — if either side
-    // fails, the error message identifies which side failed by inputs.
-    const [resolvedA, resolvedB] = await Promise.all([
+    // Resolve the anchor + every RHS concurrently. Each resolution
+    // gets the M4.14.j "did you mean" treatment independently — if
+    // any side fails, the error message identifies which side
+    // failed by input. For N-way, "right N" replaces the M4.14.f
+    // "right" label so operators can identify which --add-tenant
+    // typo'd.
+    const allResolvedResults = await Promise.all([
       resolveTenantIdentifier(conn, inputA),
-      resolveTenantIdentifier(conn, inputB),
+      ...rhsInputs.map((r) => resolveTenantIdentifier(conn, r)),
     ]);
-    if (!resolvedA.ok) {
-      printError(ctx.io, `tenant policies --diff (left '${inputA}'): ${resolvedA.error}`);
+    const resolvedAnchor = allResolvedResults[0]!;
+    const resolvedRhsResults = allResolvedResults.slice(1);
+    if (!resolvedAnchor.ok) {
+      printError(ctx.io, `tenant policies --diff (left '${inputA}'): ${resolvedAnchor.error}`);
       return 2;
     }
-    if (!resolvedB.ok) {
-      printError(ctx.io, `tenant policies --diff (right '${inputB}'): ${resolvedB.error}`);
-      return 2;
-    }
-
-    // Self-diff guard — comparing a tenant to itself always yields
-    // empty fieldDiffs and is almost always an operator typo. Fail
-    // fast rather than spend 6 queries computing the obvious.
-    if (resolvedA.tenantId === resolvedB.tenantId) {
-      printError(
-        ctx.io,
-        `tenant policies --diff: left and right resolve to the same tenant '${resolvedA.tenantId}' — nothing to diff`,
-      );
-      return 2;
+    const resolvedRhs: Array<{ readonly ok: true; readonly tenantId: string }> = [];
+    for (let i = 0; i < resolvedRhsResults.length; i++) {
+      const r = resolvedRhsResults[i]!;
+      if (!r.ok) {
+        const label = rhsInputs.length === 1 ? "right" : `right ${i + 1}`;
+        printError(ctx.io, `tenant policies --diff (${label} '${rhsInputs[i]!}'): ${r.error}`);
+        return 2;
+      }
+      resolvedRhs.push(r);
     }
 
-    let reportA: TenantPoliciesReport;
-    let reportB: TenantPoliciesReport;
+    // Self-diff guard — comparing the anchor to itself in ANY RHS
+    // slot yields empty fieldDiffs and is almost always an operator
+    // typo. Fail fast.
+    for (let i = 0; i < resolvedRhs.length; i++) {
+      if (resolvedAnchor.tenantId === resolvedRhs[i]!.tenantId) {
+        const label = rhsInputs.length === 1 ? "right" : `right ${i + 1}`;
+        printError(
+          ctx.io,
+          `tenant policies --diff: left and ${label} resolve to the same tenant '${resolvedAnchor.tenantId}' — nothing to diff`,
+        );
+        return 2;
+      }
+    }
+    // Self-add-tenant guard — same RHS listed twice in slots yields a
+    // tautological comparison. Detect duplicate RHS UUIDs.
+    const rhsUuidSeen = new Set<string>();
+    for (let i = 0; i < resolvedRhs.length; i++) {
+      const uuid = resolvedRhs[i]!.tenantId;
+      if (rhsUuidSeen.has(uuid)) {
+        printError(
+          ctx.io,
+          `tenant policies --diff: tenant '${uuid}' appears in multiple RHS slots — each --diff/--add-tenant target must be unique`,
+        );
+        return 2;
+      }
+      rhsUuidSeen.add(uuid);
+    }
+
+    let reportAnchor: TenantPoliciesReport;
+    let reportsRhs: ReadonlyArray<TenantPoliciesReport>;
     try {
-      [reportA, reportB] = await Promise.all([
+      const allReports = await Promise.all([
         // --explain is rejected with --diff above, so pass false here.
-        gatherPoliciesReport(conn, ctx, resolvedA.tenantId, inputA, effectiveFlag, false),
-        gatherPoliciesReport(conn, ctx, resolvedB.tenantId, inputB, effectiveFlag, false),
+        gatherPoliciesReport(conn, ctx, resolvedAnchor.tenantId, inputA, effectiveFlag, false),
+        ...resolvedRhs.map((r, i) =>
+          gatherPoliciesReport(conn, ctx, r.tenantId, rhsInputs[i]!, effectiveFlag, false),
+        ),
       ]);
+      reportAnchor = allReports[0]!;
+      reportsRhs = allReports.slice(1);
     } catch (err) {
       printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
 
-    return emitDiffOutput(command, ctx, reportA, reportB);
+    const firstRhs = reportsRhs[0];
+    if (reportsRhs.length === 1 && firstRhs !== undefined) {
+      return emitDiffOutput(command, ctx, reportAnchor, firstRhs);
+    }
+    return emitMultiDiffOutput(command, ctx, reportAnchor, reportsRhs);
   } finally {
     await closeConn();
   }
@@ -829,6 +902,93 @@ function emitDiffOutput(
   return diffDivergenceExitCode(command, fieldDiffs.length);
 }
 
+// M4.14.a — N-way multi-comparison envelope. The anchor is compared
+// against EACH rhsReports[i] producing a comparisons[] array. Used
+// when --diff + --add-tenant produces > 1 RHS, or when --vs-tier is
+// repeated > 1 time. Exit code is the MAX across comparisons
+// (canonical "any divergence trips the gate" semantic — operators
+// gating CI on `tenant policies anchor --diff a --add-tenant b
+// --exit-on-divergence` want exit 3 if EITHER (a) or (b) differs).
+function emitMultiDiffOutput(
+  command: ParsedCommand,
+  ctx: TenantContext,
+  anchor: TenantPoliciesReport,
+  rhsReports: ReadonlyArray<TenantPoliciesReport>,
+): number {
+  const comparisons = rhsReports.map((rhs) => ({
+    right: rhs,
+    fieldDiffs: computePolicyFieldDiffs(anchor, rhs),
+  }));
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "tenant.policies.diff.multi",
+      anchor,
+      comparisons: comparisons.map((c) => ({
+        right: c.right,
+        fieldDiffs: c.fieldDiffs,
+      })),
+    });
+  } else if (command.format === "csv" || command.format === "tsv") {
+    // Multi-comparison CSV: extra `comparison_index` column tags each
+    // row with which (anchor, right[i]) pair it came from. Empty
+    // fieldDiffs across all comparisons still emits header-only —
+    // valid CSV for spreadsheet workflows.
+    const sepResult = validatePoliciesCsvSeparator(command);
+    if (typeof sepResult === "string") {
+      printError(ctx.io, `tenant policies: ${sepResult}`);
+      return 2;
+    }
+    const allRows: Array<ReadonlyArray<unknown>> = [];
+    for (let i = 0; i < comparisons.length; i++) {
+      const c = comparisons[i]!;
+      const baseRows = buildPoliciesDiffCsvRows(anchor, c.right, c.fieldDiffs);
+      for (const r of baseRows) {
+        allRows.push([i, ...r]);
+      }
+    }
+    const headers = ["comparison_index", ...POLICIES_DIFF_CSV_HEADERS];
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, allRows);
+    } else {
+      printCsv(ctx.io, headers, allRows, sepResult.separator);
+    }
+  } else {
+    renderPoliciesMultiDiffHuman(ctx, anchor, comparisons);
+  }
+
+  // Max-divergence exit code: report the GREATEST fieldDiffs count
+  // across all comparisons to diffDivergenceExitCode. Any
+  // comparison whose count >= threshold trips exit 3. This matches
+  // operator intent for CI gates ("any divergence is a problem").
+  const maxFieldDiffsLength = comparisons.reduce((max, c) => Math.max(max, c.fieldDiffs.length), 0);
+  return diffDivergenceExitCode(command, maxFieldDiffsLength);
+}
+
+// M4.14.a — human render for multi-comparison. Emits one section per
+// comparison, each with its own Left/Right header + fieldDiffs (or
+// "No differences"). Same per-comparison shape as
+// renderPoliciesDiffHuman so operators reading multi output recognize
+// each section.
+function renderPoliciesMultiDiffHuman(
+  ctx: TenantContext,
+  anchor: TenantPoliciesReport,
+  comparisons: ReadonlyArray<{
+    right: TenantPoliciesReport;
+    fieldDiffs: ReadonlyArray<PolicyFieldDiff>;
+  }>,
+): void {
+  ctx.io.stdout.write(
+    `Multi-comparison tenant policies (anchor: ${anchor.tenantId} input: '${anchor.input}', ${comparisons.length} comparisons):\n\n`,
+  );
+  for (let i = 0; i < comparisons.length; i++) {
+    const c = comparisons[i]!;
+    ctx.io.stdout.write(`=== Comparison ${i + 1}/${comparisons.length} ===\n`);
+    renderPoliciesDiffHuman(ctx, anchor, c.right, c.fieldDiffs);
+    if (i < comparisons.length - 1) ctx.io.stdout.write(`\n`);
+  }
+}
+
 // M4.14.b — `tenant policies <lhs> --vs-tier <tierId>` orchestrator.
 // Closes ADR-0282 Q2 + ADR-0283 Q3.
 //
@@ -847,7 +1007,7 @@ async function runTenantPoliciesVsTier(
   command: ParsedCommand,
   ctx: TenantContext,
   inputLhs: string,
-  tierId: string,
+  tierIds: ReadonlyArray<string>,
   effectiveFlag: boolean,
 ): Promise<number> {
   // --threshold validation (matches retention diff convention).
@@ -855,6 +1015,21 @@ async function runTenantPoliciesVsTier(
   if (thresholdError !== null) {
     printError(ctx.io, `tenant policies: ${thresholdError}`);
     return 2;
+  }
+
+  // M4.14.a — duplicate-tier guard. Repeating the same tier in
+  // multiple --vs-tier slots yields tautological comparisons. Catch
+  // before resolving anything.
+  const tierSeen = new Set<string>();
+  for (const t of tierIds) {
+    if (tierSeen.has(t)) {
+      printError(
+        ctx.io,
+        `tenant policies --vs-tier: tier '${t}' appears in multiple --vs-tier slots — each target must be unique`,
+      );
+      return 2;
+    }
+    tierSeen.add(t);
   }
 
   let conn: PgConnection;
@@ -878,22 +1053,25 @@ async function runTenantPoliciesVsTier(
   }
 
   try {
-    // Resolve LHS slug→UUID + look up tier definition concurrently —
-    // both fail-fast on bad input. The tier lookup is from
-    // meta.llm_cost_tiers directly (NOT via membership; we want the
-    // tier shape, not "is this tenant in this tier").
-    const [resolvedLhs, tierDefinition] = await Promise.all([
+    // Resolve LHS slug→UUID + look up EVERY tier definition
+    // concurrently. The tier lookups are from meta.llm_cost_tiers
+    // directly (NOT via membership; we want the tier shape, not
+    // "is this tenant in this tier").
+    const [resolvedLhs, ...tierDefinitions] = await Promise.all([
       resolveTenantIdentifier(conn, inputLhs),
-      gatherTierDefinition(conn, tierId),
+      ...tierIds.map((t) => gatherTierDefinition(conn, t)),
     ]);
     if (!resolvedLhs.ok) {
       printError(ctx.io, `tenant policies --vs-tier (left '${inputLhs}'): ${resolvedLhs.error}`);
       return 2;
     }
-    if (tierDefinition === null) {
-      printError(ctx.io, `tenant policies --vs-tier: no tier with id '${tierId}'`);
-      return 2;
+    for (let i = 0; i < tierDefinitions.length; i++) {
+      if (tierDefinitions[i] === null) {
+        printError(ctx.io, `tenant policies --vs-tier: no tier with id '${tierIds[i]}'`);
+        return 2;
+      }
     }
+    const resolvedTiers = tierDefinitions as ReadonlyArray<TenantTierMembershipRow>;
 
     let reportLhs: TenantPoliciesReport;
     try {
@@ -910,31 +1088,37 @@ async function runTenantPoliciesVsTier(
       return 1;
     }
 
-    // Synthetic RHS: same tenant, same retention, same override —
-    // tier replaced with the looked-up definition. `input` carries a
-    // `vs-tier:` prefix so the human + CSV output makes it obvious
-    // this is a synthetic comparison, not a second tenant. The
-    // effective field (under --effective) is computed against the
-    // NEW tier so operators see the precedence-walk result with the
-    // hypothetical tier substituted.
-    const reportRhs: TenantPoliciesReport = {
-      tenantId: resolvedLhs.tenantId,
-      input: `vs-tier:${tierId}`,
-      retention: reportLhs.retention,
-      costCeiling: reportLhs.costCeiling,
-      tier: tierDefinition,
-      ...(effectiveFlag
-        ? { effective: deriveEffectivePolicy(reportLhs.costCeiling, tierDefinition) }
-        : {}),
-    };
+    // Synthetic RHSes: same tenant, same retention, same override —
+    // tier replaced with each looked-up definition. `input` carries a
+    // `vs-tier:` prefix per RHS so the human + CSV output makes it
+    // obvious which synthetic this is. The effective field (under
+    // --effective) is computed against the NEW tier so operators see
+    // the precedence-walk result with the hypothetical tier
+    // substituted.
+    const syntheticRhsReports: ReadonlyArray<TenantPoliciesReport> = resolvedTiers.map(
+      (tierDef, i) => ({
+        tenantId: resolvedLhs.tenantId,
+        input: `vs-tier:${tierIds[i]}`,
+        retention: reportLhs.retention,
+        costCeiling: reportLhs.costCeiling,
+        tier: tierDef,
+        ...(effectiveFlag
+          ? { effective: deriveEffectivePolicy(reportLhs.costCeiling, tierDef) }
+          : {}),
+      }),
+    );
 
-    // No self-diff guard here: if the tenant's CURRENT tierId equals
-    // the --vs-tier tierId, the diff is empty — that's actually the
-    // useful answer ("moving to this tier changes nothing"), not an
-    // operator typo. Different from --diff where same-tenant-as-self
-    // is almost always a typo.
+    // No self-diff guard for matching current tier: if the tenant's
+    // CURRENT tierId equals any --vs-tier tierId, the diff is empty
+    // — that's actually the useful "moving to this tier changes
+    // nothing" answer, not an operator typo. Different from --diff
+    // where same-tenant-as-self is almost always a typo.
 
-    return emitDiffOutput(command, ctx, reportLhs, reportRhs);
+    const first = syntheticRhsReports[0];
+    if (syntheticRhsReports.length === 1 && first !== undefined) {
+      return emitDiffOutput(command, ctx, reportLhs, first);
+    }
+    return emitMultiDiffOutput(command, ctx, reportLhs, syntheticRhsReports);
   } finally {
     await closeConn();
   }
