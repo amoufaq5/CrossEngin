@@ -728,3 +728,231 @@ describe("runTenant policies (M4.14.h)", () => {
     );
   });
 });
+
+describe("runTenant policies --effective (M4.14.g)", () => {
+  it("default mode (no --effective) omits effective field from envelope (backward compat)", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect("effective" in env).toBe(false);
+  });
+
+  it("--effective with override present surfaces source='override' + ceiling from override row", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise Plan",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--effective", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      effective: {
+        source: string;
+        ceiling: { maxUsdPerRequest: string; windowSeconds: number };
+        tierId?: string;
+      };
+    };
+    expect(env.effective.source).toBe("override");
+    // Override beats tier — the override values surface, NOT the tier values.
+    expect(env.effective.ceiling.maxUsdPerRequest).toBe("0.10000000");
+    expect(env.effective.ceiling.windowSeconds).toBe(3600);
+    expect(env.effective.tierId).toBeUndefined();
+  });
+
+  it("--effective with only tier present surfaces source='tier' + tierId echoed", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro Plan",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "200.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--effective", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      effective: {
+        source: string;
+        ceiling: { maxUsdPerRequest: string };
+        tierId?: string;
+      };
+    };
+    expect(env.effective.source).toBe("tier");
+    expect(env.effective.ceiling.maxUsdPerRequest).toBe("1.00000000");
+    expect(env.effective.tierId).toBe("pro");
+  });
+
+  it("--effective with neither override nor tier surfaces source='none' + no ceiling field", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--effective", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      effective: { source: string; ceiling?: unknown };
+    };
+    expect(env.effective.source).toBe("none");
+    // The "none" variant has no ceiling field — runtime falls back to
+    // router-level global config.
+    expect(env.effective.ceiling).toBeUndefined();
+  });
+
+  it("--effective does NOT issue an extra PG query — derives from already-fetched axes", async () => {
+    const queries: string[] = [];
+    const conn: PgConnection = {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        queries.push(sql);
+        if (sql.includes("FROM meta.llm_cost_ceilings WHERE tenant_id = $1")) {
+          return {
+            rows: [
+              {
+                max_usd_per_request: "0.25000000",
+                max_usd_per_window: null,
+                window_seconds: null,
+                effective_from: "2026-04-01T00:00:00.000Z",
+              },
+            ] as unknown as T[],
+            rowCount: 1,
+          } as PgQueryResult<T>;
+        }
+        if (sql.includes("FROM meta.llm_tenant_tier_memberships m")) {
+          return { rows: [], rowCount: 0 } as PgQueryResult<T>;
+        }
+        return { rows: [], rowCount: 0 } as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const retention = fakeRetentionForPolicies({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--effective", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Two queries: cost_ceilings + tier_memberships. The effective view
+    // is derived client-side from those rows — no 3rd "resolve" query.
+    expect(queries).toHaveLength(2);
+    expect(queries.some((q) => q.includes("FROM meta.llm_cost_ceilings"))).toBe(true);
+    expect(queries.some((q) => q.includes("FROM meta.llm_tenant_tier_memberships"))).toBe(true);
+  });
+
+  it("human format renders the effective-policy section when --effective is set", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID, "--effective"), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("=== Effective policy (source: override) ===");
+    expect(output).toContain("max per request: $0.10000000 USD");
+  });
+
+  it("human format renders the source='none' placeholder when no override AND no tier", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID, "--effective"), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("=== Effective policy (source: none) ===");
+    expect(output).toContain("(no per-tenant or tier policy configured");
+    expect(output).toContain("router-level global");
+  });
+});

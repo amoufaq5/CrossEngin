@@ -413,12 +413,36 @@ export interface TenantTierMembershipRow {
   readonly windowSeconds: number | null;
 }
 
+// M4.14.g — effective-policy view derived from the raw axes via the
+// override→tier→global precedence walk. Pure client-side composition
+// from the existing report — no extra PG query. Mirrors the contract
+// from PostgresCostCeilingResolver.resolveDetailed (ADR-0154) so
+// operators reading the substrate-level resolver source see the same
+// shape. The "none" variant has no `ceiling` field — runtime falls
+// back to the router-level global config which lives outside the
+// substrate (the router constructor's `costCeiling` option).
+export interface TenantPolicyEffectiveCeiling {
+  readonly maxUsdPerRequest: string | null;
+  readonly maxUsdPerWindow: string | null;
+  readonly windowSeconds: number | null;
+}
+
+export type TenantPolicyEffective =
+  | { readonly source: "override"; readonly ceiling: TenantPolicyEffectiveCeiling }
+  | {
+      readonly source: "tier";
+      readonly ceiling: TenantPolicyEffectiveCeiling;
+      readonly tierId: string;
+    }
+  | { readonly source: "none" };
+
 export interface TenantPoliciesReport {
   readonly tenantId: string;
   readonly input: string;
   readonly retention: { readonly tables: ReadonlyArray<TenantPolicyRetentionEntry> };
   readonly costCeiling: TenantCostCeilingRow | null;
   readonly tier: TenantTierMembershipRow | null;
+  readonly effective?: TenantPolicyEffective;
 }
 
 async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Promise<number> {
@@ -430,6 +454,11 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
     );
     return 2;
   }
+
+  // M4.14.g — --effective adds a fourth section showing the precedence-
+  // resolved ceiling (override → tier → none). Pure client-side
+  // composition from the existing raw axes; no extra PG query.
+  const effectiveFlag = getBooleanFlag(command, "effective");
 
   // PG conn setup mirrors runTenantHousekeeping. Tests inject via
   // pgConnectionOverride; production builds from env.
@@ -480,6 +509,7 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
         retention: { tables: retentionEntries },
         costCeiling,
         tier,
+        ...(effectiveFlag ? { effective: deriveEffectivePolicy(costCeiling, tier) } : {}),
       };
     } catch (err) {
       printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
@@ -630,8 +660,65 @@ function renderPoliciesHuman(ctx: TenantContext, report: TenantPoliciesReport): 
     ctx.io.stdout.write(`  max per window:  ${renderUsd(report.tier.maxUsdPerWindow)}\n`);
     ctx.io.stdout.write(`  window seconds:  ${report.tier.windowSeconds ?? "(unbounded)"}\n`);
   }
+
+  // M4.14.g — effective-policy block when --effective is set.
+  if (report.effective !== undefined) {
+    ctx.io.stdout.write(`\n=== Effective policy (source: ${report.effective.source}) ===\n`);
+    if (report.effective.source === "none") {
+      ctx.io.stdout.write(
+        `  (no per-tenant or tier policy configured — runtime falls back to router-level global)\n`,
+      );
+    } else {
+      ctx.io.stdout.write(
+        `  max per request: ${renderUsd(report.effective.ceiling.maxUsdPerRequest)}\n`,
+      );
+      ctx.io.stdout.write(
+        `  max per window:  ${renderUsd(report.effective.ceiling.maxUsdPerWindow)}\n`,
+      );
+      ctx.io.stdout.write(
+        `  window seconds:  ${report.effective.ceiling.windowSeconds ?? "(unbounded)"}\n`,
+      );
+      if (report.effective.source === "tier") {
+        ctx.io.stdout.write(`  tier:            ${report.effective.tierId}\n`);
+      }
+    }
+  }
 }
 
 function renderUsd(value: string | null): string {
   return value === null ? "(unbounded)" : `$${value} USD`;
+}
+
+// M4.14.g — pure precedence walk: per-tenant override beats tier
+// membership beats neither (which means the runtime falls back to the
+// router-level global config). Mirrors PostgresCostCeilingResolver
+// .resolveDetailed's source attribution (ADR-0154) so operators
+// reading the substrate-level adapter source see the same shape here.
+// No PG query — composed entirely from the already-fetched axes.
+function deriveEffectivePolicy(
+  costCeiling: TenantCostCeilingRow | null,
+  tier: TenantTierMembershipRow | null,
+): TenantPolicyEffective {
+  if (costCeiling !== null) {
+    return {
+      source: "override",
+      ceiling: {
+        maxUsdPerRequest: costCeiling.maxUsdPerRequest,
+        maxUsdPerWindow: costCeiling.maxUsdPerWindow,
+        windowSeconds: costCeiling.windowSeconds,
+      },
+    };
+  }
+  if (tier !== null) {
+    return {
+      source: "tier",
+      ceiling: {
+        maxUsdPerRequest: tier.maxUsdPerRequest,
+        maxUsdPerWindow: tier.maxUsdPerWindow,
+        windowSeconds: tier.windowSeconds,
+      },
+      tierId: tier.tierId,
+    };
+  }
+  return { source: "none" };
 }
