@@ -837,6 +837,16 @@ async function runTenantPoliciesDiff(
     return 2;
   }
 
+  // M4.15.l — --axis validation (mirrors M4.15.h housekeeping pattern,
+  // extended to 3 axes since PolicyFieldDiff has retention/costCeiling/
+  // tier). Validated up-front so the early-exit fires before any PG
+  // round-trip; the filter itself is applied post-compute in emit*.
+  const axisFilterError = validatePoliciesAxisFlag(command);
+  if (axisFilterError !== null) {
+    printError(ctx.io, `tenant policies: ${axisFilterError}`);
+    return 2;
+  }
+
   let conn: PgConnection;
   let closeConn: () => Promise<void> = async () => undefined;
   if (ctx.pgConnectionOverride !== undefined) {
@@ -952,7 +962,14 @@ function emitDiffOutput(
   reportA: TenantPoliciesReport,
   reportB: TenantPoliciesReport,
 ): number {
-  const fieldDiffs = computePolicyFieldDiffs(reportA, reportB);
+  // M4.15.l — axis filter applied post-compute (no extra PG cost
+  // since gather already retrieved all 3 axes). Filter is a no-op
+  // when --axis isn't set; otherwise narrows to retention|cost
+  // Ceiling|tier rows. Exit-code threshold gates on FILTERED count
+  // so `--axis retention --exit-on-divergence` only trips when
+  // retention-axis fields diverge.
+  const axisFilter = getPoliciesAxisFilter(command);
+  const fieldDiffs = filterFieldDiffsByAxis(computePolicyFieldDiffs(reportA, reportB), axisFilter);
 
   if (command.format === "json") {
     printJson(ctx.io, {
@@ -1002,9 +1019,14 @@ function emitMultiDiffOutput(
   anchor: TenantPoliciesReport,
   rhsReports: ReadonlyArray<TenantPoliciesReport>,
 ): number {
+  // M4.15.l — axis filter applied per-comparison (no extra PG cost
+  // since gather already retrieved all 3 axes). Each comparison's
+  // fieldDiffs narrowed independently; the max-divergence exit code
+  // is computed across the FILTERED counts.
+  const axisFilter = getPoliciesAxisFilter(command);
   const comparisons = rhsReports.map((rhs) => ({
     right: rhs,
-    fieldDiffs: computePolicyFieldDiffs(anchor, rhs),
+    fieldDiffs: filterFieldDiffsByAxis(computePolicyFieldDiffs(anchor, rhs), axisFilter),
   }));
 
   if (command.format === "json") {
@@ -2382,6 +2404,38 @@ function validateDiffThresholdFlag(command: ParsedCommand): string | null {
     return `--threshold must be a positive integer, got '${thresholdRaw}'`;
   }
   return null;
+}
+
+// M4.15.l — `tenant policies --diff --axis <axis>` substrate filter.
+// 3 axes match PolicyFieldDiff.axis exactly: retention, costCeiling,
+// tier. Validation pattern mirrors M4.15.h housekeeping --axis
+// (returns error string on invalid value, null on absent/valid).
+const POLICIES_DIFF_AXIS_VALUES = ["retention", "costCeiling", "tier"] as const;
+type PoliciesDiffAxisValue = (typeof POLICIES_DIFF_AXIS_VALUES)[number];
+
+function validatePoliciesAxisFlag(command: ParsedCommand): string | null {
+  const raw = getStringFlag(command, "axis");
+  if (raw === null) return null;
+  if (!POLICIES_DIFF_AXIS_VALUES.includes(raw as PoliciesDiffAxisValue)) {
+    return `invalid --axis '${raw}' (expected one of: ${POLICIES_DIFF_AXIS_VALUES.join(", ")})`;
+  }
+  return null;
+}
+
+function getPoliciesAxisFilter(command: ParsedCommand): PoliciesDiffAxisValue | null {
+  const raw = getStringFlag(command, "axis");
+  if (raw === null) return null;
+  // validatePoliciesAxisFlag already ran in runTenantPoliciesDiff so
+  // we can narrow without re-checking.
+  return raw as PoliciesDiffAxisValue;
+}
+
+function filterFieldDiffsByAxis(
+  diffs: ReadonlyArray<PolicyFieldDiff>,
+  axis: PoliciesDiffAxisValue | null,
+): ReadonlyArray<PolicyFieldDiff> {
+  if (axis === null) return diffs;
+  return diffs.filter((d) => d.axis === axis);
 }
 
 function diffDivergenceExitCode(command: ParsedCommand, fieldDiffsLength: number): number {
