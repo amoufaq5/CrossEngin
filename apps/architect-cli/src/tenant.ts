@@ -30,6 +30,7 @@ import {
   createNodePgConnection,
   parsePgEnvConfig,
   type PgConnection,
+  type TenantRetentionPolicyRow,
 } from "@crossengin/kernel-pg";
 import { PostgresIdempotencyStore } from "@crossengin/api-gateway-pg";
 
@@ -131,6 +132,51 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
     return 2;
   }
   const allTenants = allTenantsFlag ? (true as const) : undefined;
+
+  // M4.15.a — --diff <other-slug|uuid> compares two tenants' housekeeping
+  // dashboards side-by-side. Requires --tenant (the LHS is the existing
+  // --tenant filter; --diff supplies the RHS). The diff focuses on
+  // tenantPolicy / tenantOverrides fields — the GLOBAL per-table stats
+  // (totalRowCount, oldestAt, wouldPruneCount) are platform-wide and
+  // shouldn't differ between two tenants under the same PG snapshot
+  // (any divergence there would be a race between the two gather
+  // calls, not a meaningful policy difference). Mutually exclusive
+  // with --all-tenants (diff and matrix don't compose) and --watch
+  // (diff is one-shot for v1 — looped diff layouts garble badly).
+  // Threshold alerts also rejected (alert semantics target a single
+  // tenant view, not pair-wise divergence — which side trips?).
+  const diffFlag = getStringFlag(command, "diff");
+  if (diffFlag !== null) {
+    if (tenantFlag === null) {
+      printError(
+        ctx.io,
+        `tenant housekeeping: --diff requires --tenant (the LHS comes from --tenant; --diff supplies the RHS)`,
+      );
+      return 2;
+    }
+    if (allTenantsFlag) {
+      printError(
+        ctx.io,
+        `tenant housekeeping: --diff and --all-tenants are mutually exclusive (diff is pair-wise; --all-tenants is matrix)`,
+      );
+      return 2;
+    }
+    if (watchFlags.watch) {
+      printError(
+        ctx.io,
+        `tenant housekeeping: --diff and --watch are mutually exclusive in v1 (looped diff layouts garble; run --diff one-shot)`,
+      );
+      return 2;
+    }
+    if (getMultiFlag(command, "threshold-alert").length > 0) {
+      printError(
+        ctx.io,
+        `tenant housekeeping: --diff and --threshold-alert are mutually exclusive (alert semantics target a single tenant view, not pair-wise divergence)`,
+      );
+      return 2;
+    }
+    return await runTenantHousekeepingDiff(command, ctx, tenantFlag, diffFlag);
+  }
 
   // --threshold-alert flags. Same fail-fast-on-validation discipline.
   const alertRaws = getMultiFlag(command, "threshold-alert");
@@ -1121,6 +1167,309 @@ async function runTenantPoliciesVsTier(
     return emitMultiDiffOutput(command, ctx, reportLhs, syntheticRhsReports);
   } finally {
     await closeConn();
+  }
+}
+
+// M4.15.a — `tenant housekeeping --tenant <A> --diff <B>` orchestrator.
+// Compares two tenants' housekeeping dashboards side-by-side. The
+// meaningful diff axis is per-tenant overrides — the GLOBAL per-table
+// stats (totalRowCount, oldestAt, wouldPruneCount) are platform-wide
+// under the same PG snapshot and shouldn't differ between two
+// tenants. The diff walks the tenantPolicy field on every gateway
+// table + every retention table and emits HousekeepingFieldDiff
+// entries for each value mismatch. The threshold + exit-code
+// semantics mirror tenant policies --diff: --exit-on-divergence +
+// optional --threshold N.
+async function runTenantHousekeepingDiff(
+  command: ParsedCommand,
+  ctx: TenantContext,
+  inputLhs: string,
+  inputRhs: string,
+): Promise<number> {
+  // --threshold validation (matches policies --diff convention).
+  const thresholdError = validateDiffThresholdFlag(command);
+  if (thresholdError !== null) {
+    printError(ctx.io, `tenant housekeeping: ${thresholdError}`);
+    return 2;
+  }
+
+  let conn: PgConnection;
+  let closeConn: () => Promise<void> = async () => undefined;
+  if (ctx.pgConnectionOverride !== undefined) {
+    conn = ctx.pgConnectionOverride;
+  } else {
+    try {
+      const config = parsePgEnvConfig(ctx.env);
+      conn = createNodePgConnection(config);
+      closeConn = async () => {
+        await conn.close().catch(() => undefined);
+      };
+    } catch (err) {
+      printError(
+        ctx.io,
+        `tenant housekeeping: requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
+
+  try {
+    // Resolve both tenant identifiers concurrently — slug → UUID via
+    // shared resolver. The "did you mean" suggestion treatment from
+    // M4.14.j fires per side, labeled left vs right so operators
+    // know which input typo'd.
+    const [resolvedA, resolvedB] = await Promise.all([
+      resolveTenantIdentifier(conn, inputLhs),
+      resolveTenantIdentifier(conn, inputRhs),
+    ]);
+    if (!resolvedA.ok) {
+      printError(ctx.io, `tenant housekeeping --diff (left '${inputLhs}'): ${resolvedA.error}`);
+      return 2;
+    }
+    if (!resolvedB.ok) {
+      printError(ctx.io, `tenant housekeeping --diff (right '${inputRhs}'): ${resolvedB.error}`);
+      return 2;
+    }
+
+    // Self-diff guard — A == B yields empty fieldDiffs and is almost
+    // always an operator typo. Mirrors policies --diff (M4.14.f).
+    if (resolvedA.tenantId === resolvedB.tenantId) {
+      printError(
+        ctx.io,
+        `tenant housekeeping --diff: left and right resolve to the same tenant '${resolvedA.tenantId}' — nothing to diff`,
+      );
+      return 2;
+    }
+
+    // Gather BOTH dashboards × BOTH tenants = 4 reports concurrently.
+    // Each tenant's gather call filters by tenantId (the existing
+    // single-tenant flow), so the resulting reports already have the
+    // tenantPolicy fields populated per table. No need for a custom
+    // gather path.
+    const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
+    const idempotencyStore = ctx.idempotencyStoreOverride ?? new PostgresIdempotencyStore(conn);
+    const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+
+    let gatewayA: HousekeepingReport;
+    let gatewayB: HousekeepingReport;
+    let retentionA: RetentionHousekeepingReport;
+    let retentionB: RetentionHousekeepingReport;
+    try {
+      [gatewayA, gatewayB, retentionA, retentionB] = await Promise.all([
+        gatherHousekeepingReport({
+          conn,
+          retention,
+          idempotencyStore,
+          now,
+          tenantId: resolvedA.tenantId,
+        }),
+        gatherHousekeepingReport({
+          conn,
+          retention,
+          idempotencyStore,
+          now,
+          tenantId: resolvedB.tenantId,
+        }),
+        gatherRetentionHousekeepingReport({
+          conn,
+          retention,
+          now,
+          tenantId: resolvedA.tenantId,
+        }),
+        gatherRetentionHousekeepingReport({
+          conn,
+          retention,
+          now,
+          tenantId: resolvedB.tenantId,
+        }),
+      ]);
+    } catch (err) {
+      printError(
+        ctx.io,
+        `tenant housekeeping: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+
+    const fieldDiffs = computeHousekeepingFieldDiffs(
+      { gateway: gatewayA, retention: retentionA },
+      { gateway: gatewayB, retention: retentionB },
+    );
+
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        action: "tenant.housekeeping.diff",
+        left: {
+          tenantId: resolvedA.tenantId,
+          input: inputLhs,
+          gateway: gatewayA,
+          retention: retentionA,
+        },
+        right: {
+          tenantId: resolvedB.tenantId,
+          input: inputRhs,
+          gateway: gatewayB,
+          retention: retentionB,
+        },
+        fieldDiffs,
+      });
+    } else {
+      renderHousekeepingDiffHuman(
+        ctx,
+        { tenantId: resolvedA.tenantId, input: inputLhs },
+        { tenantId: resolvedB.tenantId, input: inputRhs },
+        fieldDiffs,
+      );
+    }
+
+    return diffDivergenceExitCode(command, fieldDiffs.length);
+  } finally {
+    await closeConn();
+  }
+}
+
+// M4.15.a — field-diff shape for housekeeping. Mirrors PolicyFieldDiff
+// but with housekeeping axes ("gateway" | "retention") and the
+// per-table tenantPolicy.* field naming.
+export interface HousekeepingFieldDiff {
+  readonly axis: "gateway" | "retention";
+  readonly tableName: string;
+  readonly field: string;
+  readonly valueA: string | number | boolean | null | undefined;
+  readonly valueB: string | number | boolean | null | undefined;
+}
+
+// M4.15.a — compute per-table tenantPolicy diffs across BOTH gateway
+// and retention dashboards. Skips global stats (totalRowCount,
+// oldestAt, wouldPruneCount, retentionDays at the platform level,
+// lastPrunedAt) since those are tenant-agnostic under the same PG
+// snapshot. Walks UNION of table names per axis for deterministic
+// output sorted alphabetically.
+export function computeHousekeepingFieldDiffs(
+  a: { gateway: HousekeepingReport; retention: RetentionHousekeepingReport },
+  b: { gateway: HousekeepingReport; retention: RetentionHousekeepingReport },
+): ReadonlyArray<HousekeepingFieldDiff> {
+  const diffs: HousekeepingFieldDiff[] = [];
+
+  // Gateway axis — walk per-table tenantPolicy fields. The gateway
+  // housekeeping report includes BOTH retention-substrate tables and
+  // the idempotency table; the idempotency table has tenantPolicy
+  // always null (no per-tenant overrides exist on the TTL surface),
+  // so it's effectively a no-op for the diff.
+  const gwTablesA = new Map(a.gateway.tables.map((t) => [t.tableName, t] as const));
+  const gwTablesB = new Map(b.gateway.tables.map((t) => [t.tableName, t] as const));
+  const gwAllTables = new Set<string>([...gwTablesA.keys(), ...gwTablesB.keys()]);
+  for (const tableName of [...gwAllTables].sort()) {
+    const ta = gwTablesA.get(tableName);
+    const tb = gwTablesB.get(tableName);
+    if (ta === undefined || tb === undefined) {
+      diffs.push({
+        axis: "gateway",
+        tableName,
+        field: "exists",
+        valueA: ta !== undefined,
+        valueB: tb !== undefined,
+      });
+      continue;
+    }
+    appendTenantPolicyDiffs("gateway", tableName, ta.tenantPolicy, tb.tenantPolicy, diffs);
+  }
+
+  // Retention axis — same walk against the retention housekeeping
+  // report's per-table tenantPolicy field.
+  const rtTablesA = new Map(a.retention.tables.map((t) => [t.tableName, t] as const));
+  const rtTablesB = new Map(b.retention.tables.map((t) => [t.tableName, t] as const));
+  const rtAllTables = new Set<string>([...rtTablesA.keys(), ...rtTablesB.keys()]);
+  for (const tableName of [...rtAllTables].sort()) {
+    const ta = rtTablesA.get(tableName);
+    const tb = rtTablesB.get(tableName);
+    if (ta === undefined || tb === undefined) {
+      diffs.push({
+        axis: "retention",
+        tableName,
+        field: "exists",
+        valueA: ta !== undefined,
+        valueB: tb !== undefined,
+      });
+      continue;
+    }
+    appendTenantPolicyDiffs("retention", tableName, ta.tenantPolicy, tb.tenantPolicy, diffs);
+  }
+
+  return diffs;
+}
+
+// Walk tenantPolicy fields for a (tableName, axis) pair and append
+// any divergences to the diffs array. tenantPolicy === undefined
+// shouldn't happen here (we always pass tenantId to the gather
+// calls) but the null case is the meaningful one ("tenant has no
+// override; inherits platform default").
+function appendTenantPolicyDiffs(
+  axis: "gateway" | "retention",
+  tableName: string,
+  policyA: TenantRetentionPolicyRow | null | undefined,
+  policyB: TenantRetentionPolicyRow | null | undefined,
+  diffs: HousekeepingFieldDiff[],
+): void {
+  // Both null = both inherit platform default = no diff.
+  if (policyA == null && policyB == null) return;
+  // One side has override, other inherits — surface the existence
+  // mismatch as a single diff so operators see "tenant A has
+  // override here, tenant B doesn't" without N field-level diffs.
+  if (policyA == null || policyB == null) {
+    diffs.push({
+      axis,
+      tableName,
+      field: "tenantPolicy.exists",
+      valueA: policyA != null,
+      valueB: policyB != null,
+    });
+    return;
+  }
+  // Both sides have overrides — compare each field. Fields mirror
+  // TenantPolicyRetentionEntry (M4.14.h).
+  const fields: ReadonlyArray<keyof TenantRetentionPolicyRow> = [
+    "retentionDays",
+    "enabled",
+    "optOut",
+    "optOutReason",
+    "optOutUntil",
+  ];
+  for (const field of fields) {
+    if (policyA[field] !== policyB[field]) {
+      diffs.push({
+        axis,
+        tableName,
+        field: `tenantPolicy.${String(field)}`,
+        valueA: policyA[field] as HousekeepingFieldDiff["valueA"],
+        valueB: policyB[field] as HousekeepingFieldDiff["valueB"],
+      });
+    }
+  }
+}
+
+// M4.15.a — human render for housekeeping --diff. Single-tenant-pair
+// shape: header naming both sides + a "Field changes" list. Empty
+// diffs render "No differences found between tenants" (matches
+// policies --diff convention from M4.14.f).
+function renderHousekeepingDiffHuman(
+  ctx: TenantContext,
+  left: { readonly tenantId: string; readonly input: string },
+  right: { readonly tenantId: string; readonly input: string },
+  fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>,
+): void {
+  ctx.io.stdout.write(`Diff between tenant housekeeping dashboards:\n`);
+  ctx.io.stdout.write(`  Left:  ${left.tenantId} (input: '${left.input}')\n`);
+  ctx.io.stdout.write(`  Right: ${right.tenantId} (input: '${right.input}')\n`);
+  if (fieldDiffs.length === 0) {
+    ctx.io.stdout.write(`\n  No differences found between tenants.\n`);
+    return;
+  }
+  ctx.io.stdout.write(`\n  Field changes (${fieldDiffs.length}):\n`);
+  for (const d of fieldDiffs) {
+    ctx.io.stdout.write(
+      `    [${d.axis}] ${d.tableName}.${d.field}: ${renderDiffValue(d.valueA)} -> ${renderDiffValue(d.valueB)}\n`,
+    );
   }
 }
 

@@ -3288,3 +3288,276 @@ describe("runTenant policies N-way --diff/--vs-tier (M4.14.a)", () => {
     expect(err()).toContain("(right 2 'no-such-tenant')");
   });
 });
+
+// M4.15.a — `tenant housekeeping --diff` tests. Closes ADR-0284 Q5.
+// Pair-wise comparison of two tenants' combined gateway + retention
+// housekeeping dashboards. Diff focuses on tenantPolicy fields per
+// table (global stats are tenant-agnostic under the same PG snapshot
+// so excluded). Self-diff + validation guards exit 2 BEFORE PG;
+// max-divergence-style exit code (any field diff trips exit 3 under
+// --exit-on-divergence).
+describe("runTenant housekeeping --diff (M4.15.a)", () => {
+  it("--diff without --tenant exits 2 ('--diff requires --tenant')", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--diff", TENANT_B), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("--diff requires --tenant");
+  });
+
+  it("--diff + --all-tenants mutually exclusive (exit 2)", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--all-tenants",
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    // --tenant + --all-tenants exclusivity fires first (also correct).
+    expect(err()).toContain("mutually exclusive");
+  });
+
+  it("--diff + --watch mutually exclusive (exit 2)", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--diff", TENANT_B, "--watch"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--diff and --watch are mutually exclusive");
+  });
+
+  it("--diff + --threshold-alert mutually exclusive (exit 2)", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--threshold-alert",
+        "would_prune > 1000",
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--diff and --threshold-alert are mutually exclusive");
+  });
+
+  it("--diff self-diff (LHS == RHS) exits 2", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--diff", RESOLVED_UUID),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("resolve to the same tenant");
+  });
+
+  it("--diff unknown RHS exits 2 with 'right' label", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--diff", "no-such-tenant"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--diff (right 'no-such-tenant')");
+  });
+
+  it("--diff JSON envelope uses tenant.housekeeping.diff action with both sides", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      action: string;
+      left: { tenantId: string; gateway: unknown; retention: unknown };
+      right: { tenantId: string; gateway: unknown; retention: unknown };
+      fieldDiffs: Array<{ axis: string; tableName: string; field: string }>;
+    };
+    expect(env.action).toBe("tenant.housekeeping.diff");
+    expect(env.left.tenantId).toBe(RESOLVED_UUID);
+    expect(env.right.tenantId).toBe(TENANT_B);
+    expect(env.left.gateway).toBeDefined();
+    expect(env.left.retention).toBeDefined();
+    expect(env.right.gateway).toBeDefined();
+    expect(env.right.retention).toBeDefined();
+    // RESOLVED_UUID has override on gateway_pipeline_executions (365 days);
+    // TENANT_B has override on workflow_traces (60 days). The diff
+    // surfaces tenantPolicy.exists divergences on both tables across
+    // BOTH gateway + retention axes since both tables appear in the
+    // retention housekeeping report. Find at least one of each.
+    expect(env.fieldDiffs.length).toBeGreaterThan(0);
+    const hasGatewayPipelineDiff = env.fieldDiffs.some(
+      (d) => d.tableName === "gateway_pipeline_executions",
+    );
+    const hasWorkflowTracesDiff = env.fieldDiffs.some((d) => d.tableName === "workflow_traces");
+    expect(hasGatewayPipelineDiff).toBe(true);
+    expect(hasWorkflowTracesDiff).toBe(true);
+  });
+
+  it("--diff human render emits 'Diff between tenant housekeeping dashboards' header + diff list", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--diff", TENANT_B),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("Diff between tenant housekeeping dashboards");
+    expect(output).toContain(`Left:  ${RESOLVED_UUID}`);
+    expect(output).toContain(`Right: ${TENANT_B}`);
+    expect(output).toContain("Field changes");
+    expect(output).toContain("tenantPolicy.exists");
+  });
+
+  it("--diff with --exit-on-divergence and divergent tenants exits 3", async () => {
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--diff slug RHS resolves via meta.tenants once and is echoed correctly in output", async () => {
+    const conn = fakeConn({ "acme-staging": TENANT_B });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        "acme-staging",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      left: { input: string };
+      right: { tenantId: string; input: string };
+    };
+    expect(env.right.tenantId).toBe(TENANT_B);
+    expect(env.right.input).toBe("acme-staging");
+  });
+});
