@@ -1828,3 +1828,294 @@ describe("runTenant policies --explain (M4.14.e)", () => {
     expect(queries).toHaveLength(2);
   });
 });
+
+// M4.14.d — tenant housekeeping --watch tests. Closes ADR-0265 Q1 +
+// ADR-0276 Q1. Combines two independent watch loops (gateway +
+// retention) under one cross-dashboard view with a SINGLE tick that
+// gathers BOTH dashboards atomically then renders ONCE — no
+// interleaved-render layout garbling.
+describe("runTenant housekeeping --watch (M4.14.d)", () => {
+  // Test-only setTimeout that fires synchronously so watch loops
+  // drain instantly under maxIterations.
+  const immediateSetTimeout = (cb: () => void, _ms: number): unknown => {
+    cb();
+    return 1 as unknown;
+  };
+
+  it("loops N times when --watch + watchOverride.maxIterations is set", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    const stdout = out();
+    // One header per tick; 3 ticks → 3 headers.
+    const headerMatches = stdout.match(/tenant housekeeping \(as of /g);
+    expect(headerMatches).not.toBeNull();
+    expect(headerMatches!.length).toBe(3);
+    // ANSI clear-screen between ticks (one per tick).
+    expect(stdout).toContain("\x1b[2J\x1b[H");
+  });
+
+  it("renders BOTH gateway and retention sections each tick", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 2, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    const stdout = out();
+    const gatewayMatches = stdout.match(/=== Gateway housekeeping ===/g);
+    const retentionMatches = stdout.match(/=== Retention housekeeping ===/g);
+    expect(gatewayMatches!.length).toBe(2);
+    expect(retentionMatches!.length).toBe(2);
+  });
+
+  it("--watch with --format json streams NDJSON-of-envelopes (one envelope per tick)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--watch", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines.length).toBe(3);
+    for (const line of lines) {
+      const env = JSON.parse(line) as { action: string; gateway: unknown; retention: unknown };
+      expect(env.action).toBe("tenant.housekeeping");
+      expect(env.gateway).toBeDefined();
+      expect(env.retention).toBeDefined();
+    }
+    // JSON streaming MUST NOT emit ANSI clear-screen — that would break
+    // log aggregators consuming NDJSON.
+    expect(out()).not.toContain("\x1b[2J");
+  });
+
+  it("--watch-interval threads custom interval (default 5s; custom honored)", async () => {
+    const conn = fakeConn({});
+    const delays: number[] = [];
+    const fakeSetTimeout = (cb: () => void, ms: number): unknown => {
+      delays.push(ms);
+      cb();
+      return 1 as unknown;
+    };
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: fakeSetTimeout },
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--watch", "--watch-interval", "20"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // 3 iterations → 2 intervals between them (last tick has no
+    // trailing wait when maxIterations is hit). Each interval is 20s.
+    expect(delays).toEqual([20000, 20000]);
+  });
+
+  it("--watch-interval requires --watch (exit 2)", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantContext = { io, env: {} };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--watch-interval", "10"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("--watch-interval requires --watch");
+  });
+
+  it("--watch-keep-going requires --watch (exit 2)", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantContext = { io, env: {} };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--watch-keep-going"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("--watch-keep-going requires --watch");
+  });
+
+  it("--watch rejects --format csv/tsv/ndjson/yaml (exit 2)", async () => {
+    for (const fmt of ["csv", "tsv", "ndjson", "yaml"]) {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(
+        parsed("tenant", "housekeeping", "--watch", "--format", fmt),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("--watch requires --format human or json");
+    }
+  });
+
+  it("--watch with abortSignal pre-aborted cancels the loop after first tick", async () => {
+    const conn = fakeConn({});
+    const controller = new AbortController();
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        // No maxIterations — abort drives termination.
+        abortSignal: controller.signal,
+        setTimeoutFn: (cb, _ms) => {
+          // Abort during the first inter-tick wait — loop should return
+          // cleanly without firing a 2nd render.
+          controller.abort();
+          cb();
+          return 1 as unknown;
+        },
+      },
+    };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    const headerMatches = out().match(/tenant housekeeping \(as of /g);
+    expect(headerMatches!.length).toBe(1);
+  });
+
+  it("threshold-alert tripping in --watch (without --keep-going) exits 3", async () => {
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      // No maxIterations needed — first tick should halt.
+      watchOverride: { setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--watch", "--threshold-alert", "totalRowCount:>10"),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--watch-keep-going records trips but continues looping (exits 3 only at end)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 3, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--watch",
+        "--watch-keep-going",
+        "--threshold-alert",
+        "totalRowCount:>10",
+      ),
+      ctx,
+    );
+    // Trip is sticky → exit 3 after 3 iterations.
+    expect(code).toBe(3);
+    // But the loop ran 3 ticks (not halted early on first trip).
+    expect(out().match(/tenant housekeeping \(as of /g)!.length).toBe(3);
+  });
+
+  it("--watch-keep-going catches gather() errors (renders error placeholder + continues)", async () => {
+    // Connection that fails the first call then succeeds.
+    let callCount = 0;
+    const failingConn: PgConnection = {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        callCount++;
+        // First tick: fail on the first PG query (any of them).
+        if (callCount <= 1) throw new Error("boom-from-pg");
+        // Subsequent calls succeed using the same fixtures as fakeConn.
+        if (sql.includes("FROM meta.gateway_pipeline_executions")) {
+          return {
+            rows: [{ total: "0", oldest: null }],
+            rowCount: 1,
+          } as unknown as PgQueryResult<T>;
+        }
+        return { rows: [{ total: "0", oldest: null }], rowCount: 1 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: failingConn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: { maxIterations: 2, setTimeoutFn: immediateSetTimeout },
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--watch", "--watch-keep-going"),
+      ctx,
+    );
+    // No alerts tripped + no halt → exit 0 despite the gather error.
+    expect(code).toBe(0);
+    expect(out()).toContain("(error this tick: boom-from-pg)");
+  });
+
+  it("--watch installs SIGINT + SIGTERM handlers via signalRegistrar", async () => {
+    const registered: string[] = [];
+    const removed: string[] = [];
+    const recordingRegistrar = (sig: string, _handler: () => void): (() => void) => {
+      registered.push(sig);
+      return () => removed.push(sig);
+    };
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 1,
+        setTimeoutFn: immediateSetTimeout,
+        signalRegistrar: recordingRegistrar,
+      },
+    };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--watch"), ctx);
+    expect(code).toBe(0);
+    expect(registered).toEqual(["SIGINT", "SIGTERM"]);
+    expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+  });
+});

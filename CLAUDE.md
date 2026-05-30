@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,234 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.14.d adds `--watch` flag to `tenant
+housekeeping` — closes ADR-0265 Q1 + ADR-0276
+Q1 in one milestone. After ADR-0273 shipped
+the one-shot cross-dashboard combined view
+(gateway + retention under one envelope, one
+PG connection, union threshold-alert
+evaluation), operators wanted the same
+single-screen view LIVE during incidents:
+multi-substrate incident monitoring (see
+gateway-side throughput AND retention-side
+accumulation in one terminal without
+tmux/screen splitting); union-alert CI gating
+(exit 3 if EITHER dashboard's threshold
+trips); pre-deployment soak (observe both
+dashboards over a window before promoting a
+tier change). The deferred Q in BOTH per-
+dashboard --watch ADRs (ADR-0265 Q1 + ADR-
+0276 Q1) flagged subtle ordering concerns —
+interleaved renders would garble layout +
+sequential per-tick would double latency and
+render the two dashboards at different
+snapshots. Solution: atomic per-tick gather
+via Promise.all of BOTH gatherHousekeepingReport
++ gatherRetentionHousekeepingReport BEFORE
+rendering ONCE. The render closure is never
+called until both gathers resolve — interleaved
+renders are impossible by construction. PG
+connection is request-serial so Promise.all
+interleaves the two gather sequences rather
+than true-parallelizing (total wall-clock is
+sum not max), but that trade-off is
+acceptable: single shared connection avoids
+connection-pool complexity at architect-cli
+layer, and operators running --watch don't
+have millisecond-tier latency requirements.
+Implementation: reuses the shared
+housekeeping-watch.ts infrastructure
+(parseWatchFlags / runHousekeepingWatchLoop /
+installShutdownBridge) so the validation
+behavior (--watch-interval bounds 1..3600s,
+--watch-keep-going requires --watch, --watch
+requires --format human|json) stays identical
+to gateway + retention housekeeping. Each
+tick: gather closure fetches BOTH dashboards
+concurrently AND evaluates threshold alerts
+across the union of tables (the existing
+evaluateAlertsAcrossDashboards from ADR-0273
+reused as-is), returns one CombinedReport
+envelope; renderTick closure dispatches on
+format (human: ANSI clear-screen between
+ticks + full combined view; JSON: NDJSON-of-
+envelopes one line per tick with no ANSI
+clears that would break log aggregators);
+returns "halt" when tripped.length > 0 which
+exits the loop with exit 3 (or sticky-records
+under --watch-keep-going + continues until
+maxIterations / SIGINT). PG connection opens
+once before the loop and closes in finally
+after loop returns — no per-tick reconnection
+cost. SIGINT + SIGTERM bridge via
+installShutdownBridge: operators pressing
+Ctrl-C OR Kubernetes sending SIGTERM both
+trigger the shared AbortController; loop
+returns cleanly + finally closes PG +
+process exits gracefully (no connection-drop
+mid-query, no orphaned watch state).
+TenantContext gains optional watchOverride
+field (reusing WatchOverride shape from
+housekeeping-watch.ts) for test injection of
+maxIterations / setTimeoutFn / abortSignal /
+signalRegistrar. Single-tick code path
+preserved (no --watch → existing one-shot
+behavior unchanged); the renderTick closure
+is unified across single-tick AND watch
+paths to prevent drift but the single-tick
+JSON branch still uses printJson while the
+watch JSON branch uses ctx.io.stdout.write
+(JSON.stringify(...)+"\n") for NDJSON
+discipline (mirrors gateway-housekeeping's
+existing pattern). Rejected — sequential
+per-tick (gateway gather → render →
+retention gather → render) (doubles tick
+latency AND renders dashboards at different
+snapshots; atomic gather is the right
+design), interleaved per-section rendering
+as each dashboard's gather resolves
+(garbles layout — the ADR-0276 Q1 concern;
+atomic gather + single render eliminates
+the problem), two independent watch loops
+in parallel + two terminal windows
+(defeats purpose of combined view), cross-
+dashboard alert ordering changes (existing
+evaluateAlertsAcrossDashboards already emits
+gateway-first / retention-second; reused
+as-is), --watch implies --threshold-alert
+'*' (operators watching without alerts want
+live view without CI-gate behavior; opt-in
+matches single-dashboard convention),
+different default --watch-interval for
+combined view e.g. 10s instead of 5s since
+gather is 2x work (adds API surface
+complexity for marginal latency gain;
+operators tune via --watch-interval),
+--watch-skip-retention or --watch-skip-
+gateway flag (that's exactly what running
+per-dashboard --watch does; no need to
+duplicate), render combined alert summary
+at tick start compact one-line "N gateway
++ M retention tripped" (existing per-alert
+THRESHOLD ALERTS block already conveys
+this; redundant), --watch-once flag
+exiting after first tick (that's just
+running without --watch), stagger the two
+gathers to reduce PG load gateway then
+100ms then retention (premature
+optimization; PG handles back-to-back
+queries fine). Drawbacks — atomic gather
+doubles single-tick PG query work vs
+running one --watch loop on either
+dashboard alone (acceptable; operators
+wanting one dashboard's view run per-
+dashboard --watch; combined-view advantage
+is precisely both visible at once), NDJSON
+output for combined view has both gateway
++ retention nested under each envelope
+(larger lines per tick; log aggregators
+handle fine; operators wanting compact
+per-tick lines run per-dashboard --watch),
+no per-dashboard --watch-interval scaling
+(both dashboards refresh at same interval;
+operators wanting different rates run two
+terminal windows), single-tick path
+preserved AND watch path duplicates render
+shape (renderTick closure unified across
+both to prevent drift but some duplication
+remains; future refactor could collapse),
+operators must remember combined-view
+alert field set is UNION (perTenantPolicyCount
+is retention-only; existing ADR-0273
+documentation covers this). 12 new tests
+under "runTenant housekeeping --watch
+(M4.14.d)" — loops N times under
+maxIterations with N header matches + ANSI
+clear-screen between ticks verified, renders
+BOTH gateway and retention sections each
+tick (=== Gateway housekeeping === and ===
+Retention housekeeping === match counts =
+tick count), --watch --format json streams
+NDJSON one envelope per line with action +
+gateway + retention all present + no ANSI
+clear (would break log aggregators),
+--watch-interval threads custom interval
+through to setTimeoutFn delays array
+(verified 3 iterations → 2 intervals of
+custom-ms each), --watch-interval requires
+--watch exits 2 with clear error,
+--watch-keep-going requires --watch exits 2,
+--watch rejects csv/tsv/ndjson/yaml format
+exits 2 (all four formats exercised),
+abortSignal pre-aborted cancels loop after
+first tick (no maxIterations needed; abort
+during inter-tick wait drives termination),
+threshold-alert tripping in --watch without
+--keep-going exits 3 (first tick halts),
+--watch-keep-going records trips but
+continues looping (exit 3 only at end +
+loop ran full 3 ticks not halted early),
+--watch-keep-going catches gather() errors
+(first PG query fails; "(error this tick:
+boom-from-pg)" rendered; loop continues to
+2nd tick which succeeds; exit 0 since no
+alert tripped), --watch installs SIGINT +
+SIGTERM handlers via signalRegistrar (both
+signals registered before loop + both
+removed after via cleanup closure). cli.ts
+helpText extended with --watch +
+--watch-interval + --watch-keep-going in
+usage line + 6-line description covering
+atomic per-tick gather + alert evaluation
+across union + format compatibility +
+SIGINT/SIGTERM behavior. Test count:
+tenant.test.ts grows 50 → 62 tests (+12).
+Workspace test count 9,764 → 9,776.
+Coverage gate passes — tenant.ts at 87.21%
+statements / 82.17% branches / 91.17%
+functions / 87.21% lines (functions UP from
+90.32% in M4.14.e via the new gather +
+renderTick + renderError closures; branches
+UP from 81.73% to 82.17% via the new
+positive-and-negative paths in the watch
+branch; all above 80/70/80/80 thresholds).
+ADR-0284 documents the design + 10
+rejected alternatives + 7 future Qs (per-
+section --watch-interval e.g.
+--watch-gateway-interval 5
+--watch-retention-interval 30 since
+gateway data churns faster than retention,
+streaming partial updates render gateway
+section as soon as it resolves then
+retention would re-introduce layout-
+garbling concern unless ANSI cursor
+positioning to overwrite sections in-place
+defer for marginal UX gain,
+--watch-summary-only flag collapsing each
+tick to one-line summary pairs with future
+compact-output design, persist watch ticks
+to structured audit table for playback,
+--watch combined with --diff <other>
+across two tenants compare two tenants'
+housekeeping dashboards live complex
+layout design defer, GitHub Actions
+integration tenant housekeeping --watch
+--threshold-alert | tee
+$GITHUB_STEP_SUMMARY already works with
+NDJSON could add --summary-md emitting
+Markdown ready for GHA defer pairs with
+broader summary-md feature, --watch on
+tenant policies policies change rarely
+watching them mostly noise defer unless
+operator workflows surface). The tenant
+housekeeping surface now answers both
+"what's the current cross-dashboard
+state?" (one-shot from ADR-0273) AND
+"what's the LIVE cross-dashboard state?"
+(--watch); multi-substrate incident
+monitoring + union-alert CI gating + pre-
+deployment soak workflows fully CLI-native
+on a single terminal without splitting.
 M4.14.e adds `--explain` flag to `tenant policies`
 — closes ADR-0281 Q1. After M4.14.g shipped the
 precedence-resolved effective view, operators

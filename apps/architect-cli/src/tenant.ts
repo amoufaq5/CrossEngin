@@ -42,6 +42,12 @@ import {
   type HousekeepingTableReport,
 } from "./gateway-housekeeping.js";
 import {
+  installShutdownBridge,
+  parseWatchFlags,
+  runHousekeepingWatchLoop,
+  type WatchOverride,
+} from "./housekeeping-watch.js";
+import {
   gatherRetentionHousekeepingReport,
   type RetentionHousekeepingReport,
   type RetentionHousekeepingTableReport,
@@ -62,6 +68,9 @@ export interface TenantContext extends RunContext {
   readonly retentionOverride?: PostgresTraceRetention;
   readonly idempotencyStoreOverride?: PostgresIdempotencyStore;
   readonly clockOverride?: () => Date;
+  // M4.14.d — `--watch` mode test-injection hooks. Production callers
+  // leave undefined and get default setTimeout/SIGINT+SIGTERM handling.
+  readonly watchOverride?: WatchOverride;
 }
 
 // The combined view's alertable-field set is the UNION of both
@@ -103,6 +112,13 @@ export async function runTenant(command: ParsedCommand, ctx: TenantContext): Pro
 }
 
 async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext): Promise<number> {
+  // M4.14.d — parse --watch flags BEFORE PG resolution so misuse exits
+  // fast without a connection attempt. Shared infrastructure handles
+  // --watch-interval bounds + --watch-keep-going + format compatibility
+  // checks identically to gateway and retention housekeeping.
+  const watchFlags = parseWatchFlags(command, ctx.io, "tenant housekeeping");
+  if (typeof watchFlags === "number") return watchFlags;
+
   // --tenant + --all-tenants parsing + mutual-exclusivity check BEFORE
   // PG resolution.
   const tenantFlag = getStringFlag(command, "tenant");
@@ -164,36 +180,132 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
     }
   }
 
-  try {
+  // M4.14.d — gather closure shared by single-tick AND --watch loop. Each
+  // tick fetches BOTH dashboards concurrently (Promise.all interleaves on
+  // the single PG connection so total wall-clock is approximately the sum
+  // of both gather sequences, but the code shape stays clean) AND
+  // evaluates threshold alerts across the union. Returning one envelope
+  // means the loop renders ONCE per tick — no interleaved-render layout
+  // garbling. `now` is sampled INSIDE the closure so each tick gets a
+  // fresh clock; under fixed clock injection the value stays constant.
+  type CombinedReport = {
+    readonly gateway: HousekeepingReport;
+    readonly retention: RetentionHousekeepingReport;
+    readonly tripped: ReadonlyArray<TrippedAlert>;
+  };
+  const gather = async (): Promise<CombinedReport> => {
     const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
     const idempotencyStore = ctx.idempotencyStoreOverride ?? new PostgresIdempotencyStore(conn);
     const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
+    const [gateway, retentionReport] = await Promise.all([
+      gatherHousekeepingReport({
+        conn,
+        retention,
+        idempotencyStore,
+        now,
+        tenantId,
+        allTenants,
+      }),
+      gatherRetentionHousekeepingReport({
+        conn,
+        retention,
+        now,
+        tenantId,
+        allTenants,
+      }),
+    ]);
+    const tripped =
+      alerts.length > 0 ? evaluateAlertsAcrossDashboards(gateway, retentionReport, alerts) : [];
+    return { gateway, retention: retentionReport, tripped };
+  };
 
-    // Gather both dashboards. Parallel via Promise.all — they share the
-    // conn but each does its own queries; PG connection is request-
-    // serial so this effectively interleaves rather than parallelizing,
-    // but the code shape mirrors how independent gather closures
-    // compose.
-    let gateway: HousekeepingReport;
-    let retentionReport: RetentionHousekeepingReport;
+  // Per-tick render. Used by both single-tick and watch paths so the
+  // human + JSON layouts stay in sync. Returns "halt" when any
+  // threshold alert tripped; the watch loop maps that to exit 3 (or
+  // records it as "ever halted" under --watch-keep-going).
+  const renderTick = (report: CombinedReport): "halt" | void => {
+    if (command.format === "json") {
+      // NDJSON under --watch (one envelope per line). Single-tick mode
+      // also uses this branch — JSON output is line-terminated either
+      // way so the shape stays identical to the gateway/retention
+      // housekeeping convention.
+      ctx.io.stdout.write(
+        JSON.stringify({
+          action: "tenant.housekeeping",
+          asOf: report.gateway.asOf,
+          ...(tenantId !== undefined ? { tenantId } : {}),
+          ...(allTenants === true ? { allTenants: true as const } : {}),
+          gateway: report.gateway,
+          retention: report.retention,
+          alerts: report.tripped,
+        }) + "\n",
+      );
+    } else {
+      renderHumanReport(ctx, report.gateway, report.retention, tenantId, allTenants);
+      if (report.tripped.length > 0) {
+        ctx.io.stdout.write(`\nTHRESHOLD ALERTS (${report.tripped.length} tripped):\n`);
+        for (const t of report.tripped) ctx.io.stdout.write(renderTrippedAlert(t) + "\n");
+      }
+    }
+    return report.tripped.length > 0 ? "halt" : undefined;
+  };
+
+  // Error renderer used only under --watch-keep-going. When a tick's
+  // gather() throws, render a placeholder line/envelope and the loop
+  // continues. Mirrors gateway-housekeeping.ts:renderError shape.
+  const renderError = (err: Error): void => {
+    if (command.format === "json") {
+      const nowIso = (
+        ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date()
+      ).toISOString();
+      ctx.io.stdout.write(
+        JSON.stringify({
+          action: "tenant.housekeeping",
+          asOf: nowIso,
+          error: { message: err.message },
+        }) + "\n",
+      );
+    } else {
+      ctx.io.stdout.write(`tenant housekeeping: (error this tick: ${err.message})\n`);
+    }
+  };
+
+  try {
+    if (watchFlags.watch) {
+      // SIGINT/SIGTERM-to-AbortController bridge for graceful Ctrl-C +
+      // pod-shutdown handling. Skips when tests supply abortSignal
+      // directly via watchOverride.
+      const shutdownBridge =
+        ctx.watchOverride?.abortSignal === undefined
+          ? installShutdownBridge(ctx.watchOverride?.signalRegistrar)
+          : undefined;
+      try {
+        const result = await runHousekeepingWatchLoop<CombinedReport>({
+          gather,
+          render: renderTick,
+          clearScreenBeforeRender: command.format === "human",
+          io: ctx.io,
+          options: {
+            intervalMs: watchFlags.intervalSeconds * 1000,
+            maxIterations: ctx.watchOverride?.maxIterations,
+            abortSignal: ctx.watchOverride?.abortSignal ?? shutdownBridge?.signal,
+            setTimeoutFn: ctx.watchOverride?.setTimeoutFn,
+            clearTimeoutFn: ctx.watchOverride?.clearTimeoutFn,
+          },
+          keepGoing: watchFlags.keepGoing,
+          errorRender: renderError,
+        });
+        return result.halted ? 3 : 0;
+      } finally {
+        shutdownBridge?.cleanup();
+      }
+    }
+
+    // Single-tick mode (no --watch). Gather errors bubble up to the
+    // generic catch below so the error message has the right prefix.
+    let report: CombinedReport;
     try {
-      [gateway, retentionReport] = await Promise.all([
-        gatherHousekeepingReport({
-          conn,
-          retention,
-          idempotencyStore,
-          now,
-          tenantId,
-          allTenants,
-        }),
-        gatherRetentionHousekeepingReport({
-          conn,
-          retention,
-          now,
-          tenantId,
-          allTenants,
-        }),
-      ]);
+      report = await gather();
     } catch (err) {
       printError(
         ctx.io,
@@ -201,29 +313,24 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
       );
       return 1;
     }
-
-    const tripped =
-      alerts.length > 0 ? evaluateAlertsAcrossDashboards(gateway, retentionReport, alerts) : [];
-
     if (command.format === "json") {
       printJson(ctx.io, {
         action: "tenant.housekeeping",
-        asOf: gateway.asOf,
+        asOf: report.gateway.asOf,
         ...(tenantId !== undefined ? { tenantId } : {}),
         ...(allTenants === true ? { allTenants: true as const } : {}),
-        gateway,
-        retention: retentionReport,
-        alerts: tripped,
+        gateway: report.gateway,
+        retention: report.retention,
+        alerts: report.tripped,
       });
     } else {
-      renderHumanReport(ctx, gateway, retentionReport, tenantId, allTenants);
-      if (tripped.length > 0) {
-        ctx.io.stdout.write(`\nTHRESHOLD ALERTS (${tripped.length} tripped):\n`);
-        for (const t of tripped) ctx.io.stdout.write(renderTrippedAlert(t) + "\n");
+      renderHumanReport(ctx, report.gateway, report.retention, tenantId, allTenants);
+      if (report.tripped.length > 0) {
+        ctx.io.stdout.write(`\nTHRESHOLD ALERTS (${report.tripped.length} tripped):\n`);
+        for (const t of report.tripped) ctx.io.stdout.write(renderTrippedAlert(t) + "\n");
       }
     }
-
-    return tripped.length > 0 ? 3 : 0;
+    return report.tripped.length > 0 ? 3 : 0;
   } finally {
     await closeConn();
   }
