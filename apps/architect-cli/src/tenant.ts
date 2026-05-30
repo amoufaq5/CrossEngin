@@ -185,7 +185,26 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
       );
       return 2;
     }
-    return await runTenantHousekeepingDiff(command, ctx, tenantFlag, [diffFlag, ...addTenantFlags]);
+    // M4.15.h — --axis gateway|retention filters the fieldDiffs to a
+    // single substrate surface. Useful when operators audit one axis
+    // only (e.g., "did retention overrides drift?" without the
+    // gateway-axis noise). Validate the value BEFORE PG so typos
+    // exit fast.
+    const axisFlag = getStringFlag(command, "axis");
+    if (axisFlag !== null && axisFlag !== "gateway" && axisFlag !== "retention") {
+      printError(
+        ctx.io,
+        `tenant housekeeping: invalid --axis '${axisFlag}' (expected 'gateway' or 'retention')`,
+      );
+      return 2;
+    }
+    return await runTenantHousekeepingDiff(
+      command,
+      ctx,
+      tenantFlag,
+      [diffFlag, ...addTenantFlags],
+      axisFlag as "gateway" | "retention" | null,
+    );
   }
   if (addTenantFlags.length > 0) {
     // --add-tenant without --diff has no anchor model: --diff supplies
@@ -1209,6 +1228,7 @@ async function runTenantHousekeepingDiff(
   ctx: TenantContext,
   inputLhs: string,
   rhsInputs: ReadonlyArray<string>,
+  axisFilter: "gateway" | "retention" | null = null,
 ): Promise<number> {
   // --threshold validation (matches policies --diff convention).
   const thresholdError = validateDiffThresholdFlag(command);
@@ -1369,10 +1389,17 @@ async function runTenantHousekeepingDiff(
 
     if (n === 1) {
       const rhs = rhsSides[0]!;
-      const fieldDiffs = computeHousekeepingFieldDiffs(
+      const rawFieldDiffs = computeHousekeepingFieldDiffs(
         { gateway: anchorSide.gateway, retention: anchorSide.retention },
         { gateway: rhs.gateway, retention: rhs.retention },
       );
+      // M4.15.h — --axis filter narrows fieldDiffs to one substrate.
+      // Acts as a post-processing step on the computed diffs; the
+      // gather already retrieved both axes so there's no extra PG
+      // cost. Empty result on a filtered axis is still a valid no-
+      // divergence outcome.
+      const fieldDiffs =
+        axisFilter === null ? rawFieldDiffs : rawFieldDiffs.filter((d) => d.axis === axisFilter);
       if (command.format === "json") {
         printJson(ctx.io, {
           action: "tenant.housekeeping.diff",
@@ -1426,13 +1453,21 @@ async function runTenantHousekeepingDiff(
     // max-divergence across all comparisons (any comparison's
     // fieldDiffs.length >= threshold trips exit 3, matching
     // policies M4.14.a semantic).
-    const comparisons = rhsSides.map((rhs) => ({
-      right: rhs,
-      fieldDiffs: computeHousekeepingFieldDiffs(
+    // M4.15.h — same axis filter applies per comparison in N-way
+    // mode. The filter narrows EACH comparison's fieldDiffs to the
+    // chosen axis; max-divergence exit code reflects the filtered
+    // counts (so operators gating on "any retention drift" don't
+    // trip on gateway-axis differences).
+    const comparisons = rhsSides.map((rhs) => {
+      const raw = computeHousekeepingFieldDiffs(
         { gateway: anchorSide.gateway, retention: anchorSide.retention },
         { gateway: rhs.gateway, retention: rhs.retention },
-      ),
-    }));
+      );
+      return {
+        right: rhs,
+        fieldDiffs: axisFilter === null ? raw : raw.filter((d) => d.axis === axisFilter),
+      };
+    });
 
     if (command.format === "json") {
       printJson(ctx.io, {

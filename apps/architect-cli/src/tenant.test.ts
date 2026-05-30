@@ -4519,3 +4519,246 @@ describe("--format gh-summary across diff family (M4.15.e)", () => {
     expect(output).toContain("ticket\\|456");
   });
 });
+
+// M4.15.h — `tenant housekeeping --diff --axis gateway|retention`
+// filter. Closes ADR-0291 Q2. Post-processes the computed fieldDiffs
+// to a single substrate surface. Composes with all formats + N-way
+// + --exit-on-divergence.
+describe("runTenant housekeeping --diff --axis filter (M4.15.h)", () => {
+  it("invalid --axis value exits 2 with parse error", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "bogus",
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --axis 'bogus'");
+  });
+
+  it("--axis gateway filters fieldDiffs to gateway axis only (JSON)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "gateway",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      fieldDiffs: Array<{ axis: string }>;
+    };
+    expect(env.fieldDiffs.length).toBeGreaterThan(0);
+    for (const d of env.fieldDiffs) {
+      expect(d.axis).toBe("gateway");
+    }
+  });
+
+  it("--axis retention filters fieldDiffs to retention axis only (JSON)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "retention",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { fieldDiffs: Array<{ axis: string }> };
+    expect(env.fieldDiffs.length).toBeGreaterThan(0);
+    for (const d of env.fieldDiffs) {
+      expect(d.axis).toBe("retention");
+    }
+  });
+
+  it("--axis filter applies to N-way comparisons per-pair (multi envelope)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--axis",
+        "gateway",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      comparisons: Array<{ fieldDiffs: Array<{ axis: string }> }>;
+    };
+    expect(env.comparisons).toHaveLength(2);
+    for (const c of env.comparisons) {
+      for (const d of c.fieldDiffs) {
+        expect(d.axis).toBe("gateway");
+      }
+    }
+  });
+
+  it("--axis filter applies to CSV output (only filtered axis rows present)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "retention",
+        "--format",
+        "csv",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // axis column is index 4 (0-based). All data rows must equal
+    // 'retention' in that column.
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i]!.split(",");
+      expect(parts[4]).toBe("retention");
+    }
+  });
+
+  it("--axis filter narrows --exit-on-divergence to the filtered axis", async () => {
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    // Verify gateway axis trips divergence with the fixture.
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "gateway",
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--axis gh-summary integration: Markdown table contains only filtered axis", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "gateway",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // Find the data rows after the Markdown table delimiter.
+    const tableSection = output.split("|------|-------|-------|------|-------|")[1] ?? "";
+    expect(tableSection).toContain("| gateway |");
+    expect(tableSection).not.toContain("| retention |");
+  });
+});
