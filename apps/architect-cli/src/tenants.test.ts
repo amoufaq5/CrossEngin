@@ -662,3 +662,140 @@ describe("runTenants list --format csv-full (M4.15.f)", () => {
     expect(parts[7]).toBe("");
   });
 });
+
+// M4.15.g — `tenants list --include-policy-count` computed column.
+// Closes ADR-0289 Q2 + ADR-0293 Q1. LEFT JOIN against
+// meta.tenant_retention_policies counts per-tenant overrides via
+// COALESCE-to-0 for tenants with no policies. Composes with all
+// formats (json, csv, csv-full, tsv, human) — extends each shape
+// with one additional `policy_count` column.
+describe("runTenants list --include-policy-count (M4.15.g)", () => {
+  const TENANT_A_WITH_COUNT = {
+    ...TENANT_A,
+    policy_count: 5,
+  };
+  const TENANT_B_WITH_COUNT = {
+    ...TENANT_B,
+    policy_count: 0,
+  };
+
+  it("--include-policy-count adds LEFT JOIN subquery + COALESCE to SQL", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A_WITH_COUNT] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--include-policy-count", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).toContain("LEFT JOIN");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0)");
+    expect(queries[0]?.sql).toContain("meta.tenant_retention_policies");
+    expect(queries[0]?.sql).toContain("GROUP BY tenant_id");
+  });
+
+  it("--include-policy-count exposes policy_count field in JSON envelope", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A_WITH_COUNT, TENANT_B_WITH_COUNT] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--include-policy-count", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenants: Array<{ slug: string; policy_count: number }>;
+    };
+    expect(env.tenants[0].policy_count).toBe(5);
+    expect(env.tenants[1].policy_count).toBe(0);
+  });
+
+  it("--include-policy-count appends column to --format csv", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A_WITH_COUNT, TENANT_B_WITH_COUNT] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--include-policy-count", "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id,slug,name,status,tier,policy_count");
+    expect(lines[1]).toBe(`${TENANT_A.id},acme-prod,Acme Production,active,enterprise,5`);
+    expect(lines[2]).toBe(`${TENANT_B.id},beta-corp,Beta Corp,suspended,small,0`);
+  });
+
+  it("--include-policy-count appends column to --format csv-full", async () => {
+    const TENANT_A_FULL_WITH_COUNT = {
+      ...TENANT_A_FULL,
+      policy_count: 3,
+    };
+    const { conn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_WITH_COUNT] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--include-policy-count", "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "id,slug,name,status,tier,region,schema_name,residency,search_locale,created_at,updated_at,policy_count",
+    );
+    expect(lines[1]).toContain(",3");
+  });
+
+  it("--include-policy-count appends column to --format tsv", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A_WITH_COUNT] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--include-policy-count", "--format", "tsv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id\tslug\tname\tstatus\ttier\tpolicy_count");
+    expect(lines[1]).toContain("\t5");
+  });
+
+  it("--include-policy-count adds `policies` column to human render", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A_WITH_COUNT, TENANT_B_WITH_COUNT] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--include-policy-count"), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("policies");
+    // Each row should include a numeric count after the standard
+    // tier column. With slug-padded widths, the absolute position
+    // varies, but the count values 5 and 0 must appear.
+    expect(output).toContain("5 ");
+    expect(output).toContain("0 ");
+  });
+
+  it("no --include-policy-count: SQL does NOT include the LEFT JOIN", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).not.toContain("LEFT JOIN");
+    expect(queries[0]?.sql).not.toContain("policy_count");
+  });
+
+  it("--include-policy-count composes with --status filter", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A_WITH_COUNT] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--include-policy-count", "--status", "active"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Both the LEFT JOIN AND the status filter present.
+    expect(queries[0]?.sql).toContain("LEFT JOIN");
+    expect(queries[0]?.sql).toContain("t.status = $1");
+    expect(queries[0]?.params).toEqual(["active"]);
+  });
+});

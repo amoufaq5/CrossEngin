@@ -98,6 +98,12 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
   }
   const tableFilter = getStringFlag(command, "table-filter");
   const hasOverrides = getBooleanFlag(command, "has-overrides");
+  // M4.15.g — --include-policy-count adds a computed `policy_count`
+  // column via LEFT JOIN against meta.tenant_retention_policies.
+  // Tenants with no overrides report 0 (via COALESCE). Composes
+  // with --has-overrides (which gates on EXISTS) — operators using
+  // both get only tenants with policy_count > 0 returned.
+  const includePolicyCount = getBooleanFlag(command, "include-policy-count");
 
   const conn = await resolveConn(ctx, "tenants list");
   if (conn === null) return 1;
@@ -121,10 +127,18 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
       // serialized to compact JSON for embedding in a CSV cell;
       // timestamps emitted in stable ISO format via to_char (same
       // shape as `tenants get`).
-      const { sql, params } = buildListQueryFull(statusFlag, tableFilter, hasOverrides);
-      const fullResult = await conn.exec.query<TenantRowFull>(sql, params);
+      const { sql, params } = buildListQueryFull(
+        statusFlag,
+        tableFilter,
+        hasOverrides,
+        includePolicyCount,
+      );
+      const fullResult = await conn.exec.query<TenantRowFull & { policy_count?: number }>(
+        sql,
+        params,
+      );
       const fullRows = fullResult.rows;
-      const headers = [
+      const baseHeaders = [
         "id",
         "slug",
         "name",
@@ -136,28 +150,39 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         "search_locale",
         "created_at",
         "updated_at",
-      ] as const;
-      const csvRows = fullRows.map((r) => [
-        r.id,
-        r.slug,
-        r.name,
-        r.status,
-        r.tier,
-        r.region,
-        r.schema_name,
-        // residency JSONB → compact JSON string for CSV. printCsv
-        // handles quoting + escaping for embedded quotes.
-        r.residency === null ? null : JSON.stringify(r.residency),
-        r.search_locale,
-        r.created_at,
-        r.updated_at,
-      ]);
+      ];
+      const headers = includePolicyCount
+        ? ([...baseHeaders, "policy_count"] as const)
+        : (baseHeaders as ReadonlyArray<string>);
+      const csvRows = fullRows.map((r) => {
+        const base = [
+          r.id,
+          r.slug,
+          r.name,
+          r.status,
+          r.tier,
+          r.region,
+          r.schema_name,
+          // residency JSONB → compact JSON string for CSV. printCsv
+          // handles quoting + escaping for embedded quotes.
+          r.residency === null ? null : JSON.stringify(r.residency),
+          r.search_locale,
+          r.created_at,
+          r.updated_at,
+        ];
+        return includePolicyCount ? [...base, r.policy_count ?? 0] : base;
+      });
       printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",");
       return 0;
     }
 
-    const { sql, params } = buildListQuery(statusFlag, tableFilter, hasOverrides);
-    const result = await conn.exec.query<TenantRow>(sql, params);
+    const { sql, params } = buildListQuery(
+      statusFlag,
+      tableFilter,
+      hasOverrides,
+      includePolicyCount,
+    );
+    const result = await conn.exec.query<TenantRow & { policy_count?: number }>(sql, params);
     const rows = result.rows;
     if (command.format === "json") {
       printJson(ctx.io, { action: "tenants.list", count: rows.length, tenants: rows });
@@ -168,15 +193,23 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
       // pipelines (pandas, Excel, jq-equivalents). Empty result set
       // still emits the header row (valid CSV; spreadsheet workflows
       // want the header present even when no rows match).
-      const headers = ["id", "slug", "name", "status", "tier"] as const;
-      const csvRows = rows.map((r) => [r.id, r.slug, r.name, r.status, r.tier]);
+      // M4.15.g — --include-policy-count appends a `policy_count`
+      // column for cohort analysis.
+      const baseHeaders = ["id", "slug", "name", "status", "tier"];
+      const headers = includePolicyCount
+        ? ([...baseHeaders, "policy_count"] as const)
+        : (baseHeaders as ReadonlyArray<string>);
+      const csvRows = rows.map((r) => {
+        const base = [r.id, r.slug, r.name, r.status, r.tier];
+        return includePolicyCount ? [...base, r.policy_count ?? 0] : base;
+      });
       if (command.format === "tsv") {
         printTsv(ctx.io, headers, csvRows);
       } else {
         printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",");
       }
     } else {
-      renderHumanTable(ctx, rows, statusFlag, tableFilter, hasOverrides);
+      renderHumanTable(ctx, rows, statusFlag, tableFilter, hasOverrides, includePolicyCount);
     }
     return 0;
   } catch (err) {
@@ -321,6 +354,7 @@ function buildListQuery(
   statusFlag: string | null,
   tableFilter: string | null,
   hasOverrides: boolean,
+  includePolicyCount: boolean = false,
 ): { sql: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -337,7 +371,17 @@ function buildListQuery(
     where.push(`EXISTS (SELECT 1 FROM meta.tenant_retention_policies p WHERE p.tenant_id = t.id)`);
   }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
-  const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier FROM meta.tenants t${whereClause} ORDER BY t.slug`;
+  // M4.15.g — --include-policy-count adds COALESCE(pc.policy_count,
+  // 0) AS policy_count from a LEFT JOIN against a per-tenant
+  // count subquery. Tenants with no overrides report 0 (COALESCE
+  // handles the LEFT-JOIN-missed case).
+  const selectExtra = includePolicyCount
+    ? ", COALESCE(pc.policy_count, 0)::int AS policy_count"
+    : "";
+  const joinExtra = includePolicyCount
+    ? " LEFT JOIN (SELECT tenant_id, COUNT(*)::int AS policy_count FROM meta.tenant_retention_policies GROUP BY tenant_id) pc ON pc.tenant_id = t.id"
+    : "";
+  const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier${selectExtra} FROM meta.tenants t${joinExtra}${whereClause} ORDER BY t.slug`;
   return { sql, params };
 }
 
@@ -350,6 +394,7 @@ function buildListQueryFull(
   statusFlag: string | null,
   tableFilter: string | null,
   hasOverrides: boolean,
+  includePolicyCount: boolean = false,
 ): { sql: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -366,20 +411,29 @@ function buildListQueryFull(
     where.push(`EXISTS (SELECT 1 FROM meta.tenant_retention_policies p WHERE p.tenant_id = t.id)`);
   }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
+  // M4.15.g — --include-policy-count integration (same shape as
+  // buildListQuery; the join + COALESCE is identical).
+  const selectExtra = includePolicyCount
+    ? ", COALESCE(pc.policy_count, 0)::int AS policy_count"
+    : "";
+  const joinExtra = includePolicyCount
+    ? " LEFT JOIN (SELECT tenant_id, COUNT(*)::int AS policy_count FROM meta.tenant_retention_policies GROUP BY tenant_id) pc ON pc.tenant_id = t.id"
+    : "";
   const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier, t.region, t.schema_name, t.residency, t.search_locale,
                       to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-                      to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-               FROM meta.tenants t${whereClause}
+                      to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at${selectExtra}
+               FROM meta.tenants t${joinExtra}${whereClause}
                ORDER BY t.slug`;
   return { sql, params };
 }
 
 function renderHumanTable(
   ctx: TenantsContext,
-  rows: ReadonlyArray<TenantRow>,
+  rows: ReadonlyArray<TenantRow & { policy_count?: number }>,
   statusFlag: string | null,
   tableFilter: string | null,
   hasOverrides: boolean,
+  includePolicyCount: boolean = false,
 ): void {
   const filters: string[] = [];
   if (statusFlag !== null) filters.push(`status=${statusFlag}`);
@@ -395,12 +449,17 @@ function renderHumanTable(
   const nameWidth = Math.max(4, ...rows.map((r) => r.name.length));
   const statusWidth = Math.max(6, ...rows.map((r) => r.status.length));
   const tierWidth = Math.max(4, ...rows.map((r) => r.tier.length));
+  // M4.15.g — extra `policies` column (just the count number) when
+  // --include-policy-count is set. Right-padded to a 7-char min
+  // matching the header "policies".
+  const policyCountSuffix = includePolicyCount ? `  ${"policies".padEnd(8)}` : "";
   ctx.io.stdout.write(
-    `  ${"id".padEnd(36)}  ${"slug".padEnd(slugWidth)}  ${"name".padEnd(nameWidth)}  ${"status".padEnd(statusWidth)}  ${"tier".padEnd(tierWidth)}\n`,
+    `  ${"id".padEnd(36)}  ${"slug".padEnd(slugWidth)}  ${"name".padEnd(nameWidth)}  ${"status".padEnd(statusWidth)}  ${"tier".padEnd(tierWidth)}${policyCountSuffix}\n`,
   );
   for (const r of rows) {
+    const pcSuffix = includePolicyCount ? `  ${String(r.policy_count ?? 0).padEnd(8)}` : "";
     ctx.io.stdout.write(
-      `  ${r.id.padEnd(36)}  ${r.slug.padEnd(slugWidth)}  ${r.name.padEnd(nameWidth)}  ${r.status.padEnd(statusWidth)}  ${r.tier.padEnd(tierWidth)}\n`,
+      `  ${r.id.padEnd(36)}  ${r.slug.padEnd(slugWidth)}  ${r.name.padEnd(nameWidth)}  ${r.status.padEnd(statusWidth)}  ${r.tier.padEnd(tierWidth)}${pcSuffix}\n`,
     );
   }
 }
