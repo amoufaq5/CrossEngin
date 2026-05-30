@@ -387,3 +387,118 @@ describe("runTenants get (M4.14.i)", () => {
     expect(output).toContain("updated_at:  2026-05-15T14:45:00.000Z");
   });
 });
+
+// M4.15.b — `tenants list --format csv|tsv` bulk export tests.
+// Closes ADR-0285 Q4. CSV/TSV output is a 5-column row-per-tenant
+// shape (id, slug, name, status, tier) suitable for spreadsheet /
+// pandas workflows. Empty result still emits the header row.
+// --csv-separator overrides comma with the same validation pattern
+// retention/policies use (rejects '"' and newlines).
+describe("runTenants list --format csv|tsv (M4.15.b)", () => {
+  it("--format csv emits header + one row per tenant", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A, TENANT_B, TENANT_C] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id,slug,name,status,tier");
+    expect(lines).toHaveLength(4); // header + 3 tenants
+    expect(lines[1]).toBe(`${TENANT_A.id},acme-prod,Acme Production,active,enterprise`);
+    expect(lines[2]).toBe(`${TENANT_B.id},beta-corp,Beta Corp,suspended,small`);
+    expect(lines[3]).toBe(`${TENANT_C.id},candidate-inc,Candidate Inc,active,regulated`);
+  });
+
+  it("--format tsv emits header + rows with tab separator", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "tsv"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id\tslug\tname\tstatus\ttier");
+    expect(lines[1]).toBe(`${TENANT_A.id}\tacme-prod\tAcme Production\tactive\tenterprise`);
+  });
+
+  it("--format csv with empty result emits header only", async () => {
+    const { conn } = fakeConn({ tenantRows: [] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe("id,slug,name,status,tier");
+  });
+
+  it("--format csv respects --status filter (only filtered rows in output)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A, TENANT_C] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--status", "active", "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines).toHaveLength(3); // header + 2 active tenants
+    // Filter passed through to SQL params.
+    expect(queries[0]?.params).toEqual(["active"]);
+  });
+
+  it("--format csv with --csv-separator ';' uses semicolon", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv", "--csv-separator", ";"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("id;slug;name;status;tier");
+    expect(lines[1]).toBe(`${TENANT_A.id};acme-prod;Acme Production;active;enterprise`);
+  });
+
+  it("--csv-separator '\"' exits 2 BEFORE PG ('cannot be \" or newline')", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv", "--csv-separator", '"'),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--csv-separator cannot be");
+    // Validation fires BEFORE the SQL query.
+    expect(queries.length).toBe(0);
+  });
+
+  it("--csv-separator newline exits 2 BEFORE PG", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv", "--csv-separator", "\n"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--csv-separator cannot be");
+    expect(queries.length).toBe(0);
+  });
+
+  it("--csv-separator is silently ignored under --format json", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "json", "--csv-separator", ";"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // JSON envelope unchanged regardless of csv-separator (silently
+    // ignored in non-CSV formats — matches retention precedent).
+    const env = JSON.parse(out()) as { action: string };
+    expect(env.action).toBe("tenants.list");
+  });
+});

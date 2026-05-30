@@ -26,7 +26,7 @@ import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@cr
 
 import { getBooleanFlag, getStringFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printError, printJson } from "./format.js";
+import { printCsv, printError, printJson, printTsv } from "./format.js";
 import { resolveTenantIdentifier } from "./tenant-resolver.js";
 
 export interface TenantsContext extends RunContext {
@@ -102,12 +102,37 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
   const conn = await resolveConn(ctx, "tenants list");
   if (conn === null) return 1;
 
+  // M4.15.b — --csv-separator validation BEFORE PG. Mirrors the
+  // retention/policies pattern: reject '"' and newlines (would
+  // produce ambiguous CSV that no parser can round-trip). Only
+  // meaningful under --format csv; under tsv/human/json it's
+  // silently ignored, matching the retention precedent.
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(ctx.io, "tenants list: --csv-separator cannot be '\"' or newline");
+    return 2;
+  }
+
   try {
     const { sql, params } = buildListQuery(statusFlag, tableFilter, hasOverrides);
     const result = await conn.exec.query<TenantRow>(sql, params);
     const rows = result.rows;
     if (command.format === "json") {
       printJson(ctx.io, { action: "tenants.list", count: rows.length, tenants: rows });
+    } else if (command.format === "csv" || command.format === "tsv") {
+      // M4.15.b — CSV/TSV bulk export. Headers match TenantRow shape
+      // (id, slug, name, status, tier). Filter context lives in the
+      // command invocation; CSV is pure data rows for downstream
+      // pipelines (pandas, Excel, jq-equivalents). Empty result set
+      // still emits the header row (valid CSV; spreadsheet workflows
+      // want the header present even when no rows match).
+      const headers = ["id", "slug", "name", "status", "tier"] as const;
+      const csvRows = rows.map((r) => [r.id, r.slug, r.name, r.status, r.tier]);
+      if (command.format === "tsv") {
+        printTsv(ctx.io, headers, csvRows);
+      } else {
+        printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",");
+      }
     } else {
       renderHumanTable(ctx, rows, statusFlag, tableFilter, hasOverrides);
     }
