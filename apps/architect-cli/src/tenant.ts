@@ -592,6 +592,32 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   // server-side diff query. Composes with --effective: both reports
   // get the effective field if --effective is set.
   const diffFlag = getStringFlag(command, "diff");
+  // M4.14.b — --vs-tier <tierId> is a synthetic-RHS comparison: the
+  // right side is constructed from the SAME tenant with the same
+  // retention + same cost-ceiling override but with the tier replaced
+  // by a lookup against meta.llm_cost_tiers. Operators answering
+  // "what would change if I moved this tenant to <tierId>?" use this
+  // before committing a membership change. Mutually exclusive with
+  // --diff (both define the RHS) and with --explain (matches the
+  // existing --diff vs --explain rule from ADR-0283).
+  const vsTierFlag = getStringFlag(command, "vs-tier");
+  if (diffFlag !== null && vsTierFlag !== null) {
+    printError(
+      ctx.io,
+      "tenant policies: --diff and --vs-tier are mutually exclusive (both define the right-hand-side; pick one)",
+    );
+    return 2;
+  }
+  if (vsTierFlag !== null && explainFlag) {
+    printError(
+      ctx.io,
+      "tenant policies: --vs-tier and --explain are mutually exclusive in v1 (the synthetic RHS already answers the what-if question --explain provides)",
+    );
+    return 2;
+  }
+  if (vsTierFlag !== null) {
+    return await runTenantPoliciesVsTier(command, ctx, input, vsTierFlag, effectiveFlag);
+  }
   if (diffFlag !== null) {
     // --explain semantics don't compose cleanly with --diff in v1
     // (which side gets explained? both? selectively?). Reject the
@@ -750,42 +776,202 @@ async function runTenantPoliciesDiff(
       return 1;
     }
 
-    const fieldDiffs = computePolicyFieldDiffs(reportA, reportB);
-
-    if (command.format === "json") {
-      printJson(ctx.io, {
-        action: "tenant.policies.diff",
-        left: reportA,
-        right: reportB,
-        fieldDiffs,
-      });
-    } else if (command.format === "csv" || command.format === "tsv") {
-      // M4.14.c — one row per fieldDiff. Empty fieldDiffs still emit
-      // the header row (valid CSV; spreadsheet workflows want the
-      // header present even when policies match). Divergence exit
-      // code still fires per --exit-on-divergence semantics — CSV
-      // doesn't suppress it.
-      const sepResult = validatePoliciesCsvSeparator(command);
-      if (typeof sepResult === "string") {
-        printError(ctx.io, `tenant policies: ${sepResult}`);
-        return 2;
-      }
-      const rows = buildPoliciesDiffCsvRows(reportA, reportB, fieldDiffs);
-      if (command.format === "tsv") {
-        printTsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows);
-      } else {
-        printCsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows, sepResult.separator);
-      }
-    } else {
-      renderPoliciesDiffHuman(ctx, reportA, reportB, fieldDiffs);
-    }
-
-    // Divergence exit code mirrors retention diff: only fires when
-    // --exit-on-divergence is set, gated by --threshold.
-    return diffDivergenceExitCode(command, fieldDiffs.length);
+    return emitDiffOutput(command, ctx, reportA, reportB);
   } finally {
     await closeConn();
   }
+}
+
+// M4.14.b — extracted from runTenantPoliciesDiff so the synthetic-RHS
+// path (--vs-tier) can reuse the format-branching + exit-code
+// machinery without duplicating it. Computes fieldDiffs, dispatches
+// json / csv / tsv / human render, returns the divergence exit code.
+// Returns 2 on --csv-separator validation failure (matches the
+// inline-branch semantic from M4.14.c).
+function emitDiffOutput(
+  command: ParsedCommand,
+  ctx: TenantContext,
+  reportA: TenantPoliciesReport,
+  reportB: TenantPoliciesReport,
+): number {
+  const fieldDiffs = computePolicyFieldDiffs(reportA, reportB);
+
+  if (command.format === "json") {
+    printJson(ctx.io, {
+      action: "tenant.policies.diff",
+      left: reportA,
+      right: reportB,
+      fieldDiffs,
+    });
+  } else if (command.format === "csv" || command.format === "tsv") {
+    // M4.14.c — one row per fieldDiff. Empty fieldDiffs still emit
+    // the header row (valid CSV; spreadsheet workflows want the
+    // header present even when policies match). Divergence exit
+    // code still fires per --exit-on-divergence semantics — CSV
+    // doesn't suppress it.
+    const sepResult = validatePoliciesCsvSeparator(command);
+    if (typeof sepResult === "string") {
+      printError(ctx.io, `tenant policies: ${sepResult}`);
+      return 2;
+    }
+    const rows = buildPoliciesDiffCsvRows(reportA, reportB, fieldDiffs);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows);
+    } else {
+      printCsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows, sepResult.separator);
+    }
+  } else {
+    renderPoliciesDiffHuman(ctx, reportA, reportB, fieldDiffs);
+  }
+
+  // Divergence exit code mirrors retention diff: only fires when
+  // --exit-on-divergence is set, gated by --threshold.
+  return diffDivergenceExitCode(command, fieldDiffs.length);
+}
+
+// M4.14.b — `tenant policies <lhs> --vs-tier <tierId>` orchestrator.
+// Closes ADR-0282 Q2 + ADR-0283 Q3.
+//
+// Constructs a synthetic right-hand-side TenantPoliciesReport for the
+// SAME tenant where only the tier is swapped — retention + cost-
+// ceiling override stay identical. Operators answering "what would
+// change if I moved this tenant to <tierId>?" use this before
+// committing a membership change. Without --effective, the diff
+// usually surfaces a single tier.tierId change (when both sides
+// have a tier) which is operationally obvious; pair with
+// --effective so both sides carry their effective-ceiling field and
+// operators can read whether the effective ceiling actually changes
+// (it doesn't when the override shadows the tier — the canonical
+// "your override is doing all the work" finding).
+async function runTenantPoliciesVsTier(
+  command: ParsedCommand,
+  ctx: TenantContext,
+  inputLhs: string,
+  tierId: string,
+  effectiveFlag: boolean,
+): Promise<number> {
+  // --threshold validation (matches retention diff convention).
+  const thresholdError = validateDiffThresholdFlag(command);
+  if (thresholdError !== null) {
+    printError(ctx.io, `tenant policies: ${thresholdError}`);
+    return 2;
+  }
+
+  let conn: PgConnection;
+  let closeConn: () => Promise<void> = async () => undefined;
+  if (ctx.pgConnectionOverride !== undefined) {
+    conn = ctx.pgConnectionOverride;
+  } else {
+    try {
+      const config = parsePgEnvConfig(ctx.env);
+      conn = createNodePgConnection(config);
+      closeConn = async () => {
+        await conn.close().catch(() => undefined);
+      };
+    } catch (err) {
+      printError(
+        ctx.io,
+        `tenant policies: requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
+
+  try {
+    // Resolve LHS slug→UUID + look up tier definition concurrently —
+    // both fail-fast on bad input. The tier lookup is from
+    // meta.llm_cost_tiers directly (NOT via membership; we want the
+    // tier shape, not "is this tenant in this tier").
+    const [resolvedLhs, tierDefinition] = await Promise.all([
+      resolveTenantIdentifier(conn, inputLhs),
+      gatherTierDefinition(conn, tierId),
+    ]);
+    if (!resolvedLhs.ok) {
+      printError(ctx.io, `tenant policies --vs-tier (left '${inputLhs}'): ${resolvedLhs.error}`);
+      return 2;
+    }
+    if (tierDefinition === null) {
+      printError(ctx.io, `tenant policies --vs-tier: no tier with id '${tierId}'`);
+      return 2;
+    }
+
+    let reportLhs: TenantPoliciesReport;
+    try {
+      reportLhs = await gatherPoliciesReport(
+        conn,
+        ctx,
+        resolvedLhs.tenantId,
+        inputLhs,
+        effectiveFlag,
+        false,
+      );
+    } catch (err) {
+      printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+
+    // Synthetic RHS: same tenant, same retention, same override —
+    // tier replaced with the looked-up definition. `input` carries a
+    // `vs-tier:` prefix so the human + CSV output makes it obvious
+    // this is a synthetic comparison, not a second tenant. The
+    // effective field (under --effective) is computed against the
+    // NEW tier so operators see the precedence-walk result with the
+    // hypothetical tier substituted.
+    const reportRhs: TenantPoliciesReport = {
+      tenantId: resolvedLhs.tenantId,
+      input: `vs-tier:${tierId}`,
+      retention: reportLhs.retention,
+      costCeiling: reportLhs.costCeiling,
+      tier: tierDefinition,
+      ...(effectiveFlag
+        ? { effective: deriveEffectivePolicy(reportLhs.costCeiling, tierDefinition) }
+        : {}),
+    };
+
+    // No self-diff guard here: if the tenant's CURRENT tierId equals
+    // the --vs-tier tierId, the diff is empty — that's actually the
+    // useful answer ("moving to this tier changes nothing"), not an
+    // operator typo. Different from --diff where same-tenant-as-self
+    // is almost always a typo.
+
+    return emitDiffOutput(command, ctx, reportLhs, reportRhs);
+  } finally {
+    await closeConn();
+  }
+}
+
+// Look up a tier definition by tierId from meta.llm_cost_tiers (no
+// membership join). Returns null when the tier doesn't exist — the
+// caller renders an error. Shape matches TenantTierMembershipRow so
+// the synthetic RHS uses the existing type without coercion.
+async function gatherTierDefinition(
+  conn: PgConnection,
+  tierId: string,
+): Promise<TenantTierMembershipRow | null> {
+  const result = await conn.query<{
+    tier_id: string;
+    display_name: string;
+    max_usd_per_request: string | null;
+    max_usd_per_window: string | null;
+    window_seconds: number | null;
+  }>(
+    `SELECT tier_id, display_name,
+            max_usd_per_request::TEXT AS max_usd_per_request,
+            max_usd_per_window::TEXT AS max_usd_per_window,
+            window_seconds
+     FROM meta.llm_cost_tiers
+     WHERE tier_id = $1`,
+    [tierId],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return null;
+  return {
+    tierId: row.tier_id,
+    displayName: row.display_name,
+    maxUsdPerRequest: row.max_usd_per_request,
+    maxUsdPerWindow: row.max_usd_per_window,
+    windowSeconds: row.window_seconds,
+  };
 }
 
 // Pure helper — gathers a single tenant's policy report. Extracted

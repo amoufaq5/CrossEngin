@@ -400,6 +400,18 @@ interface FakePoliciesOpts {
       window_seconds: number | null;
     }>
   >;
+  // M4.14.b — tier-definition lookups (not via membership) for
+  // --vs-tier synthetic-RHS comparisons. Keyed by tierId.
+  readonly tierDefinitions?: Record<
+    string,
+    {
+      tier_id: string;
+      display_name: string;
+      max_usd_per_request: string | null;
+      max_usd_per_window: string | null;
+      window_seconds: number | null;
+    }
+  >;
 }
 
 function fakePoliciesConn(opts: FakePoliciesOpts): PgConnection {
@@ -421,6 +433,15 @@ function fakePoliciesConn(opts: FakePoliciesOpts): PgConnection {
         const tenantId = String(params?.[0] ?? "");
         const rows = opts.tierRows?.[tenantId] ?? [];
         return { rows: rows as unknown as T[], rowCount: rows.length } as PgQueryResult<T>;
+      }
+      // M4.14.b — direct tier-definition lookup by tierId (no
+      // membership join) for --vs-tier synthetic-RHS comparisons.
+      if (sql.includes("FROM meta.llm_cost_tiers") && sql.includes("WHERE tier_id = $1")) {
+        const tierId = String(params?.[0] ?? "");
+        const def = opts.tierDefinitions?.[tierId];
+        return def !== undefined
+          ? ({ rows: [def as unknown as T], rowCount: 1 } as PgQueryResult<T>)
+          : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
       }
       // Unknown slug → candidates query for M4.14.j suggestions.
       // Empty result means no suggestions surface.
@@ -2544,5 +2565,332 @@ describe("runTenant policies --format csv|tsv (M4.14.c)", () => {
     );
     expect(code).toBe(0);
     expect(out()).toContain('"Enterprise, Premium"');
+  });
+});
+
+// M4.14.b — tenant policies --vs-tier tests. Closes ADR-0282 Q2 +
+// ADR-0283 Q3. Synthetic-RHS comparison: same tenant, same retention,
+// same cost-ceiling override, tier replaced by lookup against
+// meta.llm_cost_tiers. Operators preview tier-change impact before
+// committing a membership update.
+describe("runTenant policies --vs-tier (M4.14.b)", () => {
+  const ENTERPRISE_TIER = {
+    tier_id: "enterprise",
+    display_name: "Enterprise",
+    max_usd_per_request: "5.00000000",
+    max_usd_per_window: "1000.00000000",
+    window_seconds: 86400,
+  };
+  const FREE_TIER = {
+    tier_id: "free",
+    display_name: "Free",
+    max_usd_per_request: "0.05000000",
+    max_usd_per_window: "5.00000000",
+    window_seconds: 3600,
+  };
+
+  it("unknown tier exits 2 with 'no tier with id' error", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "nonexistent"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("no tier with id 'nonexistent'");
+  });
+
+  it("--vs-tier and --diff are mutually exclusive (exit 2)", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise", "--diff", TENANT_B),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--diff and --vs-tier are mutually exclusive");
+  });
+
+  it("--vs-tier and --explain are mutually exclusive (exit 2)", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise", "--explain"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--vs-tier and --explain are mutually exclusive");
+  });
+
+  it("synthetic RHS uses 'vs-tier:<tierId>' input marker in human output", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [FREE_TIER],
+      },
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("Diff between tenant policies:");
+    expect(output).toContain(`Left:  ${RESOLVED_UUID}`);
+    expect(output).toContain("Right:");
+    expect(output).toContain("vs-tier:enterprise");
+  });
+
+  it("vs-tier from free → enterprise surfaces tier.tierId diff", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [FREE_TIER],
+      },
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      action: string;
+      left: { tier: { tierId: string } };
+      right: { tier: { tierId: string }; input: string; tenantId: string };
+      fieldDiffs: Array<{ axis: string; field: string; valueA: unknown; valueB: unknown }>;
+    };
+    expect(env.action).toBe("tenant.policies.diff");
+    expect(env.left.tier.tierId).toBe("free");
+    expect(env.right.tier.tierId).toBe("enterprise");
+    expect(env.right.tenantId).toBe(RESOLVED_UUID);
+    expect(env.right.input).toBe("vs-tier:enterprise");
+    expect(env.fieldDiffs).toHaveLength(1);
+    expect(env.fieldDiffs[0]).toEqual({
+      axis: "tier",
+      field: "tier.tierId",
+      valueA: "free",
+      valueB: "enterprise",
+    });
+  });
+
+  it("vs-tier with NO current tier surfaces tier.exists false→true", async () => {
+    const conn = fakePoliciesConn({
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      fieldDiffs: Array<{ axis: string; field: string; valueA: unknown; valueB: unknown }>;
+    };
+    expect(env.fieldDiffs).toHaveLength(1);
+    expect(env.fieldDiffs[0]).toEqual({
+      axis: "tier",
+      field: "tier.exists",
+      valueA: false,
+      valueB: true,
+    });
+  });
+
+  it("vs-tier where current tier == target tier yields empty fieldDiffs (no self-guard)", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [ENTERPRISE_TIER],
+      },
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise"),
+      ctx,
+    );
+    // Empty diff is the useful "moving here changes nothing" answer
+    // — not an operator typo. Exit 0 (no divergence, no --exit-on-
+    // divergence gate).
+    expect(code).toBe(0);
+    expect(out()).toContain("No differences");
+  });
+
+  it("--vs-tier --effective populates both sides with effective field (override shadows tier)", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.50000000",
+            max_usd_per_window: "100.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: { [RESOLVED_UUID]: [FREE_TIER] },
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--vs-tier",
+        "enterprise",
+        "--effective",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      left: { effective: { source: string; ceiling: { maxUsdPerRequest: string } } };
+      right: { effective: { source: string; ceiling: { maxUsdPerRequest: string } } };
+    };
+    // Both sides have effective populated; both should yield
+    // source=override since the per-tenant override shadows the
+    // tier on each side. The canonical "your override is doing all
+    // the work" finding.
+    expect(env.left.effective.source).toBe("override");
+    expect(env.right.effective.source).toBe("override");
+    expect(env.left.effective.ceiling.maxUsdPerRequest).toBe("0.50000000");
+    expect(env.right.effective.ceiling.maxUsdPerRequest).toBe("0.50000000");
+  });
+
+  it("--vs-tier with --exit-on-divergence triggers exit 3 on tier change", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: { [RESOLVED_UUID]: [FREE_TIER] },
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--vs-tier",
+        "enterprise",
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("--vs-tier CSV emits one row per fieldDiff with synthetic input marker", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: { [RESOLVED_UUID]: [FREE_TIER] },
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "enterprise", "--format", "csv"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "tenant_a_id,tenant_a_input,tenant_b_id,tenant_b_input,axis,field,value_a,value_b",
+    );
+    expect(lines.length).toBe(2);
+    // Both tenant_a_id and tenant_b_id are the same UUID (synthetic
+    // RHS uses same tenant); only the input column differs.
+    expect(lines[1]).toBe(
+      `${RESOLVED_UUID},${RESOLVED_UUID},${RESOLVED_UUID},vs-tier:enterprise,tier,tier.tierId,free,enterprise`,
+    );
+  });
+
+  it("--vs-tier propagates LHS slug-resolution errors (unknown LHS → exit 2)", async () => {
+    const conn = fakePoliciesConn({
+      slugMap: {},
+      tierDefinitions: { enterprise: ENTERPRISE_TIER },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", "no-such-tenant", "--vs-tier", "enterprise"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--vs-tier (left 'no-such-tenant')");
   });
 });
