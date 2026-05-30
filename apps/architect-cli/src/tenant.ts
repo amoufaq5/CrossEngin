@@ -450,7 +450,7 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   if (input === undefined) {
     printError(
       ctx.io,
-      "tenant policies: missing positional argument. usage: crossengin tenant policies <slug|uuid>",
+      "tenant policies: missing positional argument. usage: crossengin tenant policies <slug|uuid> [--diff <other-slug|uuid>] [--effective]",
     );
     return 2;
   }
@@ -459,6 +459,16 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   // resolved ceiling (override → tier → none). Pure client-side
   // composition from the existing raw axes; no extra PG query.
   const effectiveFlag = getBooleanFlag(command, "effective");
+
+  // M4.14.f — --diff <other-slug|uuid> compares two tenants' policy
+  // shapes side-by-side. Mirrors the `retention diff` matrix pattern.
+  // Pure client-side comparison from two TenantPoliciesReports — no
+  // server-side diff query. Composes with --effective: both reports
+  // get the effective field if --effective is set.
+  const diffFlag = getStringFlag(command, "diff");
+  if (diffFlag !== null) {
+    return await runTenantPoliciesDiff(command, ctx, input, diffFlag, effectiveFlag);
+  }
 
   // PG conn setup mirrors runTenantHousekeeping. Tests inject via
   // pgConnectionOverride; production builds from env.
@@ -491,26 +501,9 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
     }
     const tenantId = resolved.tenantId;
 
-    // Gather all three policy axes. Run concurrently — they share the
-    // connection but each fires its own SELECT; PG connection is
-    // request-serial so this effectively interleaves rather than
-    // parallelizes, but the code shape stays clean.
     let report: TenantPoliciesReport;
     try {
-      const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
-      const [retentionEntries, costCeiling, tier] = await Promise.all([
-        gatherRetentionEntriesForTenant(retention, tenantId),
-        gatherCostCeilingForTenant(conn, tenantId),
-        gatherTierMembershipForTenant(conn, tenantId),
-      ]);
-      report = {
-        tenantId,
-        input,
-        retention: { tables: retentionEntries },
-        costCeiling,
-        tier,
-        ...(effectiveFlag ? { effective: deriveEffectivePolicy(costCeiling, tier) } : {}),
-      };
+      report = await gatherPoliciesReport(conn, ctx, tenantId, input, effectiveFlag);
     } catch (err) {
       printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
@@ -525,6 +518,130 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   } finally {
     await closeConn();
   }
+}
+
+// M4.14.f — diff orchestrator. Resolves BOTH tenants (slug→UUID for
+// each independently), gathers BOTH reports concurrently, computes
+// field-level diffs client-side, renders the result.
+async function runTenantPoliciesDiff(
+  command: ParsedCommand,
+  ctx: TenantContext,
+  inputA: string,
+  inputB: string,
+  effectiveFlag: boolean,
+): Promise<number> {
+  // --threshold validation (matches retention diff convention).
+  const thresholdError = validateDiffThresholdFlag(command);
+  if (thresholdError !== null) {
+    printError(ctx.io, `tenant policies: ${thresholdError}`);
+    return 2;
+  }
+
+  let conn: PgConnection;
+  let closeConn: () => Promise<void> = async () => undefined;
+  if (ctx.pgConnectionOverride !== undefined) {
+    conn = ctx.pgConnectionOverride;
+  } else {
+    try {
+      const config = parsePgEnvConfig(ctx.env);
+      conn = createNodePgConnection(config);
+      closeConn = async () => {
+        await conn.close().catch(() => undefined);
+      };
+    } catch (err) {
+      printError(
+        ctx.io,
+        `tenant policies: requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
+
+  try {
+    // Resolve BOTH tenant identifiers concurrently. Each call gets the
+    // M4.14.j "did you mean" treatment independently — if either side
+    // fails, the error message identifies which side failed by inputs.
+    const [resolvedA, resolvedB] = await Promise.all([
+      resolveTenantIdentifier(conn, inputA),
+      resolveTenantIdentifier(conn, inputB),
+    ]);
+    if (!resolvedA.ok) {
+      printError(ctx.io, `tenant policies --diff (left '${inputA}'): ${resolvedA.error}`);
+      return 2;
+    }
+    if (!resolvedB.ok) {
+      printError(ctx.io, `tenant policies --diff (right '${inputB}'): ${resolvedB.error}`);
+      return 2;
+    }
+
+    // Self-diff guard — comparing a tenant to itself always yields
+    // empty fieldDiffs and is almost always an operator typo. Fail
+    // fast rather than spend 6 queries computing the obvious.
+    if (resolvedA.tenantId === resolvedB.tenantId) {
+      printError(
+        ctx.io,
+        `tenant policies --diff: left and right resolve to the same tenant '${resolvedA.tenantId}' — nothing to diff`,
+      );
+      return 2;
+    }
+
+    let reportA: TenantPoliciesReport;
+    let reportB: TenantPoliciesReport;
+    try {
+      [reportA, reportB] = await Promise.all([
+        gatherPoliciesReport(conn, ctx, resolvedA.tenantId, inputA, effectiveFlag),
+        gatherPoliciesReport(conn, ctx, resolvedB.tenantId, inputB, effectiveFlag),
+      ]);
+    } catch (err) {
+      printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+
+    const fieldDiffs = computePolicyFieldDiffs(reportA, reportB);
+
+    if (command.format === "json") {
+      printJson(ctx.io, {
+        action: "tenant.policies.diff",
+        left: reportA,
+        right: reportB,
+        fieldDiffs,
+      });
+    } else {
+      renderPoliciesDiffHuman(ctx, reportA, reportB, fieldDiffs);
+    }
+
+    // Divergence exit code mirrors retention diff: only fires when
+    // --exit-on-divergence is set, gated by --threshold.
+    return diffDivergenceExitCode(command, fieldDiffs.length);
+  } finally {
+    await closeConn();
+  }
+}
+
+// Pure helper — gathers a single tenant's policy report. Extracted
+// from runTenantPolicies so the diff orchestrator can reuse it
+// without duplicating the three-axis concurrent-fetch wiring.
+async function gatherPoliciesReport(
+  conn: PgConnection,
+  ctx: TenantContext,
+  tenantId: string,
+  input: string,
+  effectiveFlag: boolean,
+): Promise<TenantPoliciesReport> {
+  const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
+  const [retentionEntries, costCeiling, tier] = await Promise.all([
+    gatherRetentionEntriesForTenant(retention, tenantId),
+    gatherCostCeilingForTenant(conn, tenantId),
+    gatherTierMembershipForTenant(conn, tenantId),
+  ]);
+  return {
+    tenantId,
+    input,
+    retention: { tables: retentionEntries },
+    costCeiling,
+    tier,
+    ...(effectiveFlag ? { effective: deriveEffectivePolicy(costCeiling, tier) } : {}),
+  };
 }
 
 async function gatherRetentionEntriesForTenant(
@@ -721,4 +838,188 @@ function deriveEffectivePolicy(
     };
   }
   return { source: "none" };
+}
+
+// M4.14.f — field-level diff over the three policy axes. JSON-friendly
+// flat list of {axis, field, valueA, valueB} entries; the field path
+// uses dotted notation so consumers can render or filter on it.
+// `undefined` for valueA/valueB means "axis or sub-axis absent on
+// that side" (distinct from `null` which means "field present but
+// explicitly NULL").
+export interface PolicyFieldDiff {
+  readonly axis: "retention" | "costCeiling" | "tier";
+  readonly field: string;
+  readonly valueA: string | number | boolean | null | undefined;
+  readonly valueB: string | number | boolean | null | undefined;
+}
+
+export function computePolicyFieldDiffs(
+  a: TenantPoliciesReport,
+  b: TenantPoliciesReport,
+): ReadonlyArray<PolicyFieldDiff> {
+  const diffs: PolicyFieldDiff[] = [];
+
+  // --- Retention axis: per-table comparison. Walk the UNION of table
+  // names from both sides; for each table, if absent on either side
+  // emit a single "exists" diff; if present on both, walk each policy
+  // field.
+  const tablesA = new Map(a.retention.tables.map((t) => [t.tableName, t] as const));
+  const tablesB = new Map(b.retention.tables.map((t) => [t.tableName, t] as const));
+  const allTables = new Set<string>([...tablesA.keys(), ...tablesB.keys()]);
+  // Sort for deterministic output — operators reading the diff
+  // shouldn't see fieldDiffs in random Map-iteration order.
+  for (const tableName of [...allTables].sort()) {
+    const ta = tablesA.get(tableName);
+    const tb = tablesB.get(tableName);
+    if (ta === undefined || tb === undefined) {
+      diffs.push({
+        axis: "retention",
+        field: `retention.${tableName}.exists`,
+        valueA: ta !== undefined,
+        valueB: tb !== undefined,
+      });
+      continue;
+    }
+    const retentionFields: ReadonlyArray<keyof TenantPolicyRetentionEntry> = [
+      "retentionDays",
+      "enabled",
+      "optOut",
+      "optOutReason",
+      "optOutUntil",
+    ];
+    for (const field of retentionFields) {
+      if (ta[field] !== tb[field]) {
+        diffs.push({
+          axis: "retention",
+          field: `retention.${tableName}.${field}`,
+          valueA: ta[field],
+          valueB: tb[field],
+        });
+      }
+    }
+  }
+
+  // --- Cost ceiling axis: if either side has a row, compare each
+  // numeric field. If only one side has a row, that's a single
+  // "exists" diff (operator-readable; the individual numeric fields
+  // would all show as undefined→value pairs which is noisier).
+  if (a.costCeiling === null && b.costCeiling !== null) {
+    diffs.push({
+      axis: "costCeiling",
+      field: "costCeiling.exists",
+      valueA: false,
+      valueB: true,
+    });
+  } else if (a.costCeiling !== null && b.costCeiling === null) {
+    diffs.push({
+      axis: "costCeiling",
+      field: "costCeiling.exists",
+      valueA: true,
+      valueB: false,
+    });
+  } else if (a.costCeiling !== null && b.costCeiling !== null) {
+    const ceilingFields: ReadonlyArray<keyof TenantCostCeilingRow> = [
+      "maxUsdPerRequest",
+      "maxUsdPerWindow",
+      "windowSeconds",
+    ];
+    for (const field of ceilingFields) {
+      if (a.costCeiling[field] !== b.costCeiling[field]) {
+        diffs.push({
+          axis: "costCeiling",
+          field: `costCeiling.${field}`,
+          valueA: a.costCeiling[field],
+          valueB: b.costCeiling[field],
+        });
+      }
+    }
+  }
+
+  // --- Tier axis: tier identity drives the comparison. If both
+  // tenants share a tierId, the tier policy fields are identical by
+  // construction (JOIN against same tier row) — no need to compare
+  // them. If tiers differ, the tierId diff is enough; operators
+  // wanting the full tier-policy comparison can rerun against the
+  // tiers themselves.
+  if (a.tier === null && b.tier !== null) {
+    diffs.push({ axis: "tier", field: "tier.exists", valueA: false, valueB: true });
+  } else if (a.tier !== null && b.tier === null) {
+    diffs.push({ axis: "tier", field: "tier.exists", valueA: true, valueB: false });
+  } else if (a.tier !== null && b.tier !== null && a.tier.tierId !== b.tier.tierId) {
+    diffs.push({
+      axis: "tier",
+      field: "tier.tierId",
+      valueA: a.tier.tierId,
+      valueB: b.tier.tierId,
+    });
+  }
+
+  return diffs;
+}
+
+function validateDiffThresholdFlag(command: ParsedCommand): string | null {
+  const thresholdRaw = getStringFlag(command, "threshold");
+  if (thresholdRaw === null) return null;
+  if (!getBooleanFlag(command, "exit-on-divergence")) {
+    return "--threshold requires --exit-on-divergence";
+  }
+  const n = Number(thresholdRaw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+    return `--threshold must be a positive integer, got '${thresholdRaw}'`;
+  }
+  return null;
+}
+
+function diffDivergenceExitCode(command: ParsedCommand, fieldDiffsLength: number): number {
+  if (!getBooleanFlag(command, "exit-on-divergence")) return 0;
+  const thresholdRaw = getStringFlag(command, "threshold");
+  const threshold = thresholdRaw === null ? 1 : Number(thresholdRaw);
+  return fieldDiffsLength >= threshold ? 3 : 0;
+}
+
+function renderDiffValue(v: string | number | boolean | null | undefined): string {
+  if (v === undefined) return "absent";
+  if (v === null) return "<null>";
+  return String(v);
+}
+
+function renderPoliciesDiffHuman(
+  ctx: TenantContext,
+  a: TenantPoliciesReport,
+  b: TenantPoliciesReport,
+  fieldDiffs: ReadonlyArray<PolicyFieldDiff>,
+): void {
+  ctx.io.stdout.write(`Diff between tenant policies:\n`);
+  ctx.io.stdout.write(`  Left:  ${a.tenantId} (input: '${a.input}')\n`);
+  ctx.io.stdout.write(`  Right: ${b.tenantId} (input: '${b.input}')\n`);
+  ctx.io.stdout.write(`\n`);
+  if (fieldDiffs.length === 0) {
+    ctx.io.stdout.write(
+      `No differences — both tenants have the same configured policy across all three axes.\n`,
+    );
+    return;
+  }
+  ctx.io.stdout.write(`Field changes (${fieldDiffs.length}):\n`);
+  // Group by axis for readability; within an axis, preserve the order
+  // computePolicyFieldDiffs emitted (table-sorted for retention,
+  // schema order for ceiling).
+  const byAxis = new Map<string, PolicyFieldDiff[]>();
+  for (const d of fieldDiffs) {
+    let list = byAxis.get(d.axis);
+    if (list === undefined) {
+      list = [];
+      byAxis.set(d.axis, list);
+    }
+    list.push(d);
+  }
+  for (const axis of ["retention", "costCeiling", "tier"] as const) {
+    const list = byAxis.get(axis);
+    if (list === undefined) continue;
+    ctx.io.stdout.write(`  [${axis}]\n`);
+    for (const d of list) {
+      const va = renderDiffValue(d.valueA);
+      const vb = renderDiffValue(d.valueB);
+      ctx.io.stdout.write(`    ${d.field.padEnd(48)} ${va}  →  ${vb}\n`);
+    }
+  }
 }

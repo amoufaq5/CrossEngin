@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,232 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.14.f adds `--diff <other-slug|uuid>` flag to
+`tenant policies` — closes ADR-0280 Q5. After M4.14.h
+shipped the per-tenant aggregated view and M4.14.g
+added the precedence-resolved effective view,
+operators wanted to COMPARE two tenants:
+post-migration cohort uniformity sampling
+(promoted 200 tenants free→pro; spot-check 10
+random ones against a known-good pro exemplar);
+differential debugging (tenant X complains about
+throttling; diff against a similar tenant to find
+the policy delta explaining the divergent
+behavior); pre-tier-change validation (preview
+what would change before moving enterprise→custom
+by diffing against a custom-tier exemplar);
+compliance attestation across tenants (verify
+tenant A and tenant B have identical retention
+for a specific table by checking empty
+fieldDiffs). Mirrors the `retention diff` matrix
+pattern from ADR-0145 but extends the comparison
+across all three policy axes simultaneously
+(retention per-table + costCeiling + tier).
+Implementation: positional[1] is the left tenant
++ --diff value is the right tenant; both
+identifiers resolved CONCURRENTLY via
+Promise.all([resolveTenantIdentifier(conn,
+inputA), resolveTenantIdentifier(conn, inputB)])
+so each side gets its own M4.14.j "did you mean"
+suggestion path independently; if either side
+fails, error message includes `left '<input>'`
+or `right '<input>'` qualifier so operators see
+which side broke; self-diff guard
+(resolvedA.tenantId === resolvedB.tenantId) →
+exit 2 fast (typo prevention; comparing a
+tenant to itself yields empty fieldDiffs by
+construction, no point spending 6 queries).
+gatherPoliciesReport extracted as a pure helper
+from runTenantPolicies — runs the 3-axis
+concurrent fetch (retention via PostgresTraceRetention,
+costCeiling via meta.llm_cost_ceilings SELECT,
+tier via meta.llm_tenant_tier_memberships JOIN);
+both reports fetched concurrently via second
+Promise.all so total wall-clock for the diff is
+roughly the same as a single tenant policies
+fetch (6 queries interleaved on the single PG
+connection). computePolicyFieldDiffs is a pure
+function over two reports — RETENTION axis
+walks the UNION of tableNames (sorted
+alphabetically for deterministic output), absent
+on one side → single `retention.<table>.exists`
+diff (false→true or true→false), present on
+both → walks 5 policy fields (retentionDays,
+enabled, optOut, optOutReason, optOutUntil)
+emitting diff per differing field; COSTCEILING
+axis row-level — one side has row + other
+doesn't → single `costCeiling.exists` diff
+(per-field diffs would all show as undefined→
+value pairs which is noisier), both have rows →
+walks 3 numeric fields (maxUsdPerRequest,
+maxUsdPerWindow, windowSeconds); TIER axis tier-
+identity drives it — one side has tier + other
+doesn't → `tier.exists` diff, both share tierId
+→ no diff (tier policy fields identical by JOIN
+construction; comparing them would be redundant),
+different tierIds → single `tier.tierId` diff
+(per-tier-policy walk skipped since tier policies
+are intrinsic to the tier not the tenant;
+operators wanting them inspect the tiers
+directly). PolicyFieldDiff is a flat shape
+`{axis, field, valueA, valueB}` where undefined
+means "axis/sub-axis absent on that side"
+(distinct from null which means "field present
+but explicitly NULL"); dotted field path
+(`retention.<table>.<field>` or
+`costCeiling.<field>` or `tier.<field>`) makes
+JSON consumers' filtering trivial. Composes
+with --effective: both reports get the
+effective field populated independently (the
+fieldDiffs themselves don't compare effective
+values — that would duplicate the raw-axis
+diff via a different lens and muddle per-axis
+grouping; operators wanting "do these enforce
+the same ceiling at runtime?" read
+left.effective vs right.effective from the
+JSON). Exit codes mirror retention diff
+convention: no flags → exit 0 always
+regardless of fieldDiffs length;
+--exit-on-divergence alone → exit 3 if
+fieldDiffs.length ≥ 1; --exit-on-divergence +
+--threshold N → exit 3 if fieldDiffs.length ≥
+N (positive integer required; non-integer or
+negative → exit 2 with clear error);
+--threshold WITHOUT --exit-on-divergence → exit
+2 with clear error ("--threshold requires
+--exit-on-divergence"; validates at boundary
+not at exit-code evaluation). Output: JSON
+envelope `{action: "tenant.policies.diff",
+left: TenantPoliciesReport, right:
+TenantPoliciesReport, fieldDiffs:
+PolicyFieldDiff[]}`; human format header echoes
+both tenant IDs + original inputs (slug-aware),
+empty fieldDiffs → "No differences — both
+tenants have the same configured policy across
+all three axes." line, non-empty → "Field
+changes (N):" header followed by per-axis
+grouped blocks ([retention] / [costCeiling] /
+[tier]) with each line showing the dotted
+field path padded to 48 cols then `valueA  →
+valueB` rendering (mirrors retention diff
+convention; → arrow direction reads left-to-
+right). Rejected — compare effective values
+not raw rows (loses configured-vs-enforced
+distinction; effective comparison derivable via
+left.effective vs right.effective from JSON),
+surface per-tier-policy-field diffs when
+tierId differs (tier policies intrinsic to
+tier not tenant; operators inspect tiers
+directly), render full reports side-by-side
+3-column matrix (balloons output for large
+retention tables; field-diff-only output stays
+focused on what changed), N-way diff with
+--add-tenant repeated flags (exit-code
+semantics get muddy — which pair trips
+divergence; deferred to Q1), SQL-side CTE
+computing diff server-side (adds PG complexity
+for zero observable difference at typical
+scale; client-side composition trivially
+handles ≤ 1K rows), exists diffs decomposed
+into per-field undefined→value lines (would
+surface N diff lines for missing N-field
+row; single exists line is cleaner), `tenant
+diff <a> <b>` as standalone top-level action
+(fragments policies surface; flag composition
+keeps it unified), threshold defaulting to 0
+(confusing semantic; 0 ≥ 0 always true; default
+1 means "any divergence trips"), --diff
+without self-diff guard (would spend 6 queries
+to compute empty result for obvious typo),
+render valueA → valueB with ↔ instead of →
+(direction-less arrows obscure left-right
+reading direction; → matches retention diff
+convention), sort fieldDiffs by axis precedence
+(every axis equally critical for compliance
+use cases; grouping for readability beats
+artificial precedence). Drawbacks — --diff
+reuses flag name pattern from retention diff
+but with different positional vs flag shape
+(retention diff uses positional `<a> <b>`;
+this uses `<a> --diff <b>`; operators familiar
+with retention diff need to mentally adapt;
+alternative `tenant policies diff <a> <b>`
+sub-action would fragment the policies
+surface), no per-tier-policy comparison when
+tiers differ (intentional design; operators
+inspect tiers directly), self-diff is error
+not no-op (scripts looping diff X vs X must
+handle exit 2; alternative silent empty
+fieldDiffs also needs documentation), cost
+ceiling exists diffs collapse per-field
+detail (operators wanting per-numeric-field
+comparison read left.costCeiling vs
+right.costCeiling JSON raw), sorted retention
+table order doesn't match natural raw-report
+order (raw retention uses listTenantPolicies
+insertion order; diff sorts alphabetically
+for determinism; two orderings for same data).
+14 new tests under "runTenant policies --diff
+(M4.14.f)" — identical policies on both sides
+yields empty fieldDiffs + "No differences"
+human output, JSON envelope shape verification
+(action / left / right / fieldDiffs +
+tier.tierId diff value), retention table on
+only one side surfaces single exists diff not
+per-field diffs, retention table on both
+sides with different retentionDays surfaces
+per-field diff (no exists diff), cost
+ceiling on only one side → single
+costCeiling.exists diff, same tier on both
+sides → no tier diff (tier policies identical
+by construction), self-diff guard exits 2
+with clear error, --exit-on-divergence with
+divergence trips exit 3, --exit-on-divergence
++ --threshold 2 with only 1 diff → exit 0,
+--threshold without --exit-on-divergence
+exits 2, --diff composes with --effective
+(both sides populate effective field; left
+shows source=override + right shows
+source=tier), invalid left tenant surfaces
+'left' qualifier in error, invalid right
+tenant surfaces 'right' qualifier in error,
+human format groups diffs by axis with
+[retention] / [costCeiling] / [tier] headers.
+cli.ts helpText extended with --diff +
+--exit-on-divergence + --threshold N options
+and 5-line description covering side-by-side
+comparison + fieldDiffs grouped by axis +
+composes-with-effective + CI integration
+pattern. Test count: tenant.test.ts grows 26
+→ 40 tests (+14). Workspace test count 9,740
+→ 9,754. Coverage gate passes — tenant.ts at
+85.93% statements / 78.53% branches / 89.65%
+functions / 85.93% lines (statements dropped
+slightly from 87.84% due to diff orchestrator
++ renderPoliciesDiffHuman edge paths; still
+above 80% threshold; branches improved 74.4%
+→ 78.53% from the explicit positive-and-
+negative paths in computePolicyFieldDiffs).
+ADR-0282 documents the design + 11 rejected
+alternatives + 6 future Qs (N-way diff with
+--add-tenant N repeats useful for cohort
+sampling but exit-code semantics need design,
+--vs-tier <tierId> comparing single tenant
+against tier's synthetic right-hand-side for
+pre-tier-change preview, persist diff outputs
+to structured audit table for compliance,
+CSV/TSV output pairs with ADR-0280 Q6,
+--diff-no-noise suppressing exists diffs for
+operators treating absence as expected, render
+effective field comparison in fieldDiffs
+deferred until operator demand). The tenant
+policies surface now answers all three operator
+questions: "what's CONFIGURED?" (default) +
+"what's ENFORCED?" (--effective) + "how do
+two tenants COMPARE?" (--diff); cohort
+uniformity verification + differential debugging
++ pre-tier-change validation + compliance
+attestation across tenants fully CLI-native.
 M4.14.g adds `--effective` flag to `tenant policies`
 — closes ADR-0280 Q2 + ADR-0154 Q1 in one milestone.
 After M4.14.h shipped the raw three-axis aggregation
