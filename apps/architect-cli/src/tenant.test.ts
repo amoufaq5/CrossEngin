@@ -4099,3 +4099,423 @@ describe("runTenant housekeeping --diff --format csv|tsv (M4.15.d)", () => {
     expect(code).toBe(3);
   });
 });
+
+// M4.15.e — `--format gh-summary` Markdown rendering across the diff
+// family. Closes ADR-0287 Q3 + ADR-0288 Q3 + ADR-0290 Q2 + ADR-0286
+// Q7 + ADR-0282 Q5. Operators redirect `crossengin <command> ...
+// --format gh-summary >> $GITHUB_STEP_SUMMARY` from CI workflows.
+// Markdown shape: ## header + metadata + field-changes table +
+// verdict-emoji footer. Multi-comparison adds per-pair ### sections
+// + Summary footer with max-divergence.
+describe("--format gh-summary across diff family (M4.15.e)", () => {
+  it("policies --diff: emits Markdown header + table + verdict emoji", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro",
+            max_usd_per_request: "1.00",
+            max_usd_per_window: "200.00",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00",
+            max_usd_per_window: "1000.00",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--diff", TENANT_B, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant policies");
+    expect(output).toContain(`**Left:** \`${RESOLVED_UUID}\``);
+    expect(output).toContain(`**Right:** \`${TENANT_B}\``);
+    expect(output).toContain("### Field changes");
+    expect(output).toContain("| Axis | Field | Left | Right |");
+    expect(output).toContain("|------|-------|------|-------|");
+    expect(output).toContain(":warning: **Divergence detected**");
+  });
+
+  it("policies --diff with no divergences: emits 'No differences' check mark", async () => {
+    // Both tenants have IDENTICAL tier → no diff.
+    const sameTier = {
+      tier_id: "pro",
+      display_name: "Pro",
+      max_usd_per_request: "1.00",
+      max_usd_per_window: "200.00",
+      window_seconds: 3600,
+    };
+    const conn = fakePoliciesConn({
+      tierRows: { [RESOLVED_UUID]: [sameTier], [TENANT_B]: [sameTier] },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--diff", TENANT_B, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(":white_check_mark: **No differences**");
+    expect(output).not.toContain(":warning:");
+  });
+
+  it("policies N-way --diff: emits multi-comparison Markdown with per-pair sections", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05",
+            max_usd_per_window: "5.00",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro",
+            max_usd_per_request: "1.00",
+            max_usd_per_window: "200.00",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_C]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00",
+            max_usd_per_window: "1000.00",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Multi-comparison diff: tenant policies");
+    expect(output).toContain(`**Anchor:** \`${RESOLVED_UUID}\``);
+    expect(output).toContain("**Comparisons:** 2");
+    expect(output).toContain(`### Comparison 1/2: vs \`${TENANT_B}\``);
+    expect(output).toContain(`### Comparison 2/2: vs \`${TENANT_C}\``);
+    expect(output).toContain("**Summary:**");
+    expect(output).toContain(":warning: **Divergence detected**");
+  });
+
+  it("policies --vs-tier: gh-summary works for synthetic RHS", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05",
+            max_usd_per_window: "5.00",
+            window_seconds: 3600,
+          },
+        ],
+      },
+      tierDefinitions: {
+        pro: {
+          tier_id: "pro",
+          display_name: "Pro",
+          max_usd_per_request: "1.00",
+          max_usd_per_window: "200.00",
+          window_seconds: 3600,
+        },
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--vs-tier", "pro", "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant policies");
+    expect(output).toContain("vs-tier:pro");
+  });
+
+  it("housekeeping --diff: emits Markdown with 5-column table (extra Table col)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant housekeeping");
+    expect(output).toContain(`**Left:** \`${RESOLVED_UUID}\``);
+    expect(output).toContain(`**Right:** \`${TENANT_B}\``);
+    expect(output).toContain("| Axis | Table | Field | Left | Right |");
+    expect(output).toContain("|------|-------|-------|------|-------|");
+    expect(output).toContain(":warning: **Divergence detected**");
+  });
+
+  it("housekeeping N-way --diff: emits multi-comparison Markdown with per-pair sections", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Multi-comparison diff: tenant housekeeping");
+    expect(output).toContain(`**Anchor:** \`${RESOLVED_UUID}\``);
+    expect(output).toContain("**Comparisons:** 2");
+    expect(output).toContain(`### Comparison 1/2: vs \`${TENANT_B}\``);
+    expect(output).toContain(`### Comparison 2/2: vs \`${TENANT_C}\``);
+    expect(output).toContain("**Summary:**");
+  });
+
+  it("--format gh-summary composes with --exit-on-divergence (exits 3 on divergence)", async () => {
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "gh-summary",
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+
+  it("multi-comparison with all-identical comparisons emits 'All comparisons match' verdict", async () => {
+    // Fake retention where every tenant has IDENTICAL tier and no
+    // tenant overrides → all pair-wise comparisons empty.
+    const sameRetention = {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 0,
+          cutoffMs: 0,
+        },
+      ],
+    };
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: sameRetention as unknown as ReturnType<typeof fakeRetention>,
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(":white_check_mark: **All comparisons match.**");
+    expect(output).toContain("max divergence 0 fields");
+  });
+
+  it("Markdown values: pipe character in values is escaped to avoid breaking table rows", async () => {
+    // Construct a fake report where one side has a tenantPolicy
+    // with optOutReason containing a pipe character. The diff
+    // includes that string value; Markdown needs the pipe
+    // escaped.
+    const retentionWithPipe = {
+      listPolicies: async () => [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      listTenantPolicies: async () => [
+        {
+          tenantId: RESOLVED_UUID,
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          optOut: false,
+          optOutReason: "ticket|123",
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+        {
+          tenantId: TENANT_B,
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          optOut: false,
+          optOutReason: "ticket|456",
+          optOutUntil: null,
+          lastPrunedAt: null,
+        },
+      ],
+      previewPrune: async () => [
+        {
+          tableName: "workflow_traces",
+          status: "previewed",
+          retentionDays: 90,
+          wouldDeleteCount: 0,
+          cutoffMs: 0,
+        },
+      ],
+    };
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retentionWithPipe as unknown as ReturnType<typeof fakeRetention>,
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // Escaped pipes (\|) should appear; unescaped pipes inside
+    // value cells would break the Markdown table parser.
+    expect(output).toContain("ticket\\|123");
+    expect(output).toContain("ticket\\|456");
+  });
+});

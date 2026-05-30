@@ -110,6 +110,14 @@ describe("parseArgs — flags", () => {
     }
   });
 
+  it("accepts --format gh-summary (M4.15.e)", () => {
+    const result = parseArgs(argv("validate", "x.json", "--format=gh-summary"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.command.format).toBe("gh-summary");
+    }
+  });
+
   it("threads multiple positionals", () => {
     const result = parseArgs(argv("diff", "a.json", "b.json"));
     expect(result.ok).toBe(true);

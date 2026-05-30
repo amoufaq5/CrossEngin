@@ -959,6 +959,8 @@ function emitDiffOutput(
     } else {
       printCsv(ctx.io, POLICIES_DIFF_CSV_HEADERS, rows, sepResult.separator);
     }
+  } else if (command.format === "gh-summary") {
+    renderPoliciesDiffGhSummary(ctx, reportA, reportB, fieldDiffs);
   } else {
     renderPoliciesDiffHuman(ctx, reportA, reportB, fieldDiffs);
   }
@@ -1019,6 +1021,8 @@ function emitMultiDiffOutput(
     } else {
       printCsv(ctx.io, headers, allRows, sepResult.separator);
     }
+  } else if (command.format === "gh-summary") {
+    renderPoliciesMultiDiffGhSummary(ctx, anchor, comparisons);
   } else {
     renderPoliciesMultiDiffHuman(ctx, anchor, comparisons);
   }
@@ -1399,6 +1403,13 @@ async function runTenantHousekeepingDiff(
         } else {
           printCsv(ctx.io, HOUSEKEEPING_DIFF_CSV_HEADERS, rows, sepResult.separator);
         }
+      } else if (command.format === "gh-summary") {
+        renderHousekeepingDiffGhSummary(
+          ctx,
+          { tenantId: anchorSide.tenantId, input: anchorSide.input },
+          { tenantId: rhs.tenantId, input: rhs.input },
+          fieldDiffs,
+        );
       } else {
         renderHousekeepingDiffHuman(
           ctx,
@@ -1460,6 +1471,12 @@ async function runTenantHousekeepingDiff(
       } else {
         printCsv(ctx.io, headers, allRows, sepResult.separator);
       }
+    } else if (command.format === "gh-summary") {
+      renderHousekeepingMultiDiffGhSummary(
+        ctx,
+        { tenantId: anchorSide.tenantId, input: anchorSide.input },
+        comparisons,
+      );
     } else {
       renderHousekeepingMultiDiffHuman(ctx, anchorSide, comparisons);
     }
@@ -2384,4 +2401,175 @@ function renderPoliciesDiffHuman(
       ctx.io.stdout.write(`    ${d.field.padEnd(48)} ${va}  →  ${vb}\n`);
     }
   }
+}
+
+// M4.15.e — Markdown summary for GitHub Step Summary integration.
+// Operators redirect `crossengin tenant policies <a> --diff <b>
+// --format gh-summary >> $GITHUB_STEP_SUMMARY` from CI workflows
+// to surface diff results in the run UI. Output is Markdown with
+// a header (anchor/left/right metadata) + field-changes table +
+// summary footer indicating divergence count. Verdict emoji
+// (`:white_check_mark:` / `:warning:`) gives a one-glance
+// signal whether the gate passed.
+function renderPoliciesDiffGhSummary(
+  ctx: TenantContext,
+  a: TenantPoliciesReport,
+  b: TenantPoliciesReport,
+  fieldDiffs: ReadonlyArray<PolicyFieldDiff>,
+): void {
+  ctx.io.stdout.write(`## Diff: tenant policies\n\n`);
+  ctx.io.stdout.write(`**Left:** \`${a.tenantId}\` (input: \`${a.input}\`)  \n`);
+  ctx.io.stdout.write(`**Right:** \`${b.tenantId}\` (input: \`${b.input}\`)\n\n`);
+  if (fieldDiffs.length === 0) {
+    ctx.io.stdout.write(`:white_check_mark: **No differences** — both tenants match.\n`);
+    return;
+  }
+  ctx.io.stdout.write(`### Field changes (${fieldDiffs.length})\n\n`);
+  ctx.io.stdout.write(`| Axis | Field | Left | Right |\n`);
+  ctx.io.stdout.write(`|------|-------|------|-------|\n`);
+  for (const d of fieldDiffs) {
+    ctx.io.stdout.write(
+      `| ${d.axis} | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+    );
+  }
+  ctx.io.stdout.write(
+    `\n:warning: **Divergence detected** — ${fieldDiffs.length} field(s) differ.\n`,
+  );
+}
+
+// M4.15.e — Markdown summary for N-way policies diff. Emits one
+// `### Comparison i/N: ...` section per pair, each followed by
+// its own field-changes table. Operators reading the summary in
+// the GitHub UI can collapse-expand sections via the natural
+// Markdown heading hierarchy. Summary footer reports max
+// divergence + total comparisons.
+function renderPoliciesMultiDiffGhSummary(
+  ctx: TenantContext,
+  anchor: TenantPoliciesReport,
+  comparisons: ReadonlyArray<{
+    readonly right: TenantPoliciesReport;
+    readonly fieldDiffs: ReadonlyArray<PolicyFieldDiff>;
+  }>,
+): void {
+  ctx.io.stdout.write(`## Multi-comparison diff: tenant policies\n\n`);
+  ctx.io.stdout.write(`**Anchor:** \`${anchor.tenantId}\` (input: \`${anchor.input}\`)  \n`);
+  ctx.io.stdout.write(`**Comparisons:** ${comparisons.length}\n\n`);
+  let maxDivergence = 0;
+  for (let i = 0; i < comparisons.length; i++) {
+    const c = comparisons[i]!;
+    maxDivergence = Math.max(maxDivergence, c.fieldDiffs.length);
+    ctx.io.stdout.write(
+      `### Comparison ${i + 1}/${comparisons.length}: vs \`${c.right.tenantId}\` (${c.fieldDiffs.length} difference${c.fieldDiffs.length === 1 ? "" : "s"})\n\n`,
+    );
+    if (c.fieldDiffs.length === 0) {
+      ctx.io.stdout.write(`:white_check_mark: No differences.\n\n`);
+      continue;
+    }
+    ctx.io.stdout.write(`| Axis | Field | Left | Right |\n`);
+    ctx.io.stdout.write(`|------|-------|------|-------|\n`);
+    for (const d of c.fieldDiffs) {
+      ctx.io.stdout.write(
+        `| ${d.axis} | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+      );
+    }
+    ctx.io.stdout.write(`\n`);
+  }
+  ctx.io.stdout.write(`---\n\n`);
+  ctx.io.stdout.write(
+    `**Summary:** ${comparisons.length} comparisons, max divergence ${maxDivergence} field${maxDivergence === 1 ? "" : "s"}.\n`,
+  );
+  if (maxDivergence === 0) {
+    ctx.io.stdout.write(`:white_check_mark: **All comparisons match.**\n`);
+  } else {
+    ctx.io.stdout.write(`:warning: **Divergence detected** in at least one comparison.\n`);
+  }
+}
+
+// M4.15.e — Markdown summary for single-comparison housekeeping
+// diff. Extra `Table` column compared to policies since
+// HousekeepingFieldDiff keys by (axis, tableName, field).
+function renderHousekeepingDiffGhSummary(
+  ctx: TenantContext,
+  left: { readonly tenantId: string; readonly input: string },
+  right: { readonly tenantId: string; readonly input: string },
+  fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>,
+): void {
+  ctx.io.stdout.write(`## Diff: tenant housekeeping\n\n`);
+  ctx.io.stdout.write(`**Left:** \`${left.tenantId}\` (input: \`${left.input}\`)  \n`);
+  ctx.io.stdout.write(`**Right:** \`${right.tenantId}\` (input: \`${right.input}\`)\n\n`);
+  if (fieldDiffs.length === 0) {
+    ctx.io.stdout.write(`:white_check_mark: **No differences** — both tenants match.\n`);
+    return;
+  }
+  ctx.io.stdout.write(`### Field changes (${fieldDiffs.length})\n\n`);
+  ctx.io.stdout.write(`| Axis | Table | Field | Left | Right |\n`);
+  ctx.io.stdout.write(`|------|-------|-------|------|-------|\n`);
+  for (const d of fieldDiffs) {
+    ctx.io.stdout.write(
+      `| ${d.axis} | \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+    );
+  }
+  ctx.io.stdout.write(
+    `\n:warning: **Divergence detected** — ${fieldDiffs.length} field(s) differ.\n`,
+  );
+}
+
+// M4.15.e — Markdown summary for N-way housekeeping diff. Same
+// shape as policies multi but with the 5-column housekeeping
+// table (extra Table column).
+function renderHousekeepingMultiDiffGhSummary(
+  ctx: TenantContext,
+  anchor: { readonly tenantId: string; readonly input: string },
+  comparisons: ReadonlyArray<{
+    readonly right: { readonly tenantId: string; readonly input: string };
+    readonly fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>;
+  }>,
+): void {
+  ctx.io.stdout.write(`## Multi-comparison diff: tenant housekeeping\n\n`);
+  ctx.io.stdout.write(`**Anchor:** \`${anchor.tenantId}\` (input: \`${anchor.input}\`)  \n`);
+  ctx.io.stdout.write(`**Comparisons:** ${comparisons.length}\n\n`);
+  let maxDivergence = 0;
+  for (let i = 0; i < comparisons.length; i++) {
+    const c = comparisons[i]!;
+    maxDivergence = Math.max(maxDivergence, c.fieldDiffs.length);
+    ctx.io.stdout.write(
+      `### Comparison ${i + 1}/${comparisons.length}: vs \`${c.right.tenantId}\` (${c.fieldDiffs.length} difference${c.fieldDiffs.length === 1 ? "" : "s"})\n\n`,
+    );
+    if (c.fieldDiffs.length === 0) {
+      ctx.io.stdout.write(`:white_check_mark: No differences.\n\n`);
+      continue;
+    }
+    ctx.io.stdout.write(`| Axis | Table | Field | Left | Right |\n`);
+    ctx.io.stdout.write(`|------|-------|-------|------|-------|\n`);
+    for (const d of c.fieldDiffs) {
+      ctx.io.stdout.write(
+        `| ${d.axis} | \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+      );
+    }
+    ctx.io.stdout.write(`\n`);
+  }
+  ctx.io.stdout.write(`---\n\n`);
+  ctx.io.stdout.write(
+    `**Summary:** ${comparisons.length} comparisons, max divergence ${maxDivergence} field${maxDivergence === 1 ? "" : "s"}.\n`,
+  );
+  if (maxDivergence === 0) {
+    ctx.io.stdout.write(`:white_check_mark: **All comparisons match.**\n`);
+  } else {
+    ctx.io.stdout.write(`:warning: **Divergence detected** in at least one comparison.\n`);
+  }
+}
+
+// Markdown-safe value formatter. `null`/`undefined` → `\`null\``
+// for visibility (operators reading the summary need to
+// distinguish "absent" from "empty string"). Booleans and numbers
+// stringified directly. Strings backtick-wrapped to inhibit
+// Markdown interpretation of special chars (asterisks, pipes,
+// etc.) and to make the value visually distinct.
+function formatMdValue(v: string | number | boolean | null | undefined): string {
+  if (v == null) return `\`null\``;
+  if (typeof v === "boolean" || typeof v === "number") return `\`${String(v)}\``;
+  // Pipes in strings would break Markdown table cells; escape them.
+  // Backticks would break the wrapping; escape those too.
+  const safe = String(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/`/g, "\\`");
+  return `\`${safe}\``;
 }

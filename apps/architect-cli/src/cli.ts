@@ -17,7 +17,21 @@ export const SUBCOMMANDS = [
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
-export const OUTPUT_FORMATS = ["human", "json", "csv", "tsv", "ndjson", "yaml"] as const;
+export const OUTPUT_FORMATS = [
+  "human",
+  "json",
+  "csv",
+  "tsv",
+  "ndjson",
+  "yaml",
+  // M4.15.e — Markdown table output suitable for $GITHUB_STEP_SUMMARY.
+  // Operators redirect: `crossengin tenant policies acme --diff foo
+  // --format gh-summary >> $GITHUB_STEP_SUMMARY`. Currently honored
+  // by the diff family (tenant policies + tenant housekeeping diff
+  // variants); other surfaces silently fall through to human format
+  // until they grow Markdown renderers in follow-ups.
+  "gh-summary",
+] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 export interface ParsedCommand {
@@ -108,7 +122,8 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       formatRaw !== "csv" &&
       formatRaw !== "tsv" &&
       formatRaw !== "ndjson" &&
-      formatRaw !== "yaml"
+      formatRaw !== "yaml" &&
+      formatRaw !== "gh-summary"
     ) {
       return {
         ok: false,
@@ -671,12 +686,18 @@ export function helpText(): string {
     "  help                    Show this help text",
     "",
     "Flags:",
-    "  --format human|json|csv|tsv|ndjson|yaml",
+    "  --format human|json|csv|tsv|ndjson|yaml|gh-summary",
     "                          Output format (default: human). csv/tsv/ndjson are",
     "                          supported on list-style retention actions (history +",
     "                          diff-timeline); diff-history csv/tsv emits field-diff",
     "                          rows. ndjson emits one entry per line (no envelope).",
     "                          yaml emits the same structured envelope as json, in YAML.",
+    "                          gh-summary emits Markdown table output suitable for",
+    "                          $GITHUB_STEP_SUMMARY redirection from CI workflows;",
+    "                          honored by the diff family (tenant policies + tenant",
+    "                          housekeeping diff variants) with header + field-changes",
+    "                          table + verdict-emoji footer. Other surfaces fall",
+    "                          through to human until they grow Markdown renderers.",
     "  --csv-separator CHAR    Custom CSV separator (default: ','). Only applies to",
     "                          --format=csv. Cannot be '\"' or newline.",
     "  --force                 With init / patch, overwrite an existing file",

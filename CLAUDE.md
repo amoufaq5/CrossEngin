@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,380 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.e adds `--format gh-summary`
+Markdown output across the entire diff
+family — extends the existing format-
+branching machinery (M4.14.c CSV/TSV
+M4.15.d housekeeping CSV/TSV pattern)
+with a Markdown table render suitable
+for $GITHUB_STEP_SUMMARY redirection
+from CI workflows. Closes 5 deferred
+ADR Qs simultaneously since each
+surface called for the same rendering
+shape — ADR-0282 Q5 (policies --diff)
++ ADR-0286 Q7 (policies --vs-tier) +
+ADR-0287 Q3 (policies N-way) +
+ADR-0288 Q3 (housekeeping --diff) +
+ADR-0290 Q2 (housekeeping N-way).
+Real workflows: CI gate visibility
+(pipeline step "Verify cohort
+uniformity" prints Markdown table to
+run UI showing which fields drifted
+across N tenants), PR review summary
+(reviewers see divergence table
+inline rather than clicking through
+to step logs), compliance gate
+verdicts (verdict emojis ✅/⚠️
+give one-glance signal whether gate
+passed). Operator usage:
+`crossengin tenant policies acme
+--diff foo --format gh-summary >>
+"$GITHUB_STEP_SUMMARY"`. CLI writes
+Markdown to stdout only; operators
+handle the file redirect — the CLI
+does NOT read $GITHUB_STEP_SUMMARY
+from env and write directly to the
+file since that would entangle the
+CLI with GitHub-specific side
+effects (the redirect-in-shell
+approach is more composable
+operators can redirect to any file
+or pipe elsewhere). Markdown
+shape: single-comparison emits
+## header + Left/Right metadata
+labels + ### Field changes (N)
+table + verdict-emoji footer
+(:white_check_mark: for no diffs
+:warning: for divergence detected).
+Empty fieldDiffs replaces table
+with bold-text "No differences —
+both tenants match" + green check
+emoji. Multi-comparison wraps each
+pair in ### Comparison i/N: vs
+<uuid> section with own field-
+changes table then --- separator
++ **Summary:** N comparisons max
+divergence M field(s) footer +
+verdict emoji reflecting max-
+divergence state. Policies table
+is 4-col (Axis Field Left Right);
+housekeeping table is 5-col (extra
+Table column since
+HousekeepingFieldDiff keys by
+axis+tableName+field unlike
+PolicyFieldDiff which keys only by
+axis+field). Value escaping via
+new formatMdValue helper: wraps
+every value in backticks for
+visual distinction; escapes
+pipes (| → \\|) so they don't
+break table cells; escapes
+backticks (` → \\`) so they
+don't terminate wrapping;
+escapes backslashes (\\ → \\\\)
+for completeness; null/undefined
+renders as backtick-wrapped
+'null' literal for visibility
+distinct from empty string;
+booleans + numbers stringify to
+their natural form. Verdict
+emoji convention uses GitHub-
+flavored Markdown shortcodes
+(:white_check_mark: :warning:)
+since GitHub renders them
+automatically and shortcodes are
+diffable + grep-able + don't
+require embedded Unicode
+codepoints. Exit code identical
+to other formats — diff
+DivergenceExitCode fires exit 3
+on divergence regardless of
+format under --exit-on-
+divergence semantic (Markdown
+is render mode not gate
+override). Implementation:
+"gh-summary" added to
+OUTPUT_FORMATS const +
+parseArgs validation whitelist
+(cli.ts); 4 new renderer
+helpers in tenant.ts (render
+PoliciesDiffGhSummary +
+renderPoliciesMultiDiffGhSummary
++ renderHousekeepingDiffGhSummary
++ renderHousekeepingMultiDiffGh
+Summary); branches added to
+emitDiffOutput (policies single)
++ emitMultiDiffOutput (policies
+multi + vs-tier multi via
+shared emit) + runTenantHouse
+keepingDiff (both n===1 and n>1
+paths). --vs-tier picks up
+gh-summary AUTOMATICALLY since
+it routes through emitDiff
+Output / emitMultiDiffOutput
+for single + N-way respectively
+— no separate renderer
+needed for the synthetic-RHS
+path. Rejected — separate
+--gh-summary boolean flag not
+a format value (would require
+special-casing alongside
+--format; cleaner to make it
+a format value so existing
+branching machinery handles
+it), --format md generic
+Markdown (risks colliding
+with future general Markdown
+output e.g. docs generation;
+gh-summary name signals
+"this targets GitHub Step
+Summary" specifically leaving
+room for md to mean something
+else later), write directly
+to $GITHUB_STEP_SUMMARY from
+CLI (entangles CLI with
+GitHub conventions; redirect-
+in-shell approach is more
+composable), emoji rendering
+via Unicode codepoints
+(GitHub-flavored Markdown
+renders shortcode form
+automatically; shortcodes
+are diffable and grep-able),
+collapsible <details>
+sections per comparison
+(adds visual noise for small
+N; reviewers want to skim;
+heading hierarchy ### per
+comparison gives same scanning
+behavior with no collapse
+mechanics), JSON+Markdown
+hybrid Markdown wraps JSON
+block (defeats purpose;
+operators wanting both use
+jq on --format json), format-
+validation error when
+--format gh-summary set on
+surfaces that don't support
+it (would surprise operators
+with subtle command-specific
+failures; falling through to
+human format means command
+always works even if output
+isn't Markdown), build shared
+renderDiffMarkdown helper
+across policies + housekeeping
+(table column counts differ
+4 vs 5 cols; inlining keeps
+each renderer simple + self-
+contained; formatMdValue
+helper IS shared). Drawbacks
+— fall-through behavior for
+unsupported surfaces
+(operators running e.g.
+tenants list --format
+gh-summary get human-table
+output not Markdown; CLI
+doesn't reject; matches
+spirit of graceful
+degradation but could
+surprise users who expect
+Markdown everywhere),
+heading levels hardcoded at
+## / ### / #### (works for
+top-level Step Summary
+content but operators
+embedding output inside
+larger Markdown doc would
+need to munge headings;
+acceptable trade-off
+primary use case is Step
+Summary at root), verdict
+emoji is binary (operators
+wanting nuance e.g. 1-2
+diffs is yellow 3+ is red
+need to post-process; defer
+threshold-based verdicts),
+pipe-escaping reads oddly
+in copy-paste (ticket\\|456
+looks off when extracted
+from Markdown; alternative
+HTML-encoded &#124; is
+worse for human-
+readability), no GitHub
+Actions test-coverage in
+this milestone (we test
+Markdown OUTPUT not the
+integration with GitHub
+Actions workflow files;
+defer to future CI
+integration test). 9 new
+tests under "--format
+gh-summary across diff
+family (M4.15.e)" — policies
+--diff emits Markdown header
++ table + verdict emoji
+(## header + **Left:** +
+**Right:** + ### Field
+changes + | Axis | Field |
+Left | Right | header row +
+|------|-------|------|-------|
+delimiter row + :warning:
+divergence detected verified),
+policies --diff with no
+divergences emits 'No
+differences' check mark
+(same tier on both sides
+produces empty fieldDiffs;
+:white_check_mark: verified +
+:warning: absent), policies
+N-way --diff emits multi-
+comparison Markdown with
+per-pair sections (##
+Multi-comparison + **Anchor:**
++ **Comparisons:** 2 +
+### Comparison 1/2: vs
+TENANT_B + ### Comparison
+2/2: vs TENANT_C + **Summary:**
+verified), policies --vs-tier
+gh-summary works for synthetic
+RHS (vs-tier:pro input marker
+appears in output verifying
+the synthetic-RHS routing
+through shared emitDiffOutput
+helper carries gh-summary
+correctly), housekeeping
+--diff emits Markdown with
+5-column table (## Diff +
+**Left:** + **Right:** +
+| Axis | Table | Field | Left
+| Right | header row with
+extra Table column verified),
+housekeeping N-way --diff
+emits multi-comparison
+Markdown (## Multi-comparison
+diff: tenant housekeeping
++ per-pair sections + Summary
+footer verified), --format
+gh-summary composes with
+--exit-on-divergence exits
+3 on divergence (Markdown
+output doesn't suppress
+divergence exit code), multi-
+comparison with all-identical
+comparisons emits 'All
+comparisons match' verdict
+(test fake retention with
+no overrides + identical
+defaults yields empty
+fieldDiffs across all pairs;
+:white_check_mark: **All
+comparisons match.** verified
++ "max divergence 0 fields"
+verified), Markdown values
+pipe character in values is
+escaped to avoid breaking
+table rows (optOutReason
+"ticket|123" and "ticket|456"
+in two tenant policies;
+ticket\\|123 and ticket\\|456
+escaped appear in output
+verifying formatMdValue's
+pipe-escaping). cli.test.ts
+gets 1 new test verifying
+--format=gh-summary is
+accepted by parseArgs and
+result.command.format equals
+"gh-summary". cli.ts
+helpText extended: --format
+flag list adds gh-summary
++ paragraph describes
+Markdown table output
+suitable for
+$GITHUB_STEP_SUMMARY
+redirection from CI
+workflows honored by diff
+family + fall-through
+behavior for unsupported
+surfaces. Test count:
+tenant.test.ts grows
+122 → 131 tests (+9);
+cli.test.ts grows by 1
+(format validation
+test). Workspace test
+count 9,844 → 9,854 (+10).
+Coverage gate passes —
+tenant.ts at 88.26%
+statements / 84.3%
+branches / 91.37%
+functions / 88.26% lines
+(statements + functions
++ lines UP from M4.15.d
+86.51% / 90.56% / 86.51%
+via 4 new render
+functions + formatMdValue
+helper + format-branch
+expansions in 4 emit
+paths; all above 80/70/
+80/80 thresholds).
+ADR-0292 documents
+design + 8 rejected
+alternatives + 7 future
+Qs (threshold-based
+verdict emojis yellow/
+red/green based on count
+pairs with --threshold
+N flag, collapsible
+<details> per comparison
+for very large N >10
+pairs, --gh-summary-write
+$PATH flag that writes
+directly instead of
+stdout avoids redirect
+dance defer unless
+requested, Markdown
+rendering for retention
+diff family --format
+gh-summary on retention
+diff etc. same pattern,
+linkified field references
+to ADR docs or schema
+documentation pairs with
+--docs-base-url flag,
+compact mode just verdict
++ count no field table
+for cohort summaries that
+roll up dozens of
+comparisons, HTML output
+--format html for non-
+GitHub targets Slack
+Confluence future
+surface). The diff family
+now answers ALL four
+output modes uniformly
+across all 5 surfaces
+(policies --diff +
+policies --vs-tier +
+policies N-way +
+housekeeping --diff +
+housekeeping N-way) —
+human for operator
+readability + JSON for
+programmatic consumption
++ CSV/TSV for spreadsheet
+workflows + gh-summary
+Markdown for CI Step
+Summary integration.
+M4.15.e is the natural
+capstone of the M4.15.x
+family on the diff
+surfaces; remaining
+M4.15.x slots can branch
+into adjacent surfaces
+(tenants list expansions,
+housekeeping --axis
+filter etc.) or jump to
+M4.16.x.
 M4.15.d adds `--format csv|tsv` +
 `--csv-separator <c>` to `tenant
 housekeeping --diff` — extends both
