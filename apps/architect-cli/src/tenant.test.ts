@@ -3561,3 +3561,249 @@ describe("runTenant housekeeping --diff (M4.15.a)", () => {
     expect(env.right.input).toBe("acme-staging");
   });
 });
+
+// M4.15.c — `tenant housekeeping --add-tenant` N-way diff tests.
+// Closes ADR-0288 Q1. Mirrors policies M4.14.a shape: --add-tenant
+// extends --diff into N-way comparison; multi-comparison envelope
+// when N>1 with anchor + comparisons[] array; max-divergence exit
+// code; duplicate-target guards.
+describe("runTenant housekeeping --add-tenant N-way (M4.15.c)", () => {
+  it("--add-tenant without --diff exits 2", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--add-tenant", TENANT_B),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--add-tenant requires --diff");
+  });
+
+  it("--diff + --add-tenant: JSON envelope uses tenant.housekeeping.diff.multi", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      action: string;
+      anchor: { tenantId: string };
+      comparisons: Array<{ right: { tenantId: string }; fieldDiffs: Array<unknown> }>;
+    };
+    expect(env.action).toBe("tenant.housekeeping.diff.multi");
+    expect(env.anchor.tenantId).toBe(RESOLVED_UUID);
+    expect(env.comparisons).toHaveLength(2);
+    expect(env.comparisons[0].right.tenantId).toBe(TENANT_B);
+    expect(env.comparisons[1].right.tenantId).toBe(TENANT_C);
+  });
+
+  it("single --diff (no --add-tenant) preserves M4.15.a single envelope", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { action: string; left: unknown; right: unknown };
+    // Backward-compat preserved: single-comparison stays
+    // tenant.housekeeping.diff (NOT .multi).
+    expect(env.action).toBe("tenant.housekeeping.diff");
+    expect(env.left).toBeDefined();
+    expect(env.right).toBeDefined();
+  });
+
+  it("duplicate RHS UUIDs exit 2 ('appears in multiple RHS slots')", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_B,
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("appears in multiple RHS slots");
+  });
+
+  it("N-way max-divergence exit code: any comparison trips → exit 3", async () => {
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    // RESOLVED_UUID has override on gateway_pipeline_executions;
+    // TENANT_B has override on workflow_traces; TENANT_C has no
+    // overrides in the fixture. Comparison vs B trips, comparison
+    // vs C trips. Max-divergence exit code = exit 3.
+    expect(code).toBe(3);
+  });
+
+  it("N-way human render emits section per comparison", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("Multi-comparison tenant housekeeping");
+    expect(output).toContain("2 comparisons");
+    expect(output).toContain("=== Comparison 1/2 ===");
+    expect(output).toContain("=== Comparison 2/2 ===");
+  });
+
+  it("N-way unknown --add-tenant target surfaces 'right 2' label", async () => {
+    const conn = fakeConn({ "acme-prod": TENANT_B });
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        "acme-prod",
+        "--add-tenant",
+        "no-such-tenant",
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("(right 2 'no-such-tenant')");
+  });
+
+  it("N-way anchor matching any RHS slot exits 2 with slot-labeled message", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        RESOLVED_UUID,
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("left and right 2 resolve to the same tenant");
+  });
+});

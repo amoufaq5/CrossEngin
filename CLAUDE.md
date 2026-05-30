@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,343 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.c adds `--add-tenant <other>`
+repeatable flag to `tenant housekeeping
+--diff` — extends M4.15.a single-pair
+diff (closing ADR-0284 Q5) into N-way
+cohort pair-wise comparison. Closes
+ADR-0288 Q1 deferred ("N-way --add-
+tenant extension"). Mirrors the
+policies M4.14.a shape end-to-end:
+--diff supplies the first RHS,
+--add-tenant adds more, multi
+envelope when N>1, max-divergence exit
+code, duplicate-target guards. Real
+workflows: post-migration cohort
+verification (auditor runs "tenant
+housekeeping --tenant acme-prod --diff
+acme-staging --add-tenant acme-dev
+--exit-on-divergence" to gate CI on
+uniform retention overrides across a
+3-tenant cohort), multi-tenant
+uniformity sampling (operator picks
+anchor tenant and diffs against 5
+peers to find any that drifted from
+cohort policy). Invocation:
+`tenant housekeeping --tenant <A>
+--diff <B> [--add-tenant <C>
+--add-tenant <D> ...] [--exit-on-
+divergence [--threshold N]]
+[--format json]`. --add-tenant
+REQUIRES --diff (first RHS comes
+from --diff; --add-tenant only
+adds); standalone --add-tenant
+exits 2 with clear error.
+Mutual-exclusivity inherited from
+M4.15.a --diff rules (--diff +
+--all-tenants/--watch/--threshold-
+alert all reject); adds:
+duplicate RHS UUIDs in slots
+(same RHS via slug + UUID, or two
+slugs resolving to same UUID)
+exit 2 with "appears in multiple
+RHS slots" message; anchor
+matching ANY RHS slot exits 2
+with slot-labeled "left and right
+N resolve to the same tenant"
+message preserving "right" label
+when N=1 for M4.15.a backward
+compat. Envelope shape: single-
+comparison (N=1) preserves
+tenant.housekeeping.diff +
+left/right/fieldDiffs from M4.15.a
+(backward compat: consumers
+parsing M4.15.a shape stay
+unchanged); multi-comparison
+(N>1) switches to
+tenant.housekeeping.diff.multi
+with anchor + comparisons[]
+array (each containing right
+side + per-pair fieldDiffs).
+Implementation: runTenantHouse
+keepingDiff refactored to accept
+rhsInputs: ReadonlyArray<string>
+rather than single inputRhs;
+parsing in runTenantHousekeeping
+adds --add-tenant via
+getMultiFlag and passes
+[diffFlag, ...addTenantFlags]
+to the diff orchestrator; new
+runTenantHousekeeping flow
+rejects --add-tenant without
+--diff with explicit error
+before reaching diff path.
+Resolution: anchor + all RHSes
+resolved concurrently via single
+Promise.all; per-RHS error path
+with "right N" labels when N>1
+"right" when N=1. Self-diff
+guard iterates every RHS slot
+with same labeling discipline.
+Duplicate-RHS-UUID guard via Set
+iteration catches "appears in
+multiple RHS slots" before
+gather. Gather: anchor's 2
+reports + each RHS's 2 reports
+concurrently (total = 2*(1+N)
+reports); stable slice ordering
+gateway_anchor / gateway_rhs[0..
+N-1] / retention_anchor /
+retention_rhs[0..N-1] for
+downstream slicing. For N=1
+emits single-comparison
+envelope preserving M4.15.a
+shape; for N>1 emits multi-
+comparison envelope via new
+renderHousekeepingMultiDiffHuman
+human render. computeHouse
+keepingFieldDiffs reused per
+pair (anchor vs each rhs[i])
+yielding HousekeepingFieldDiff[]
+per comparison. Max-divergence
+exit code: maxFieldDiffsLength
+= comparisons.reduce((max, c)
+=> max(max, c.fieldDiffs.length),
+0) fed to shared
+diffDivergenceExitCode helper.
+renderHousekeepingMultiDiff
+Human emits "Multi-comparison
+tenant housekeeping (anchor:
+...):" header + "=== Comparison
+i/N ===" section markers per
+pair using existing
+renderHousekeepingDiffHuman
+shape (operators reading multi
+output recognize each
+section). Rejected — default
+to multi envelope even when
+N=1 (breaks every existing
+JSON consumer parsing
+tenant.housekeeping.diff;
+backward-compat rule from
+ADR-0287 applies identically),
+--add-tenant works without
+--diff (ambiguous which is
+"the" RHS; --diff anchors
+first RHS explicitly +
+--add-tenant adds; cleaner
+mental model), sum-divergence
+exit code (conflates "ALL
+comparisons trip slightly"
+with "ONE comparison trips
+massively"; operators want
+latter to trip + sum hides
+it under high thresholds;
+same rationale as ADR-0287),
+per-comparison threshold
+flags (over-engineered for
+v1; single --threshold flag
+covers gate semantic), allow
+--diff to repeat instead of
+separate --add-tenant
+(conflicts with single-
+comparison backward compat;
+getStringFlag would have to
+switch to getMulti silently;
+--add-tenant convention is
+clearer), N-way diff against
+--all-tenants matrix
+(semantically muddled which
+N×M cells get compared;
+existing exclusivity rule
+rejects), comparison index
+in human render like CSV's
+comparison_index from
+M4.14.a (already surfaced
+via === Comparison i/N ===
+markers; no additional
+indexing needed), custom
+comparison label anchor vs
+rhs[i].tenantId in render
+(per-section Left/Right
+labels already carry
+tenantId; redundant).
+Drawbacks — 2*(1+N) PG
+round-trips for N RHSes
+parallelized via Promise.all
+so wall-clock cost is roughly
+the slowest gather but total
+query work grows linearly
+acceptable for operator-
+driven CI gates N typically
+≤ 5; bulk-cohort comparisons
+>10 tenants benefit from
+future tenants-list-vs-
+matrix surface, envelope
+shape switches on N=1 vs
+N>1 operators reading JSON
+handle both tenant.house
+keeping.diff and tenant.
+housekeeping.diff.multi
+switch is explicit via
+action name + documented
+in CLI help, max-divergence
+exit code obscures which
+comparison tripped operators
+reading exit code alone
+can't tell whether
+comparison 0/1/2 caused
+exit 3 pair with --format
+json for per-comparison
+inspection, CSV/TSV output
+for N-way not in M4.15.c
+scope consumers of bulk
+diff in spreadsheets need
+to wait for ADR-0288 Q2
+closure future M4.15.x.
+8 new tests under
+"runTenant housekeeping
+--add-tenant N-way
+(M4.15.c)" — --add-tenant
+without --diff exits 2
+("--add-tenant requires
+--diff" verified), --diff
++ --add-tenant JSON
+envelope uses tenant.
+housekeeping.diff.multi
+shape (action verified +
+anchor.tenantId +
+comparisons length 2 +
+each right.tenantId
+matches), single --diff
+without --add-tenant
+preserves M4.15.a single
+envelope (action stays
+tenant.housekeeping.diff
+NOT multi + left + right
+present verifying backward
+compat), duplicate RHS
+UUIDs exit 2 ("appears
+in multiple RHS slots"
+message verified),
+max-divergence exit code
+any comparison tripping
+→ exit 3 (RESOLVED_UUID
+has override on gateway_
+pipeline_executions
+TENANT_B has override on
+workflow_traces TENANT_C
+has no overrides; B and
+C each trip so max
+divergence trips exit
+3), N-way human render
+emits section per
+comparison ("Multi-
+comparison tenant
+housekeeping" header
++ "2 comparisons" + each
+"=== Comparison i/N
+===" section), unknown
+--add-tenant target
+surfaces "right 2"
+label (right 2 'no-such-
+tenant' verified
+exercising slot-labeled
+error path), anchor
+matching any RHS slot
+exits 2 with slot-labeled
+message ("left and right
+2 resolve to the same
+tenant" verifying self-
+diff guard iterates
+every slot). cli.ts
+helpText extended with
+paragraph documenting
+--add-tenant repeatable
+flag + N-way envelope
+name + max-divergence
+exit code + duplicate-
+target rejection. Test
+count: tenant.test.ts
+grows 106 → 114 tests
+(+8). Workspace test
+count 9,828 → 9,836.
+Coverage gate passes —
+tenant.ts at 86.13%
+statements / 84.67%
+branches / 90.38%
+functions / 86.13% lines
+(UP from M4.15.a 85.49%/
+83.59%/90.19%/85.49% via
+new runTenantHousekeeping
+Diff N-way branches +
+duplicate-guard branches
++ per-slot-label error
+paths; all above 80/70/
+80/80 thresholds).
+ADR-0290 documents
+design + 8 rejected
+alternatives + 6 future
+Qs (CSV/TSV output for
+multi-comparison
+envelope closes ADR-
+0288 Q2 future M4.15.x
+adds comparison_index
+column per row matching
+policies CSV pattern
+from M4.14.a, --gh-
+summary Markdown for
+N-way housekeeping
+diff pairs with ADR-
+0287 Q3 + ADR-0288 Q3
+across all diff
+variants, N-way --vs-
+defaults synthetic
+comparison analogue to
+policies --vs-tier not
+in M4.15.c scope defer,
+stream NDJSON for very
+large N >50 comparisons
+future surface not
+needed for current
+operator workflows,
+anchor-first field-
+grouped CSV alternative
+group diffs by axis +
+table then comparison_
+index secondary instead
+of comparison_index
+primary trade-off
+spreadsheets pivot
+either way defer,
+--summary-only flag
+emitting just
+[comparison_index,
+field_diff_count] rows
+for bulk reporting
+where operators want
+which comparisons
+tripped at a glance
+pairs with ADR-0287
+Q1). The tenant
+housekeeping surface
+now scales linearly
+across comparison
+cardinality — single
+comparison preserves
+M4.15.a envelope shape
+for JSON consumers,
+N>1 unlocks cohort
+uniformity sampling
++ multi-tenant
+verification + CI
+compliance gates
+through shared diff
+machinery. M4.15.c
+closes the housekeeping
+side of the N-way
+pattern that M4.14.a
+closed for policies.
 M4.15.b adds `--format csv|tsv` +
 `--csv-separator <c>` to `tenants list` —
 extends the bulk-enumeration command

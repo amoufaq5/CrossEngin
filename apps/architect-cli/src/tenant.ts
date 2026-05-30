@@ -146,6 +146,16 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
   // Threshold alerts also rejected (alert semantics target a single
   // tenant view, not pair-wise divergence — which side trips?).
   const diffFlag = getStringFlag(command, "diff");
+  // M4.15.c — --add-tenant <other> (repeatable, requires --diff)
+  // extends --diff into N-way housekeeping comparison. Mirrors the
+  // policies M4.14.a shape: --diff supplies the first RHS, each
+  // --add-tenant adds another RHS compared against the anchor.
+  // When N>1, the envelope switches to multi-comparison form with
+  // action `tenant.housekeeping.diff.multi` + `anchor` +
+  // `comparisons[]` array. Exit code = max-divergence across all
+  // comparisons (any comparison's fieldDiffs.length >= threshold
+  // trips exit 3).
+  const addTenantFlags = getMultiFlag(command, "add-tenant");
   if (diffFlag !== null) {
     if (tenantFlag === null) {
       printError(
@@ -175,7 +185,17 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
       );
       return 2;
     }
-    return await runTenantHousekeepingDiff(command, ctx, tenantFlag, diffFlag);
+    return await runTenantHousekeepingDiff(command, ctx, tenantFlag, [diffFlag, ...addTenantFlags]);
+  }
+  if (addTenantFlags.length > 0) {
+    // --add-tenant without --diff has no anchor model: --diff supplies
+    // the first RHS; --add-tenant only adds more. Reject explicitly
+    // rather than silently treating the first --add-tenant as --diff.
+    printError(
+      ctx.io,
+      `tenant housekeeping: --add-tenant requires --diff (the first RHS comes from --diff; --add-tenant adds more)`,
+    );
+    return 2;
   }
 
   // --threshold-alert flags. Same fail-fast-on-validation discipline.
@@ -1184,7 +1204,7 @@ async function runTenantHousekeepingDiff(
   command: ParsedCommand,
   ctx: TenantContext,
   inputLhs: string,
-  inputRhs: string,
+  rhsInputs: ReadonlyArray<string>,
 ): Promise<number> {
   // --threshold validation (matches policies --diff convention).
   const thresholdError = validateDiffThresholdFlag(command);
@@ -1214,75 +1234,114 @@ async function runTenantHousekeepingDiff(
   }
 
   try {
-    // Resolve both tenant identifiers concurrently — slug → UUID via
-    // shared resolver. The "did you mean" suggestion treatment from
-    // M4.14.j fires per side, labeled left vs right so operators
-    // know which input typo'd.
-    const [resolvedA, resolvedB] = await Promise.all([
+    // Resolve anchor + every RHS concurrently. The "did you mean"
+    // suggestion treatment from M4.14.j fires per side; when N>1,
+    // RHSes are labeled "right N" so operators know which
+    // --add-tenant typo'd. Single RHS preserves the "right" label
+    // from M4.15.a for backward compat.
+    const allResolvedResults = await Promise.all([
       resolveTenantIdentifier(conn, inputLhs),
-      resolveTenantIdentifier(conn, inputRhs),
+      ...rhsInputs.map((r) => resolveTenantIdentifier(conn, r)),
     ]);
-    if (!resolvedA.ok) {
-      printError(ctx.io, `tenant housekeeping --diff (left '${inputLhs}'): ${resolvedA.error}`);
-      return 2;
-    }
-    if (!resolvedB.ok) {
-      printError(ctx.io, `tenant housekeeping --diff (right '${inputRhs}'): ${resolvedB.error}`);
-      return 2;
-    }
-
-    // Self-diff guard — A == B yields empty fieldDiffs and is almost
-    // always an operator typo. Mirrors policies --diff (M4.14.f).
-    if (resolvedA.tenantId === resolvedB.tenantId) {
+    const resolvedAnchor = allResolvedResults[0]!;
+    const resolvedRhsResults = allResolvedResults.slice(1);
+    if (!resolvedAnchor.ok) {
       printError(
         ctx.io,
-        `tenant housekeeping --diff: left and right resolve to the same tenant '${resolvedA.tenantId}' — nothing to diff`,
+        `tenant housekeeping --diff (left '${inputLhs}'): ${resolvedAnchor.error}`,
       );
       return 2;
     }
+    const resolvedRhs: Array<{ readonly ok: true; readonly tenantId: string }> = [];
+    for (let i = 0; i < resolvedRhsResults.length; i++) {
+      const r = resolvedRhsResults[i]!;
+      if (!r.ok) {
+        const label = rhsInputs.length === 1 ? "right" : `right ${i + 1}`;
+        printError(ctx.io, `tenant housekeeping --diff (${label} '${rhsInputs[i]!}'): ${r.error}`);
+        return 2;
+      }
+      resolvedRhs.push(r);
+    }
 
-    // Gather BOTH dashboards × BOTH tenants = 4 reports concurrently.
-    // Each tenant's gather call filters by tenantId (the existing
-    // single-tenant flow), so the resulting reports already have the
-    // tenantPolicy fields populated per table. No need for a custom
-    // gather path.
+    // Self-diff guard — anchor matching any RHS slot yields empty
+    // fieldDiffs for that comparison and is almost always an
+    // operator typo. Mirrors policies M4.14.a N-way self-diff.
+    for (let i = 0; i < resolvedRhs.length; i++) {
+      if (resolvedAnchor.tenantId === resolvedRhs[i]!.tenantId) {
+        const label = rhsInputs.length === 1 ? "right" : `right ${i + 1}`;
+        printError(
+          ctx.io,
+          `tenant housekeeping --diff: left and ${label} resolve to the same tenant '${resolvedAnchor.tenantId}' — nothing to diff`,
+        );
+        return 2;
+      }
+    }
+    // Duplicate-RHS guard — same RHS in multiple slots yields a
+    // tautological comparison. Mirrors policies M4.14.a.
+    const rhsUuidSeen = new Set<string>();
+    for (let i = 0; i < resolvedRhs.length; i++) {
+      const uuid = resolvedRhs[i]!.tenantId;
+      if (rhsUuidSeen.has(uuid)) {
+        printError(
+          ctx.io,
+          `tenant housekeeping --diff: tenant '${uuid}' appears in multiple RHS slots — each --diff/--add-tenant target must be unique`,
+        );
+        return 2;
+      }
+      rhsUuidSeen.add(uuid);
+    }
+
+    // Gather anchor's 2 reports + each RHS's 2 reports concurrently.
+    // Total reports = 2 * (1 + N) where N = rhsInputs.length. All
+    // tenant-filtered so tenantPolicy fields populate per table.
     const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
     const idempotencyStore = ctx.idempotencyStoreOverride ?? new PostgresIdempotencyStore(conn);
     const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
 
-    let gatewayA: HousekeepingReport;
-    let gatewayB: HousekeepingReport;
-    let retentionA: RetentionHousekeepingReport;
-    let retentionB: RetentionHousekeepingReport;
+    const n = resolvedRhs.length;
+    let gatewayAnchor: HousekeepingReport;
+    let gatewayRhs: ReadonlyArray<HousekeepingReport>;
+    let retentionAnchor: RetentionHousekeepingReport;
+    let retentionRhs: ReadonlyArray<RetentionHousekeepingReport>;
     try {
-      [gatewayA, gatewayB, retentionA, retentionB] = await Promise.all([
+      // Order: gateway_anchor, gateway_rhs[0..N-1], retention_anchor,
+      // retention_rhs[0..N-1]. Stable slice ordering for downstream.
+      const allReports = await Promise.all([
         gatherHousekeepingReport({
           conn,
           retention,
           idempotencyStore,
           now,
-          tenantId: resolvedA.tenantId,
+          tenantId: resolvedAnchor.tenantId,
         }),
-        gatherHousekeepingReport({
-          conn,
-          retention,
-          idempotencyStore,
-          now,
-          tenantId: resolvedB.tenantId,
-        }),
+        ...resolvedRhs.map((r) =>
+          gatherHousekeepingReport({
+            conn,
+            retention,
+            idempotencyStore,
+            now,
+            tenantId: r.tenantId,
+          }),
+        ),
         gatherRetentionHousekeepingReport({
           conn,
           retention,
           now,
-          tenantId: resolvedA.tenantId,
+          tenantId: resolvedAnchor.tenantId,
         }),
-        gatherRetentionHousekeepingReport({
-          conn,
-          retention,
-          now,
-          tenantId: resolvedB.tenantId,
-        }),
+        ...resolvedRhs.map((r) =>
+          gatherRetentionHousekeepingReport({
+            conn,
+            retention,
+            now,
+            tenantId: r.tenantId,
+          }),
+        ),
       ]);
+      gatewayAnchor = allReports[0] as HousekeepingReport;
+      gatewayRhs = allReports.slice(1, 1 + n) as ReadonlyArray<HousekeepingReport>;
+      retentionAnchor = allReports[1 + n] as RetentionHousekeepingReport;
+      retentionRhs = allReports.slice(2 + n) as ReadonlyArray<RetentionHousekeepingReport>;
     } catch (err) {
       printError(
         ctx.io,
@@ -1291,40 +1350,104 @@ async function runTenantHousekeepingDiff(
       return 1;
     }
 
-    const fieldDiffs = computeHousekeepingFieldDiffs(
-      { gateway: gatewayA, retention: retentionA },
-      { gateway: gatewayB, retention: retentionB },
-    );
+    const anchorSide = {
+      tenantId: resolvedAnchor.tenantId,
+      input: inputLhs,
+      gateway: gatewayAnchor,
+      retention: retentionAnchor,
+    };
+    const rhsSides = resolvedRhs.map((r, i) => ({
+      tenantId: r.tenantId,
+      input: rhsInputs[i]!,
+      gateway: gatewayRhs[i]!,
+      retention: retentionRhs[i]!,
+    }));
+
+    if (n === 1) {
+      const rhs = rhsSides[0]!;
+      const fieldDiffs = computeHousekeepingFieldDiffs(
+        { gateway: anchorSide.gateway, retention: anchorSide.retention },
+        { gateway: rhs.gateway, retention: rhs.retention },
+      );
+      if (command.format === "json") {
+        printJson(ctx.io, {
+          action: "tenant.housekeeping.diff",
+          left: anchorSide,
+          right: rhs,
+          fieldDiffs,
+        });
+      } else {
+        renderHousekeepingDiffHuman(
+          ctx,
+          { tenantId: anchorSide.tenantId, input: anchorSide.input },
+          { tenantId: rhs.tenantId, input: rhs.input },
+          fieldDiffs,
+        );
+      }
+      return diffDivergenceExitCode(command, fieldDiffs.length);
+    }
+
+    // M4.15.c — N>1: multi-comparison envelope. Each comparison is
+    // anchor vs one RHS yielding its own fieldDiffs. Exit code =
+    // max-divergence across all comparisons (any comparison's
+    // fieldDiffs.length >= threshold trips exit 3, matching
+    // policies M4.14.a semantic).
+    const comparisons = rhsSides.map((rhs) => ({
+      right: rhs,
+      fieldDiffs: computeHousekeepingFieldDiffs(
+        { gateway: anchorSide.gateway, retention: anchorSide.retention },
+        { gateway: rhs.gateway, retention: rhs.retention },
+      ),
+    }));
 
     if (command.format === "json") {
       printJson(ctx.io, {
-        action: "tenant.housekeeping.diff",
-        left: {
-          tenantId: resolvedA.tenantId,
-          input: inputLhs,
-          gateway: gatewayA,
-          retention: retentionA,
-        },
-        right: {
-          tenantId: resolvedB.tenantId,
-          input: inputRhs,
-          gateway: gatewayB,
-          retention: retentionB,
-        },
-        fieldDiffs,
+        action: "tenant.housekeeping.diff.multi",
+        anchor: anchorSide,
+        comparisons: comparisons.map((c) => ({
+          right: c.right,
+          fieldDiffs: c.fieldDiffs,
+        })),
       });
     } else {
-      renderHousekeepingDiffHuman(
-        ctx,
-        { tenantId: resolvedA.tenantId, input: inputLhs },
-        { tenantId: resolvedB.tenantId, input: inputRhs },
-        fieldDiffs,
-      );
+      renderHousekeepingMultiDiffHuman(ctx, anchorSide, comparisons);
     }
 
-    return diffDivergenceExitCode(command, fieldDiffs.length);
+    const maxFieldDiffsLength = comparisons.reduce(
+      (max, c) => Math.max(max, c.fieldDiffs.length),
+      0,
+    );
+    return diffDivergenceExitCode(command, maxFieldDiffsLength);
   } finally {
     await closeConn();
+  }
+}
+
+// M4.15.c — human render for N-way housekeeping diff. Emits one
+// section per comparison, each using the existing
+// renderHousekeepingDiffHuman shape so the per-comparison layout
+// matches what operators see in single-diff mode.
+function renderHousekeepingMultiDiffHuman(
+  ctx: TenantContext,
+  anchor: { readonly tenantId: string; readonly input: string },
+  comparisons: ReadonlyArray<{
+    readonly right: { readonly tenantId: string; readonly input: string };
+    readonly fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>;
+  }>,
+): void {
+  ctx.io.stdout.write(
+    `Multi-comparison tenant housekeeping (anchor: ${anchor.tenantId} input: '${anchor.input}', ${comparisons.length} comparisons):\n\n`,
+  );
+  for (let i = 0; i < comparisons.length; i++) {
+    const c = comparisons[i]!;
+    ctx.io.stdout.write(`=== Comparison ${i + 1}/${comparisons.length} ===\n`);
+    renderHousekeepingDiffHuman(
+      ctx,
+      { tenantId: anchor.tenantId, input: anchor.input },
+      { tenantId: c.right.tenantId, input: c.right.input },
+      c.fieldDiffs,
+    );
+    if (i < comparisons.length - 1) ctx.io.stdout.write(`\n`);
   }
 }
 
