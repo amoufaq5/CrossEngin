@@ -946,3 +946,149 @@ describe("runTenants list --include-policy-count (M4.15.g)", () => {
     expect(queries[0]?.params).toEqual(["active"]);
   });
 });
+
+// M4.15.k — `tenants list --min-policy-count N` server-side cohort
+// filter tests. Closes ADR-0294 Q4. Forces the policy_count LEFT
+// JOIN even when --include-policy-count is off (the WHERE filter
+// references the JOIN expression). N must be a positive integer
+// >= 1 (rejects 0, negative, non-numeric). Composes with all other
+// filters (--status, --table-filter, --has-overrides, --include-
+// policy-count) via AND.
+describe("runTenants list --min-policy-count (M4.15.k)", () => {
+  it("--min-policy-count 5 adds COALESCE(pc.policy_count, 0) >= $N to WHERE + forces JOIN", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--min-policy-count", "5", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // LEFT JOIN forced on even without --include-policy-count.
+    expect(queries[0]?.sql).toContain("LEFT JOIN");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) >= $1");
+    expect(queries[0]?.params).toEqual([5]);
+    // The outer SELECT does NOT add `COALESCE(...)::int AS
+    // policy_count` (that's only added when --include-policy-count is
+    // on). The inner JOIN subquery has `COUNT(*)::int AS policy_count`
+    // unavoidably — that's how the subquery names its column for
+    // the outer COALESCE reference, but it's not exposed to callers.
+    expect(queries[0]?.sql).not.toContain("COALESCE(pc.policy_count, 0)::int AS policy_count");
+  });
+
+  it("--min-policy-count composes with --include-policy-count (single JOIN, both behaviors)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed(
+        "tenants",
+        "list",
+        "--min-policy-count",
+        "3",
+        "--include-policy-count",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Only ONE LEFT JOIN despite both flags requesting one — the join
+    // is shared. Both the SELECT and the WHERE reference it.
+    const sql = queries[0]!.sql;
+    expect(sql.match(/LEFT JOIN/g)?.length).toBe(1);
+    expect(sql).toContain("AS policy_count");
+    expect(sql).toContain("COALESCE(pc.policy_count, 0) >= $1");
+    expect(queries[0]?.params).toEqual([3]);
+    // JSON envelope still emits the action label.
+    const env = JSON.parse(out()) as { action: string };
+    expect(env.action).toBe("tenants.list");
+  });
+
+  it("--min-policy-count composes with --status (both filters AND'd, params indexed)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed(
+        "tenants",
+        "list",
+        "--status",
+        "active",
+        "--min-policy-count",
+        "10",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Both filters appear; param indices reflect insertion order
+    // (status first since runTenantsList builds status before the
+    // min-policy-count clause).
+    expect(queries[0]?.sql).toContain("t.status = $1");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) >= $2");
+    expect(queries[0]?.params).toEqual(["active", 10]);
+  });
+
+  it("--min-policy-count works with --format csv-full (forces JOIN in full-row query path)", async () => {
+    const { conn, queries } = fakeConn({ tenantRowsFull: [TENANT_A_FULL] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--min-policy-count", "1", "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // buildListQueryFull also threads the filter through.
+    expect(queries[0]?.sql).toContain("LEFT JOIN");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) >= $1");
+    expect(queries[0]?.params).toEqual([1]);
+  });
+
+  it("--min-policy-count 0 rejected with usage error (N=0 is no-op, prevents typo'd widening)", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--min-policy-count", "0"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --min-policy-count '0'");
+    expect(err()).toContain("positive integer >= 1");
+  });
+
+  it("--min-policy-count negative rejected with usage error", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--min-policy-count", "-3"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --min-policy-count '-3'");
+  });
+
+  it("--min-policy-count non-numeric rejected with usage error", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--min-policy-count", "many"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --min-policy-count 'many'");
+  });
+
+  it("--min-policy-count float rejected with usage error (integer-only)", async () => {
+    // Number.parseInt('5.5') returns 5 but String(5) !== '5.5' so the
+    // round-trip check rejects floats with a stricter "integer-only"
+    // signal than parseInt's silent truncation.
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--min-policy-count", "5.5"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --min-policy-count '5.5'");
+  });
+
+  it("--min-policy-count not set → no JOIN, no extra WHERE clause (M4.15.k is opt-in only)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).not.toContain("LEFT JOIN");
+    expect(queries[0]?.sql).not.toContain("COALESCE(pc.policy_count");
+  });
+});

@@ -104,6 +104,25 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
   // with --has-overrides (which gates on EXISTS) — operators using
   // both get only tenants with policy_count > 0 returned.
   const includePolicyCount = getBooleanFlag(command, "include-policy-count");
+  // M4.15.k — --min-policy-count N filters to tenants with at least
+  // N policies. Implies the policy_count JOIN even if --include-
+  // policy-count isn't set (otherwise the WHERE clause has nothing
+  // to reference). N must be a positive integer (>= 1) — N=0 is a
+  // no-op (everyone qualifies) and rejected with a usage error so
+  // a typo'd `0` doesn't silently widen the result set.
+  const minPolicyCountFlag = getStringFlag(command, "min-policy-count");
+  let minPolicyCount: number | null = null;
+  if (minPolicyCountFlag !== null) {
+    const parsed = Number.parseInt(minPolicyCountFlag, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0 || String(parsed) !== minPolicyCountFlag.trim()) {
+      printError(
+        ctx.io,
+        `tenants list: invalid --min-policy-count '${minPolicyCountFlag}' (expected a positive integer >= 1)`,
+      );
+      return 2;
+    }
+    minPolicyCount = parsed;
+  }
 
   const conn = await resolveConn(ctx, "tenants list");
   if (conn === null) return 1;
@@ -132,6 +151,7 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         tableFilter,
         hasOverrides,
         includePolicyCount,
+        minPolicyCount,
       );
       const fullResult = await conn.exec.query<TenantRowFull & { policy_count?: number }>(
         sql,
@@ -181,6 +201,7 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
       tableFilter,
       hasOverrides,
       includePolicyCount,
+      minPolicyCount,
     );
     const result = await conn.exec.query<TenantRow & { policy_count?: number }>(sql, params);
     const rows = result.rows;
@@ -403,6 +424,7 @@ function buildListQuery(
   tableFilter: string | null,
   hasOverrides: boolean,
   includePolicyCount: boolean = false,
+  minPolicyCount: number | null = null,
 ): { sql: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -418,15 +440,26 @@ function buildListQuery(
   } else if (hasOverrides) {
     where.push(`EXISTS (SELECT 1 FROM meta.tenant_retention_policies p WHERE p.tenant_id = t.id)`);
   }
+  // M4.15.k — --min-policy-count N forces the LEFT JOIN (so the
+  // policy_count expression is available to WHERE) even if
+  // --include-policy-count isn't set. WHERE filter is on the
+  // COALESCE expression directly rather than the SELECT alias so
+  // the JOIN can be referenced without exposing the column.
+  if (minPolicyCount !== null) {
+    params.push(minPolicyCount);
+    where.push(`COALESCE(pc.policy_count, 0) >= $${params.length}`);
+  }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   // M4.15.g — --include-policy-count adds COALESCE(pc.policy_count,
   // 0) AS policy_count from a LEFT JOIN against a per-tenant
   // count subquery. Tenants with no overrides report 0 (COALESCE
-  // handles the LEFT-JOIN-missed case).
+  // handles the LEFT-JOIN-missed case). M4.15.k — --min-policy-
+  // count also needs the JOIN; either flag forces it on.
+  const needsJoin = includePolicyCount || minPolicyCount !== null;
   const selectExtra = includePolicyCount
     ? ", COALESCE(pc.policy_count, 0)::int AS policy_count"
     : "";
-  const joinExtra = includePolicyCount
+  const joinExtra = needsJoin
     ? " LEFT JOIN (SELECT tenant_id, COUNT(*)::int AS policy_count FROM meta.tenant_retention_policies GROUP BY tenant_id) pc ON pc.tenant_id = t.id"
     : "";
   const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier${selectExtra} FROM meta.tenants t${joinExtra}${whereClause} ORDER BY t.slug`;
@@ -443,6 +476,7 @@ function buildListQueryFull(
   tableFilter: string | null,
   hasOverrides: boolean,
   includePolicyCount: boolean = false,
+  minPolicyCount: number | null = null,
 ): { sql: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -458,13 +492,19 @@ function buildListQueryFull(
   } else if (hasOverrides) {
     where.push(`EXISTS (SELECT 1 FROM meta.tenant_retention_policies p WHERE p.tenant_id = t.id)`);
   }
+  if (minPolicyCount !== null) {
+    params.push(minPolicyCount);
+    where.push(`COALESCE(pc.policy_count, 0) >= $${params.length}`);
+  }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   // M4.15.g — --include-policy-count integration (same shape as
-  // buildListQuery; the join + COALESCE is identical).
+  // buildListQuery; the join + COALESCE is identical). M4.15.k —
+  // --min-policy-count also needs the JOIN; either flag forces it on.
+  const needsJoin = includePolicyCount || minPolicyCount !== null;
   const selectExtra = includePolicyCount
     ? ", COALESCE(pc.policy_count, 0)::int AS policy_count"
     : "";
-  const joinExtra = includePolicyCount
+  const joinExtra = needsJoin
     ? " LEFT JOIN (SELECT tenant_id, COUNT(*)::int AS policy_count FROM meta.tenant_retention_policies GROUP BY tenant_id) pc ON pc.tenant_id = t.id"
     : "";
   const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier, t.region, t.schema_name, t.residency, t.search_locale,
