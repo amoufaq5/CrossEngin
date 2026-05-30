@@ -114,6 +114,48 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
   }
 
   try {
+    if (command.format === "csv-full") {
+      // M4.15.f — 11-column TenantRowFull CSV. Uses the wider SELECT
+      // (region, schema, residency JSONB, search_locale, timestamps)
+      // rather than the compact 5-column list query. residency is
+      // serialized to compact JSON for embedding in a CSV cell;
+      // timestamps emitted in stable ISO format via to_char (same
+      // shape as `tenants get`).
+      const { sql, params } = buildListQueryFull(statusFlag, tableFilter, hasOverrides);
+      const fullResult = await conn.exec.query<TenantRowFull>(sql, params);
+      const fullRows = fullResult.rows;
+      const headers = [
+        "id",
+        "slug",
+        "name",
+        "status",
+        "tier",
+        "region",
+        "schema_name",
+        "residency",
+        "search_locale",
+        "created_at",
+        "updated_at",
+      ] as const;
+      const csvRows = fullRows.map((r) => [
+        r.id,
+        r.slug,
+        r.name,
+        r.status,
+        r.tier,
+        r.region,
+        r.schema_name,
+        // residency JSONB → compact JSON string for CSV. printCsv
+        // handles quoting + escaping for embedded quotes.
+        r.residency === null ? null : JSON.stringify(r.residency),
+        r.search_locale,
+        r.created_at,
+        r.updated_at,
+      ]);
+      printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",");
+      return 0;
+    }
+
     const { sql, params } = buildListQuery(statusFlag, tableFilter, hasOverrides);
     const result = await conn.exec.query<TenantRow>(sql, params);
     const rows = result.rows;
@@ -296,6 +338,39 @@ function buildListQuery(
   }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier FROM meta.tenants t${whereClause} ORDER BY t.slug`;
+  return { sql, params };
+}
+
+// M4.15.f — full-row variant of buildListQuery. Adds region,
+// schema_name, residency (JSONB), search_locale + ISO-formatted
+// timestamps. Mirrors the SELECT shape from `tenants get` so
+// downstream consumers see consistent columns across the
+// list-bulk and per-tenant single-row paths.
+function buildListQueryFull(
+  statusFlag: string | null,
+  tableFilter: string | null,
+  hasOverrides: boolean,
+): { sql: string; params: unknown[] } {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (statusFlag !== null) {
+    params.push(statusFlag);
+    where.push(`t.status = $${params.length}`);
+  }
+  if (tableFilter !== null) {
+    params.push(tableFilter);
+    where.push(
+      `EXISTS (SELECT 1 FROM meta.tenant_retention_policies p WHERE p.tenant_id = t.id AND p.table_name = $${params.length})`,
+    );
+  } else if (hasOverrides) {
+    where.push(`EXISTS (SELECT 1 FROM meta.tenant_retention_policies p WHERE p.tenant_id = t.id)`);
+  }
+  const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
+  const sql = `SELECT t.id, t.slug, t.name, t.status, t.tier, t.region, t.schema_name, t.residency, t.search_locale,
+                      to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+                      to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
+               FROM meta.tenants t${whereClause}
+               ORDER BY t.slug`;
   return { sql, params };
 }
 

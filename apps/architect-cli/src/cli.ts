@@ -31,6 +31,14 @@ export const OUTPUT_FORMATS = [
   // variants); other surfaces silently fall through to human format
   // until they grow Markdown renderers in follow-ups.
   "gh-summary",
+  // M4.15.f — 11-column CSV variant of `tenants list` emitting the
+  // full TenantRowFull shape (id, slug, name, status, tier, region,
+  // schema_name, residency, search_locale, created_at, updated_at).
+  // Currently honored by `tenants list` only; other surfaces fall
+  // through to human format (consistent with gh-summary precedent).
+  // The "full" suffix distinguishes from the compact 5-column "csv"
+  // variant from M4.15.b.
+  "csv-full",
 ] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
@@ -123,7 +131,8 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       formatRaw !== "tsv" &&
       formatRaw !== "ndjson" &&
       formatRaw !== "yaml" &&
-      formatRaw !== "gh-summary"
+      formatRaw !== "gh-summary" &&
+      formatRaw !== "csv-full"
     ) {
       return {
         ok: false,
@@ -654,7 +663,7 @@ export function helpText(): string {
     "                          no per-tenant override table today; tenant variation goes through",
     "                          tier membership).",
     "  tenants list [--status <s>] [--table-filter <name>] [--has-overrides]",
-    "               [--format csv|tsv [--csv-separator <c>]]",
+    "               [--format csv|tsv|csv-full [--csv-separator <c>]]",
     "                          Enumerate tenants from meta.tenants. Optional filters: --status",
     "                          (active|suspended|archived|deleted) matches the schema CHECK;",
     "                          --table-filter <name> narrows to tenants with a per-tenant policy",
@@ -662,8 +671,11 @@ export function helpText(): string {
     "                          one per-tenant policy on any table. Sorted by slug. With --format",
     "                          csv|tsv: 5-column bulk export (id, slug, name, status, tier) ready",
     "                          for spreadsheet/pandas workflows; empty result still emits header.",
-    "                          --csv-separator <c> overrides comma (rejects '\"' and newlines).",
-    "                          (requires PG env)",
+    "                          With --format csv-full: 11-column TenantRowFull shape adds region,",
+    "                          schema_name, residency (JSONB compact), search_locale, created_at,",
+    "                          updated_at (ISO UTC). Matches `tenants get` columns. Useful for",
+    "                          full audit exports. --csv-separator <c> overrides comma (rejects",
+    "                          '\"' and newlines). (requires PG env)",
     "  tenants resolve <slug|uuid>",
     "                          One-shot UUID lookup helper for shell scripting. UUIDs short-",
     "                          circuit; slugs resolve via meta.tenants. Output (human format):",

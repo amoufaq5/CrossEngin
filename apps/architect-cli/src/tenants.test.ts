@@ -71,6 +71,11 @@ interface CapturedQuery {
 // lookups (used by the resolveTenantIdentifier path).
 function fakeConn(opts: {
   tenantRows?: ReadonlyArray<TenantRow>;
+  // M4.15.f — full-row variant for `tenants list --format csv-full`
+  // tests. When set + the SELECT mentions `residency` (the marker
+  // column that distinguishes the wider query), this is returned
+  // instead of tenantRows.
+  tenantRowsFull?: ReadonlyArray<TenantRowFull>;
   slugMap?: Record<string, string>;
   getMap?: Record<string, TenantRowFull>;
 }): { conn: PgConnection; queries: CapturedQuery[] } {
@@ -93,6 +98,15 @@ function fakeConn(opts: {
           : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
       }
       if (sql.includes("FROM meta.tenants t")) {
+        // M4.15.f — distinguish full-row SELECT (mentions residency)
+        // from compact SELECT (5 cols). The wider query path needs
+        // TenantRowFull-shaped data so route to tenantRowsFull when
+        // available; otherwise fall back to the compact rows.
+        const isFull = sql.includes("t.residency");
+        if (isFull && opts.tenantRowsFull !== undefined) {
+          const rows = opts.tenantRowsFull as unknown as T[];
+          return { rows, rowCount: rows.length } as PgQueryResult<T>;
+        }
         const rows = (opts.tenantRows ?? []) as unknown as T[];
         return { rows, rowCount: rows.length } as PgQueryResult<T>;
       }
@@ -500,5 +514,151 @@ describe("runTenants list --format csv|tsv (M4.15.b)", () => {
     // ignored in non-CSV formats — matches retention precedent).
     const env = JSON.parse(out()) as { action: string };
     expect(env.action).toBe("tenants.list");
+  });
+});
+
+// M4.15.f — `tenants list --format csv-full` 11-column bulk export.
+// Closes ADR-0289 Q1. Adds region, schema_name, residency (JSONB
+// stringified), search_locale, created_at, updated_at to the
+// compact 5-column M4.15.b shape. Useful for full audit exports.
+describe("runTenants list --format csv-full (M4.15.f)", () => {
+  const TENANT_A_FULL_LIST: TenantRowFull = {
+    id: TENANT_A.id,
+    slug: TENANT_A.slug,
+    name: TENANT_A.name,
+    status: TENANT_A.status,
+    tier: TENANT_A.tier,
+    region: "us",
+    schema_name: "tenant_acme_prod",
+    residency: { primary: "us-east-1", failover: "us-west-2" },
+    search_locale: "english",
+    created_at: "2026-04-15T10:30:00.000Z",
+    updated_at: "2026-05-15T14:45:00.000Z",
+  };
+  const TENANT_B_FULL_LIST: TenantRowFull = {
+    id: TENANT_B.id,
+    slug: TENANT_B.slug,
+    name: TENANT_B.name,
+    status: TENANT_B.status,
+    tier: TENANT_B.tier,
+    region: "eu",
+    schema_name: "tenant_beta_corp",
+    residency: { primary: "eu-west-1" },
+    search_locale: "german",
+    created_at: "2026-03-01T08:00:00.000Z",
+    updated_at: "2026-05-20T16:30:00.000Z",
+  };
+
+  it("--format csv-full emits 11-column header + one row per tenant", async () => {
+    const { conn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_LIST, TENANT_B_FULL_LIST] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "id,slug,name,status,tier,region,schema_name,residency,search_locale,created_at,updated_at",
+    );
+    expect(lines).toHaveLength(3); // header + 2 tenants
+  });
+
+  it("--format csv-full serializes residency JSONB as compact JSON in CSV cell", async () => {
+    const { conn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_LIST] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    // residency object stringified to compact JSON. CSV embeds the
+    // JSON via quote-wrapping since the JSON contains a comma; the
+    // quoted form preserves the original JSON literal.
+    expect(output).toContain('"{""primary"":""us-east-1"",""failover"":""us-west-2""}"');
+  });
+
+  it("--format csv-full uses the wider SELECT query (includes residency)", async () => {
+    const { conn, queries } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_LIST] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    // The wider query mentions residency + schema_name + search_locale
+    // + the to_char timestamps.
+    expect(queries[0]?.sql).toContain("t.residency");
+    expect(queries[0]?.sql).toContain("t.schema_name");
+    expect(queries[0]?.sql).toContain("t.search_locale");
+    expect(queries[0]?.sql).toContain("to_char(t.created_at");
+  });
+
+  it("--format csv-full respects --status filter", async () => {
+    const { conn, queries } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_LIST] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--status", "active", "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(queries[0]?.params).toEqual(["active"]);
+  });
+
+  it("--format csv-full respects --has-overrides filter", async () => {
+    const { conn, queries } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_LIST] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--has-overrides", "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).toContain("EXISTS");
+  });
+
+  it("--format csv-full with empty result emits header-only", async () => {
+    const { conn } = fakeConn({ tenantRowsFull: [] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe(
+      "id,slug,name,status,tier,region,schema_name,residency,search_locale,created_at,updated_at",
+    );
+  });
+
+  it("--format csv-full with --csv-separator ';' uses semicolon", async () => {
+    const { conn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL_LIST] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv-full", "--csv-separator", ";"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "id;slug;name;status;tier;region;schema_name;residency;search_locale;created_at;updated_at",
+    );
+  });
+
+  it("--format csv-full with null residency renders as empty CSV cell", async () => {
+    const tenantNullResidency: TenantRowFull = {
+      ...TENANT_A_FULL_LIST,
+      residency: null as unknown as TenantRowFull["residency"],
+    };
+    const { conn } = fakeConn({ tenantRowsFull: [tenantNullResidency] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // null serialized to empty cell by printCsv (verify the residency
+    // column is empty by checking the column count + that the line
+    // doesn't contain a literal "null" string).
+    const parts = lines[1]!.split(",");
+    expect(parts).toHaveLength(11);
+    // residency is the 8th column (0-indexed 7). Should be empty
+    // string (printCsv renders null as empty by convention).
+    expect(parts[7]).toBe("");
   });
 });

@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,278 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.f adds `tenants list --format
+csv-full` 11-column bulk export —
+extends the compact 5-column
+`--format csv` from M4.15.b with a
+wider variant emitting all
+TenantRowFull columns. Closes
+ADR-0289 Q1 deferred ("--format
+csv-full variant emitting all
+TenantRowFull columns"). Real
+workflows: quarterly compliance
+audit export (GRC team needs every
+tenant's full record including
+region + residency + timestamps as
+CSV for SOC 2 evidence), migration
+verification (operators verifying
+tenant data residency post-
+migration want full row including
+schema_name + residency JSONB),
+tenant inventory bulk-review
+(auditor opens full-shape CSV in
+Excel pivots by region + tier).
+Column shape: 11 columns matching
+TenantRowFull (id, slug, name,
+status, tier, region, schema_name,
+residency, search_locale,
+created_at, updated_at) — same
+columns as `tenants get` single-
+row output for consistency
+between bulk-list and per-tenant
+single paths. residency JSONB
+column serializes to compact JSON
+string for CSV cell embedding via
+JSON.stringify(r.residency);
+printCsv quote-wrapping handles
+embedded commas + quotes
+automatically via standard
+quote-doubling convention
+(e.g. `"{""primary"":""us-east-1""
+,""failover"":""us-west-2""}"`).
+Null residency renders as empty
+CSV cell matching printCsv null
+convention from existing code-
+paths. Timestamps emitted in
+stable ISO UTC format (YYYY-MM-
+DDTHH:MM:SS.MSZ) via to_char
+mirror identical to `tenants
+get`. Implementation: csv-full
+added to OUTPUT_FORMATS const +
+parseArgs validation whitelist
+(cli.ts) — symmetric with
+gh-summary M4.15.e pattern; new
+buildListQueryFull mirrors
+buildListQuery structure with
+wider SELECT clause + ISO
+timestamp formatting via
+to_char; filter logic (--status,
+--table-filter, --has-overrides)
+composes identically via shared
+WHERE-clause construction;
+runTenantsList csv-full branch
+runs the wider query, maps row
+to 11-column array with
+residency stringified, calls
+printCsv with comma default or
+--csv-separator override. Format
+value naming "csv-full" chosen
+over "csv2"/"csv-extended"
+(semantically clear "full
+version of CSV" without
+versioning baggage csv2 implies
+existing csv is obsolete;
+hyphenated form matches
+gh-summary precedent; leaves
+csv as compact default
+preserving M4.15.b backward
+compat). Fall-through for other
+surfaces: csv-full honored by
+tenants list only; other
+surfaces (tenant policies diff
+etc.) silently fall through to
+human format matching gh-summary
+M4.15.e pattern documented in
+CLI help. Rejected — use --full
+boolean flag combined with
+--format csv (couples format
+choice with separate flag
+complicating downstream
+consumers; separate format
+value is clearer), replace
+compact --format csv with full
+shape (breaks backward compat
+for operators already scripting
+against M4.15.b output), make
+csv-full default and rename
+compact form csv-compact (same
+backward-compat break), include
+per-tenant policy counts in
+csv-full (would require GROUP
+BY join different query
+semantic defer to future
+--include-policy-count flag
+from ADR-0289 Q2), use NDJSON
+for full shape one
+TenantRowFull per line (useful
+for streaming but spreadsheet
+workflows want CSV; operators
+wanting NDJSON use --format
+ndjson planned not yet wired
+for tenants), embed residency
+as multiple denormalized
+columns primary failover etc.
+(residency JSONB has variable
+shape per tenant; flattening
+requires knowing schema
+upfront; JSON-in-cell preserves
+flexibility), add column
+selection via --columns
+region,tier (over-engineered
+for v1; two-format compact/
+full split covers common
+cases). Drawbacks — JSON-in-
+CSV cells are awkward for raw
+reading (operators inspecting
+CSV with head see escaped
+quotes around residency cell;
+spreadsheet imports handle
+correctly raw-text consumers
+need to JSON-parse cell
+content), two query paths
+buildListQuery + buildList
+QueryFull means filter-logic
+changes need updating in two
+places (acceptable filter
+logic identical modulo
+SELECT; future refactor
+could extract shared WHERE
+builder), csv-full not
+available on other surfaces
+yet (operators expecting
+--format csv-full on
+retention diff etc. silently
+get human output documented
+but could surprise),
+timestamp rendering hardcoded
+to UTC + ISO 8601 (operators
+wanting local time zone need
+post-processing; acceptable
+UTC is canonical audit
+format). 8 new tests under
+"runTenants list --format
+csv-full (M4.15.f)" — --format
+csv-full emits 11-column
+header + one row per tenant
+(header verified 2 tenant
+rows + 3 lines total),
+--format csv-full serializes
+residency JSONB as compact
+JSON in CSV cell (residency
+{"primary":"us-east-1",
+"failover":"us-west-2"}
+appears quote-wrapped with
+escaped inner quotes
+verifying CSV embedding),
+--format csv-full uses
+wider SELECT query includes
+residency (queries[0].sql
+contains t.residency +
+t.schema_name + t.search_
+locale + to_char(t.created
+_at verifying query path),
+--format csv-full respects
+--status filter (params
+=["active"] verified),
+--format csv-full respects
+--has-overrides filter
+(EXISTS clause in SQL),
+--format csv-full with
+empty result emits header-
+only (1 line valid CSV),
+--format csv-full with
+--csv-separator ';' uses
+semicolon (header verified
+with semicolon delimiters),
+--format csv-full with null
+residency renders as empty
+CSV cell (11-column row
+parts split + residency
+column 7 zero-indexed
+asserts empty string).
+Test infrastructure
+extension: fakeConn gains
+tenantRowsFull option that
+returns TenantRowFull rows
+when SQL mentions
+t.residency (the marker
+column distinguishing wider
+query from compact); test-
+fake-implementation
+detail. cli.ts helpText
+updated: --format list
+adds csv-full + tenants
+list paragraph describes
+11-column TenantRowFull
+shape rationale +
+spreadsheet/audit use cases.
+Test count: tenants.test.ts
+grows 30 → 38 tests (+8).
+Workspace test count
+9,854 → 9,862 (+8).
+Coverage gate passes —
+tenants.ts at 92.17%
+statements / 93.4%
+branches / 91.66%
+functions / 92.17% lines
+(stable slight up vs
+M4.15.b 91.96% / 93.67%
+/ 90.9% / 91.96% with
+new csv-full branch +
+buildListQueryFull
+helper + tenantRowsFull
+test fixture path; all
+above 80/70/80/80
+thresholds). ADR-0293
+documents design + 7
+rejected alternatives
++ 7 future Qs (--include-
+policy-count computed
+column closes ADR-0289
+Q2 GROUP BY join adds 1
+column to either compact
+or full variant,
+--columns id,slug,region
+selection override
+format-chosen columns
+with custom subset,
+--format csv-full for
+tenants get too currently
+json + human only would
+need single-row CSV path,
+timezone flag --tz
+America/New_York for
+timestamp rendering
+useful for timezone-aware
+GRC reports, --include-
+tier-detail joining meta.
+llm_cost_tiers for tier
+display name + ceiling
+pairs with tier-membership
+audits, NDJSON format for
+full shape for streaming
+large tenant lists
+>10k, --exclude-residency
+privacy flag to omit
+residency column when
+exporting externally
+PII-aware audits). The
+tenants list surface now
+answers across THREE
+output shapes — human
+table for operator
+readability, JSON for
+programmatic consumption,
+compact CSV/TSV for
+quick exports (M4.15.b)
+plus full-shape csv-full
+for audit/compliance
+exports (M4.15.f). The
+compact/full split
+preserves M4.15.b
+backward compat while
+adding the new
+capability cleanly.
 M4.15.e adds `--format gh-summary`
 Markdown output across the entire diff
 family — extends the existing format-
