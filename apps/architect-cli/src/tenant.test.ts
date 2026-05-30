@@ -1492,3 +1492,339 @@ describe("runTenant policies --diff (M4.14.f)", () => {
     expect(output).toContain("[tier]");
   });
 });
+
+describe("runTenant policies --explain (M4.14.e)", () => {
+  it("default mode (no --explain) omits explain field from envelope (backward compat)", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect("explain" in env).toBe(false);
+  });
+
+  it("--explain implies --effective (effective field populated even without --effective flag)", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro Plan",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "200.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--explain", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      effective?: { source: string };
+      explain?: unknown;
+    };
+    expect(env.effective?.source).toBe("tier");
+    expect(env.explain).toBeDefined();
+  });
+
+  it("override + tier present: withoutOverride falls through to tier; withoutTier still shows override", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: "50.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro Plan",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "200.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--explain", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      effective: { source: string; ceiling: { maxUsdPerRequest: string } };
+      explain: {
+        withoutOverride: {
+          source: string;
+          ceiling?: { maxUsdPerRequest: string };
+          tierId?: string;
+        };
+        withoutTier: { source: string; ceiling?: { maxUsdPerRequest: string } };
+      };
+    };
+    // Current effective surface = override
+    expect(env.effective.source).toBe("override");
+    expect(env.effective.ceiling.maxUsdPerRequest).toBe("0.10000000");
+    // Strip the override → tier wins
+    expect(env.explain.withoutOverride.source).toBe("tier");
+    expect(env.explain.withoutOverride.ceiling?.maxUsdPerRequest).toBe("1.00000000");
+    expect(env.explain.withoutOverride.tierId).toBe("pro");
+    // Strip the tier → override still wins
+    expect(env.explain.withoutTier.source).toBe("override");
+    expect(env.explain.withoutTier.ceiling?.maxUsdPerRequest).toBe("0.10000000");
+  });
+
+  it("override only (no tier): withoutOverride falls through to 'none'", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: null,
+            window_seconds: null,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--explain", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      explain: {
+        withoutOverride: { source: string };
+        withoutTier: { source: string };
+      };
+    };
+    // Override stripped + no tier → none (falls to router-level global)
+    expect(env.explain.withoutOverride.source).toBe("none");
+    // Tier stripped (was already absent) → override still wins
+    expect(env.explain.withoutTier.source).toBe("override");
+  });
+
+  it("tier only (no override): withoutOverride still tier; withoutTier falls to 'none'", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free Plan",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: null,
+            window_seconds: null,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--explain", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      explain: {
+        withoutOverride: { source: string };
+        withoutTier: { source: string };
+      };
+    };
+    expect(env.explain.withoutOverride.source).toBe("tier");
+    expect(env.explain.withoutTier.source).toBe("none");
+  });
+
+  it("neither override nor tier: both scenarios resolve to 'none'", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--explain", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      explain: {
+        withoutOverride: { source: string };
+        withoutTier: { source: string };
+      };
+    };
+    expect(env.explain.withoutOverride.source).toBe("none");
+    expect(env.explain.withoutTier.source).toBe("none");
+  });
+
+  it("--explain + --diff are mutually exclusive: exits 2 with clear error", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--diff", TENANT_B, "--explain"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--diff and --explain are mutually exclusive");
+  });
+
+  it("human format renders the explain section with both scenarios", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "0.10000000",
+            max_usd_per_window: null,
+            window_seconds: null,
+            effective_from: "2026-04-01T00:00:00.000Z",
+          },
+        ],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro Plan",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "200.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID, "--explain"), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("=== Explain (what-if precedence walk) ===");
+    expect(output).toContain("without override:");
+    expect(output).toContain("source=tier");
+    expect(output).toContain("tier=pro");
+    expect(output).toContain("without tier:");
+    expect(output).toContain("source=override");
+  });
+
+  it("human format renders 'source=none' placeholder for scenarios that fall through to global", async () => {
+    const conn = fakePoliciesConn({});
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(parsed("tenant", "policies", RESOLVED_UUID, "--explain"), ctx);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("source=none");
+    expect(output).toContain("router-level global");
+  });
+
+  it("--explain does NOT issue an extra PG query — derives from already-fetched axes", async () => {
+    const queries: string[] = [];
+    const conn: PgConnection = {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        queries.push(sql);
+        if (sql.includes("FROM meta.llm_cost_ceilings WHERE tenant_id = $1")) {
+          return {
+            rows: [
+              {
+                max_usd_per_request: "0.25000000",
+                max_usd_per_window: null,
+                window_seconds: null,
+                effective_from: "2026-04-01T00:00:00.000Z",
+              },
+            ] as unknown as T[],
+            rowCount: 1,
+          } as PgQueryResult<T>;
+        }
+        return { rows: [], rowCount: 0 } as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const retention = fakeRetentionForPolicies({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--explain", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Same two queries M4.14.h fires (cost_ceilings + tier_memberships).
+    // The explain view + effective view are both derived client-side.
+    expect(queries).toHaveLength(2);
+  });
+});

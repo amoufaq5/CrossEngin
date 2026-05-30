@@ -436,6 +436,20 @@ export type TenantPolicyEffective =
     }
   | { readonly source: "none" };
 
+// M4.14.e — what-if precedence walk surfacing what would happen if
+// the override or tier was stripped. Operators auditing whether an
+// override is actually doing anything different from what the tier
+// would produce ("can I safely clear this override?") read
+// `withoutOverride` and compare to `effective`. The `withoutTier`
+// path is included for symmetry — operators planning to demote a
+// tenant out of a tier read this. Pure client-side derivation,
+// composed from `deriveEffectivePolicy` with each input stripped
+// to null.
+export interface TenantPolicyExplain {
+  readonly withoutOverride: TenantPolicyEffective;
+  readonly withoutTier: TenantPolicyEffective;
+}
+
 export interface TenantPoliciesReport {
   readonly tenantId: string;
   readonly input: string;
@@ -443,6 +457,7 @@ export interface TenantPoliciesReport {
   readonly costCeiling: TenantCostCeilingRow | null;
   readonly tier: TenantTierMembershipRow | null;
   readonly effective?: TenantPolicyEffective;
+  readonly explain?: TenantPolicyExplain;
 }
 
 async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Promise<number> {
@@ -450,15 +465,19 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   if (input === undefined) {
     printError(
       ctx.io,
-      "tenant policies: missing positional argument. usage: crossengin tenant policies <slug|uuid> [--diff <other-slug|uuid>] [--effective]",
+      "tenant policies: missing positional argument. usage: crossengin tenant policies <slug|uuid> [--diff <other-slug|uuid>] [--effective] [--explain]",
     );
     return 2;
   }
 
-  // M4.14.g — --effective adds a fourth section showing the precedence-
+  // M4.14.g — --effective adds a section showing the precedence-
   // resolved ceiling (override → tier → none). Pure client-side
   // composition from the existing raw axes; no extra PG query.
-  const effectiveFlag = getBooleanFlag(command, "effective");
+  // M4.14.e — --explain ALSO implies --effective (operators reading
+  // the what-if walk almost always want the current effective view
+  // as the baseline; forcing both flags is friction).
+  const explainFlag = getBooleanFlag(command, "explain");
+  const effectiveFlag = getBooleanFlag(command, "effective") || explainFlag;
 
   // M4.14.f — --diff <other-slug|uuid> compares two tenants' policy
   // shapes side-by-side. Mirrors the `retention diff` matrix pattern.
@@ -467,6 +486,16 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
   // get the effective field if --effective is set.
   const diffFlag = getStringFlag(command, "diff");
   if (diffFlag !== null) {
+    // --explain semantics don't compose cleanly with --diff in v1
+    // (which side gets explained? both? selectively?). Reject the
+    // combination explicitly rather than silently picking a behavior.
+    if (explainFlag) {
+      printError(
+        ctx.io,
+        "tenant policies: --diff and --explain are mutually exclusive in v1 (run --explain against each side separately)",
+      );
+      return 2;
+    }
     return await runTenantPoliciesDiff(command, ctx, input, diffFlag, effectiveFlag);
   }
 
@@ -503,7 +532,7 @@ async function runTenantPolicies(command: ParsedCommand, ctx: TenantContext): Pr
 
     let report: TenantPoliciesReport;
     try {
-      report = await gatherPoliciesReport(conn, ctx, tenantId, input, effectiveFlag);
+      report = await gatherPoliciesReport(conn, ctx, tenantId, input, effectiveFlag, explainFlag);
     } catch (err) {
       printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
@@ -589,8 +618,9 @@ async function runTenantPoliciesDiff(
     let reportB: TenantPoliciesReport;
     try {
       [reportA, reportB] = await Promise.all([
-        gatherPoliciesReport(conn, ctx, resolvedA.tenantId, inputA, effectiveFlag),
-        gatherPoliciesReport(conn, ctx, resolvedB.tenantId, inputB, effectiveFlag),
+        // --explain is rejected with --diff above, so pass false here.
+        gatherPoliciesReport(conn, ctx, resolvedA.tenantId, inputA, effectiveFlag, false),
+        gatherPoliciesReport(conn, ctx, resolvedB.tenantId, inputB, effectiveFlag, false),
       ]);
     } catch (err) {
       printError(ctx.io, `tenant policies: ${err instanceof Error ? err.message : String(err)}`);
@@ -627,6 +657,7 @@ async function gatherPoliciesReport(
   tenantId: string,
   input: string,
   effectiveFlag: boolean,
+  explainFlag: boolean,
 ): Promise<TenantPoliciesReport> {
   const retention = ctx.retentionOverride ?? new PostgresTraceRetention({ conn });
   const [retentionEntries, costCeiling, tier] = await Promise.all([
@@ -641,6 +672,7 @@ async function gatherPoliciesReport(
     costCeiling,
     tier,
     ...(effectiveFlag ? { effective: deriveEffectivePolicy(costCeiling, tier) } : {}),
+    ...(explainFlag ? { explain: deriveExplainView(costCeiling, tier) } : {}),
   };
 }
 
@@ -800,6 +832,36 @@ function renderPoliciesHuman(ctx: TenantContext, report: TenantPoliciesReport): 
       }
     }
   }
+
+  // M4.14.e — explain (what-if precedence walk) block when --explain
+  // is set. Renders two scenarios: what the effective walk would
+  // yield if the override was stripped, and if the tier was
+  // stripped. Operators compare to the current `effective` source
+  // above to decide whether clearing either input would change
+  // behavior.
+  if (report.explain !== undefined) {
+    ctx.io.stdout.write(`\n=== Explain (what-if precedence walk) ===\n`);
+    renderExplainScenario(ctx, "without override:", report.explain.withoutOverride);
+    renderExplainScenario(ctx, "without tier:    ", report.explain.withoutTier);
+  }
+}
+
+function renderExplainScenario(
+  ctx: TenantContext,
+  label: string,
+  result: TenantPolicyEffective,
+): void {
+  if (result.source === "none") {
+    ctx.io.stdout.write(`  ${label} source=none  (falls back to router-level global)\n`);
+    return;
+  }
+  const req = renderUsd(result.ceiling.maxUsdPerRequest);
+  const win = renderUsd(result.ceiling.maxUsdPerWindow);
+  const sec = result.ceiling.windowSeconds ?? "(unbounded)";
+  const tierSuffix = result.source === "tier" ? `  tier=${result.tierId}` : "";
+  ctx.io.stdout.write(
+    `  ${label} source=${result.source}  req=${req}  win=${win}  windowSec=${sec}${tierSuffix}\n`,
+  );
 }
 
 function renderUsd(value: string | null): string {
@@ -838,6 +900,24 @@ function deriveEffectivePolicy(
     };
   }
   return { source: "none" };
+}
+
+// M4.14.e — what-if precedence walk. Composes `deriveEffectivePolicy`
+// twice with each input stripped to null. Pure function over the
+// already-fetched raw axes; no PG query. Operators compare
+// `effective` (with current inputs) to `explain.withoutOverride`
+// (with override stripped) to answer "is my override actually
+// doing anything different from what the tier would produce?"
+// Identical answers → override is redundant; safe to clear.
+// Different answers → override is actively shadowing the tier.
+function deriveExplainView(
+  costCeiling: TenantCostCeilingRow | null,
+  tier: TenantTierMembershipRow | null,
+): TenantPolicyExplain {
+  return {
+    withoutOverride: deriveEffectivePolicy(null, tier),
+    withoutTier: deriveEffectivePolicy(costCeiling, null),
+  };
 }
 
 // M4.14.f — field-level diff over the three policy axes. JSON-friendly

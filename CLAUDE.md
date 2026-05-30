@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,206 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.14.e adds `--explain` flag to `tenant policies`
+— closes ADR-0281 Q1. After M4.14.g shipped the
+precedence-resolved effective view, operators
+auditing cost-ceiling overrides asked "is this
+override actually doing anything different from
+what the tier would produce?" — the answer
+required mentally simulating the precedence walk
+with the override stripped, which is error-prone
+for the multi-tier or compound-policy cases. The
+what-if extension surfaces two scenarios as a
+structured `TenantPolicyExplain` block:
+`withoutOverride` (the precedence walk yielded
+if the override was stripped to null) and
+`withoutTier` (the walk yielded if the tier
+membership was stripped). Operators compare the
+current `effective` source to
+`explain.withoutOverride` — same → override is
+redundant and can be cleared; different →
+override is actively shadowing the tier and
+clearing it would change runtime behavior.
+Implementation: --explain implies --effective
+(force-enables it; operators reading the what-if
+walk almost always want the baseline for
+comparison; requiring both flags is friction;
+explainFlag || effectiveFlag union); rejected
+mutual-exclusively with --diff in v1 (which
+side gets explained? both? selectively? — clear
+error message "run --explain against each side
+separately"; deferred to Q1). deriveExplainView
+is a pure function over the already-fetched raw
+axes that composes deriveEffectivePolicy twice
+with each input stripped — zero parallel
+implementation, zero drift risk vs the ADR-0281
+effective walk, zero PG queries beyond the two
+M4.14.h already fires (cost_ceilings +
+tier_memberships). Both scenarios share the same
+TenantPolicyEffective discriminated union from
+ADR-0281; the same source: override|tier|none
+semantics apply unchanged. Output: JSON envelope
+gains explain field only when --explain set
+(consumers detect via key existence); human
+format appends `=== Explain (what-if precedence
+walk) ===` section AFTER the effective block
+with each scenario rendered on one dense line
+(`without override: source=tier  req=$1.00 USD
+win=$200.00 USD  windowSec=86400  tier=pro`) or
+collapsed to placeholder for source=none
+scenarios (`without override: source=none
+(falls back to router-level global)`). The two
+scenarios chosen (withoutOverride + withoutTier)
+cover the operator's "what if I clear input X?"
+question for the two substrate-level policy
+inputs; withoutBoth is implicit (always
+source=none — substrate has nothing to say,
+runtime falls back to router-level global config
+which lives outside the substrate via
+DefaultLlmRouter constructor's costCeiling
+option) and adds zero signal; withAddedOverride
+/ withAddedTier (forward-projection) require
+operator-supplied hypothetical values and
+belong on a different command surface (a
+future tenants policies set --dry-run). Rejected
+— --explain takes axis arg --explain override |
+tier (both scenarios fit on two lines; forcing
+operator choice is friction for negligible
+output cost), --explain does NOT imply
+--effective (would force operators to pass both
+flags together; baseline needed for comparison
+to make sense), surface wouldChange boolean
+field clearingOverrideWouldChange:true
+(computable via simple visual comparison; adds
+API + test surface for convenience; defer until
+script-driven consumers ask), include
+withAddedOverride / withAddedTier forward-
+projection (requires operator-supplied
+hypothetical values; different command surface
+entirely), server-side what-if via dedicated
+SQL function (PG complexity for zero observable
+difference at typical scale; client-side
+derivation reuses deriveEffectivePolicy and is
+trivially correct), allow --explain + --diff
+to render both reports' explain blocks (muddles
+diff focus — which side's what-if matters?
+operators run --explain against each side
+separately), render withoutBoth scenario
+explicitly even though always source=none
+(noise; substrate "no policy" → runtime global
+is self-evident from the structure), make
+--explain default-on always compute (adds output
+noise for common case where operators want just
+raw axes; opt-in matches M4.14.g + M4.14.f
+pattern), compute explain as property of
+effective field effective.alternatives
+.withoutOverride (couples two opt-in views into
+one shape; separating preserves backward compat
+for M4.14.g consumers + lets operators request
+what they need), render explain values in human
+format with full key: value per-line layout like
+effective block (triples line count per
+scenario; single-line summary is dense but
+readable; operators wanting per-field detail
+use JSON). Drawbacks — two flags doing related-
+but-distinct things --effective and --explain
+(operators must learn both; --explain implies
+the other so common path is fine but API
+surface grows), mutually exclusive with --diff
+means operators investigating "do these two
+tenants enforce the same thing AND would
+clearing their overrides change anything?"
+run two commands (acceptable trade-off;
+combined view design is non-trivial),
+single-line human renderer is information-
+dense and harder to skim than multi-line
+effective block (operators wanting detail use
+JSON; single-line preserves vertical density),
+source=none placeholder lies slightly about
+runtime behavior (strictly runtime applies
+router-level global which substrate doesn't
+know about; documented in placeholder text
+"falls back to router-level global" but
+operators auditing actual enforced ceiling
+need to read operator config), two scenarios
+doubles surface to test vs --effective alone
+(addressed via pure-function composition;
+tests exercise same deriveEffectivePolicy
+logic just with different inputs). 10 new
+tests under "runTenant policies --explain
+(M4.14.e)" — default mode (no --explain)
+omits explain field from envelope (backward
+compat), --explain implies --effective
+(effective field populated even without
+--effective flag), override + tier present
+(withoutOverride falls through to tier
+showing tier ceiling + tierId; withoutTier
+still shows override since override beats
+absent tier), override only no tier
+(withoutOverride falls to source=none;
+withoutTier shows override since tier was
+already absent), tier only no override
+(withoutOverride shows tier; withoutTier
+falls to source=none), neither override nor
+tier (both scenarios resolve to source=none),
+--explain + --diff mutually exclusive exits 2
+with clear error, human format renders explain
+section with both scenarios + source=tier
+attribution + tier=pro tierId echo +
+source=override line, human format renders
+source=none placeholder for fall-through
+scenarios + router-level global suffix,
+--explain does NOT issue extra PG query
+(verified via 2-query assertion). cli.ts
+helpText extended with --explain in usage line
++ 5-line description explaining what-if walk +
+implies-effective semantic + override-vs-tier
+audit use case + mutual-exclusivity with --diff.
+Test count: tenant.test.ts grows 40 → 50 tests
+(+10). Workspace test count 9,754 → 9,764.
+Coverage gate passes — tenant.ts at 87.36%
+statements / 81.73% branches / 90.32%
+functions / 87.36% lines (statements UP from
+85.93% in M4.14.f; branches UP from 78.53% to
+81.73% from the additional positive-and-
+negative paths in deriveExplainView; functions
+UP from 89.65% to 90.32%; all above
+80/70/80/80 thresholds). ADR-0283 documents
+the design + 10 rejected alternatives + 7
+future Qs (--explain + --diff cross-tenant
+what-if comparison rendering both sides'
+explain blocks with second-order diff useful
+for migration planning, --explain --axis
+override arg deferred until operator output-
+width complaints surface, forward-projection
+scenarios --preview-override requires
+operator-supplied hypothetical values pairs
+with future tenants policies set --dry-run,
+explain.wouldChange boolean for script
+consumers easy add if demand emerges, --explain
+for retention has its own per-table precedence
+pairs with effectiveRetention from ADR-0159
+if operators ask, render explain values as
+structured YAML table in human format
+operators skimming long lines might prefer
+multi-line layout defer YAML output also
+reachable via --format yaml not currently
+wired through tenant policies but trivially
+addable, persist explain outputs to audit
+table when operator about to clear override
+e.g. tenants policies clear --record-explain
+pairs with future audit-log surface). The
+tenant policies surface now answers four
+operator questions: "what's CONFIGURED?"
+(default), "what's ENFORCED?" (--effective),
+"what would change if I cleared the
+override/tier?" (--explain), "how do two
+tenants COMPARE?" (--diff). Override
+redundancy audit + pre-deletion verification
++ tier offboarding preview workflows fully
+CLI-native — operators no longer mentally
+simulate the precedence walk to validate
+override-clearing decisions.
 M4.14.f adds `--diff <other-slug|uuid>` flag to
 `tenant policies` — closes ADR-0280 Q5. After M4.14.h
 shipped the per-tenant aggregated view and M4.14.g
