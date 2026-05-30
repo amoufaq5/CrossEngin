@@ -3807,3 +3807,295 @@ describe("runTenant housekeeping --add-tenant N-way (M4.15.c)", () => {
     expect(err()).toContain("left and right 2 resolve to the same tenant");
   });
 });
+
+// M4.15.d — CSV/TSV output for housekeeping --diff. Closes
+// ADR-0288 Q2 + ADR-0285 Q5. Single-comparison: 9-column shape
+// (tenant_a_id, tenant_a_input, tenant_b_id, tenant_b_input,
+// axis, table_name, field, value_a, value_b). N-way (--add-tenant)
+// prepends comparison_index column 0..N-1. Empty fieldDiffs still
+// emits header.
+describe("runTenant housekeeping --diff --format csv|tsv (M4.15.d)", () => {
+  it("single --diff --format csv emits header + one row per fieldDiff", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "csv",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "tenant_a_id,tenant_a_input,tenant_b_id,tenant_b_input,axis,table_name,field,value_a,value_b",
+    );
+    // Fixture: RESOLVED_UUID has override on gateway_pipeline_executions;
+    // TENANT_B has override on workflow_traces. Both surfaces appear in
+    // gateway + retention reports so multiple rows expected.
+    expect(lines.length).toBeGreaterThan(1);
+    // Each data row starts with tenant_a_id, tenant_a_input columns.
+    expect(lines[1]!.startsWith(`${RESOLVED_UUID},${RESOLVED_UUID},${TENANT_B},${TENANT_B},`)).toBe(
+      true,
+    );
+  });
+
+  it("single --diff --format tsv uses tab separator", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "tsv",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "tenant_a_id\ttenant_a_input\ttenant_b_id\ttenant_b_input\taxis\ttable_name\tfield\tvalue_a\tvalue_b",
+    );
+  });
+
+  it("single --diff --format csv with no fieldDiffs emits header-only (1 line)", async () => {
+    // A retention fake where both tenants have IDENTICAL overrides
+    // → fieldDiffs empty → CSV header-only.
+    const noOverrideRetention = {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      listTenantPolicies: async () => [],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 0,
+          cutoffMs: 0,
+        },
+      ],
+    };
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: noOverrideRetention as unknown as ReturnType<typeof fakeRetention>,
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "csv",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("tenant_a_id");
+  });
+
+  it("single --diff --format csv with --csv-separator ';' uses semicolon", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "csv",
+        "--csv-separator",
+        ";",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "tenant_a_id;tenant_a_input;tenant_b_id;tenant_b_input;axis;table_name;field;value_a;value_b",
+    );
+  });
+
+  it("--csv-separator '\"' under --format csv exits 2 BEFORE gather", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "csv",
+        "--csv-separator",
+        '"',
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--csv-separator cannot be");
+  });
+
+  it("N-way --diff --format csv prepends comparison_index column", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "csv",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "comparison_index,tenant_a_id,tenant_a_input,tenant_b_id,tenant_b_input,axis,table_name,field,value_a,value_b",
+    );
+    // At least one row with comparison_index 0 and one with 1.
+    const hasIdx0 = lines.slice(1).some((l) => l.startsWith("0,"));
+    const hasIdx1 = lines.slice(1).some((l) => l.startsWith("1,"));
+    expect(hasIdx0).toBe(true);
+    expect(hasIdx1).toBe(true);
+  });
+
+  it("N-way --diff --format tsv uses tab separator + comparison_index column", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "tsv",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "comparison_index\ttenant_a_id\ttenant_a_input\ttenant_b_id\ttenant_b_input\taxis\ttable_name\tfield\tvalue_a\tvalue_b",
+    );
+  });
+
+  it("--format csv composes with --exit-on-divergence (exits 3 on divergence)", async () => {
+    const conn = fakeConn({});
+    const { io } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "csv",
+        "--exit-on-divergence",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+  });
+});

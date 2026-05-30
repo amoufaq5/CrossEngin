@@ -1376,6 +1376,29 @@ async function runTenantHousekeepingDiff(
           right: rhs,
           fieldDiffs,
         });
+      } else if (command.format === "csv" || command.format === "tsv") {
+        // M4.15.d — single-comparison CSV: one row per fieldDiff with
+        // tenant_a/tenant_b identity columns + axis + table_name +
+        // field + value_a + value_b. Empty fieldDiffs still emits the
+        // header row (valid CSV; spreadsheet workflows want the
+        // header present even when policies match — same convention
+        // as policies --diff M4.14.c). Divergence exit code still
+        // fires per --exit-on-divergence semantics.
+        const sepResult = validatePoliciesCsvSeparator(command);
+        if (typeof sepResult === "string") {
+          printError(ctx.io, `tenant housekeeping: ${sepResult}`);
+          return 2;
+        }
+        const rows = buildHousekeepingDiffCsvRows(
+          { tenantId: anchorSide.tenantId, input: anchorSide.input },
+          { tenantId: rhs.tenantId, input: rhs.input },
+          fieldDiffs,
+        );
+        if (command.format === "tsv") {
+          printTsv(ctx.io, HOUSEKEEPING_DIFF_CSV_HEADERS, rows);
+        } else {
+          printCsv(ctx.io, HOUSEKEEPING_DIFF_CSV_HEADERS, rows, sepResult.separator);
+        }
       } else {
         renderHousekeepingDiffHuman(
           ctx,
@@ -1409,6 +1432,34 @@ async function runTenantHousekeepingDiff(
           fieldDiffs: c.fieldDiffs,
         })),
       });
+    } else if (command.format === "csv" || command.format === "tsv") {
+      // M4.15.d — multi-comparison CSV: prepend comparison_index
+      // column tagging each row with which (anchor, right[i]) pair
+      // it came from. Empty fieldDiffs across all comparisons still
+      // emits header-only (matches policies multi-CSV from M4.14.a).
+      const sepResult = validatePoliciesCsvSeparator(command);
+      if (typeof sepResult === "string") {
+        printError(ctx.io, `tenant housekeeping: ${sepResult}`);
+        return 2;
+      }
+      const allRows: Array<ReadonlyArray<unknown>> = [];
+      for (let i = 0; i < comparisons.length; i++) {
+        const c = comparisons[i]!;
+        const baseRows = buildHousekeepingDiffCsvRows(
+          { tenantId: anchorSide.tenantId, input: anchorSide.input },
+          { tenantId: c.right.tenantId, input: c.right.input },
+          c.fieldDiffs,
+        );
+        for (const r of baseRows) {
+          allRows.push([i, ...r]);
+        }
+      }
+      const headers = ["comparison_index", ...HOUSEKEEPING_DIFF_CSV_HEADERS];
+      if (command.format === "tsv") {
+        printTsv(ctx.io, headers, allRows);
+      } else {
+        printCsv(ctx.io, headers, allRows, sepResult.separator);
+      }
     } else {
       renderHousekeepingMultiDiffHuman(ctx, anchorSide, comparisons);
     }
@@ -1946,6 +1997,43 @@ const POLICIES_DIFF_CSV_HEADERS: ReadonlyArray<string> = [
   "value_a",
   "value_b",
 ];
+
+// M4.15.d — housekeeping --diff CSV/TSV headers. Adds table_name
+// column since HousekeepingFieldDiff keys per (axis, tableName,
+// field) rather than just (axis, field) like policies. 9-column
+// shape (10 under N-way with comparison_index prepended).
+const HOUSEKEEPING_DIFF_CSV_HEADERS: ReadonlyArray<string> = [
+  "tenant_a_id",
+  "tenant_a_input",
+  "tenant_b_id",
+  "tenant_b_input",
+  "axis",
+  "table_name",
+  "field",
+  "value_a",
+  "value_b",
+];
+
+// M4.15.d — one row per HousekeepingFieldDiff. Empty fieldDiffs
+// yields an empty row list; the caller emits header-only CSV in
+// that case (matches policies M4.14.c convention).
+function buildHousekeepingDiffCsvRows(
+  left: { readonly tenantId: string; readonly input: string },
+  right: { readonly tenantId: string; readonly input: string },
+  fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>,
+): ReadonlyArray<ReadonlyArray<unknown>> {
+  return fieldDiffs.map((d) => [
+    left.tenantId,
+    left.input,
+    right.tenantId,
+    right.input,
+    d.axis,
+    d.tableName,
+    d.field,
+    d.valueA ?? null,
+    d.valueB ?? null,
+  ]);
+}
 
 // Each axis emits its sub-fields into a row aligned with the header
 // schema. Fields not relevant to the axis are emitted as `null` (the
