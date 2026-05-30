@@ -57,6 +57,11 @@ import {
   formatPrunePreview,
   formatPruneRun,
   formatRestorePreview,
+  formatRetentionDiffCrossTableGhSummary,
+  formatRetentionDiffCrossTableNwayGhSummary,
+  formatRetentionDiffGhSummary,
+  formatRetentionDiffNwayGhSummary,
+  formatRetentionDiffVsPlatformGhSummary,
   formatTenantDiff,
   formatTenantNwayDiff,
   formatTenantTablesDiff,
@@ -16613,5 +16618,192 @@ describe("--tenant <uuid|slug> slug resolution across list-policies / history / 
     // NO meta.tenants SELECT issued across all three actions — UUID
     // short-circuit preserved end-to-end.
     expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
+  });
+});
+
+// M4.15.i — `--format gh-summary` Markdown rendering for the
+// retention diff family. Closes ADR-0292 Q4. Each retention diff
+// surface (pair, vs-platform, cross-table, N-way, cross-table N-way)
+// emits Markdown suitable for $GITHUB_STEP_SUMMARY redirection.
+describe("retention diff --format gh-summary (M4.15.i)", () => {
+  it("formatRetentionDiffGhSummary emits Markdown with header + table + verdict (divergence)", () => {
+    const md = formatRetentionDiffGhSummary({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      resolutionA: { source: "tenant", retentionDays: 30, enabled: true, tenantId: TENANT_A },
+      resolutionB: { source: "platform", retentionDays: 90, enabled: true },
+      fieldDiffs: [
+        { field: "retentionDays", valueA: 30, valueB: 90 },
+        { field: "source", valueA: "tenant", valueB: "platform" },
+      ],
+    });
+    expect(md).toContain("## Diff: retention policies");
+    expect(md).toContain(`**Table:** \`workflow_traces\``);
+    expect(md).toContain(`**Tenant A:** \`${TENANT_A}\``);
+    expect(md).toContain(`**Tenant B:** \`${TENANT_B}\``);
+    expect(md).toContain("### Field changes (2)");
+    expect(md).toContain("| Field | Tenant A | Tenant B |");
+    expect(md).toContain("| `retentionDays` | `30` | `90` |");
+    expect(md).toContain(":warning: **Divergence detected**");
+  });
+
+  it("formatRetentionDiffGhSummary emits 'No differences' check mark on empty fieldDiffs", () => {
+    const md = formatRetentionDiffGhSummary({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      resolutionA: { source: "platform", retentionDays: 90, enabled: true },
+      resolutionB: { source: "platform", retentionDays: 90, enabled: true },
+      fieldDiffs: [],
+    });
+    expect(md).toContain(":white_check_mark: **No differences**");
+    expect(md).not.toContain(":warning:");
+  });
+
+  it("formatRetentionDiffVsPlatformGhSummary emits 'Override detected' for divergence", () => {
+    const md = formatRetentionDiffVsPlatformGhSummary({
+      tenantId: TENANT_A,
+      tableName: "workflow_traces",
+      tenantResolution: { source: "tenant", retentionDays: 365, enabled: true, tenantId: TENANT_A },
+      platformResolution: { source: "platform", retentionDays: 90, enabled: true },
+      fieldDiffs: [{ field: "retentionDays", valueA: 365, valueB: 90 }],
+    });
+    expect(md).toContain("## Diff: retention tenant vs platform defaults");
+    expect(md).toContain(`**Tenant:** \`${TENANT_A}\``);
+    expect(md).toContain("| Field | Tenant | Platform |");
+    expect(md).toContain(":warning: **Override detected**");
+  });
+
+  it("formatRetentionDiffCrossTableGhSummary emits Table A/B columns", () => {
+    const md = formatRetentionDiffCrossTableGhSummary({
+      tenantId: TENANT_A,
+      tableNameA: "workflow_traces",
+      tableNameB: "gateway_pipeline_executions",
+      resolutionA: { source: "tenant", retentionDays: 90, enabled: true, tenantId: TENANT_A },
+      resolutionB: { source: "platform", retentionDays: 30, enabled: true },
+      fieldDiffs: [{ field: "retentionDays", valueA: 90, valueB: 30 }],
+    });
+    expect(md).toContain("## Diff: retention cross-table");
+    expect(md).toContain("**Table A:** `workflow_traces`");
+    expect(md).toContain("**Table B:** `gateway_pipeline_executions`");
+    expect(md).toContain("| Field | Table A | Table B |");
+    expect(md).toContain(":warning: **Cross-table divergence**");
+  });
+
+  it("formatRetentionDiffNwayGhSummary emits Distinct values column with labels", () => {
+    const md = formatRetentionDiffNwayGhSummary({
+      tenantIds: [TENANT_A, TENANT_B, "tenant-c"],
+      tableName: "workflow_traces",
+      resolutions: [
+        {
+          tenantId: TENANT_A,
+          resolution: { source: "tenant", retentionDays: 30, enabled: true, tenantId: TENANT_A },
+        },
+        {
+          tenantId: TENANT_B,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tenantId: "tenant-c",
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+      ],
+      fieldVariations: [
+        {
+          field: "retentionDays",
+          distinctValues: [
+            { value: 30, labels: [TENANT_A] },
+            { value: 90, labels: [TENANT_B, "tenant-c"] },
+          ],
+        },
+      ],
+    });
+    expect(md).toContain("## Multi-tenant retention diff");
+    expect(md).toContain("**Tenants:** 3");
+    expect(md).toContain("| Field | Distinct values |");
+    expect(md).toContain(`\`30\` (${TENANT_A})`);
+    expect(md).toContain(`\`90\` (${TENANT_B}, tenant-c)`);
+    expect(md).toContain(":warning: **Variations detected**");
+  });
+
+  it("formatRetentionDiffNwayGhSummary emits 'No variations' check mark on empty variations", () => {
+    const md = formatRetentionDiffNwayGhSummary({
+      tenantIds: [TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+      resolutions: [
+        {
+          tenantId: TENANT_A,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+        {
+          tenantId: TENANT_B,
+          resolution: { source: "platform", retentionDays: 90, enabled: true },
+        },
+      ],
+      fieldVariations: [],
+    });
+    expect(md).toContain(":white_check_mark: **No variations**");
+    expect(md).toContain("all 2 tenants match");
+  });
+
+  it("formatRetentionDiffCrossTableNwayGhSummary emits multi-table summary", () => {
+    const md = formatRetentionDiffCrossTableNwayGhSummary({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "gateway_pipeline_executions", "rate_limit_decisions"],
+      resolutions: [
+        {
+          tableName: "workflow_traces",
+          resolution: { source: "tenant", retentionDays: 90, enabled: true, tenantId: TENANT_A },
+        },
+        {
+          tableName: "gateway_pipeline_executions",
+          resolution: { source: "platform", retentionDays: 30, enabled: true },
+        },
+        {
+          tableName: "rate_limit_decisions",
+          resolution: { source: "platform", retentionDays: 7, enabled: true },
+        },
+      ],
+      fieldVariations: [
+        {
+          field: "retentionDays",
+          distinctValues: [
+            { value: 90, labels: ["workflow_traces"] },
+            { value: 30, labels: ["gateway_pipeline_executions"] },
+            { value: 7, labels: ["rate_limit_decisions"] },
+          ],
+        },
+      ],
+    });
+    expect(md).toContain("## Multi-table retention diff (cross-table)");
+    expect(md).toContain(`**Tenant:** \`${TENANT_A}\``);
+    expect(md).toContain("**Tables:** 3");
+    expect(md).toContain("| Field | Distinct values |");
+  });
+
+  it("Markdown value escaping: pipe characters in string values are escaped", () => {
+    const md = formatRetentionDiffGhSummary({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      resolutionA: { source: "platform", retentionDays: 90, enabled: true },
+      resolutionB: { source: "platform", retentionDays: 90, enabled: true },
+      fieldDiffs: [{ field: "optOutReason", valueA: "ticket|123", valueB: "ticket|456" }],
+    });
+    expect(md).toContain("ticket\\|123");
+    expect(md).toContain("ticket\\|456");
+  });
+
+  it("Markdown value rendering: undefined → `absent`, null → `null`", () => {
+    const md = formatRetentionDiffGhSummary({
+      tenantIdA: TENANT_A,
+      tenantIdB: TENANT_B,
+      tableName: "workflow_traces",
+      resolutionA: { source: "platform", retentionDays: 90, enabled: true },
+      resolutionB: { source: "platform", retentionDays: 90, enabled: true },
+      fieldDiffs: [{ field: "optOutReason", valueA: undefined, valueB: null }],
+    });
+    expect(md).toContain("| `optOutReason` | `absent` | `null` |");
   });
 });

@@ -3264,6 +3264,8 @@ async function runRetentionDiff(
 
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, { action: "diff", result });
+  } else if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatRetentionDiffGhSummary(result));
   } else {
     ctx.io.stdout.write(formatTenantDiff(result));
   }
@@ -3295,6 +3297,8 @@ async function runRetentionDiffVsPlatform(
 
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, { action: "diff", vsPlatform: true, result });
+  } else if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatRetentionDiffVsPlatformGhSummary(result));
   } else {
     ctx.io.stdout.write(formatTenantVsPlatformDiff(result));
   }
@@ -3331,6 +3335,8 @@ async function runRetentionDiffCrossTable(
 
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, { action: "diff", crossTable: true, result });
+  } else if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatRetentionDiffCrossTableGhSummary(result));
   } else {
     ctx.io.stdout.write(formatTenantTablesDiff(result));
   }
@@ -3365,6 +3371,8 @@ async function runRetentionDiffNway(
 
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, { action: "diff", nway: true, result });
+  } else if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatRetentionDiffNwayGhSummary(result));
   } else {
     ctx.io.stdout.write(formatTenantNwayDiff(result));
   }
@@ -3404,6 +3412,8 @@ async function runRetentionDiffCrossTableNway(
       crossTable: true,
       result,
     });
+  } else if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatRetentionDiffCrossTableNwayGhSummary(result));
   } else {
     ctx.io.stdout.write(formatTenantTablesNwayDiff(result));
   }
@@ -3620,5 +3630,165 @@ export function formatTenantVsPlatformDiff(result: DiffTenantVsPlatformResult): 
       lines.push(`  ${d.field.padEnd(20)} ${a}  →  ${b}`);
     }
   }
+  return lines.join("\n") + "\n";
+}
+
+// M4.15.i — Markdown summary helpers for the retention diff family,
+// suitable for $GITHUB_STEP_SUMMARY redirection from CI workflows.
+// Same shape conventions as the policies + housekeeping renderers
+// (M4.15.e): ## header + metadata + ### Field changes table +
+// verdict-emoji footer. formatMdRetentionValue handles backtick-wrap
+// + pipe/backtick/backslash escaping; null/undefined renders as
+// `null` / `absent` for visibility.
+
+function formatMdRetentionValue(v: unknown): string {
+  if (v === undefined) return "`absent`";
+  if (v === null) return "`null`";
+  if (typeof v === "boolean" || typeof v === "number") return `\`${String(v)}\``;
+  const str = typeof v === "string" ? v : JSON.stringify(v);
+  const safe = str.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/`/g, "\\`");
+  return `\`${safe}\``;
+}
+
+export function formatRetentionDiffGhSummary(result: DiffTenantPoliciesResult): string {
+  const lines: string[] = [];
+  lines.push(`## Diff: retention policies`);
+  lines.push("");
+  lines.push(`**Table:** \`${result.tableName}\`  `);
+  lines.push(`**Tenant A:** \`${result.tenantIdA}\`  `);
+  lines.push(`**Tenant B:** \`${result.tenantIdB}\``);
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(`:white_check_mark: **No differences** — both tenants match.`);
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`### Field changes (${result.fieldDiffs.length})`);
+  lines.push("");
+  lines.push(`| Field | Tenant A | Tenant B |`);
+  lines.push(`|-------|----------|----------|`);
+  for (const d of result.fieldDiffs) {
+    lines.push(
+      `| \`${d.field}\` | ${formatMdRetentionValue(d.valueA)} | ${formatMdRetentionValue(d.valueB)} |`,
+    );
+  }
+  lines.push("");
+  lines.push(`:warning: **Divergence detected** — ${result.fieldDiffs.length} field(s) differ.`);
+  return lines.join("\n") + "\n";
+}
+
+export function formatRetentionDiffVsPlatformGhSummary(result: DiffTenantVsPlatformResult): string {
+  const lines: string[] = [];
+  lines.push(`## Diff: retention tenant vs platform defaults`);
+  lines.push("");
+  lines.push(`**Table:** \`${result.tableName}\`  `);
+  lines.push(`**Tenant:** \`${result.tenantId}\``);
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(
+      `:white_check_mark: **No differences** — tenant matches platform defaults on this table.`,
+    );
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`### Field changes (${result.fieldDiffs.length})`);
+  lines.push("");
+  lines.push(`| Field | Tenant | Platform |`);
+  lines.push(`|-------|--------|----------|`);
+  for (const d of result.fieldDiffs) {
+    lines.push(
+      `| \`${d.field}\` | ${formatMdRetentionValue(d.valueA)} | ${formatMdRetentionValue(d.valueB)} |`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    `:warning: **Override detected** — ${result.fieldDiffs.length} field(s) differ from platform.`,
+  );
+  return lines.join("\n") + "\n";
+}
+
+export function formatRetentionDiffCrossTableGhSummary(result: DiffTenantTablesResult): string {
+  const lines: string[] = [];
+  lines.push(`## Diff: retention cross-table`);
+  lines.push("");
+  lines.push(`**Tenant:** \`${result.tenantId}\`  `);
+  lines.push(`**Table A:** \`${result.tableNameA}\`  `);
+  lines.push(`**Table B:** \`${result.tableNameB}\``);
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(`:white_check_mark: **No differences** — both tables match for this tenant.`);
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`### Field changes (${result.fieldDiffs.length})`);
+  lines.push("");
+  lines.push(`| Field | Table A | Table B |`);
+  lines.push(`|-------|---------|---------|`);
+  for (const d of result.fieldDiffs) {
+    lines.push(
+      `| \`${d.field}\` | ${formatMdRetentionValue(d.valueA)} | ${formatMdRetentionValue(d.valueB)} |`,
+    );
+  }
+  lines.push("");
+  lines.push(`:warning: **Cross-table divergence** — ${result.fieldDiffs.length} field(s) differ.`);
+  return lines.join("\n") + "\n";
+}
+
+export function formatRetentionDiffNwayGhSummary(result: DiffTenantPoliciesNwayResult): string {
+  const lines: string[] = [];
+  lines.push(`## Multi-tenant retention diff`);
+  lines.push("");
+  lines.push(`**Table:** \`${result.tableName}\`  `);
+  lines.push(`**Tenants:** ${result.resolutions.length}`);
+  lines.push("");
+  if (result.fieldVariations.length === 0) {
+    lines.push(
+      `:white_check_mark: **No variations** — all ${result.resolutions.length} tenants match.`,
+    );
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`### Field variations (${result.fieldVariations.length})`);
+  lines.push("");
+  lines.push(`| Field | Distinct values |`);
+  lines.push(`|-------|-----------------|`);
+  for (const v of result.fieldVariations) {
+    const groups = v.distinctValues
+      .map((g) => `${formatMdRetentionValue(g.value)} (${g.labels.join(", ")})`)
+      .join(" ; ");
+    lines.push(`| \`${v.field}\` | ${groups} |`);
+  }
+  lines.push("");
+  lines.push(
+    `:warning: **Variations detected** — ${result.fieldVariations.length} field(s) vary across ${result.resolutions.length} tenants.`,
+  );
+  return lines.join("\n") + "\n";
+}
+
+export function formatRetentionDiffCrossTableNwayGhSummary(
+  result: DiffTenantTablesNwayResult,
+): string {
+  const lines: string[] = [];
+  lines.push(`## Multi-table retention diff (cross-table)`);
+  lines.push("");
+  lines.push(`**Tenant:** \`${result.tenantId}\`  `);
+  lines.push(`**Tables:** ${result.tableNames.length}`);
+  lines.push("");
+  if (result.fieldVariations.length === 0) {
+    lines.push(
+      `:white_check_mark: **No variations** — all ${result.tableNames.length} tables match for this tenant.`,
+    );
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`### Field variations (${result.fieldVariations.length})`);
+  lines.push("");
+  lines.push(`| Field | Distinct values |`);
+  lines.push(`|-------|-----------------|`);
+  for (const v of result.fieldVariations) {
+    const groups = v.distinctValues
+      .map((g) => `${formatMdRetentionValue(g.value)} (${g.labels.join(", ")})`)
+      .join(" ; ");
+    lines.push(`| \`${v.field}\` | ${groups} |`);
+  }
+  lines.push("");
+  lines.push(
+    `:warning: **Variations detected** — ${result.fieldVariations.length} field(s) vary across ${result.tableNames.length} tables.`,
+  );
   return lines.join("\n") + "\n";
 }
