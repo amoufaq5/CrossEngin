@@ -2243,6 +2243,10 @@ async function runRetentionDiffHistory(
     }
     return 0;
   }
+  if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatHistoryDiffGhSummary(result, { withActorNames }));
+    return 0;
+  }
   ctx.io.stdout.write(formatHistoryDiff(result, { withActorNames }));
   return 0;
 }
@@ -3037,6 +3041,16 @@ async function runRetentionDiffTimeline(
     }
     return 0;
   }
+  if (command.format === "gh-summary") {
+    ctx.io.stdout.write(
+      formatTimelineDiffGhSummary(result, {
+        withActorNames,
+        nextAfterId: nextAfterIdPair,
+        nextBeforeId: nextBeforeIdPair,
+      }),
+    );
+    return 0;
+  }
   ctx.io.stdout.write(
     formatTimelineDiff(result, {
       withActorNames,
@@ -3790,5 +3804,118 @@ export function formatRetentionDiffCrossTableNwayGhSummary(
   lines.push(
     `:warning: **Variations detected** — ${result.fieldVariations.length} field(s) vary across ${result.tableNames.length} tables.`,
   );
+  return lines.join("\n") + "\n";
+}
+
+// M4.15.m — Markdown summary helpers for retention diff-history +
+// diff-timeline. Closes ADR-0296 Q1. diff-history uses the same
+// Field/A/B table shape as the M4.15.i pair diff (matching
+// HistoryEntryFieldDiff shape) with event metadata (kinds, actors,
+// timestamps) in the header. diff-timeline uses an event-per-row
+// table (timestamp / tenant-side / event-kind / actor) since
+// timeline entries are a log, not a pair-wise diff.
+
+export function formatHistoryDiffGhSummary(
+  result: DiffHistoryEntriesResult,
+  opts: { readonly withActorNames?: boolean } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(`## Diff: retention history events`);
+  lines.push("");
+  lines.push(`**Tenant:** \`${result.tenantId}\`  `);
+  lines.push(`**Table:** \`${result.tableName}\``);
+  lines.push("");
+  const actorALine = opts.withActorNames
+    ? ` by ${formatActor({
+        actorId: result.actorIdA,
+        actorDisplayName: result.actorDisplayNameA,
+        actorEmail: result.actorEmailA,
+      })}`
+    : "";
+  const actorBLine = opts.withActorNames
+    ? ` by ${formatActor({
+        actorId: result.actorIdB,
+        actorDisplayName: result.actorDisplayNameB,
+        actorEmail: result.actorEmailB,
+      })}`
+    : "";
+  lines.push(
+    `**Event A:** \`${result.idA}\` @ \`${result.occurredAtA}\` (\`${result.eventKindA}\`)${actorALine}  `,
+  );
+  lines.push(
+    `**Event B:** \`${result.idB}\` @ \`${result.occurredAtB}\` (\`${result.eventKindB}\`)${actorBLine}`,
+  );
+  lines.push("");
+  if (result.fieldDiffs.length === 0) {
+    lines.push(
+      `:white_check_mark: **No differences** — both events captured the same policy state.`,
+    );
+    return lines.join("\n") + "\n";
+  }
+  lines.push(`### Field changes (${result.fieldDiffs.length})`);
+  lines.push("");
+  lines.push(`| Field | A | B |`);
+  lines.push(`|-------|---|---|`);
+  for (const d of result.fieldDiffs) {
+    lines.push(
+      `| \`${d.field}\` | ${formatMdRetentionValue(d.valueA)} | ${formatMdRetentionValue(d.valueB)} |`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    `:warning: **Divergence detected** — ${result.fieldDiffs.length} field(s) differ between events.`,
+  );
+  return lines.join("\n") + "\n";
+}
+
+export function formatTimelineDiffGhSummary(
+  result: DiffHistoryTimelineResult,
+  opts: {
+    readonly withActorNames?: boolean;
+    readonly nextAfterId?: string | null;
+    readonly nextBeforeId?: string | null;
+  } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(`## Timeline: retention history events`);
+  lines.push("");
+  lines.push(`**Table:** \`${result.tableName}\`  `);
+  lines.push(`**Entries:** ${result.entries.length}`);
+  lines.push("");
+  if (result.entries.length === 0) {
+    lines.push(`:white_check_mark: **No events in window** — timeline is empty.`);
+    return lines.join("\n") + "\n";
+  }
+  const actorHeader = opts.withActorNames ? ` | Actor` : "";
+  const actorAlign = opts.withActorNames ? `|-------` : "";
+  lines.push(`### Events (${result.entries.length})`);
+  lines.push("");
+  lines.push(`| Time | Side | Kind | Tenant${actorHeader} |`);
+  lines.push(`|------|------|------|--------${actorAlign}|`);
+  for (const e of result.entries) {
+    const actorCol = opts.withActorNames
+      ? ` | ${formatMdRetentionValue(
+          formatActor({
+            actorId: e.actorId,
+            actorDisplayName: e.actorDisplayName,
+            actorEmail: e.actorEmail,
+          }),
+        )}`
+      : "";
+    lines.push(
+      `| \`${e.occurredAt}\` | \`${e.tenantSide}\` | \`${e.eventKind}\` | \`${e.tenantId}\`${actorCol} |`,
+    );
+  }
+  lines.push("");
+  // Pagination cursor surfaced as a footer hint (operators chaining
+  // pages from CI step output benefit from a visible nextAfterId).
+  if (opts.nextAfterId !== null && opts.nextAfterId !== undefined) {
+    lines.push(`> Next page: \`--after-id ${opts.nextAfterId}\``);
+    lines.push("");
+  }
+  if (opts.nextBeforeId !== null && opts.nextBeforeId !== undefined) {
+    lines.push(`> Previous page: \`--before-id ${opts.nextBeforeId}\``);
+    lines.push("");
+  }
   return lines.join("\n") + "\n";
 }

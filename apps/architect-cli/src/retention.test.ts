@@ -58,7 +58,9 @@ import {
   formatPruneRun,
   formatRestorePreview,
   formatRetentionDiffCrossTableGhSummary,
+  formatHistoryDiffGhSummary,
   formatRetentionDiffCrossTableNwayGhSummary,
+  formatTimelineDiffGhSummary,
   formatRetentionDiffGhSummary,
   formatRetentionDiffNwayGhSummary,
   formatRetentionDiffVsPlatformGhSummary,
@@ -16805,5 +16807,196 @@ describe("retention diff --format gh-summary (M4.15.i)", () => {
       fieldDiffs: [{ field: "optOutReason", valueA: undefined, valueB: null }],
     });
     expect(md).toContain("| `optOutReason` | `absent` | `null` |");
+  });
+});
+
+// M4.15.m — `--format gh-summary` Markdown rendering for `retention
+// diff-history` + `retention diff-timeline`. Closes ADR-0296 Q1.
+// diff-history mirrors the M4.15.i pair-diff shape (matching
+// HistoryEntryFieldDiff) with event metadata header. diff-timeline
+// uses an event-per-row table since timeline entries are a log.
+describe("retention diff-history / diff-timeline --format gh-summary (M4.15.m)", () => {
+  it("formatHistoryDiffGhSummary emits Markdown with event metadata + field-changes table on divergence", () => {
+    const md = formatHistoryDiffGhSummary({
+      idA: "h-aaa-001",
+      idB: "h-bbb-002",
+      tenantId: "00000000-0000-4000-8000-00000000000a",
+      tableName: "workflow_traces",
+      occurredAtA: "2026-05-15T10:00:00.000Z",
+      occurredAtB: "2026-05-20T14:30:00.000Z",
+      eventKindA: "retention_set",
+      eventKindB: "opt_out_set",
+      actorIdA: "operator-1",
+      actorIdB: "operator-2",
+      actorDisplayNameA: null,
+      actorDisplayNameB: null,
+      actorEmailA: null,
+      actorEmailB: null,
+      fieldDiffs: [
+        { field: "retentionDays", valueA: 30, valueB: 90 },
+        { field: "optOut", valueA: false, valueB: true },
+      ],
+    });
+    expect(md).toContain("## Diff: retention history events");
+    expect(md).toContain(`**Tenant:** \`00000000-0000-4000-8000-00000000000a\``);
+    expect(md).toContain("**Table:** `workflow_traces`");
+    expect(md).toContain("**Event A:** `h-aaa-001` @ `2026-05-15T10:00:00.000Z` (`retention_set`)");
+    expect(md).toContain("**Event B:** `h-bbb-002` @ `2026-05-20T14:30:00.000Z` (`opt_out_set`)");
+    expect(md).toContain("### Field changes (2)");
+    expect(md).toContain("| `retentionDays` | `30` | `90` |");
+    expect(md).toContain("| `optOut` | `false` | `true` |");
+    expect(md).toContain(":warning: **Divergence detected**");
+  });
+
+  it("formatHistoryDiffGhSummary with withActorNames adds 'by <name>' suffix", () => {
+    const md = formatHistoryDiffGhSummary(
+      {
+        idA: "h-aaa-001",
+        idB: "h-bbb-002",
+        tenantId: "00000000-0000-4000-8000-00000000000a",
+        tableName: "workflow_traces",
+        occurredAtA: "2026-05-15T10:00:00.000Z",
+        occurredAtB: "2026-05-20T14:30:00.000Z",
+        eventKindA: "retention_set",
+        eventKindB: "retention_set",
+        actorIdA: "operator-1",
+        actorIdB: "operator-2",
+        actorDisplayNameA: "Alice Operator",
+        actorDisplayNameB: "Bob Operator",
+        actorEmailA: "alice@example.com",
+        actorEmailB: "bob@example.com",
+        fieldDiffs: [{ field: "retentionDays", valueA: 30, valueB: 90 }],
+      },
+      { withActorNames: true },
+    );
+    expect(md).toContain("by Alice Operator");
+    expect(md).toContain("by Bob Operator");
+  });
+
+  it("formatHistoryDiffGhSummary emits 'No differences' check mark on empty fieldDiffs", () => {
+    const md = formatHistoryDiffGhSummary({
+      idA: "h-aaa-001",
+      idB: "h-bbb-002",
+      tenantId: "00000000-0000-4000-8000-00000000000a",
+      tableName: "workflow_traces",
+      occurredAtA: "2026-05-15T10:00:00.000Z",
+      occurredAtB: "2026-05-20T14:30:00.000Z",
+      eventKindA: "retention_set",
+      eventKindB: "retention_set",
+      actorIdA: "operator-1",
+      actorIdB: "operator-1",
+      actorDisplayNameA: null,
+      actorDisplayNameB: null,
+      actorEmailA: null,
+      actorEmailB: null,
+      fieldDiffs: [],
+    });
+    expect(md).toContain(":white_check_mark: **No differences**");
+    expect(md).not.toContain(":warning:");
+  });
+
+  it("formatTimelineDiffGhSummary emits event-per-row table with side/kind/tenant columns", () => {
+    const md = formatTimelineDiffGhSummary({
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h-001",
+          tenantId: "00000000-0000-4000-8000-00000000000a",
+          tenantSide: "A",
+          tableName: "workflow_traces",
+          eventKind: "retention_set",
+          actorId: "operator-1",
+          actorDisplayName: null,
+          actorEmail: null,
+          occurredAt: "2026-05-15T10:00:00.000Z",
+          prevState: { retentionDays: 30 },
+          nextState: { retentionDays: 90 },
+          attributes: null,
+        },
+        {
+          id: "h-002",
+          tenantId: "00000000-0000-4000-8000-00000000000b",
+          tenantSide: "B",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          actorId: "operator-2",
+          actorDisplayName: null,
+          actorEmail: null,
+          occurredAt: "2026-05-16T11:00:00.000Z",
+          prevState: { optOut: false },
+          nextState: { optOut: true },
+          attributes: null,
+        },
+      ],
+    });
+    expect(md).toContain("## Timeline: retention history events");
+    expect(md).toContain("**Table:** `workflow_traces`");
+    expect(md).toContain("**Entries:** 2");
+    expect(md).toContain("### Events (2)");
+    expect(md).toContain("| Time | Side | Kind | Tenant |");
+    expect(md).toContain("| `2026-05-15T10:00:00.000Z` | `A` | `retention_set` |");
+    expect(md).toContain("| `2026-05-16T11:00:00.000Z` | `B` | `opt_out_set` |");
+  });
+
+  it("formatTimelineDiffGhSummary emits 'No events in window' check mark on empty entries", () => {
+    const md = formatTimelineDiffGhSummary({
+      tableName: "workflow_traces",
+      entries: [],
+    });
+    expect(md).toContain(":white_check_mark: **No events in window**");
+  });
+
+  it("formatTimelineDiffGhSummary with withActorNames adds Actor column", () => {
+    const md = formatTimelineDiffGhSummary(
+      {
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h-001",
+            tenantId: "00000000-0000-4000-8000-00000000000a",
+            tenantSide: "A",
+            tableName: "workflow_traces",
+            eventKind: "retention_set",
+            actorId: "operator-1",
+            actorDisplayName: "Alice Operator",
+            actorEmail: "alice@example.com",
+            occurredAt: "2026-05-15T10:00:00.000Z",
+            prevState: { retentionDays: 30 },
+            nextState: { retentionDays: 90 },
+            attributes: null,
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(md).toContain("| Time | Side | Kind | Tenant | Actor |");
+    expect(md).toContain("Alice Operator");
+  });
+
+  it("formatTimelineDiffGhSummary emits pagination cursors when nextAfterId/nextBeforeId set", () => {
+    const md = formatTimelineDiffGhSummary(
+      {
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h-001",
+            tenantId: "00000000-0000-4000-8000-00000000000a",
+            tenantSide: "A",
+            tableName: "workflow_traces",
+            eventKind: "retention_set",
+            actorId: "operator-1",
+            actorDisplayName: null,
+            actorEmail: null,
+            occurredAt: "2026-05-15T10:00:00.000Z",
+            prevState: null,
+            nextState: null,
+            attributes: null,
+          },
+        ],
+      },
+      { nextAfterId: "h-002", nextBeforeId: "h-000" },
+    );
+    expect(md).toContain("> Next page: `--after-id h-002`");
+    expect(md).toContain("> Previous page: `--before-id h-000`");
   });
 });
