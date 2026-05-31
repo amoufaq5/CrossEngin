@@ -140,18 +140,34 @@ export function escapeCsvCellWithSep(value: unknown, separator: string): string 
   return str;
 }
 
+export interface CsvOpts {
+  // M4.15.p — when true, skip the header row. For per-tenant CSV
+  // fetches that append onto bulk-list output (e.g., `tenants get
+  // <slug> --format csv-full --no-header >> all.csv`) the leading
+  // header would otherwise produce a duplicate header line each
+  // call. Default: false (header included; backward-compatible).
+  readonly noHeader?: boolean;
+}
+
 export function formatCsv(
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
   separator: string = ",",
+  opts: CsvOpts = {},
 ): string {
   const escape =
     separator === "," ? escapeCsvCell : (value: unknown) => escapeCsvCellWithSep(value, separator);
-  const lines: string[] = [headers.map(escape).join(separator)];
+  const lines: string[] = [];
+  if (opts.noHeader !== true) {
+    lines.push(headers.map(escape).join(separator));
+  }
   for (const row of rows) {
     lines.push(row.map(escape).join(separator));
   }
-  return lines.join("\n") + "\n";
+  // Empty output (no header + no rows) renders as bare newline; the
+  // caller's stdout still terminates with newline so a redirected
+  // `>> all.csv` doesn't lose the preceding line's terminator.
+  return lines.join("\n") + (lines.length > 0 ? "\n" : "");
 }
 
 export function printCsv(
@@ -159,23 +175,26 @@ export function printCsv(
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
   separator: string = ",",
+  opts: CsvOpts = {},
 ): void {
-  io.stdout.write(formatCsv(headers, rows, separator));
+  io.stdout.write(formatCsv(headers, rows, separator, opts));
 }
 
 export function formatTsv(
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  opts: CsvOpts = {},
 ): string {
-  return formatCsv(headers, rows, "\t");
+  return formatCsv(headers, rows, "\t", opts);
 }
 
 export function printTsv(
   io: IoStreams,
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  opts: CsvOpts = {},
 ): void {
-  io.stdout.write(formatTsv(headers, rows));
+  io.stdout.write(formatTsv(headers, rows, opts));
 }
 
 export function formatNdjson(rows: ReadonlyArray<unknown>): string {

@@ -484,3 +484,51 @@ describe("printYaml + printStructured", () => {
     expect(buf).toBe('{\n  "a": 1\n}\n');
   });
 });
+
+// M4.15.p — opts.noHeader skips the header row. For per-tenant
+// fetches appending onto bulk-list output via shell redirection
+// (`tenants get <slug> --format csv-full --no-header >> all.csv`)
+// the leading header would otherwise produce a duplicate per call.
+describe("formatCsv/formatTsv noHeader opt (M4.15.p)", () => {
+  it("formatCsv with noHeader: true emits only data rows", () => {
+    const out = formatCsv(
+      ["id", "slug", "name"],
+      [
+        ["1", "acme", "Acme"],
+        ["2", "beta", "Beta"],
+      ],
+      ",",
+      { noHeader: true },
+    );
+    expect(out).toBe("1,acme,Acme\n2,beta,Beta\n");
+  });
+
+  it("formatCsv with noHeader: false (default) emits header + rows (backward-compatible)", () => {
+    const out = formatCsv(["id", "slug"], [["1", "acme"]], ",");
+    expect(out).toBe("id,slug\n1,acme\n");
+  });
+
+  it("formatCsv with noHeader: true + empty rows emits empty string (no trailing newline)", () => {
+    // Useful for shell pipelines where `>>` on empty output should
+    // be a no-op rather than appending a blank line.
+    const out = formatCsv(["id", "slug"], [], ",", { noHeader: true });
+    expect(out).toBe("");
+  });
+
+  it("formatCsv with noHeader: true preserves custom separator", () => {
+    const out = formatCsv(["id", "slug"], [["1", "acme"]], "|", { noHeader: true });
+    expect(out).toBe("1|acme\n");
+  });
+
+  it("formatTsv with noHeader: true emits only data rows tab-separated", () => {
+    const out = formatTsv(["id", "slug"], [["1", "acme"]], { noHeader: true });
+    expect(out).toBe("1\tacme\n");
+  });
+
+  it("formatTsv with noHeader: true + embedded tab in cell preserves CSV-style quoting", () => {
+    const out = formatTsv(["id"], [["a\tb"]], { noHeader: true });
+    // Tab in cell triggers quote-escape; verify the rule applies
+    // independently of header suppression.
+    expect(out).toContain('"a\tb"');
+  });
+});

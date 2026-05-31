@@ -549,6 +549,131 @@ describe("runTenants get --format csv|tsv|csv-full (M4.15.j)", () => {
   });
 });
 
+// M4.15.p — `tenants get/list --no-header` suppresses the leading
+// CSV/TSV header row. Closes ADR-0297 Q1. Honored on csv|tsv|csv-
+// full; ignored under json/human formats.
+describe("runTenants get/list --no-header (M4.15.p)", () => {
+  it("tenants get --format csv --no-header drops header (single data row only)", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv", "--no-header"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).not.toContain("id,slug,name,status,tier");
+    expect(output.trim()).toBe(`${TENANT_A.id},acme-prod,Acme Production,active,enterprise`);
+  });
+
+  it("tenants get --format csv-full --no-header drops 11-column header", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full", "--no-header"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).not.toContain("id,slug,name,status,tier,region");
+    expect(output.trim()).toContain(`${TENANT_A.id},acme-prod,Acme Production`);
+  });
+
+  it("tenants get --format tsv --no-header drops tab-separated header", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "tsv", "--no-header"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).not.toContain("id\tslug\tname\tstatus\ttier");
+    expect(output.trim()).toBe(`${TENANT_A.id}\tacme-prod\tAcme Production\tactive\tenterprise`);
+  });
+
+  it("tenants list --format csv --no-header drops header (all data rows preserved)", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A, TENANT_B, TENANT_C] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv", "--no-header"), ctx);
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).not.toBe("id,slug,name,status,tier");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe(`${TENANT_A.id},acme-prod,Acme Production,active,enterprise`);
+  });
+
+  it("tenants list --format csv-full --no-header drops 11-column header", async () => {
+    const { conn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv-full", "--no-header"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).not.toContain("id,slug,name,status,tier,region,schema_name");
+    expect(output.trim()).toContain(`${TENANT_A.id},acme-prod,Acme Production`);
+  });
+
+  it("tenants list --format csv --no-header + empty result emits nothing (no blank header line)", async () => {
+    const { conn } = fakeConn({ tenantRows: [] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "csv", "--no-header"), ctx);
+    expect(code).toBe(0);
+    // No header + no rows → empty output (shell `>> all.csv` no-op).
+    expect(out()).toBe("");
+  });
+
+  it("tenants get --format json --no-header has no effect (flag silently ignored)", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "json", "--no-header"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // JSON envelope unchanged — no-header is csv/tsv-specific.
+    const env = JSON.parse(out()) as { action: string };
+    expect(env.action).toBe("tenants.get");
+  });
+
+  it("tenants list concat workflow: bulk-list header + per-tenant fetch headerless yields valid CSV", async () => {
+    // Operational verification: `tenants list --format csv-full` produces
+    // header + N rows, then `tenants get <slug> --format csv-full --no-
+    // header` appends a single data row. Concat yields a valid CSV
+    // file with exactly one header line at the top.
+    const { conn: listConn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL] });
+    const { io: listIo, out: listOut } = makeIo();
+    const listCtx: TenantsContext = { io: listIo, env: {}, pgConnectionOverride: listConn };
+    await runTenants(parsed("tenants", "list", "--format", "csv-full"), listCtx);
+
+    const { conn: getConn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io: getIo, out: getOut } = makeIo();
+    const getCtx: TenantsContext = { io: getIo, env: {}, pgConnectionOverride: getConn };
+    await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full", "--no-header"),
+      getCtx,
+    );
+
+    const combined = listOut() + getOut();
+    const lines = combined.trim().split("\n");
+    // Exactly one header line at the top + 2 data rows (one from
+    // list-bulk, one from get-append; same fixture for simplicity).
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain("id,slug,name,status,tier");
+    expect(lines[1]).toContain(`${TENANT_A.id},acme-prod`);
+    expect(lines[2]).toContain(`${TENANT_A.id},acme-prod`);
+  });
+});
+
 // M4.15.b — `tenants list --format csv|tsv` bulk export tests.
 // Closes ADR-0285 Q4. CSV/TSV output is a 5-column row-per-tenant
 // shape (id, slug, name, status, tier) suitable for spreadsheet /

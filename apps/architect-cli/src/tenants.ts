@@ -137,6 +137,14 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
     printError(ctx.io, "tenants list: --csv-separator cannot be '\"' or newline");
     return 2;
   }
+  // M4.15.p — --no-header suppresses the leading CSV header row so
+  // per-tenant fetches can be appended onto bulk-list output without
+  // producing duplicate header lines (e.g., `tenants list --format
+  // csv-full > all.csv` then `tenants get <slug> --format csv-full
+  // --no-header >> all.csv`). Honored on csv/tsv/csv-full; silently
+  // ignored under json/human formats (matching --csv-separator
+  // precedent).
+  const noHeader = getBooleanFlag(command, "no-header");
 
   try {
     if (command.format === "csv-full") {
@@ -192,7 +200,7 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         ];
         return includePolicyCount ? [...base, r.policy_count ?? 0] : base;
       });
-      printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",");
+      printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",", { noHeader });
       return 0;
     }
 
@@ -225,9 +233,9 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         return includePolicyCount ? [...base, r.policy_count ?? 0] : base;
       });
       if (command.format === "tsv") {
-        printTsv(ctx.io, headers, csvRows);
+        printTsv(ctx.io, headers, csvRows, { noHeader });
       } else {
-        printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",");
+        printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",", { noHeader });
       }
     } else {
       renderHumanTable(ctx, rows, statusFlag, tableFilter, hasOverrides, includePolicyCount);
@@ -298,6 +306,10 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
 
   const conn = await resolveConn(ctx, "tenants get");
   if (conn === null) return 1;
+  // M4.15.p — --no-header suppresses CSV header row (see tenants
+  // list comment block for the operational rationale). Honored on
+  // csv/tsv/csv-full; ignored under json/human.
+  const noHeader = getBooleanFlag(command, "no-header");
 
   try {
     const resolved = await resolveTenantIdentifier(conn.exec, input);
@@ -331,10 +343,10 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
       const headers = ["id", "slug", "name", "status", "tier"];
       const csvRows = [[row.id, row.slug, row.name, row.status, row.tier]];
       if (command.format === "tsv") {
-        printTsv(ctx.io, headers, csvRows);
+        printTsv(ctx.io, headers, csvRows, { noHeader });
       } else {
         const csvSeparator = getStringFlag(command, "csv-separator");
-        printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",");
+        printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",", { noHeader });
       }
     } else if (command.format === "csv-full") {
       // M4.15.j — single-row 11-column TenantRowFull CSV. Mirrors
@@ -370,7 +382,7 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
         ],
       ];
       const csvSeparator = getStringFlag(command, "csv-separator");
-      printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",");
+      printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",", { noHeader });
     } else {
       renderHumanTenant(ctx, row);
     }
