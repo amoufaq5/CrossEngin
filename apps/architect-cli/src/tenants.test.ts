@@ -1217,3 +1217,166 @@ describe("runTenants list --min-policy-count (M4.15.k)", () => {
     expect(queries[0]?.sql).not.toContain("COALESCE(pc.policy_count");
   });
 });
+
+// M4.15.q — `tenants list/get --columns col1,col2` subset filter.
+// Closes ADR-0297 Q2. Composes with --no-header (M4.15.p). Invalid
+// column / empty list / duplicates exit 2 with the validation error.
+describe("runTenants get/list --columns (M4.15.q)", () => {
+  it("tenants list --format csv --columns tier,slug narrows + reorders columns", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A, TENANT_B] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv", "--columns", "tier,slug"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("tier,slug");
+    expect(lines[1]).toBe("enterprise,acme-prod");
+    expect(lines[2]).toBe("small,beta-corp");
+  });
+
+  it("tenants list --format csv-full --columns slug,residency narrows 11-col output", async () => {
+    const { conn } = fakeConn({ tenantRowsFull: [TENANT_A_FULL] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv-full", "--columns", "slug,residency"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("slug,residency");
+    expect(lines[1]).toContain("acme-prod");
+    expect(lines[1]).toContain('"{""primary""');
+  });
+
+  it("tenants list --format csv --columns rejects unknown column with valid-list hint", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv", "--columns", "bogus"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("tenants list:");
+    expect(err()).toContain("unknown column 'bogus'");
+    expect(err()).toContain("valid: id, slug, name, status, tier");
+  });
+
+  it("tenants list --columns includes policy_count when --include-policy-count is on (composition)", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed(
+        "tenants",
+        "list",
+        "--format",
+        "csv",
+        "--include-policy-count",
+        "--columns",
+        "slug,policy_count",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("slug,policy_count");
+  });
+
+  it("tenants list --columns rejects duplicate column names", async () => {
+    const { conn } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--format", "csv", "--columns", "slug,slug"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("duplicate column 'slug'");
+  });
+
+  it("tenants get --format csv --columns name,tier reorders single-row output", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv", "--columns", "name,tier"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("name,tier");
+    expect(lines[1]).toBe("Acme Production,enterprise");
+  });
+
+  it("tenants get --format csv-full --columns slug narrows to one column", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full", "--columns", "slug"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("slug");
+    expect(lines[1]).toBe("acme-prod");
+  });
+
+  it("tenants get --columns composes with --no-header (data-only narrowed row)", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed(
+        "tenants",
+        "get",
+        TENANT_A.id,
+        "--format",
+        "csv",
+        "--columns",
+        "slug,tier",
+        "--no-header",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // No header line; just the narrowed data row.
+    expect(out().trim()).toBe("acme-prod,enterprise");
+  });
+
+  it("tenants get --columns rejects unknown column on csv-full path", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "csv-full", "--columns", "id,nope"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("tenants get:");
+    expect(err()).toContain("unknown column 'nope'");
+    // valid list reflects the 11-col csv-full headers, not the 5-col compact set.
+    expect(err()).toContain("residency");
+    expect(err()).toContain("search_locale");
+  });
+
+  it("tenants get --format json --columns has no effect (flag silently ignored)", async () => {
+    const { conn } = fakeConn({ getMap: { [TENANT_A.id]: TENANT_A_FULL } });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "get", TENANT_A.id, "--format", "json", "--columns", "slug"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // JSON envelope intact — full TenantRow, not narrowed.
+    const env = JSON.parse(out()) as { action: string; tenant: { name?: string } };
+    expect(env.action).toBe("tenants.get");
+    expect(env.tenant.name).toBe("Acme Production");
+  });
+});

@@ -149,6 +149,70 @@ export interface CsvOpts {
   readonly noHeader?: boolean;
 }
 
+// M4.15.q — `applyColumnsFilter` narrows a CSV (headers, rows) pair to
+// the operator-specified subset. Caller pre-parses `--columns
+// col1,col2` into a string[] and passes it here along with the full
+// column set; we validate every requested column exists, then
+// project each row onto the requested column indices.
+//
+// Returns either { ok: true, headers, rows } with the filtered shape,
+// or { ok: false, error } describing what went wrong (unknown column,
+// empty filter, duplicate). The caller surfaces the error via
+// `printError` with command-specific framing (e.g., "tenants list:").
+export type ApplyColumnsFilterResult =
+  | {
+      readonly ok: true;
+      readonly headers: ReadonlyArray<string>;
+      readonly rows: ReadonlyArray<ReadonlyArray<unknown>>;
+    }
+  | { readonly ok: false; readonly error: string };
+
+export function applyColumnsFilter(
+  headers: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  columns: ReadonlyArray<string>,
+): ApplyColumnsFilterResult {
+  if (columns.length === 0) {
+    return {
+      ok: false,
+      error: `--columns requires at least one column name (got empty list)`,
+    };
+  }
+  const seen = new Set<string>();
+  const indices: number[] = [];
+  for (const col of columns) {
+    if (seen.has(col)) {
+      return {
+        ok: false,
+        error: `--columns has duplicate column '${col}'`,
+      };
+    }
+    seen.add(col);
+    const idx = headers.indexOf(col);
+    if (idx === -1) {
+      return {
+        ok: false,
+        error: `--columns includes unknown column '${col}' (valid: ${headers.join(", ")})`,
+      };
+    }
+    indices.push(idx);
+  }
+  const filteredHeaders = indices.map((i) => headers[i]!);
+  const filteredRows = rows.map((r) => indices.map((i) => r[i]));
+  return { ok: true, headers: filteredHeaders, rows: filteredRows };
+}
+
+// Helper: parse `--columns "a,b,c"` into ["a","b","c"], trimming
+// whitespace and dropping empty segments (from trailing commas etc).
+// Returns null if the flag is unset (caller skips filter entirely).
+export function parseColumnsFlag(raw: string | null): ReadonlyArray<string> | null {
+  if (raw === null) return null;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 export function formatCsv(
   headers: ReadonlyArray<string>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,

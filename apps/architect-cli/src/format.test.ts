@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyColumnsFilter,
   escapeCsvCell,
   escapeCsvCellWithSep,
   formatCsv,
@@ -10,6 +11,7 @@ import {
   formatTsv,
   formatValidationErrors,
   formatYaml,
+  parseColumnsFlag,
   printCsv,
   printError,
   printJson,
@@ -530,5 +532,103 @@ describe("formatCsv/formatTsv noHeader opt (M4.15.p)", () => {
     // Tab in cell triggers quote-escape; verify the rule applies
     // independently of header suppression.
     expect(out).toContain('"a\tb"');
+  });
+});
+
+// M4.15.q — `applyColumnsFilter` validates + narrows (headers, rows)
+// to the operator-specified subset, preserving the column order
+// supplied by the caller (which is the operator's --columns order).
+// `parseColumnsFlag` splits the raw flag value on commas, trims, and
+// drops empty segments.
+describe("applyColumnsFilter / parseColumnsFlag (M4.15.q)", () => {
+  it("parseColumnsFlag returns null when flag unset", () => {
+    expect(parseColumnsFlag(null)).toBeNull();
+  });
+
+  it("parseColumnsFlag splits comma-separated value + trims whitespace", () => {
+    expect(parseColumnsFlag("id, slug ,name")).toEqual(["id", "slug", "name"]);
+  });
+
+  it("parseColumnsFlag drops empty segments from trailing/leading commas", () => {
+    expect(parseColumnsFlag(",id,,slug,")).toEqual(["id", "slug"]);
+  });
+
+  it("applyColumnsFilter narrows headers + rows to requested subset in caller order", () => {
+    const result = applyColumnsFilter(
+      ["id", "slug", "name", "status", "tier"],
+      [
+        ["1", "acme", "Acme", "active", "enterprise"],
+        ["2", "beta", "Beta", "suspended", "small"],
+      ],
+      ["tier", "slug"],
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.headers).toEqual(["tier", "slug"]);
+      expect(result.rows).toEqual([
+        ["enterprise", "acme"],
+        ["small", "beta"],
+      ]);
+    }
+  });
+
+  it("applyColumnsFilter preserves caller-specified order (not original header order)", () => {
+    // Caller order is `name,id` — output reflects that, not the
+    // original `id,name` order. This is the documented contract.
+    const result = applyColumnsFilter(["id", "name"], [["1", "Acme"]], ["name", "id"]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.headers).toEqual(["name", "id"]);
+      expect(result.rows).toEqual([["Acme", "1"]]);
+    }
+  });
+
+  it("applyColumnsFilter rejects empty columns list", () => {
+    const result = applyColumnsFilter(["id"], [["1"]], []);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("at least one column");
+    }
+  });
+
+  it("applyColumnsFilter rejects unknown column with valid-columns hint", () => {
+    const result = applyColumnsFilter(["id", "slug", "name"], [["1", "acme", "Acme"]], ["bogus"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("unknown column 'bogus'");
+      expect(result.error).toContain("valid: id, slug, name");
+    }
+  });
+
+  it("applyColumnsFilter rejects duplicate column references", () => {
+    const result = applyColumnsFilter(["id", "slug"], [["1", "acme"]], ["id", "slug", "id"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("duplicate column 'id'");
+    }
+  });
+
+  it("applyColumnsFilter on empty rows returns empty rows (header-only subset)", () => {
+    const result = applyColumnsFilter(["id", "slug"], [], ["slug"]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.headers).toEqual(["slug"]);
+      expect(result.rows).toEqual([]);
+    }
+  });
+
+  it("applyColumnsFilter supports column-repeat-via-aliasing pattern (single column duplicated rejected, but distinct columns preserve order)", () => {
+    // Verifies the contract: columns ordering is a permutation +
+    // subset; duplicates aren't a valid use case.
+    const result = applyColumnsFilter(
+      ["id", "slug", "name", "status", "tier"],
+      [["1", "acme", "Acme", "active", "enterprise"]],
+      ["tier", "status", "slug"],
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.headers).toEqual(["tier", "status", "slug"]);
+      expect(result.rows).toEqual([["enterprise", "active", "acme"]]);
+    }
   });
 });

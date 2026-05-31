@@ -26,7 +26,14 @@ import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@cr
 
 import { getBooleanFlag, getStringFlag, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printCsv, printError, printJson, printTsv } from "./format.js";
+import {
+  applyColumnsFilter,
+  parseColumnsFlag,
+  printCsv,
+  printError,
+  printJson,
+  printTsv,
+} from "./format.js";
 import { resolveTenantIdentifier } from "./tenant-resolver.js";
 
 export interface TenantsContext extends RunContext {
@@ -145,6 +152,13 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
   // ignored under json/human formats (matching --csv-separator
   // precedent).
   const noHeader = getBooleanFlag(command, "no-header");
+  // M4.15.q — --columns <col1,col2,...> narrows the CSV output to a
+  // subset of columns, preserving the operator-specified order
+  // (operators may want `tier,slug,name` instead of the canonical
+  // `id,slug,name,status,tier`). Validation is deferred to
+  // applyColumnsFilter at the emit site since the valid column set
+  // differs between the 5-col compact path and the 11-col full path.
+  const columnsFilter = parseColumnsFlag(getStringFlag(command, "columns"));
 
   try {
     if (command.format === "csv-full") {
@@ -200,7 +214,20 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         ];
         return includePolicyCount ? [...base, r.policy_count ?? 0] : base;
       });
-      printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",", { noHeader });
+      // M4.15.q — apply --columns filter (if set) before printing.
+      // Invalid column → exit 2 with the validation error surfaced.
+      if (columnsFilter !== null) {
+        const filtered = applyColumnsFilter(headers, csvRows, columnsFilter);
+        if (!filtered.ok) {
+          printError(ctx.io, `tenants list: ${filtered.error}`);
+          return 2;
+        }
+        printCsv(ctx.io, filtered.headers, filtered.rows, csvSeparatorFlag ?? ",", {
+          noHeader,
+        });
+      } else {
+        printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",", { noHeader });
+      }
       return 0;
     }
 
@@ -232,10 +259,24 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         const base = [r.id, r.slug, r.name, r.status, r.tier];
         return includePolicyCount ? [...base, r.policy_count ?? 0] : base;
       });
+      // M4.15.q — --columns filter applied uniformly across tsv + csv
+      // emit. Failure returns 2 with the validation error; caller
+      // gets actionable feedback before any data is written.
+      let outHeaders: ReadonlyArray<string> = headers;
+      let outRows: ReadonlyArray<ReadonlyArray<unknown>> = csvRows;
+      if (columnsFilter !== null) {
+        const filtered = applyColumnsFilter(headers, csvRows, columnsFilter);
+        if (!filtered.ok) {
+          printError(ctx.io, `tenants list: ${filtered.error}`);
+          return 2;
+        }
+        outHeaders = filtered.headers;
+        outRows = filtered.rows;
+      }
       if (command.format === "tsv") {
-        printTsv(ctx.io, headers, csvRows, { noHeader });
+        printTsv(ctx.io, outHeaders, outRows, { noHeader });
       } else {
-        printCsv(ctx.io, headers, csvRows, csvSeparatorFlag ?? ",", { noHeader });
+        printCsv(ctx.io, outHeaders, outRows, csvSeparatorFlag ?? ",", { noHeader });
       }
     } else {
       renderHumanTable(ctx, rows, statusFlag, tableFilter, hasOverrides, includePolicyCount);
@@ -310,6 +351,8 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
   // list comment block for the operational rationale). Honored on
   // csv/tsv/csv-full; ignored under json/human.
   const noHeader = getBooleanFlag(command, "no-header");
+  // M4.15.q — --columns subset filter (see tenants list comment).
+  const columnsFilter = parseColumnsFlag(getStringFlag(command, "columns"));
 
   try {
     const resolved = await resolveTenantIdentifier(conn.exec, input);
@@ -340,13 +383,27 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
       // list --format csv` exactly (id, slug, name, status, tier) so
       // downstream pipelines can concat per-tenant fetches into the
       // same shape as list-bulk output without re-aligning columns.
-      const headers = ["id", "slug", "name", "status", "tier"];
-      const csvRows = [[row.id, row.slug, row.name, row.status, row.tier]];
+      const baseHeaders: ReadonlyArray<string> = ["id", "slug", "name", "status", "tier"];
+      const baseRows: ReadonlyArray<ReadonlyArray<unknown>> = [
+        [row.id, row.slug, row.name, row.status, row.tier],
+      ];
+      // M4.15.q — apply --columns filter before emitting.
+      let outHeaders: ReadonlyArray<string> = baseHeaders;
+      let outRows: ReadonlyArray<ReadonlyArray<unknown>> = baseRows;
+      if (columnsFilter !== null) {
+        const filtered = applyColumnsFilter(baseHeaders, baseRows, columnsFilter);
+        if (!filtered.ok) {
+          printError(ctx.io, `tenants get: ${filtered.error}`);
+          return 2;
+        }
+        outHeaders = filtered.headers;
+        outRows = filtered.rows;
+      }
       if (command.format === "tsv") {
-        printTsv(ctx.io, headers, csvRows, { noHeader });
+        printTsv(ctx.io, outHeaders, outRows, { noHeader });
       } else {
         const csvSeparator = getStringFlag(command, "csv-separator");
-        printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",", { noHeader });
+        printCsv(ctx.io, outHeaders, outRows, csvSeparator ?? ",", { noHeader });
       }
     } else if (command.format === "csv-full") {
       // M4.15.j — single-row 11-column TenantRowFull CSV. Mirrors
@@ -382,7 +439,19 @@ async function runTenantsGet(command: ParsedCommand, ctx: TenantsContext): Promi
         ],
       ];
       const csvSeparator = getStringFlag(command, "csv-separator");
-      printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",", { noHeader });
+      // M4.15.q — apply --columns filter against the 11-col csv-full
+      // shape. Operators can select any subset / re-order (e.g.,
+      // `--columns slug,tier,residency` for a tier-residency audit).
+      if (columnsFilter !== null) {
+        const filtered = applyColumnsFilter(headers, csvRows, columnsFilter);
+        if (!filtered.ok) {
+          printError(ctx.io, `tenants get: ${filtered.error}`);
+          return 2;
+        }
+        printCsv(ctx.io, filtered.headers, filtered.rows, csvSeparator ?? ",", { noHeader });
+      } else {
+        printCsv(ctx.io, headers, csvRows, csvSeparator ?? ",", { noHeader });
+      }
     } else {
       renderHumanTenant(ctx, row);
     }
