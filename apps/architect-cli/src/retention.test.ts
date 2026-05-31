@@ -69,6 +69,8 @@ import {
   formatTenantTablesDiff,
   formatTenantTablesNwayDiff,
   formatTimelineCrossTableDiff,
+  formatTimelineCrossTableDiffGhSummary,
+  formatTimelineNwayDiffGhSummary,
   formatTimelineDiff,
   formatTimelineNwayDiff,
   formatTenantVsPlatformDiff,
@@ -16998,5 +17000,249 @@ describe("retention diff-history / diff-timeline --format gh-summary (M4.15.m)",
     );
     expect(md).toContain("> Next page: `--after-id h-002`");
     expect(md).toContain("> Previous page: `--before-id h-000`");
+  });
+});
+
+// M4.15.n — `--format gh-summary` Markdown rendering for the
+// cross-table + N-way variants of `retention diff-timeline`.
+// Closes ADR-0300 Q1. Same event-per-row shape as M4.15.m's
+// pair-wise renderer; the "Side" column becomes "Table" (cross-
+// table) or "Tenant" label (N-way). Header lists each table /
+// tenant the timeline covers as a bulleted label legend so
+// operators can map the per-row labels (A/B/C/...) back to
+// actual names.
+describe("retention diff-timeline cross-table / N-way --format gh-summary (M4.15.n)", () => {
+  const TENANT_C = "00000000-0000-4000-8000-00000000000C";
+
+  it("formatTimelineCrossTableDiffGhSummary emits per-table legend + Events table with Table column", () => {
+    const md = formatTimelineCrossTableDiffGhSummary({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "gateway_pipeline_executions", "rate_limit_decisions"],
+      entries: [
+        {
+          id: "h-001",
+          tenantId: TENANT_A,
+          tableLabel: "A",
+          tableName: "workflow_traces",
+          eventKind: "retention_set",
+          actorId: "operator-1",
+          actorDisplayName: null,
+          actorEmail: null,
+          occurredAt: "2026-05-15T10:00:00.000Z",
+          prevState: null,
+          nextState: { retentionDays: 90 },
+          attributes: null,
+        },
+        {
+          id: "h-002",
+          tenantId: TENANT_A,
+          tableLabel: "B",
+          tableName: "gateway_pipeline_executions",
+          eventKind: "opt_out_set",
+          actorId: "operator-2",
+          actorDisplayName: null,
+          actorEmail: null,
+          occurredAt: "2026-05-16T11:00:00.000Z",
+          prevState: null,
+          nextState: { optOut: true },
+          attributes: null,
+        },
+      ],
+    });
+    expect(md).toContain("## Timeline: retention history events (cross-table)");
+    expect(md).toContain(`**Tenant:** \`${TENANT_A}\``);
+    expect(md).toContain("**Tables:** 3");
+    // Per-table label legend.
+    expect(md).toContain("- **A:** `workflow_traces`");
+    expect(md).toContain("- **B:** `gateway_pipeline_executions`");
+    expect(md).toContain("- **C:** `rate_limit_decisions`");
+    expect(md).toContain("### Events (2)");
+    expect(md).toContain("| Time | Table | Kind | Tenant |");
+    expect(md).toContain("| `2026-05-15T10:00:00.000Z` | `A` | `retention_set` |");
+    expect(md).toContain("| `2026-05-16T11:00:00.000Z` | `B` | `opt_out_set` |");
+  });
+
+  it("formatTimelineCrossTableDiffGhSummary emits 'No events in window' on empty entries", () => {
+    const md = formatTimelineCrossTableDiffGhSummary({
+      tenantId: TENANT_A,
+      tableNames: ["workflow_traces", "gateway_pipeline_executions"],
+      entries: [],
+    });
+    expect(md).toContain(":white_check_mark: **No events in window**");
+    expect(md).toContain("no history events for this tenant on any of these tables");
+    // Legend still emitted even on empty so operators see what was queried.
+    expect(md).toContain("- **A:** `workflow_traces`");
+    expect(md).toContain("- **B:** `gateway_pipeline_executions`");
+  });
+
+  it("formatTimelineCrossTableDiffGhSummary withActorNames adds Actor column", () => {
+    const md = formatTimelineCrossTableDiffGhSummary(
+      {
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces"],
+        entries: [
+          {
+            id: "h-001",
+            tenantId: TENANT_A,
+            tableLabel: "A",
+            tableName: "workflow_traces",
+            eventKind: "retention_set",
+            actorId: "operator-1",
+            actorDisplayName: "Alice Operator",
+            actorEmail: "alice@example.com",
+            occurredAt: "2026-05-15T10:00:00.000Z",
+            prevState: null,
+            nextState: null,
+            attributes: null,
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(md).toContain("| Time | Table | Kind | Tenant | Actor |");
+    expect(md).toContain("Alice Operator");
+  });
+
+  it("formatTimelineCrossTableDiffGhSummary emits pagination cursors when set", () => {
+    const md = formatTimelineCrossTableDiffGhSummary(
+      {
+        tenantId: TENANT_A,
+        tableNames: ["workflow_traces"],
+        entries: [
+          {
+            id: "h-001",
+            tenantId: TENANT_A,
+            tableLabel: "A",
+            tableName: "workflow_traces",
+            eventKind: "retention_set",
+            actorId: "operator-1",
+            actorDisplayName: null,
+            actorEmail: null,
+            occurredAt: "2026-05-15T10:00:00.000Z",
+            prevState: null,
+            nextState: null,
+            attributes: null,
+          },
+        ],
+      },
+      { nextAfterId: "h-050", nextBeforeId: "h-000" },
+    );
+    expect(md).toContain("> Next page: `--after-id h-050`");
+    expect(md).toContain("> Previous page: `--before-id h-000`");
+  });
+
+  it("formatTimelineNwayDiffGhSummary emits per-tenant legend + Events table with Tenant label column", () => {
+    const md = formatTimelineNwayDiffGhSummary({
+      tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+      tableName: "workflow_traces",
+      entries: [
+        {
+          id: "h-001",
+          tenantId: TENANT_A,
+          tenantLabel: "A",
+          tableName: "workflow_traces",
+          eventKind: "retention_set",
+          actorId: "operator-1",
+          actorDisplayName: null,
+          actorEmail: null,
+          occurredAt: "2026-05-15T10:00:00.000Z",
+          prevState: null,
+          nextState: { retentionDays: 90 },
+          attributes: null,
+        },
+        {
+          id: "h-002",
+          tenantId: TENANT_C,
+          tenantLabel: "C",
+          tableName: "workflow_traces",
+          eventKind: "opt_out_set",
+          actorId: "operator-2",
+          actorDisplayName: null,
+          actorEmail: null,
+          occurredAt: "2026-05-16T11:00:00.000Z",
+          prevState: null,
+          nextState: { optOut: true },
+          attributes: null,
+        },
+      ],
+    });
+    expect(md).toContain("## Timeline: retention history events (multi-tenant)");
+    expect(md).toContain("**Table:** `workflow_traces`");
+    expect(md).toContain("**Tenants:** 3");
+    expect(md).toContain(`- **A:** \`${TENANT_A}\``);
+    expect(md).toContain(`- **B:** \`${TENANT_B}\``);
+    expect(md).toContain(`- **C:** \`${TENANT_C}\``);
+    expect(md).toContain("### Events (2)");
+    expect(md).toContain("| Time | Tenant | Kind |");
+    expect(md).toContain("| `2026-05-15T10:00:00.000Z` | `A` | `retention_set` |");
+    expect(md).toContain("| `2026-05-16T11:00:00.000Z` | `C` | `opt_out_set` |");
+  });
+
+  it("formatTimelineNwayDiffGhSummary emits 'No events in window' on empty entries", () => {
+    const md = formatTimelineNwayDiffGhSummary({
+      tenantIds: [TENANT_A, TENANT_B],
+      tableName: "workflow_traces",
+      entries: [],
+    });
+    expect(md).toContain(":white_check_mark: **No events in window**");
+    expect(md).toContain("no history events for any of these tenants on this table");
+    expect(md).toContain(`- **A:** \`${TENANT_A}\``);
+    expect(md).toContain(`- **B:** \`${TENANT_B}\``);
+  });
+
+  it("formatTimelineNwayDiffGhSummary withActorNames adds Actor column", () => {
+    const md = formatTimelineNwayDiffGhSummary(
+      {
+        tenantIds: [TENANT_A, TENANT_B],
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h-001",
+            tenantId: TENANT_A,
+            tenantLabel: "A",
+            tableName: "workflow_traces",
+            eventKind: "retention_set",
+            actorId: "operator-1",
+            actorDisplayName: "Alice Operator",
+            actorEmail: "alice@example.com",
+            occurredAt: "2026-05-15T10:00:00.000Z",
+            prevState: null,
+            nextState: null,
+            attributes: null,
+          },
+        ],
+      },
+      { withActorNames: true },
+    );
+    expect(md).toContain("| Time | Tenant | Kind | Actor |");
+    expect(md).toContain("Alice Operator");
+  });
+
+  it("formatTimelineNwayDiffGhSummary emits pagination cursors when set", () => {
+    const md = formatTimelineNwayDiffGhSummary(
+      {
+        tenantIds: [TENANT_A, TENANT_B],
+        tableName: "workflow_traces",
+        entries: [
+          {
+            id: "h-001",
+            tenantId: TENANT_A,
+            tenantLabel: "A",
+            tableName: "workflow_traces",
+            eventKind: "retention_set",
+            actorId: "operator-1",
+            actorDisplayName: null,
+            actorEmail: null,
+            occurredAt: "2026-05-15T10:00:00.000Z",
+            prevState: null,
+            nextState: null,
+            attributes: null,
+          },
+        ],
+      },
+      { nextAfterId: "h-100", nextBeforeId: "h-001" },
+    );
+    expect(md).toContain("> Next page: `--after-id h-100`");
+    expect(md).toContain("> Previous page: `--before-id h-001`");
   });
 });

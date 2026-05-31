@@ -2818,6 +2818,16 @@ async function runRetentionDiffTimeline(
       }
       return 0;
     }
+    if (command.format === "gh-summary") {
+      ctx.io.stdout.write(
+        formatTimelineCrossTableDiffGhSummary(crossResult, {
+          withActorNames,
+          nextAfterId: nextAfterIdCross,
+          nextBeforeId: nextBeforeIdCross,
+        }),
+      );
+      return 0;
+    }
     ctx.io.stdout.write(
       formatTimelineCrossTableDiff(crossResult, {
         withActorNames,
@@ -2931,6 +2941,16 @@ async function runRetentionDiffTimeline(
       } else {
         printCsv(ctx.io, headers, rows, csvSeparator);
       }
+      return 0;
+    }
+    if (command.format === "gh-summary") {
+      ctx.io.stdout.write(
+        formatTimelineNwayDiffGhSummary(nwayResult, {
+          withActorNames,
+          nextAfterId: nextAfterIdNway,
+          nextBeforeId: nextBeforeIdNway,
+        }),
+      );
       return 0;
     }
     ctx.io.stdout.write(
@@ -3909,6 +3929,128 @@ export function formatTimelineDiffGhSummary(
   lines.push("");
   // Pagination cursor surfaced as a footer hint (operators chaining
   // pages from CI step output benefit from a visible nextAfterId).
+  if (opts.nextAfterId !== null && opts.nextAfterId !== undefined) {
+    lines.push(`> Next page: \`--after-id ${opts.nextAfterId}\``);
+    lines.push("");
+  }
+  if (opts.nextBeforeId !== null && opts.nextBeforeId !== undefined) {
+    lines.push(`> Previous page: \`--before-id ${opts.nextBeforeId}\``);
+    lines.push("");
+  }
+  return lines.join("\n") + "\n";
+}
+
+// M4.15.n — Markdown summary helpers for cross-table + N-way
+// diff-timeline. Closes ADR-0300 Q1. Same event-per-row shape as
+// M4.15.m's pair-wise renderer; the "Side" column becomes "Table"
+// (cross-table) or "Tenant" label (N-way) since the entries are
+// interleaved across multiple tables / tenants instead of A/B
+// sides. Header lists each table / tenant the timeline covers
+// for at-a-glance context.
+
+export function formatTimelineCrossTableDiffGhSummary(
+  result: DiffHistoryTimelineCrossTableResult,
+  opts: {
+    readonly withActorNames?: boolean;
+    readonly nextAfterId?: string | null;
+    readonly nextBeforeId?: string | null;
+  } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(`## Timeline: retention history events (cross-table)`);
+  lines.push("");
+  lines.push(`**Tenant:** \`${result.tenantId}\`  `);
+  lines.push(`**Tables:** ${result.tableNames.length}`);
+  lines.push("");
+  // Per-table label legend so operators can map the `Table` column
+  // values (A/B/C/...) back to actual table names.
+  for (let i = 0; i < result.tableNames.length; i++) {
+    lines.push(`- **${labelForIndex(i)}:** \`${result.tableNames[i]!}\``);
+  }
+  lines.push("");
+  if (result.entries.length === 0) {
+    lines.push(
+      `:white_check_mark: **No events in window** — no history events for this tenant on any of these tables.`,
+    );
+    return lines.join("\n") + "\n";
+  }
+  const actorHeader = opts.withActorNames ? ` | Actor` : "";
+  const actorAlign = opts.withActorNames ? `|-------` : "";
+  lines.push(`### Events (${result.entries.length})`);
+  lines.push("");
+  lines.push(`| Time | Table | Kind | Tenant${actorHeader} |`);
+  lines.push(`|------|-------|------|--------${actorAlign}|`);
+  for (const e of result.entries) {
+    const actorCol = opts.withActorNames
+      ? ` | ${formatMdRetentionValue(
+          formatActor({
+            actorId: e.actorId,
+            actorDisplayName: e.actorDisplayName,
+            actorEmail: e.actorEmail,
+          }),
+        )}`
+      : "";
+    lines.push(
+      `| \`${e.occurredAt}\` | \`${e.tableLabel}\` | \`${e.eventKind}\` | \`${e.tenantId}\`${actorCol} |`,
+    );
+  }
+  lines.push("");
+  if (opts.nextAfterId !== null && opts.nextAfterId !== undefined) {
+    lines.push(`> Next page: \`--after-id ${opts.nextAfterId}\``);
+    lines.push("");
+  }
+  if (opts.nextBeforeId !== null && opts.nextBeforeId !== undefined) {
+    lines.push(`> Previous page: \`--before-id ${opts.nextBeforeId}\``);
+    lines.push("");
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function formatTimelineNwayDiffGhSummary(
+  result: DiffHistoryTimelineNwayResult,
+  opts: {
+    readonly withActorNames?: boolean;
+    readonly nextAfterId?: string | null;
+    readonly nextBeforeId?: string | null;
+  } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(`## Timeline: retention history events (multi-tenant)`);
+  lines.push("");
+  lines.push(`**Table:** \`${result.tableName}\`  `);
+  lines.push(`**Tenants:** ${result.tenantIds.length}`);
+  lines.push("");
+  // Per-tenant label legend so operators can map the `Tenant` label
+  // column values (A/B/C/...) back to actual tenant ids/slugs.
+  for (let i = 0; i < result.tenantIds.length; i++) {
+    lines.push(`- **${labelForIndex(i)}:** \`${result.tenantIds[i]!}\``);
+  }
+  lines.push("");
+  if (result.entries.length === 0) {
+    lines.push(
+      `:white_check_mark: **No events in window** — no history events for any of these tenants on this table.`,
+    );
+    return lines.join("\n") + "\n";
+  }
+  const actorHeader = opts.withActorNames ? ` | Actor` : "";
+  const actorAlign = opts.withActorNames ? `|-------` : "";
+  lines.push(`### Events (${result.entries.length})`);
+  lines.push("");
+  lines.push(`| Time | Tenant | Kind${actorHeader} |`);
+  lines.push(`|------|--------|------${actorAlign}|`);
+  for (const e of result.entries) {
+    const actorCol = opts.withActorNames
+      ? ` | ${formatMdRetentionValue(
+          formatActor({
+            actorId: e.actorId,
+            actorDisplayName: e.actorDisplayName,
+            actorEmail: e.actorEmail,
+          }),
+        )}`
+      : "";
+    lines.push(`| \`${e.occurredAt}\` | \`${e.tenantLabel}\` | \`${e.eventKind}\`${actorCol} |`);
+  }
+  lines.push("");
   if (opts.nextAfterId !== null && opts.nextAfterId !== undefined) {
     lines.push(`> Next page: \`--after-id ${opts.nextAfterId}\``);
     lines.push("");
