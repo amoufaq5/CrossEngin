@@ -62,6 +62,7 @@ import {
   formatRetentionDiffCrossTableNwayGhSummary,
   formatTimelineDiffGhSummary,
   formatRetentionDiffGhSummary,
+  buildNwayCsvRows,
   formatRetentionDiffNwayGhSummary,
   formatRetentionDiffVsPlatformGhSummary,
   formatTenantDiff,
@@ -11050,6 +11051,158 @@ describe("runRetention diff --add-tenant (M6.7.zz.tenant.opt-out.cli.diff.add-te
     );
   });
 
+  // M4.15.o — `--format csv|tsv` wide-format integration tests for
+  // the N-way diff entry point. Header is `field,value_<UUID>,...`
+  // with one column per tenant; one data row per fieldVariation.
+  it("--format csv emits wide-format with per-tenant columns (M4.15.o)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "csv",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [
+              {
+                tenantId: TENANT_A,
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tenantId: TENANT_B,
+                resolution: { source: "platform", retentionDays: 90, enabled: true },
+              },
+              {
+                tenantId: TENANT_C,
+                resolution: { source: "platform", retentionDays: 90, enabled: true },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "retentionDays",
+                distinctValues: [
+                  { value: 30, labels: [TENANT_A] },
+                  { value: 90, labels: [TENANT_B, TENANT_C] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(`field,value_${TENANT_A},value_${TENANT_B},value_${TENANT_C}`);
+    expect(lines[1]).toBe("retentionDays,30,90,90");
+  });
+
+  it("--format tsv emits tab-separated wide-format (M4.15.o)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "tsv",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [
+              {
+                tenantId: TENANT_A,
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 30,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tenantId: TENANT_B,
+                resolution: { source: "platform", retentionDays: 90, enabled: true },
+              },
+              {
+                tenantId: TENANT_C,
+                resolution: { source: "platform", retentionDays: 90, enabled: true },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "retentionDays",
+                distinctValues: [
+                  { value: 30, labels: [TENANT_A] },
+                  { value: 90, labels: [TENANT_B, TENANT_C] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(`field\tvalue_${TENANT_A}\tvalue_${TENANT_B}\tvalue_${TENANT_C}`);
+    expect(lines[1]).toBe("retentionDays\t30\t90\t90");
+  });
+
+  it("--format csv --csv-separator validation rejects '\"' (M4.15.o)", async () => {
+    const { ctx, err } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        TENANT_B,
+        "workflow_traces",
+        "--add-tenant",
+        TENANT_C,
+        "--format",
+        "csv",
+        "--csv-separator",
+        '"',
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantNwayResult: {
+            tenantIds: [TENANT_A, TENANT_B, TENANT_C],
+            tableName: "workflow_traces",
+            resolutions: [],
+            fieldVariations: [],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("retention diff:");
+    expect(err()).toContain("--csv-separator cannot be");
+  });
+
   it("human-format renders per-field variations with tenant attribution", async () => {
     const { ctx, out } = buffers();
     const code = await runRetention(
@@ -11402,6 +11555,70 @@ describe("runRetention diff --cross-table --add-table (M6.7.zz.tenant.opt-out.cl
     expect(out()).toContain(
       "No differences — all 3 tables resolve to the same effective retention policy for this tenant.",
     );
+  });
+
+  // M4.15.o — `--format csv` wide-format for cross-table N-way.
+  // Header is `field,value_<table>,...` with one column per table.
+  it("--format csv emits wide-format with per-table columns (M4.15.o)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "diff",
+        TENANT_A,
+        "workflow_traces",
+        "gateway_pipeline_executions",
+        "--cross-table",
+        "--add-table",
+        "rate_limit_decisions",
+        "--format",
+        "csv",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          diffTenantTablesNwayResult: {
+            tenantId: TENANT_A,
+            tableNames: ["workflow_traces", "gateway_pipeline_executions", "rate_limit_decisions"],
+            resolutions: [
+              {
+                tableName: "workflow_traces",
+                resolution: {
+                  source: "tenant",
+                  retentionDays: 90,
+                  enabled: true,
+                  tenantId: TENANT_A,
+                },
+              },
+              {
+                tableName: "gateway_pipeline_executions",
+                resolution: { source: "platform", retentionDays: 30, enabled: true },
+              },
+              {
+                tableName: "rate_limit_decisions",
+                resolution: { source: "platform", retentionDays: 7, enabled: true },
+              },
+            ],
+            fieldVariations: [
+              {
+                field: "retentionDays",
+                distinctValues: [
+                  { value: 90, labels: ["workflow_traces"] },
+                  { value: 30, labels: ["gateway_pipeline_executions"] },
+                  { value: 7, labels: ["rate_limit_decisions"] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "field,value_workflow_traces,value_gateway_pipeline_executions,value_rate_limit_decisions",
+    );
+    expect(lines[1]).toBe("retentionDays,90,30,7");
   });
 
   it("human-format renders per-field variations with table labels", async () => {
@@ -17244,5 +17461,110 @@ describe("retention diff-timeline cross-table / N-way --format gh-summary (M4.15
     );
     expect(md).toContain("> Next page: `--after-id h-100`");
     expect(md).toContain("> Previous page: `--before-id h-001`");
+  });
+});
+
+// M4.15.o — `retention diff --add-tenant --format csv|tsv` +
+// `retention diff --cross-table --add-table --format csv|tsv`
+// wide-format export tests. Closes ADR-0296 future Q ("CSV/TSV for
+// retention N-way diffs — distinct-values grouping needs column-
+// per-tenant rather than row-per-field shape"). Wide shape (1 row
+// per field, 1 col per tenant/table) matches the natural way
+// operators read divergences at a glance in spreadsheet workflows.
+describe("buildNwayCsvRows wide-format (M4.15.o)", () => {
+  const T_A = "00000000-0000-4000-8000-00000000000A";
+  const T_B = "00000000-0000-4000-8000-00000000000B";
+  const T_C = "00000000-0000-4000-8000-00000000000C";
+
+  it("emits 1 row per fieldVariation with column-per-label values", () => {
+    const rows = buildNwayCsvRows(
+      [
+        {
+          field: "retentionDays",
+          distinctValues: [
+            { value: 30, labels: [T_A] },
+            { value: 90, labels: [T_B, T_C] },
+          ],
+        },
+        {
+          field: "enabled",
+          distinctValues: [{ value: true, labels: [T_A, T_B, T_C] }],
+        },
+      ],
+      [T_A, T_B, T_C],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(["retentionDays", 30, 90, 90]);
+    expect(rows[1]).toEqual(["enabled", true, true, true]);
+  });
+
+  it("emits null cell when a label is absent from all distinct-value groups", () => {
+    // T_C has no group → cell is null (empty CSV cell). Possible in
+    // theory but normally computeFieldVariations partitions all
+    // tenants; this guard catches degenerate inputs.
+    const rows = buildNwayCsvRows(
+      [
+        {
+          field: "retentionDays",
+          distinctValues: [
+            { value: 30, labels: [T_A] },
+            { value: 90, labels: [T_B] },
+          ],
+        },
+      ],
+      [T_A, T_B, T_C],
+    );
+    expect(rows[0]).toEqual(["retentionDays", 30, 90, null]);
+  });
+
+  it("serializes null/undefined values as null cells", () => {
+    const rows = buildNwayCsvRows(
+      [
+        {
+          field: "optOutReason",
+          distinctValues: [
+            { value: null, labels: [T_A, T_B] },
+            { value: "legal-hold", labels: [T_C] },
+          ],
+        },
+      ],
+      [T_A, T_B, T_C],
+    );
+    expect(rows[0]).toEqual(["optOutReason", null, null, "legal-hold"]);
+  });
+
+  it("serializes object values as compact JSON strings (csv-friendly)", () => {
+    const rows = buildNwayCsvRows(
+      [
+        {
+          field: "attributes",
+          distinctValues: [{ value: { region: "us", tier: "enterprise" }, labels: [T_A] }],
+        },
+      ],
+      [T_A],
+    );
+    expect(rows[0]).toEqual(["attributes", '{"region":"us","tier":"enterprise"}']);
+  });
+
+  it("preserves tenantIds[] order in column ordering (anchor, RHS, --add-tenant chain)", () => {
+    // Column order matches the labels argument exactly — caller is
+    // responsible for passing [anchor, rhs, ...add] order. This
+    // contract preserves the input order from the CLI flag sequence.
+    const rows = buildNwayCsvRows(
+      [
+        {
+          field: "retentionDays",
+          distinctValues: [
+            { value: 90, labels: [T_C] },
+            { value: 30, labels: [T_A] },
+            { value: 60, labels: [T_B] },
+          ],
+        },
+      ],
+      [T_A, T_B, T_C],
+    );
+    // Even though distinctValues are in arbitrary order, output
+    // columns match labels[] ordering: A=30, B=60, C=90.
+    expect(rows[0]).toEqual(["retentionDays", 30, 60, 90]);
   });
 });

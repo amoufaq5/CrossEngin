@@ -18,6 +18,7 @@ import {
   type DiffTenantVsPlatformResult,
   type EffectiveRetentionResolution,
   type ExpiringOptOut,
+  type FieldVariation,
   type OptOutHistoryEntry,
   type OptOutHistoryEventKind,
   type OptOutHistorySummaryGroupBy,
@@ -3407,6 +3408,25 @@ async function runRetentionDiffNway(
     printStructured(ctx.io, command.format, { action: "diff", nway: true, result });
   } else if (command.format === "gh-summary") {
     ctx.io.stdout.write(formatRetentionDiffNwayGhSummary(result));
+  } else if (command.format === "csv" || command.format === "tsv") {
+    // M4.15.o — wide-format CSV/TSV: one row per field, one column
+    // per tenant (with the tenant UUID in the column header). Tenants
+    // matching the same value get the same cell value. Header order
+    // matches tenantIds[] (input order: anchor, RHS, --add-tenant
+    // chain). printCsv handles quoting + escaping; null/undefined →
+    // empty cell.
+    const sepError = validateNwayCsvSeparator(command);
+    if (sepError !== null) {
+      printError(ctx.io, `retention diff: ${sepError}`);
+      return 2;
+    }
+    const headers = ["field", ...result.tenantIds.map((id) => `value_${id}`)];
+    const rows = buildNwayCsvRows(result.fieldVariations, result.tenantIds);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, rows);
+    } else {
+      printCsv(ctx.io, headers, rows, getStringFlag(command, "csv-separator") ?? ",");
+    }
   } else {
     ctx.io.stdout.write(formatTenantNwayDiff(result));
   }
@@ -3448,6 +3468,22 @@ async function runRetentionDiffCrossTableNway(
     });
   } else if (command.format === "gh-summary") {
     ctx.io.stdout.write(formatRetentionDiffCrossTableNwayGhSummary(result));
+  } else if (command.format === "csv" || command.format === "tsv") {
+    // M4.15.o — wide-format CSV/TSV: one row per field, one column
+    // per table (with table name in column header). Same shape as
+    // the N-way per-tenant variant; just different label set.
+    const sepError = validateNwayCsvSeparator(command);
+    if (sepError !== null) {
+      printError(ctx.io, `retention diff: ${sepError}`);
+      return 2;
+    }
+    const headers = ["field", ...result.tableNames.map((t) => `value_${t}`)];
+    const rows = buildNwayCsvRows(result.fieldVariations, result.tableNames);
+    if (command.format === "tsv") {
+      printTsv(ctx.io, headers, rows);
+    } else {
+      printCsv(ctx.io, headers, rows, getStringFlag(command, "csv-separator") ?? ",");
+    }
   } else {
     ctx.io.stdout.write(formatTenantTablesNwayDiff(result));
   }
@@ -3763,6 +3799,54 @@ export function formatRetentionDiffCrossTableGhSummary(result: DiffTenantTablesR
   lines.push("");
   lines.push(`:warning: **Cross-table divergence** — ${result.fieldDiffs.length} field(s) differ.`);
   return lines.join("\n") + "\n";
+}
+
+// M4.15.o — CSV/TSV wide-format helpers for retention N-way diffs.
+// Wide shape (one row per field, one column per tenant/table)
+// matches the natural way operators read divergences at a glance
+// in spreadsheet workflows. Long format would have been more
+// pandas-idiomatic but the column count is bounded by N and N is
+// typically small (~3-10 tenants), so wide is the better default.
+//
+// Empty distinctValues group (no tenant matched the label) → empty
+// cell. printCsv handles the quoting; null/undefined render as
+// empty per the printCsv contract (same as csv-full's null
+// residency convention).
+
+function validateNwayCsvSeparator(command: ParsedCommand): string | null {
+  const sep = getStringFlag(command, "csv-separator");
+  if (sep !== null && (sep === '"' || /[\n\r]/.test(sep))) {
+    return "--csv-separator cannot be '\"' or newline";
+  }
+  return null;
+}
+
+export function buildNwayCsvRows(
+  fieldVariations: ReadonlyArray<FieldVariation>,
+  labels: ReadonlyArray<string>,
+): Array<Array<unknown>> {
+  return fieldVariations.map((v) => {
+    const row: Array<unknown> = [v.field];
+    for (const label of labels) {
+      // Find the distinct-value group containing this label. Each
+      // label appears in at most one group (computeFieldVariations
+      // partitions tenants/tables by value).
+      const group = v.distinctValues.find((g) => g.labels.includes(label));
+      row.push(group === undefined ? null : serializeNwayCellValue(group.value));
+    }
+    return row;
+  });
+}
+
+function serializeNwayCellValue(value: unknown): unknown {
+  // Strings, numbers, booleans pass through to printCsv. null stays
+  // null (empty cell). Objects/arrays serialize to compact JSON for
+  // embedding (same convention as tenants list csv-full residency).
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  return JSON.stringify(value);
 }
 
 export function formatRetentionDiffNwayGhSummary(result: DiffTenantPoliciesNwayResult): string {
