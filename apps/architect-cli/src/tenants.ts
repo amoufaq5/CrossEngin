@@ -130,6 +130,37 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
     }
     minPolicyCount = parsed;
   }
+  // M4.15.r — --max-policy-count N filters to tenants with at most N
+  // policies (inverse cohort: "under-customized" / "platform-default"
+  // tenants). Same JOIN-forcing semantic as --min-policy-count.
+  // N >= 0 is valid here (N=0 = "no overrides" = pure platform
+  // defaults; inverse of --has-overrides). Composes with --min for
+  // range queries: --min 3 --max 10 → tenants with 3-10 policies.
+  // Negative + non-numeric + float rejected with same round-trip
+  // check as --min.
+  const maxPolicyCountFlag = getStringFlag(command, "max-policy-count");
+  let maxPolicyCount: number | null = null;
+  if (maxPolicyCountFlag !== null) {
+    const parsed = Number.parseInt(maxPolicyCountFlag, 10);
+    if (!Number.isFinite(parsed) || parsed < 0 || String(parsed) !== maxPolicyCountFlag.trim()) {
+      printError(
+        ctx.io,
+        `tenants list: invalid --max-policy-count '${maxPolicyCountFlag}' (expected a non-negative integer >= 0)`,
+      );
+      return 2;
+    }
+    maxPolicyCount = parsed;
+  }
+  // Range consistency: --min > --max would yield empty result set
+  // intentionally if accepted, but it's almost always an operator
+  // typo. Reject with explanatory error so the operator notices.
+  if (minPolicyCount !== null && maxPolicyCount !== null && minPolicyCount > maxPolicyCount) {
+    printError(
+      ctx.io,
+      `tenants list: --min-policy-count (${minPolicyCount}) cannot exceed --max-policy-count (${maxPolicyCount})`,
+    );
+    return 2;
+  }
 
   const conn = await resolveConn(ctx, "tenants list");
   if (conn === null) return 1;
@@ -174,6 +205,7 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
         hasOverrides,
         includePolicyCount,
         minPolicyCount,
+        maxPolicyCount,
       );
       const fullResult = await conn.exec.query<TenantRowFull & { policy_count?: number }>(
         sql,
@@ -237,6 +269,7 @@ async function runTenantsList(command: ParsedCommand, ctx: TenantsContext): Prom
       hasOverrides,
       includePolicyCount,
       minPolicyCount,
+      maxPolicyCount,
     );
     const result = await conn.exec.query<TenantRow & { policy_count?: number }>(sql, params);
     const rows = result.rows;
@@ -506,6 +539,7 @@ function buildListQuery(
   hasOverrides: boolean,
   includePolicyCount: boolean = false,
   minPolicyCount: number | null = null,
+  maxPolicyCount: number | null = null,
 ): { sql: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -530,13 +564,20 @@ function buildListQuery(
     params.push(minPolicyCount);
     where.push(`COALESCE(pc.policy_count, 0) >= $${params.length}`);
   }
+  // M4.15.r — --max-policy-count N adds the inverse bound. Either
+  // flag forces the JOIN; both compose via AND for range filtering.
+  if (maxPolicyCount !== null) {
+    params.push(maxPolicyCount);
+    where.push(`COALESCE(pc.policy_count, 0) <= $${params.length}`);
+  }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   // M4.15.g — --include-policy-count adds COALESCE(pc.policy_count,
   // 0) AS policy_count from a LEFT JOIN against a per-tenant
   // count subquery. Tenants with no overrides report 0 (COALESCE
-  // handles the LEFT-JOIN-missed case). M4.15.k — --min-policy-
-  // count also needs the JOIN; either flag forces it on.
-  const needsJoin = includePolicyCount || minPolicyCount !== null;
+  // handles the LEFT-JOIN-missed case). M4.15.k/r — --min/--max-
+  // policy-count also need the JOIN; any of the three flags forces
+  // it on.
+  const needsJoin = includePolicyCount || minPolicyCount !== null || maxPolicyCount !== null;
   const selectExtra = includePolicyCount
     ? ", COALESCE(pc.policy_count, 0)::int AS policy_count"
     : "";
@@ -558,6 +599,7 @@ function buildListQueryFull(
   hasOverrides: boolean,
   includePolicyCount: boolean = false,
   minPolicyCount: number | null = null,
+  maxPolicyCount: number | null = null,
 ): { sql: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -577,11 +619,18 @@ function buildListQueryFull(
     params.push(minPolicyCount);
     where.push(`COALESCE(pc.policy_count, 0) >= $${params.length}`);
   }
+  // M4.15.r — --max-policy-count adds the inverse bound (same shape
+  // as the buildListQuery 5-col path).
+  if (maxPolicyCount !== null) {
+    params.push(maxPolicyCount);
+    where.push(`COALESCE(pc.policy_count, 0) <= $${params.length}`);
+  }
   const whereClause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
   // M4.15.g — --include-policy-count integration (same shape as
-  // buildListQuery; the join + COALESCE is identical). M4.15.k —
-  // --min-policy-count also needs the JOIN; either flag forces it on.
-  const needsJoin = includePolicyCount || minPolicyCount !== null;
+  // buildListQuery; the join + COALESCE is identical). M4.15.k/r —
+  // --min-policy-count + --max-policy-count also need the JOIN;
+  // any of the three flags forces it on.
+  const needsJoin = includePolicyCount || minPolicyCount !== null || maxPolicyCount !== null;
   const selectExtra = includePolicyCount
     ? ", COALESCE(pc.policy_count, 0)::int AS policy_count"
     : "";

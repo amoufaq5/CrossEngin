@@ -1218,6 +1218,157 @@ describe("runTenants list --min-policy-count (M4.15.k)", () => {
   });
 });
 
+// M4.15.r — `tenants list --max-policy-count N` inverse-cohort
+// filter tests. Closes ADR-0298 Q1. Inverse of --min-policy-count;
+// N >= 0 (unlike --min where N >= 1) since N=0 = tenants with no
+// overrides = pure platform defaults. Composes with --min for
+// range queries.
+describe("runTenants list --max-policy-count (M4.15.r)", () => {
+  it("--max-policy-count 5 adds COALESCE(...) <= $N to WHERE + forces JOIN", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--max-policy-count", "5", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).toContain("LEFT JOIN");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) <= $1");
+    expect(queries[0]?.params).toEqual([5]);
+  });
+
+  it("--max-policy-count 0 accepted (N=0 = pure platform-default tenants)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--max-policy-count", "0", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) <= $1");
+    expect(queries[0]?.params).toEqual([0]);
+  });
+
+  it("--max-policy-count negative rejected with usage error", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--max-policy-count", "-1"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --max-policy-count '-1'");
+    expect(err()).toContain("non-negative integer >= 0");
+  });
+
+  it("--max-policy-count float rejected (round-trip integer-only check)", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--max-policy-count", "5.5"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --max-policy-count '5.5'");
+  });
+
+  it("--max-policy-count non-numeric rejected", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(parsed("tenants", "list", "--max-policy-count", "many"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("invalid --max-policy-count 'many'");
+  });
+
+  it("--min-policy-count 3 + --max-policy-count 10 composes via AND for range query", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed(
+        "tenants",
+        "list",
+        "--min-policy-count",
+        "3",
+        "--max-policy-count",
+        "10",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Both bounds present in WHERE; params indexed by insertion order
+    // (min first since validation runs in that order in runTenantsList).
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) >= $1");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) <= $2");
+    expect(queries[0]?.params).toEqual([3, 10]);
+    // Only ONE LEFT JOIN despite both flags (shared infra).
+    expect(queries[0]?.sql.match(/LEFT JOIN/g)?.length).toBe(1);
+  });
+
+  it("--min-policy-count > --max-policy-count rejected with explanatory error", async () => {
+    const { io, err } = makeIo();
+    const ctx: TenantsContext = { io, env: {} };
+    const code = await runTenants(
+      parsed("tenants", "list", "--min-policy-count", "10", "--max-policy-count", "3"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--min-policy-count (10) cannot exceed --max-policy-count (3)");
+  });
+
+  it("--max-policy-count works with --format csv-full (full-row builder threads through)", async () => {
+    const { conn, queries } = fakeConn({ tenantRowsFull: [TENANT_A_FULL] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed("tenants", "list", "--max-policy-count", "5", "--format", "csv-full"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).toContain("LEFT JOIN");
+    expect(queries[0]?.sql).toContain("COALESCE(pc.policy_count, 0) <= $1");
+    expect(queries[0]?.params).toEqual([5]);
+  });
+
+  it("--max-policy-count composes with --include-policy-count + --status (4-way composition)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io, out } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(
+      parsed(
+        "tenants",
+        "list",
+        "--status",
+        "active",
+        "--max-policy-count",
+        "5",
+        "--include-policy-count",
+        "--format",
+        "json",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const sql = queries[0]!.sql;
+    // Single shared JOIN, all three filters present, exposed column.
+    expect(sql.match(/LEFT JOIN/g)?.length).toBe(1);
+    expect(sql).toContain("t.status = $1");
+    expect(sql).toContain("COALESCE(pc.policy_count, 0) <= $2");
+    expect(sql).toContain("AS policy_count");
+    expect(queries[0]?.params).toEqual(["active", 5]);
+    const env = JSON.parse(out()) as { action: string };
+    expect(env.action).toBe("tenants.list");
+  });
+
+  it("--max-policy-count not set → no JOIN imposed (M4.15.r is opt-in only)", async () => {
+    const { conn, queries } = fakeConn({ tenantRows: [TENANT_A] });
+    const { io } = makeIo();
+    const ctx: TenantsContext = { io, env: {}, pgConnectionOverride: conn };
+    const code = await runTenants(parsed("tenants", "list", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    expect(queries[0]?.sql).not.toContain("LEFT JOIN");
+    expect(queries[0]?.sql).not.toContain("<=");
+  });
+});
+
 // M4.15.q — `tenants list/get --columns col1,col2` subset filter.
 // Closes ADR-0297 Q2. Composes with --no-header (M4.15.p). Invalid
 // column / empty list / duplicates exit 2 with the validation error.
