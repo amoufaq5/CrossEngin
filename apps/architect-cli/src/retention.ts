@@ -777,6 +777,17 @@ async function runRetentionListPolicies(
     });
     return 0;
   }
+  if (command.format === "gh-summary") {
+    ctx.io.stdout.write(
+      formatPoliciesListGhSummary({
+        platform: filteredPlatform,
+        tenantPolicies: filteredTenant,
+        tenantFilter,
+        tableFilter,
+      }),
+    );
+    return 0;
+  }
 
   ctx.io.stdout.write(
     formatPoliciesList(filteredPlatform, filteredTenant, {
@@ -785,6 +796,69 @@ async function runRetentionListPolicies(
     }),
   );
   return 0;
+}
+
+// M4.15.ag — gh-summary Markdown for `retention list-policies`.
+// Sister query-surface to M4.15.x prune-idempotency and M4.15.af
+// retention prune; like those, no verdict emoji since list-policies
+// is informational not a gate. Renders two sections (Platform
+// defaults + Per-tenant overrides) under a single title, each with
+// its own per-row table. Filter context echoes in the metadata
+// line for audit reproducibility.
+export interface PoliciesListGhSummaryInput {
+  readonly platform: ReadonlyArray<RetentionPolicyRow>;
+  readonly tenantPolicies: ReadonlyArray<TenantRetentionPolicyRow>;
+  readonly tenantFilter: string | null;
+  readonly tableFilter: string | null;
+}
+
+export function formatPoliciesListGhSummary(input: PoliciesListGhSummaryInput): string {
+  const lines: string[] = [];
+  lines.push(`## Retention policies`);
+  lines.push("");
+  if (input.tenantFilter !== null || input.tableFilter !== null) {
+    const parts: string[] = [];
+    if (input.tenantFilter !== null) parts.push(`tenant=\`${input.tenantFilter}\``);
+    if (input.tableFilter !== null) parts.push(`table=\`${input.tableFilter}\``);
+    lines.push(`**Filtered:** ${parts.join(" | ")}  `);
+  }
+  lines.push(
+    `**Platform defaults:** ${input.platform.length} | **Per-tenant overrides:** ${input.tenantPolicies.length}`,
+  );
+  lines.push("");
+  lines.push(`### Platform defaults`);
+  lines.push("");
+  if (input.platform.length === 0) {
+    lines.push(`_No platform defaults configured._`);
+  } else {
+    lines.push(`| Table | Retention | Enabled | Last pruned |`);
+    lines.push(`|-------|----------:|---------|-------------|`);
+    for (const p of input.platform) {
+      const last = p.lastPrunedAt === null ? "_never_" : `\`${p.lastPrunedAt}\``;
+      lines.push(
+        `| \`${p.tableName}\` | ${p.retentionDays}d | ${p.enabled ? "yes" : "no"} | ${last} |`,
+      );
+    }
+  }
+  lines.push("");
+  lines.push(`### Per-tenant overrides`);
+  lines.push("");
+  if (input.tenantPolicies.length === 0) {
+    lines.push(`_No per-tenant overrides configured._`);
+  } else {
+    lines.push(`| Tenant | Table | Retention | Enabled | Opt-out |`);
+    lines.push(`|--------|-------|----------:|---------|---------|`);
+    for (const p of input.tenantPolicies) {
+      const optOut = !p.optOut
+        ? "no"
+        : `yes _(until ${p.optOutUntil ?? "indefinite"}; reason: ${p.optOutReason ?? "<no reason>"})_`;
+      lines.push(
+        `| \`${p.tenantId}\` | \`${p.tableName}\` | ${p.retentionDays}d | ${p.enabled ? "yes" : "no"} | ${optOut} |`,
+      );
+    }
+  }
+  lines.push("");
+  return lines.join("\n") + "\n";
 }
 
 export interface PoliciesListFilters {
