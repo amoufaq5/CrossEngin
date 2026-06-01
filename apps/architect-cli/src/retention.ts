@@ -44,7 +44,7 @@ import {
   printTsv,
 } from "./format.js";
 import { runRetentionHousekeeping } from "./retention-housekeeping.js";
-import { resolveTenantIdentifier } from "./tenant-resolver.js";
+import { resolveTenantIdentifier, reverseTenantSlug } from "./tenant-resolver.js";
 
 const DEFAULT_WITHIN_DAYS = 30;
 
@@ -775,7 +775,25 @@ async function runRetentionListPolicies(
   // their layer. UUID input → undefined → field omitted from envelope
   // (backward-compatible with M4.15.ag shape for UUID callers). Closes
   // ADR-0322 future Q3.
-  const tenantSlug = tenantRaw !== null && tenantRaw !== tenantFilter ? tenantRaw : undefined;
+  //
+  // M4.15.ak — extends with reverse slug lookup for UUID input: when
+  // operator passes a UUID, query meta.tenants for the canonical slug
+  // so audit-trail consumers see both regardless of input shape. Best-
+  // effort: requires conn to be available (test paths without
+  // pgConnectionOverride skip — same gap as the forward resolver path).
+  // Closes ADR-0322 Q2 + ADR-0323 Q1.
+  let tenantSlug: string | undefined;
+  if (tenantRaw !== null && tenantFilter !== null) {
+    if (tenantRaw !== tenantFilter) {
+      // Slug input — preserve operator-typed value (M4.15.aj behavior).
+      tenantSlug = tenantRaw;
+    } else if (conn !== undefined) {
+      // UUID input — reverse-lookup canonical slug from meta.tenants.
+      // Test paths without pgConnectionOverride skip (same gap as
+      // forward resolver — operators in that path must use UUIDs).
+      tenantSlug = await reverseTenantSlug(conn, tenantFilter);
+    }
+  }
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, {
       tenantFilter: tenantFilter ?? null,

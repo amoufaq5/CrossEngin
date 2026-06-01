@@ -73,6 +73,37 @@ export function findSimilarSlugs(input: string, candidates: ReadonlyArray<string
   return scored.slice(0, MAX_SUGGESTIONS).map((s) => s.slug);
 }
 
+// M4.15.ak — reverse slug lookup for UUID-input callers. After M4.15.ai/aj
+// surfaced operator-typed slugs in gh-summary headers + JSON envelopes,
+// operators passing UUIDs got no slug in either output — round-trip was
+// one-way (slug-input preserved) not bidirectional. This helper queries
+// meta.tenants for the canonical slug matching a given UUID; returns the
+// slug if found, undefined otherwise. Best-effort: query failures (PG
+// transient errors) and missing rows degrade silently to undefined so
+// audit-trail visibility doesn't block the main workflow. Operators
+// running tens of thousands of housekeeping calls per day pay one extra
+// indexed PK lookup per call — negligible at typical scales. Pairs with
+// the forward `SELECT id FROM meta.tenants WHERE slug = $1` pattern from
+// `resolveTenantIdentifier` so the round-trip is symmetric.
+export async function reverseTenantSlug(
+  conn: PgConnection,
+  tenantId: string,
+): Promise<string | undefined> {
+  try {
+    const result = await conn.query<{ slug: string }>(
+      `SELECT slug FROM meta.tenants WHERE id = $1`,
+      [tenantId],
+    );
+    const row = result.rows[0];
+    if (row !== undefined && typeof row.slug === "string" && row.slug.length > 0) {
+      return row.slug;
+    }
+  } catch {
+    // Best-effort: degrade silently rather than blocking the surface.
+  }
+  return undefined;
+}
+
 export async function resolveTenantIdentifier(
   conn: PgConnection,
   value: string,

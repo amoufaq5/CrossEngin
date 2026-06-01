@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.aj + M4.15.ai + M4.15.ah + M4.15.ag + M4.15.af + M4.15.ae + M4.15.ad + M4.15.ac + M4.15.ab + M4.15.aa + M4.15.z + M4.15.y + M4.15.x + M4.15.w + M4.15.v + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.ak + M4.15.aj + M4.15.ai + M4.15.ah + M4.15.ag + M4.15.af + M4.15.ae + M4.15.ad + M4.15.ac + M4.15.ab + M4.15.aa + M4.15.z + M4.15.y + M4.15.x + M4.15.w + M4.15.v + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,192 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.ak completes the bidirectional
+slug round-trip story by adding
+reverse slug lookup for UUID-input
+callers — closes ADR-0322 Q2 +
+ADR-0323 Q1. After M4.15.ai/aj
+surfaced operator-typed slugs in
+gh-summary headers + JSON envelopes,
+operators passing UUIDs (e.g.,
+scripting against stored UUIDs in
+a CI config, or copy-pasting from
+a previous audit log) still got no
+slug in either output — the round-
+trip was one-way (slug-input
+preserved) not bidirectional. This
+milestone queries meta.tenants for
+the canonical slug matching a
+given UUID so audit-trail consumers
+see both shapes regardless of input.
+New shared `reverseTenantSlug
+(conn, tenantId)` helper in
+tenant-resolver.ts queries
+`SELECT slug FROM meta.tenants
+WHERE id = $1`; returns the slug
+if found, undefined otherwise.
+Best-effort semantic: PG transient
+errors, missing rows, and empty-
+string slug fields all degrade
+silently to undefined so audit-
+trail visibility doesn't block
+the main workflow. Both surfaces
+that got slug round-trip in
+M4.15.ai/aj gain the reverse-
+lookup branch: tenant.ts (single-
+tick + watch tick) and retention.
+ts (list-policies). The
+`tenantSlug` variable threads
+through ALL existing sinks (gh-
+summary header, JSON envelope,
+NDJSON watch tick) unchanged
+from M4.15.aj — only the source
+extends to include reverse-
+lookup when input was a UUID.
+Symmetric cost: slug-input
+workflows already pay forward-
+resolver query (1 extra per
+call), UUID-input workflows now
+pay reverse-resolver query (1
+extra per call), both shapes
+cost exactly one meta.tenants
+query per call — fair trade.
+Rejected — cache reverse lookups
+(cache invalidation problem
+adds complexity for sub-
+millisecond savings; defer),
+opt-in via --include-slug flag
+(operators want by default;
+symmetric cost with forward
+slug resolution), opt-out via
+--no-slug-lookup flag (defensive
+surface expansion for unmeasured
+optimization; defer), throw on
+reverse-lookup failure
+(blocks workflow when gather()
+succeeded; degrade silently
+matches audit-trail-not-
+workflow-blocker principle),
+surface slugLookupError as
+separate field (bare UUID
+output is the signal; no need
+for explicit error visibility),
+reverse-lookup per-tenant in
+matrix mode (potentially
+thousands of queries; defer
+scaling reasons), cache in
+tenant-resolver helper (resolver
+stateless; defer), skip reverse
+lookup when --format=human
+(format-sensitive branching for
+sub-millisecond optimization;
+uniform behavior simpler).
+Drawbacks — one extra PG query
+per call for UUID input
+(symmetric with forward-
+resolver cost), best-effort
+degradation may surprise
+operators expecting always-
+return-slug behavior (documented
+in ADR + comments), no visibility
+into reverse-lookup failures
+(operators debugging "why no
+slug?" see only bare-UUID;
+acceptable for best-effort;
+re-query meta.tenants manually),
+test path without
+pgConnectionOverride in retention
+list-policies skips reverse
+lookup (same gap as forward
+resolveTenantFlagFor from
+M4.14.m). Note: 1 existing
+M4.14.m test updated — "UUID-
+shaped --tenant bypasses slug
+lookup on all three surfaces"
+previously asserted "NO
+meta.tenants SELECT issued"
+across the three retention
+read actions; now asserts "NO
+forward `SELECT id FROM meta.
+tenants WHERE slug` issued"
+since M4.15.ak adds an opt-in
+reverse `SELECT slug FROM meta.
+tenants WHERE id` lookup for
+list-policies. 16 new tests
+across 3 describe blocks: 6 in
+`reverseTenantSlug (M4.15.ak)`
+in tenant-resolver.test.ts
+covering happy path + 5
+degradation paths (no row, no
+slug field, empty slug, query
+throws, parameterized SQL); 5
+in `tenant housekeeping reverse
+slug round-trip (M4.15.ak)` in
+tenant.test.ts covering
+--tenant <uuid> + --format json
+emits tenantSlug, --tenant
+<uuid> + --format gh-summary
+emits slug round-trip header,
+--tenant <uuid> omits when no
+slug exists (M4.15.aj backward
+compat), --tenant <slug>
+preserves operator input over
+reverse-lookup result,
+--all-tenants omits tenantSlug;
+5 in `retention list-policies
+reverse slug round-trip
+(M4.15.ak)` in retention.test.ts
+mirroring the same shape on
+list-policies surface. tenant-
+resolver.test.ts grows 23 →
+29 tests (+6). tenant.test.ts
+grows 187 → 192 tests (+5).
+retention.test.ts grows 815
+→ 820 tests (+5). Workspace
+test count 10,152 → 10,168
+(+16). ADR-0324 documents
+design + 8 rejected alternatives
++ 8 future Qs (apply reverse
+lookup to diff/diff-history/
+diff-timeline gh-summary +
+JSON envelopes pairs with
+ADR-0322 Q1 + ADR-0323 Q2,
+apply to retention history/
+summary surfaces when they
+ship pairs with ADR-0323 Q3,
+apply to gateway housekeeping
++ retention housekeeping
+separate dashboards pairs
+with ADR-0323 Q4, cache
+reverse lookups in --watch
+loops defer until measured,
+reverse lookup batching for
+matrix mode with single IN
+query defer until matrix-
+mode slug surfacing requested,
+surface slug in **Scope:** line
+under --all-tenants pairs with
+batched lookup, reverse lookup
+in error-path gh-summary defer,
+multi-tenant reverse lookup
+for tenants list/get if those
+gain slug resolution from UUID
+pairs with ADR-0323 Q5).
+Useful for CI analytics
+dashboards parsing UUIDs from
+audit-trail logs + compliance
+reporting pipelines reconstructing
+slug context post-hoc + incident-
+response playback where operators
+correlate UUIDs from runtime
+logs against slugs in their
+mental model + bidirectional
+audit-trail visibility regardless
+of input shape (operator typed
+UUID or slug, output shows
+both). Closes ADR-0322 Q2 +
+ADR-0323 Q1.
+
 M4.15.aj surfaces tenantSlug in JSON
 envelopes for the two surfaces that
 got gh-summary slug round-trip in

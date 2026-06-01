@@ -16653,6 +16653,16 @@ describe("--tenant <uuid|slug> slug resolution across list-policies / history / 
             ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
             : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
         }
+        // M4.15.ak — reverse slug lookup. Inverts slugMap (slug→uuid) to
+        // find the slug for a given UUID. Tests with empty slugMap get
+        // no slug back (preserves M4.15.aj backward-compat behavior).
+        if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+          const id = String(params?.[0] ?? "");
+          const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+          return slug !== undefined
+            ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
         return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
       },
       transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
@@ -16838,9 +16848,13 @@ describe("--tenant <uuid|slug> slug resolution across list-policies / history / 
       } as RetentionContext);
       expect(code).toBe(0);
     }
-    // NO meta.tenants SELECT issued across all three actions — UUID
-    // short-circuit preserved end-to-end.
-    expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
+    // NO forward slug→UUID lookup issued across all three actions —
+    // UUID short-circuit on the resolver path preserved end-to-end.
+    // M4.15.ak adds an optional reverse UUID→slug lookup for audit-
+    // trail visibility on list-policies (the gh-summary + JSON envelope
+    // surface), but the forward `SELECT id FROM meta.tenants WHERE slug`
+    // path stays bypassed for UUID input.
+    expect(queries.some((q) => q.includes("SELECT id FROM meta.tenants WHERE slug"))).toBe(false);
   });
 });
 
@@ -18041,6 +18055,16 @@ describe("retention list-policies gh-summary slug round-trip (M4.15.ai)", () => 
             ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
             : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
         }
+        // M4.15.ak — reverse slug lookup. Inverts slugMap (slug→uuid) to
+        // find the slug for a given UUID. Tests with empty slugMap get
+        // no slug back (preserves M4.15.aj backward-compat behavior).
+        if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+          const id = String(params?.[0] ?? "");
+          const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+          return slug !== undefined
+            ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
         return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
       },
       transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
@@ -18157,6 +18181,16 @@ describe("retention list-policies JSON envelope slug round-trip (M4.15.aj)", () 
           const id = slugMap[slug];
           return id !== undefined
             ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        // M4.15.ak — reverse slug lookup. Inverts slugMap (slug→uuid) to
+        // find the slug for a given UUID. Tests with empty slugMap get
+        // no slug back (preserves M4.15.aj backward-compat behavior).
+        if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+          const id = String(params?.[0] ?? "");
+          const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+          return slug !== undefined
+            ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
             : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
         }
         return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
@@ -18284,5 +18318,146 @@ describe("retention list-policies JSON envelope slug round-trip (M4.15.aj)", () 
     expect(env.tenantFilter).toBe(RESOLVED_UUID_AJ);
     expect(env.tenantSlug).toBe("acme-prod");
     expect(env.tableFilter).toBe("workflow_traces");
+  });
+});
+
+// M4.15.ak — reverse slug lookup for UUID-input callers on retention
+// list-policies. Completes the bidirectional round-trip story across
+// both gh-summary header + JSON envelope so audit-trail consumers see
+// the slug regardless of whether operator passed a UUID or a slug. Best-
+// effort: degrades silently on missing row or query failure. Closes
+// ADR-0322 Q2 + ADR-0323 Q1.
+describe("retention list-policies reverse slug round-trip (M4.15.ak)", () => {
+  const RESOLVED_UUID_AK = "00000000-0000-4000-8000-00000000000a";
+
+  function fakeConnWithSlug(slugMap: Record<string, string>): PgConnection {
+    return {
+      query: async <T>(sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+          const slug = String(params?.[0] ?? "");
+          const id = slugMap[slug];
+          return id !== undefined
+            ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        // M4.15.ak — reverse slug lookup. Inverts slugMap (slug→uuid) to
+        // find the slug for a given UUID.
+        if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+          const id = String(params?.[0] ?? "");
+          const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+          return slug !== undefined
+            ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  it("--tenant <uuid> + --format json emits tenantSlug from reverse lookup when meta.tenants has the row", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AK });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", RESOLVED_UUID_AK, "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantFilter: string | null;
+      tenantSlug?: string;
+    };
+    expect(env.tenantFilter).toBe(RESOLVED_UUID_AK);
+    expect(env.tenantSlug).toBe("acme-prod");
+  });
+
+  it("--tenant <uuid> + --format gh-summary emits slug round-trip in **Filtered:** line", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AK });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", RESOLVED_UUID_AK, "--format", "gh-summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`**Filtered:** tenant=\`${RESOLVED_UUID_AK}\` (slug: \`acme-prod\`)`);
+  });
+
+  it("--tenant <uuid> --format json omits tenantSlug when no slug exists for that UUID (M4.15.aj backward compat)", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({});
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", RESOLVED_UUID_AK, "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.tenantFilter).toBe(RESOLVED_UUID_AK);
+    expect("tenantSlug" in env).toBe(false);
+  });
+
+  it("--tenant <slug> path still preserves operator input over reverse-lookup result (M4.15.aj behavior)", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AK });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", "acme-prod", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { tenantFilter: string | null; tenantSlug: string };
+    expect(env.tenantFilter).toBe(RESOLVED_UUID_AK);
+    expect(env.tenantSlug).toBe("acme-prod");
+  });
+
+  it("no --tenant flag — no reverse lookup attempted, tenantSlug omitted", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AK });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "list-policies", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetentionMock,
+      pgConnectionOverride: conn,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.tenantFilter).toBe(null);
+    expect("tenantSlug" in env).toBe(false);
   });
 });

@@ -47,6 +47,16 @@ function fakeConn(slugMap: Record<string, string>): PgConnection {
           ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
           : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
       }
+      // M4.15.ak — reverse slug lookup. Inverts the slugMap (slug→uuid)
+      // to find the slug for a given UUID. Tests setting slugMap = {}
+      // (UUID-input M4.15.aj backward-compat tests) get no slug back.
+      if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+        const id = String(params?.[0] ?? "");
+        const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+        return slug !== undefined
+          ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
+          : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+      }
       // Gateway housekeeping tables.
       if (sql.includes("FROM meta.gateway_pipeline_executions")) {
         return {
@@ -6260,6 +6270,127 @@ describe("tenant housekeeping JSON envelope slug round-trip (M4.15.aj)", () => {
       expect(env.tenantId).toBe(RESOLVED_UUID);
       expect(env.tenantSlug).toBe("acme-prod");
     }
+  });
+});
+
+// M4.15.ak — reverse slug lookup for UUID-input callers completes the
+// bidirectional round-trip story. After M4.15.ai/aj surfaced operator-
+// typed slugs in gh-summary + JSON envelopes, operators passing UUIDs
+// still got no slug in either output. This milestone queries
+// meta.tenants for the canonical slug when input was a UUID, so audit-
+// trail consumers see both shapes regardless of input. Best-effort:
+// missing rows or query failures degrade silently. Closes ADR-0322 Q2
+// + ADR-0323 Q1.
+describe("tenant housekeeping reverse slug round-trip (M4.15.ak)", () => {
+  it("--tenant <uuid> + --format json emits tenantSlug from reverse lookup when meta.tenants has the row", async () => {
+    // slugMap is also inverted to handle the reverse query — see fakeConn.
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { tenantId: string; tenantSlug?: string };
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect(env.tenantSlug).toBe("acme-prod");
+  });
+
+  it("--tenant <uuid> + --format gh-summary emits slug round-trip header from reverse lookup", async () => {
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // M4.15.aj UUID-input behavior was bare-UUID; M4.15.ak now surfaces
+    // the slug via reverse lookup.
+    expect(output).toContain(`**Tenant:** \`${RESOLVED_UUID}\` (slug: \`acme-prod\`)`);
+  });
+
+  it("--tenant <uuid> --format json omits tenantSlug when no slug exists for that UUID (M4.15.aj backward compat)", async () => {
+    // Empty slugMap → reverse lookup returns no row → tenantSlug undefined.
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect("tenantSlug" in env).toBe(false);
+  });
+
+  it("--tenant <slug> path still preserves operator input over reverse-lookup result (M4.15.aj behavior)", async () => {
+    // Operator types --tenant acme-prod. Forward resolver returns the
+    // resolved UUID. Reverse lookup is NOT called for slug input —
+    // tenantSlug is populated directly from the operator's typed value.
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", "acme-prod", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { tenantId: string; tenantSlug: string };
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect(env.tenantSlug).toBe("acme-prod");
+  });
+
+  it("--all-tenants omits tenantSlug — no slug resolution happens in matrix mode", async () => {
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--all-tenants", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.allTenants).toBe(true);
+    expect("tenantSlug" in env).toBe(false);
   });
 });
 

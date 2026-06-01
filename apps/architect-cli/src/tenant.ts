@@ -53,7 +53,7 @@ import {
   type RetentionHousekeepingReport,
   type RetentionHousekeepingTableReport,
 } from "./retention-housekeeping.js";
-import { resolveTenantIdentifier } from "./tenant-resolver.js";
+import { resolveTenantIdentifier, reverseTenantSlug } from "./tenant-resolver.js";
 import {
   evaluateAlertCompound,
   formatTrippedAlertsGhSummaryTable,
@@ -272,7 +272,23 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
   // resolve slugs at their layer. UUID input → undefined → field omitted
   // from envelope (backward-compatible with M4.15.aa shape for UUID
   // callers). Closes ADR-0322 future Q3.
-  const tenantSlug = tenantFlag !== null && tenantFlag !== tenantId ? tenantFlag : undefined;
+  //
+  // M4.15.ak — extends with reverse slug lookup for UUID input: when
+  // operator passes a UUID, query meta.tenants for the canonical slug so
+  // audit-trail consumers see both regardless of input shape. One extra
+  // indexed PK lookup per call (negligible at typical scales); best-
+  // effort degrades silently on missing row or query failure. Closes
+  // ADR-0322 Q2 + ADR-0323 Q1.
+  let tenantSlug: string | undefined;
+  if (tenantFlag !== null && tenantId !== undefined) {
+    if (tenantFlag !== tenantId) {
+      // Slug input — preserve operator-typed value (M4.15.aj behavior).
+      tenantSlug = tenantFlag;
+    } else {
+      // UUID input — reverse-lookup canonical slug from meta.tenants.
+      tenantSlug = await reverseTenantSlug(conn, tenantId);
+    }
+  }
 
   // M4.14.d — gather closure shared by single-tick AND --watch loop. Each
   // tick fetches BOTH dashboards concurrently (Promise.all interleaves on

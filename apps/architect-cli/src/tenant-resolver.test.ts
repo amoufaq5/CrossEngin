@@ -5,6 +5,7 @@ import {
   findSimilarSlugs,
   levenshteinDistance,
   resolveTenantIdentifier,
+  reverseTenantSlug,
 } from "./tenant-resolver.js";
 
 interface CapturedQuery {
@@ -232,5 +233,62 @@ describe("resolveTenantIdentifier slug suggestions (M4.14.j)", () => {
       const matches = result.error.match(/'acme-[a-e]'/g) ?? [];
       expect(matches).toHaveLength(3);
     }
+  });
+});
+
+// M4.15.ak — reverse slug lookup for UUID-input callers. Completes the
+// bidirectional round-trip story across both gh-summary headers + JSON
+// envelopes for tenant housekeeping + retention list-policies. Best-
+// effort: degrades silently on missing row, missing slug field, or query
+// failure so audit-trail visibility doesn't block the main workflow.
+describe("reverseTenantSlug (M4.15.ak)", () => {
+  it("returns the matched slug when meta.tenants has a row for the given UUID", async () => {
+    const { conn, queries } = fakeConn([[{ slug: "acme-prod" }]]);
+    const slug = await reverseTenantSlug(conn, UUID);
+    expect(slug).toBe("acme-prod");
+    expect(queries).toHaveLength(1);
+    expect(queries[0]!.sql).toContain("SELECT slug FROM meta.tenants WHERE id = $1");
+    expect(queries[0]!.params).toEqual([UUID]);
+  });
+
+  it("returns undefined when no row matches the given UUID", async () => {
+    const { conn, queries } = fakeConn([[]]);
+    const slug = await reverseTenantSlug(conn, UUID);
+    expect(slug).toBeUndefined();
+    expect(queries).toHaveLength(1);
+  });
+
+  it("returns undefined when row has missing slug field (defensive against degraded DB states)", async () => {
+    const { conn } = fakeConn([[{} as { slug?: string }]]);
+    const slug = await reverseTenantSlug(conn, UUID);
+    expect(slug).toBeUndefined();
+  });
+
+  it("returns undefined when slug field is empty string", async () => {
+    const { conn } = fakeConn([[{ slug: "" }]]);
+    const slug = await reverseTenantSlug(conn, UUID);
+    expect(slug).toBeUndefined();
+  });
+
+  it("returns undefined when query throws (best-effort degradation)", async () => {
+    const throwingConn: PgConnection = {
+      query: async () => {
+        throw new Error("PG transient failure");
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    const slug = await reverseTenantSlug(throwingConn, UUID);
+    expect(slug).toBeUndefined();
+  });
+
+  it("uses parameterized query (UUID passed as $1 not interpolated)", async () => {
+    const { conn, queries } = fakeConn([[{ slug: "acme-prod" }]]);
+    await reverseTenantSlug(conn, UUID);
+    // Verifies the SQL string doesn't contain the UUID literal — the
+    // parameterized binding keeps the query safe against injection.
+    expect(queries[0]!.sql).not.toContain(UUID);
+    expect(queries[0]!.params).toEqual([UUID]);
   });
 });
