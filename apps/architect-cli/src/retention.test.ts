@@ -64,6 +64,7 @@ import {
   formatRetentionDiffGhSummary,
   buildNwayCsvRows,
   formatRetentionDiffNwayGhSummary,
+  formatRetentionPruneGhSummary,
   formatRetentionDiffVsPlatformGhSummary,
   formatTenantDiff,
   formatTenantNwayDiff,
@@ -17566,5 +17567,251 @@ describe("buildNwayCsvRows wide-format (M4.15.o)", () => {
     // Even though distinctValues are in arbitrary order, output
     // columns match labels[] ordering: A=30, B=60, C=90.
     expect(rows[0]).toEqual(["retentionDays", 30, 60, 90]);
+  });
+});
+
+// M4.15.af — `retention prune --format gh-summary` Markdown rendering
+// for CI step output. Mirrors the M4.15.x gateway prune-idempotency
+// gh-summary pattern: dry-run + actual-prune paths share shape but
+// differ on title suffix + verdict. Verdict semantic identical to
+// gateway prune (success on N > 0 and Nothing-to-prune on N == 0;
+// dry-run is informational).
+describe("runRetention prune --format gh-summary (M4.15.af)", () => {
+  it("--dry-run --format gh-summary emits dry-run title + Would prune labels + informational footer", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(
+      parsed("retention", "prune", "--dry-run", "--format", "gh-summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetention({
+          previewResults: [
+            {
+              tableName: "workflow_traces",
+              status: "previewed",
+              retentionDays: 90,
+              wouldDeleteCount: 1234,
+              cutoffMs: Date.UTC(2026, 2, 1),
+            },
+          ],
+        }),
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Retention prune (dry-run)");
+    expect(output).toContain("**As of:** `");
+    expect(output).toContain("**Entries:** 1");
+    expect(output).toContain("**Would prune:** 1");
+    expect(output).toContain("**Skipped:** 0");
+    expect(output).toContain("**Rows would be deleted:** 1,234");
+    expect(output).toContain("| Table | Tenant | Status | Retention | Would delete | Cutoff |");
+    expect(output).toContain("`workflow_traces`");
+    expect(output).toContain("_(platform)_");
+    expect(output).toContain("90d");
+    expect(output).toContain("1,234");
+    expect(output).toContain("_Dry-run: no rows deleted.");
+    // No verdict emoji on dry-run.
+    expect(output).not.toContain(":white_check_mark:");
+    expect(output).not.toContain(":x:");
+  });
+
+  it("--format gh-summary (actual prune) emits success verdict with total-row count", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune", "--format", "gh-summary"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        pruneResults: [
+          {
+            tableName: "workflow_traces",
+            status: "pruned",
+            retentionDays: 90,
+            deletedCount: 500,
+            cutoffMs: Date.UTC(2026, 2, 1),
+          },
+          {
+            tableName: "llm_call_traces",
+            status: "pruned",
+            retentionDays: 30,
+            deletedCount: 200,
+            cutoffMs: Date.UTC(2026, 4, 1),
+          },
+        ],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Retention prune");
+    expect(output).not.toContain("(dry-run)");
+    expect(output).toContain("**Pruned:** 2");
+    expect(output).toContain("**Rows deleted:** 700");
+    expect(output).toContain("| Table | Tenant | Status | Retention | Deleted | Cutoff |");
+    expect(output).toContain(
+      ":white_check_mark: **Prune succeeded** — 700 row(s) deleted across 2 entries.",
+    );
+  });
+
+  it("--format gh-summary with empty results emits 'No retention policies configured'", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune", "--format", "gh-summary"), {
+      ...ctx,
+      retentionOverride: fakeRetention({ pruneResults: [] }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Retention prune");
+    expect(output).toContain("_No retention policies configured._");
+    expect(output).not.toContain("| Table |");
+  });
+
+  it("--format gh-summary with all-skipped results emits 'Nothing to prune' verdict", async () => {
+    const { ctx, out } = buffers();
+    const code = await runRetention(parsed("retention", "prune", "--format", "gh-summary"), {
+      ...ctx,
+      retentionOverride: fakeRetention({
+        pruneResults: [
+          {
+            tableName: "workflow_traces",
+            status: "skipped_disabled",
+            retentionDays: 90,
+            deletedCount: 0,
+            cutoffMs: null,
+          },
+          {
+            tableName: "llm_call_traces",
+            tenantId: "00000000-0000-4000-8000-00000000000a",
+            status: "skipped_opt_out",
+            retentionDays: 30,
+            deletedCount: 0,
+            cutoffMs: null,
+            optOutReason: "compliance-hold",
+            optOutUntil: "2026-12-31T23:59:59.000Z",
+          },
+        ],
+      }),
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("**Pruned:** 0");
+    expect(output).toContain("**Skipped:** 2 (1 skipped_disabled, 1 skipped_opt_out)");
+    expect(output).toContain(":white_check_mark: **Nothing to prune** — all 2 entries skipped.");
+    expect(output).toContain("_(skipped)_");
+  });
+});
+
+describe("formatRetentionPruneGhSummary (M4.15.af)", () => {
+  const asOf = new Date("2026-05-26T12:00:00.000Z");
+
+  it("dry-run + 1 entry renders the full shape", () => {
+    const md = formatRetentionPruneGhSummary({
+      dryRun: true,
+      asOf,
+      results: [
+        {
+          tableName: "workflow_traces",
+          tenantId: "00000000-0000-4000-8000-00000000000a",
+          status: "previewed",
+          retentionDays: 90,
+          wouldDeleteCount: 1000,
+          cutoffMs: Date.UTC(2026, 2, 1),
+        },
+      ],
+    });
+    expect(md).toContain("## Retention prune (dry-run)");
+    expect(md).toContain("`00000000-0000-4000-8000-00000000000a`");
+    expect(md).toContain("`previewed`");
+    expect(md).toContain("90d");
+    expect(md).toContain("1,000");
+  });
+
+  it("actual prune with mixed pruned + skipped renders both rows + verdict", () => {
+    const md = formatRetentionPruneGhSummary({
+      dryRun: false,
+      asOf,
+      results: [
+        {
+          tableName: "workflow_traces",
+          status: "pruned",
+          retentionDays: 90,
+          deletedCount: 1000,
+          cutoffMs: Date.UTC(2026, 2, 1),
+        },
+        {
+          tableName: "llm_call_traces",
+          status: "skipped_disabled",
+          retentionDays: 30,
+          deletedCount: 0,
+          cutoffMs: null,
+        },
+      ],
+    });
+    expect(md).toContain("**Pruned:** 1");
+    expect(md).toContain("**Skipped:** 1 (1 skipped_disabled)");
+    expect(md).toContain("`pruned`");
+    expect(md).toContain("`skipped_disabled` _(skipped)_");
+    expect(md).toContain(
+      ":white_check_mark: **Prune succeeded** — 1,000 row(s) deleted across 1 entries.",
+    );
+    // Skipped row has em-dash count + em-dash cutoff.
+    expect(md).toMatch(/\| `llm_call_traces` \|.*\| — \| —/);
+  });
+
+  it("renders cutoff as ISO timestamp when set + em-dash when null", () => {
+    const md = formatRetentionPruneGhSummary({
+      dryRun: true,
+      asOf,
+      results: [
+        {
+          tableName: "t1",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 5,
+          cutoffMs: Date.UTC(2026, 3, 15),
+        },
+        {
+          tableName: "t2",
+          status: "skipped_opt_out_expired",
+          retentionDays: 30,
+          wouldDeleteCount: 0,
+          cutoffMs: null,
+        },
+      ],
+    });
+    expect(md).toContain("`2026-04-15T00:00:00.000Z`");
+    // The em-dash appears in the count + cutoff columns of the skipped row.
+    expect(md).toMatch(/\| `t2` \|.*\| — \| —/);
+  });
+
+  it("skip-status breakdown sorted alphabetically when multiple distinct skip statuses", () => {
+    const md = formatRetentionPruneGhSummary({
+      dryRun: false,
+      asOf,
+      results: [
+        {
+          tableName: "t1",
+          status: "skipped_opt_out",
+          retentionDays: 30,
+          deletedCount: 0,
+          cutoffMs: null,
+        },
+        {
+          tableName: "t2",
+          status: "skipped_disabled",
+          retentionDays: 30,
+          deletedCount: 0,
+          cutoffMs: null,
+        },
+        {
+          tableName: "t3",
+          status: "skipped_unknown_table",
+          retentionDays: 30,
+          deletedCount: 0,
+          cutoffMs: null,
+        },
+      ],
+    });
+    // Alphabetical: skipped_disabled, skipped_opt_out, skipped_unknown_table.
+    expect(md).toContain(
+      "**Skipped:** 3 (1 skipped_disabled, 1 skipped_opt_out, 1 skipped_unknown_table)",
+    );
   });
 });

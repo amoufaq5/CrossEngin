@@ -2313,6 +2313,12 @@ async function runRetentionPrune(
       printStructured(ctx.io, command.format, { action: "prune", dryRun: true, results });
       return 0;
     }
+    if (command.format === "gh-summary") {
+      ctx.io.stdout.write(
+        formatRetentionPruneGhSummary({ dryRun: true, results, asOf: new Date() }),
+      );
+      return 0;
+    }
     ctx.io.stdout.write(formatPrunePreview(results));
     return 0;
   }
@@ -2328,8 +2334,109 @@ async function runRetentionPrune(
     printStructured(ctx.io, command.format, { action: "prune", dryRun: false, results });
     return 0;
   }
+  if (command.format === "gh-summary") {
+    ctx.io.stdout.write(
+      formatRetentionPruneGhSummary({ dryRun: false, results, asOf: new Date() }),
+    );
+    return 0;
+  }
   ctx.io.stdout.write(formatPruneRun(results));
   return 0;
+}
+
+// M4.15.af — gh-summary Markdown for `retention prune`. Mirrors the
+// M4.15.x gateway prune-idempotency gh-summary shape: dry-run and
+// actual-prune paths share the same shape but differ on title
+// suffix + verdict. Dry-run is informational (no verdict — operator
+// hasn't decided yet); actual-prune emits a success verdict (prune
+// is operationally idempotent — 0 deleted is the same outcome as N
+// deleted from the gate perspective). Successful + skipped entries
+// both appear in the per-entry table since the skip reason is
+// actionable audit info (which tenants opted out, which policies
+// are disabled).
+export type RetentionPruneGhSummaryInput =
+  | {
+      readonly dryRun: true;
+      readonly results: ReadonlyArray<RetentionPreviewResult>;
+      readonly asOf: Date;
+    }
+  | {
+      readonly dryRun: false;
+      readonly results: ReadonlyArray<RetentionRunResult>;
+      readonly asOf: Date;
+    };
+
+export function formatRetentionPruneGhSummary(input: RetentionPruneGhSummaryInput): string {
+  const lines: string[] = [];
+  const titleSuffix = input.dryRun ? " (dry-run)" : "";
+  lines.push(`## Retention prune${titleSuffix}`);
+  lines.push("");
+  lines.push(`**As of:** \`${input.asOf.toISOString()}\``);
+  lines.push("");
+  if (input.results.length === 0) {
+    lines.push(`_No retention policies configured${input.dryRun ? " (dry-run)" : ""}._`);
+    return lines.join("\n") + "\n";
+  }
+  // Summary line: pruned/would-prune + skipped + total-row counts.
+  // Skip reasons aggregate into a parenthetical breakdown when > 0.
+  const isCountedStatus = (s: string): boolean => s === "pruned" || s === "previewed";
+  const countLabel = input.dryRun ? "Would prune" : "Pruned";
+  const rowLabel = input.dryRun ? "Rows would be deleted" : "Rows deleted";
+  let countedEntries = 0;
+  let totalRows = 0;
+  const skippedByStatus: Record<string, number> = {};
+  for (const r of input.results) {
+    if (isCountedStatus(r.status)) {
+      countedEntries += 1;
+      totalRows += input.dryRun
+        ? (r as RetentionPreviewResult).wouldDeleteCount
+        : (r as RetentionRunResult).deletedCount;
+    } else {
+      skippedByStatus[r.status] = (skippedByStatus[r.status] ?? 0) + 1;
+    }
+  }
+  const totalSkipped = Object.values(skippedByStatus).reduce((a, b) => a + b, 0);
+  const skippedBreakdown =
+    totalSkipped === 0
+      ? ""
+      : ` (${Object.entries(skippedByStatus)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([s, n]) => `${n} ${s}`)
+          .join(", ")})`;
+  lines.push(
+    `**Entries:** ${input.results.length} | **${countLabel}:** ${countedEntries} | **Skipped:** ${totalSkipped}${skippedBreakdown} | **${rowLabel}:** ${totalRows.toLocaleString("en-US")}`,
+  );
+  lines.push("");
+  const countColLabel = input.dryRun ? "Would delete" : "Deleted";
+  lines.push(`| Table | Tenant | Status | Retention | ${countColLabel} | Cutoff |`);
+  lines.push(`|-------|--------|--------|----------:|------------:|--------|`);
+  for (const r of input.results) {
+    const tenant = r.tenantId !== undefined ? `\`${r.tenantId}\`` : "_(platform)_";
+    const status = isCountedStatus(r.status) ? `\`${r.status}\`` : `\`${r.status}\` _(skipped)_`;
+    const count = isCountedStatus(r.status)
+      ? (input.dryRun
+          ? (r as RetentionPreviewResult).wouldDeleteCount
+          : (r as RetentionRunResult).deletedCount
+        ).toLocaleString("en-US")
+      : "—";
+    const cutoff = r.cutoffMs === null ? "—" : `\`${new Date(r.cutoffMs).toISOString()}\``;
+    lines.push(
+      `| \`${r.tableName}\` | ${tenant} | ${status} | ${r.retentionDays}d | ${count} | ${cutoff} |`,
+    );
+  }
+  lines.push("");
+  if (input.dryRun) {
+    lines.push(`_Dry-run: no rows deleted. Re-run without \`--dry-run\` to prune._`);
+  } else if (countedEntries === 0) {
+    lines.push(
+      `:white_check_mark: **Nothing to prune** — all ${input.results.length} entries skipped.`,
+    );
+  } else {
+    lines.push(
+      `:white_check_mark: **Prune succeeded** — ${totalRows.toLocaleString("en-US")} row(s) deleted across ${countedEntries} entries.`,
+    );
+  }
+  return lines.join("\n") + "\n";
 }
 
 export function formatPruneRun(results: ReadonlyArray<RetentionRunResult>): string {
