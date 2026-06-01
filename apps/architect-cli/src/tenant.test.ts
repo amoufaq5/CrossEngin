@@ -6121,6 +6121,148 @@ describe("tenant housekeeping gh-summary slug round-trip (M4.15.ai)", () => {
   });
 });
 
+// M4.15.aj — surface tenantSlug in the tenant housekeeping JSON envelope.
+// After M4.15.ai shipped slug round-trip in gh-summary headers, the JSON
+// envelope still echoed back ONLY the resolved UUID — programmatic
+// consumers parsing JSON for audit trails had to re-resolve slugs at
+// their layer. This milestone closes that gap with conditional-emit
+// pattern matching tenantId precedent (omitted on UUID input for
+// backward compatibility). Closes ADR-0322 future Q3.
+describe("tenant housekeeping JSON envelope slug round-trip (M4.15.aj)", () => {
+  it("--tenant <slug> --format json emits tenantSlug field alongside tenantId", async () => {
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", "acme-prod", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantId: string;
+      tenantSlug?: string;
+    };
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect(env.tenantSlug).toBe("acme-prod");
+  });
+
+  it("--tenant <uuid> --format json omits tenantSlug field (backward compat with M4.15.aa)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.tenantId).toBe(RESOLVED_UUID);
+    expect("tenantSlug" in env).toBe(false);
+  });
+
+  it("--all-tenants --format json omits tenantSlug (no slug resolution happened)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--all-tenants", "--format", "json"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.allTenants).toBe(true);
+    expect("tenantSlug" in env).toBe(false);
+    expect("tenantId" in env).toBe(false);
+  });
+
+  it("no --tenant flag --format json omits both tenantId and tenantSlug", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(parsed("tenant", "housekeeping", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect("tenantSlug" in env).toBe(false);
+    expect("tenantId" in env).toBe(false);
+  });
+
+  it("--watch + --tenant <slug> --format json streams NDJSON with tenantSlug per tick", async () => {
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    let tickCount = 0;
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+      watchOverride: {
+        maxIterations: 2,
+        setTimeoutFn: (fn: () => void) => {
+          tickCount += 1;
+          fn();
+          return tickCount as unknown as ReturnType<typeof setTimeout>;
+        },
+      },
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        "acme-prod",
+        "--format",
+        "json",
+        "--watch",
+        "--watch-interval",
+        "1",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    // Output is NDJSON-of-envelopes — one line per tick. Both lines
+    // should carry tenantSlug = "acme-prod".
+    const lines = out()
+      .split("\n")
+      .filter((l) => l.length > 0);
+    expect(lines.length).toBe(2);
+    for (const line of lines) {
+      const env = JSON.parse(line) as { tenantId: string; tenantSlug: string };
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect(env.tenantSlug).toBe("acme-prod");
+    }
+  });
+});
+
 // M4.15.ae — coverage maintenance pass on tenant.ts. After M4.15.aa
 // shipped tenant-housekeeping gh-summary, tenant.ts sat at 89.69%
 // statements. Targets the cheap PG-env-missing exits + flag-

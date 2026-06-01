@@ -265,6 +265,14 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
       tenantId = resolved.tenantId;
     }
   }
+  // M4.15.aj — operator's raw --tenant input as tenantSlug when it was a
+  // slug (differs from resolved UUID). Threaded into BOTH JSON envelopes
+  // (watch tick + single tick) and the gh-summary header so programmatic
+  // consumers parsing JSON for audit-trail purposes don't need to re-
+  // resolve slugs at their layer. UUID input → undefined → field omitted
+  // from envelope (backward-compatible with M4.15.aa shape for UUID
+  // callers). Closes ADR-0322 future Q3.
+  const tenantSlug = tenantFlag !== null && tenantFlag !== tenantId ? tenantFlag : undefined;
 
   // M4.14.d — gather closure shared by single-tick AND --watch loop. Each
   // tick fetches BOTH dashboards concurrently (Promise.all interleaves on
@@ -320,6 +328,7 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
           action: "tenant.housekeeping",
           asOf: report.gateway.asOf,
           ...(tenantId !== undefined ? { tenantId } : {}),
+          ...(tenantSlug !== undefined ? { tenantSlug } : {}),
           ...(allTenants === true ? { allTenants: true as const } : {}),
           gateway: report.gateway,
           retention: report.retention,
@@ -404,6 +413,7 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
         action: "tenant.housekeeping",
         asOf: report.gateway.asOf,
         ...(tenantId !== undefined ? { tenantId } : {}),
+        ...(tenantSlug !== undefined ? { tenantSlug } : {}),
         ...(allTenants === true ? { allTenants: true as const } : {}),
         gateway: report.gateway,
         retention: report.retention,
@@ -420,15 +430,15 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
       // :white_check_mark:; tripped → :x: + exit 3.
       // M4.15.ai — pass operator's original --tenant input as tenantSlug
       // when it was a slug (resolver was called) so the header surfaces
-      // `**Tenant:** \`<uuid>\` (slug: \`<slug>\`)`. UUID input → tenantFlag
-      // === tenantId → renderer treats matching values as no-round-trip.
+      // `**Tenant:** \`<uuid>\` (slug: \`<slug>\`)`. Uses the shared
+      // tenantSlug computed at the dispatcher level (M4.15.aj).
       ctx.io.stdout.write(
         formatTenantHousekeepingReportGhSummary({
           gateway: report.gateway,
           retention: report.retention,
           tripped: report.tripped,
           tenantId,
-          tenantSlug: tenantFlag !== null && tenantFlag !== tenantId ? tenantFlag : undefined,
+          tenantSlug,
           allTenants: allTenants === true,
           hadAlerts: alerts.length > 0,
         }),

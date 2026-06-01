@@ -18137,3 +18137,152 @@ describe("retention list-policies gh-summary slug round-trip (M4.15.ai)", () => 
     );
   });
 });
+
+// M4.15.aj — surface tenantSlug in the retention list-policies json/yaml
+// envelope. After M4.15.ai shipped slug round-trip in the gh-summary
+// header, json/yaml envelopes still echoed back ONLY the resolved UUID
+// in tenantFilter — programmatic consumers parsing JSON for audit
+// trails had to re-resolve slugs at their layer. This milestone closes
+// that gap with conditional-emit pattern (omitted on UUID input for
+// backward compatibility with the M4.15.ag envelope shape). Closes
+// ADR-0322 future Q3.
+describe("retention list-policies JSON envelope slug round-trip (M4.15.aj)", () => {
+  const RESOLVED_UUID_AJ = "00000000-0000-4000-8000-00000000000a";
+
+  function fakeConnWithSlug(slugMap: Record<string, string>): PgConnection {
+    return {
+      query: async <T>(sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+          const slug = String(params?.[0] ?? "");
+          const id = slugMap[slug];
+          return id !== undefined
+            ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  it("--tenant <slug> --format json emits tenantSlug field alongside tenantFilter", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AJ });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", "acme-prod", "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantFilter: string | null;
+      tenantSlug?: string;
+    };
+    expect(env.tenantFilter).toBe(RESOLVED_UUID_AJ);
+    expect(env.tenantSlug).toBe("acme-prod");
+  });
+
+  it("--tenant <uuid> --format json omits tenantSlug field (backward compat with M4.15.ag)", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({});
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", RESOLVED_UUID_AJ, "--format", "json"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.tenantFilter).toBe(RESOLVED_UUID_AJ);
+    expect("tenantSlug" in env).toBe(false);
+  });
+
+  it("no --tenant flag --format json omits tenantSlug (tenantFilter null)", async () => {
+    const { ctx, out } = buffers();
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(parsed("retention", "list-policies", "--format", "json"), {
+      ...ctx,
+      retentionOverride: fakeRetentionMock,
+    } as RetentionContext);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as Record<string, unknown>;
+    expect(env.tenantFilter).toBe(null);
+    expect("tenantSlug" in env).toBe(false);
+  });
+
+  it("--tenant <slug> --format yaml emits tenantSlug field in YAML envelope", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AJ });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", "acme-prod", "--format", "yaml"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // YAML output is text — check that tenantSlug appears as a key.
+    // formatYaml emits "key: value" pairs at top level.
+    expect(output).toContain(`tenantFilter: "${RESOLVED_UUID_AJ}"`);
+    expect(output).toContain("tenantSlug: acme-prod");
+  });
+
+  it("--tenant <slug> composes with --table filter — both surface correctly in JSON", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AJ });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed(
+        "retention",
+        "list-policies",
+        "--tenant",
+        "acme-prod",
+        "--table",
+        "workflow_traces",
+        "--format",
+        "json",
+      ),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantFilter: string | null;
+      tenantSlug?: string;
+      tableFilter: string | null;
+    };
+    expect(env.tenantFilter).toBe(RESOLVED_UUID_AJ);
+    expect(env.tenantSlug).toBe("acme-prod");
+    expect(env.tableFilter).toBe("workflow_traces");
+  });
+});

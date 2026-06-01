@@ -768,9 +768,18 @@ async function runRetentionListPolicies(
       (tableFilter === null || p.tableName === tableFilter),
   );
 
+  // M4.15.aj — operator's raw --tenant input as tenantSlug when it was
+  // a slug (differs from resolved UUID). Threaded into BOTH json/yaml
+  // envelope and gh-summary header so programmatic consumers parsing
+  // JSON for audit-trail purposes don't need to re-resolve slugs at
+  // their layer. UUID input → undefined → field omitted from envelope
+  // (backward-compatible with M4.15.ag shape for UUID callers). Closes
+  // ADR-0322 future Q3.
+  const tenantSlug = tenantRaw !== null && tenantRaw !== tenantFilter ? tenantRaw : undefined;
   if (command.format === "json" || command.format === "yaml") {
     printStructured(ctx.io, command.format, {
       tenantFilter: tenantFilter ?? null,
+      ...(tenantSlug !== undefined ? { tenantSlug } : {}),
       tableFilter: tableFilter ?? null,
       platform: filteredPlatform,
       tenantPolicies: filteredTenant,
@@ -781,13 +790,13 @@ async function runRetentionListPolicies(
     // M4.15.ai — pass operator's original --tenant input as tenantSlug
     // when it was a slug (raw value differs from resolved UUID) so the
     // **Filtered:** line surfaces `tenant=\`<uuid>\` (slug: \`<slug>\`)`.
-    // UUID input → tenantRaw === tenantFilter → no round-trip rendered.
+    // Uses the shared tenantSlug computed above (M4.15.aj).
     ctx.io.stdout.write(
       formatPoliciesListGhSummary({
         platform: filteredPlatform,
         tenantPolicies: filteredTenant,
         tenantFilter,
-        tenantSlug: tenantRaw !== null && tenantRaw !== tenantFilter ? tenantRaw : undefined,
+        tenantSlug,
         tableFilter,
       }),
     );
