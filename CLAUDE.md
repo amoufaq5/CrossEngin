@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.ac + M4.15.ab + M4.15.aa + M4.15.z + M4.15.y + M4.15.x + M4.15.w + M4.15.v + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.ad + M4.15.ac + M4.15.ab + M4.15.aa + M4.15.z + M4.15.y + M4.15.x + M4.15.w + M4.15.v + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,164 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.ad is the fourth M-maint.
+coverage milestone in the M4.15.x
+series — a follow-up to M4.15.ab
+which deferred chat-surface
+coverage gaps to a separate
+pass. After M4.15.ab landed
+commands.ts at 93.64%
+statements, the remaining 6.36%
+concentrated in chat-loop
+internal state transitions
+(lines 291-292 interactive
+approver, 348-349 ProviderBuilder
+rethrow, 407 router suffix,
+415-422 outer catch + finally
+pgConnection close). This pass
+targets tractable chat-loop
+gaps via StubProvider extensions
+(ThrowingProvider class
+overriding complete() to throw)
++ targeted flag-validation
+tests. 6 new tests under
+existing "commands.ts coverage
+maintenance (M4.15.ab)" describe
+block: --max-tool-iterations
+non-numeric → exit 2 (lines
+271-273), --allow-file-write +
+--one-shot without --auto-
+approve-writes → exit 2
+explanatory error (lines 284-
+289), provider throws mid-
+stream Error → outer catch
+with `chat: <message>` exit 1
+(lines 415-416), provider
+throws non-Error string →
+String(err) fallback (covers
+the err instanceof Error
+ternary's else branch), JSON
+envelope on success preserves
+providerKind=single +
+availableProviders via string
+matching since printJson
+pretty-prints multi-line per
+envelope making JSON.parse
+unreliable on the streaming
+output (lines 396-402),
+human-format success session-
+ended line without router
+suffix (line 410's else
+branch). Coverage delta:
+statements 93.64% → 94.19%
+(+0.55pp), branches 84.92%
+→ 85.49% (+0.57pp), functions
+100% → 100% (unchanged),
+lines 93.64% → 94.19%
+(+0.55pp). Modest delta
+reflects diminishing-returns
+reality: remaining gaps are
+hardest to close — lines 78-
+80 runInit emptyManifest
+catch unreachable without TS-
+bypass, 120-129 validate
+Manifest throw effectively
+dead code since tryValidate
+Manifest catches only
+throwable ManifestValidation
+Error, 291-292 interactive
+approver requires interactive
+lineReader hanging gracefully,
+348-349 ProviderBuilder
+rethrow buildChatCompleter
+internal, 407 router suffix
+requires both ANTHROPIC +
+OPENAI keys forcing
+buildChatCompleter to return
+providerKind=router, 419-422
+finally pgConnection close
+requires --persist + valid PG
+env where createNodePgConnection
+succeeds (currently fails
+early in test env). JSON
+streaming test uses string
+matching not JSON.parse due
+to printJson pretty-printing
+producing multi-line-per-
+envelope output (test-side
+workaround; actual chat code
+emits valid JSON). Rejected
+— inject transcriptOverride
+wrapping fake pgConnection
+(chat code only sets
+internal pgConnection when
+transcript undefined AND
+--persist set so transcript
+Override bypasses branch
+entirely), add provider
+BuilderOverride returning
+providerKind=router (would
+require new injection point
+for one line of coverage;
+surface expansion not worth
+it), mark 78-80 + 120-129
+defensive lines with c8
+ignore (force higher
+coverage but hide legitimate
+guards; accept gap honestly),
+use vi.mock to stub
+buildChatCompleter (brittle
+couples tests to internal
+API), set real PG env vars
++ --persist + handle
+connection failure
+gracefully (would exercise
+PG env validation branch
+but not reach 419-422 since
+pgConnection creation throws
+before close path fires).
+Drawbacks — 6 tests for
++0.55pp worse ROI than
+M4.15.ab pass (14 tests for
++7.18pp); still useful for
+hardening outer-catch
+paths against future
+regression; next maintenance
+pass should pivot to
+different file. Throwing
+Provider defined inline
+inside each test not as
+fixture (one-line override
+acceptable). JSON test
+uses string matching instead
+of JSON parsing.
+commands.test.ts grows 53 →
+59 tests (+6). Workspace
+test count 10,096 → 10,102
+(+6). ADR-0317 documents
+design + 5 rejected
+alternatives + 5 future Qs
+(fixture for throwing
+provider chunks if more
+chat-error tests land,
+providerInfoOverride
+injection point for line
+407 router suffix without
+real ProviderBuilder,
+document defensive nature
+of 120-129 in code comment
+so future passes know not
+to bother, pivot M-maint.
+coverage to tenant.ts
+88.93% for fifth pass
+higher ROI than continued
+commands.ts work, track
+M-maint.coverage ROI in
+ADR future Qs showing
+diminishing returns
+pattern). Fourth M-maint.
+coverage milestone.
+
 M4.15.ac is the third M-maint.
 coverage milestone in the M4.15.x
 series after M4.15.y (apply.ts

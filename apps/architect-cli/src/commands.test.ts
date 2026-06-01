@@ -857,5 +857,111 @@ describe("commands.ts coverage maintenance (M4.15.ab)", () => {
       expect(code).toBe(2);
       expect(err()).toContain("chat: invalid --max-tokens");
     });
+
+    it("returns exit 2 when --max-tool-iterations is not a positive integer (line 271-273)", async () => {
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+      const code = await runChat(parsed("chat", "--max-tool-iterations=not-a-number"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("chat: invalid --max-tool-iterations");
+    });
+
+    it("returns exit 2 when --allow-file-write + --one-shot without --auto-approve-writes (lines 284-289)", async () => {
+      const provider = new StubProvider([]);
+      const { ctx, err } = buffers({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        providerOverride: provider,
+      });
+      // --prompt sets oneShot=true; --allow-file-write requires auto-
+      // approve in one-shot mode (no interactive prompt available).
+      const code = await runChat(parsed("chat", "--prompt=hi", "--allow-file-write"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("--allow-file-write in one-shot mode requires --auto-approve-writes");
+    });
+  });
+
+  // M4.15.ad — coverage maintenance pass on commands.ts chat surface.
+  // Targets the chat-loop error-rendering paths (lines 291-292,
+  // 348-349, 407, 415-422) that ADR-0315 deferred from M4.15.ab.
+  // Uses StubProvider to inject specific chunk sequences + thrown
+  // errors mid-stream.
+  describe("runChat error-rendering paths (M4.15.ad)", () => {
+    it("exit 1 when provider.complete() throws mid-stream (lines 415-416 outer catch)", async () => {
+      class ThrowingProvider extends StubProvider {
+        constructor() {
+          super([]);
+        }
+        async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+          throw new Error("provider rate-limited");
+        }
+      }
+      const provider = new ThrowingProvider();
+      const { ctx, err } = buffers({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        providerOverride: provider,
+      });
+      const code = await runChat(parsed("chat", "--prompt=hi"), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("chat:");
+      expect(err()).toContain("provider rate-limited");
+    });
+
+    it("exit 1 when provider.complete() throws non-Error (String fallback)", async () => {
+      class ThrowingProvider extends StubProvider {
+        constructor() {
+          super([]);
+        }
+        async *complete(_req: CompletionRequest): AsyncIterable<CompletionChunk> {
+          throw "string-thrown-error" as never;
+        }
+      }
+      const provider = new ThrowingProvider();
+      const { ctx, err } = buffers({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        providerOverride: provider,
+      });
+      const code = await runChat(parsed("chat", "--prompt=hi"), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("chat: string-thrown-error");
+    });
+
+    it("JSON envelope on success preserves providerKind=single + availableProviders (lines 396-402)", async () => {
+      const provider = new StubProvider([
+        { kind: "text", text: "hi" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]);
+      const { ctx, out } = buffers({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        providerOverride: provider,
+      });
+      const code = await runChat(parsed("chat", "--prompt=hi", "--format=json"), ctx);
+      expect(code).toBe(0);
+      // JSON format streams multiple envelopes (per-chunk + final
+      // session summary) all pretty-printed via printJson — multi-
+      // line per envelope, so we string-match the key fields rather
+      // than JSON.parse the whole stream.
+      const output = out();
+      expect(output).toContain(`"providerKind": "single"`);
+      expect(output).toContain(`"availableProviders"`);
+      expect(output).toContain(`"override"`);
+    });
+
+    it("human-format success preserves session-ended line with NON-router suffix (line 410)", async () => {
+      const provider = new StubProvider([
+        { kind: "text", text: "claude says hi" },
+        { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+      ]);
+      const { ctx, out } = buffers({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        providerOverride: provider,
+      });
+      const code = await runChat(parsed("chat", "--prompt=hi"), ctx);
+      expect(code).toBe(0);
+      const output = out();
+      expect(output).toContain("Session ended after");
+      expect(output).toContain("turn(s)");
+      // providerKind defaults to "single" when providerOverride is set —
+      // no "(router over ...)" suffix appears.
+      expect(output).not.toContain("router over");
+    });
   });
 });
