@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.ab + M4.15.aa + M4.15.z + M4.15.y + M4.15.x + M4.15.w + M4.15.v + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.ac + M4.15.ab + M4.15.aa + M4.15.z + M4.15.y + M4.15.x + M4.15.w + M4.15.v + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,143 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.ac is the third M-maint.
+coverage milestone in the M4.15.x
+series after M4.15.y (apply.ts
+74.58% → 92.24%) and M4.15.ab
+(commands.ts 86.46% → 93.64%).
+Targets gateway.ts at 81.91%
+statements (the lowest non-chat
+file in architect-cli). 5 new
+tests via existing fakePgConnection
++ fakeServerFactory fixtures
+target cheap wins: prune-
+idempotency with pgConnection
+Override only (no idempotency
+StoreOverride forces line 169
+PostgresIdempotencyStore
+construction from injected
+conn), prune-idempotency PG-
+env-missing exit 1 with PG-
+required error (catch branch
+lines 163-167), runGatewayStart
+serverFactory rejection throws
+EADDRINUSE-style → printError
+"failed to listen" exit 1
+(lines 377-385), runGatewayStart
+--in-memory without runtime
+Override forces buildRuntime
+in-memory branch lines 527-552
+(constructs InMemoryRouteRegistry
++ InMemoryPrincipalResolver +
+InMemoryIdempotencyStore +
+InMemoryRateLimitChecker; uses
+fakeServerFactory + waitFor
+Shutdown returning immediately),
+runGatewayStart --in-memory
+--format=json emits "kind":
+"started" JSON envelope (lines
+424-431 non-human format
+branch). Coverage delta:
+statements 81.91% → 89.50%
+(+7.59pp), branches 79.10% →
+81.29% (+2.19pp), functions
+87.50% → 87.50% unchanged (2
+uncovered functions
+beforeHandle line 581 +
+waitForShutdownSignal line
+586 require real HTTP request
+handling + OS signal handling
+respectively neither testable
+without substantial fixture
+infrastructure), lines 81.91%
+→ 89.50% (+7.59pp). Remaining
+uncovered 10.5% = PG-mode
+buildRuntime branch lines
+568-579 (constructing Postgres
+RouteRegistry + PostgresRate
+LimitChecker + PostgresIdempotency
+Store from real PG connection;
+defer to PG-stub maintenance
+pass) + waitForShutdownSignal
+lines 586-596 (hooks SIGINT +
+SIGTERM; defer). Rejected — add
+PG-mode buildRuntime tests
+covering 568-579 (would require
+fake PgConnection satisfying
+PostgresRouteRegistry schema-
+probing queries + PostgresRate
+LimitChecker index-existence
+queries + advisory-lock
+contracts; defer to substantial
+PG-stub pass), add signal
+Registrar injection to wait
+ForShutdownSignal (refactor
+signal-handling surface for
+coverage alone; acceptable
+reached exclusively when ctx.
+waitForShutdown undefined
+always true in tests), add
+chat-surface coverage tests
+(chat.ts already at 92.64%
+lines; gateway.ts lower-
+priority), use vi.mock to
+stub InMemoryRouteRegistry
+constructors (brittle couples
+tests to internals; real
+constructions via buildRuntime
+honest), co-locate tests
+inside existing describe
+blocks (single maintenance
+block matches M4.15.y +
+M4.15.ab precedent makes
+intent clear in test output),
+mark PG-mode buildRuntime
+lines with c8 ignore (hides
+legitimate production code).
+Drawbacks — gateway.ts still
+has 10.5% uncovered (awaiting
+PG-stub infrastructure),
+serverFactory rejection test
+uses contrived EADDRINUSE
+error message (actual on
+Linux comes with errno
+codes; string matching
+loose), in-memory build
+Runtime test doesn't verify
+exact runtime components
+(only that flow exits 0 +
+prints expected startup
+message; acceptable Gateway
+Runtime internals tested in
+api-gateway-runtime package).
+gateway.test.ts grows 99 →
+104 tests (+5). Workspace
+test count 10,091 → 10,096
+(+5). ADR-0316 documents
+design + 6 rejected
+alternatives + 5 future Qs
+(PG-mode coverage pass to
+close lines 568-579 via PG-
+stub satisfying construction
+contracts, add signal
+Registrar injection to wait
+ForShutdownSignal already a
+pattern in housekeeping
+watch mode, extend M-maint.
+coverage pattern to tenant.
+ts at 88.93% for fourth
+pass, track per-milestone
+coverage delta in coverage-
+trend doc, document wait
+ForShutdownSignal contract
+in comment for future
+coverage passes). Third
+M-maint.coverage milestone
++ restores coverage hygiene
+on gateway.ts after M4.15.x
+prune-idempotency additions.
+
 M4.15.ab is a coverage maintenance
 pass on commands.ts, the second
 M-maint.coverage-style milestone

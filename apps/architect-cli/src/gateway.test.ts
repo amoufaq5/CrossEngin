@@ -3174,3 +3174,105 @@ describe("threshold-alert gh-summary helpers (M4.15.z)", () => {
     expect(lines[3]).toContain("`rate_limit_decisions`");
   });
 });
+
+// M4.15.ac — coverage maintenance pass on gateway.ts. After M4.15.x
+// shipped gh-summary on gateway prune-idempotency, gateway.ts sat at
+// 81.91% statements with notable gaps in: prune-idempotency without
+// idempotencyStoreOverride (line 169), runGatewayStart serverFactory
+// error path (lines 377-385), runGatewayStart in-memory buildRuntime
+// path without runtimeOverride (lines 527-552), and various JWKS +
+// finally branches. This pass targets the cheap wins via existing
+// fake fixtures (fakePgConnection, fakeServerFactory).
+describe("gateway.ts coverage maintenance (M4.15.ac)", () => {
+  const fixedNow = new Date("2026-05-26T12:00:00.000Z");
+
+  describe("runGateway prune-idempotency without idempotencyStoreOverride", () => {
+    it("constructs PostgresIdempotencyStore from pgConnectionOverride (line 169 branch)", async () => {
+      const { conn } = fakePgConnection(() => ({ rows: [], rowCount: 17 }));
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {
+          PGHOST: "localhost",
+          PGUSER: "postgres",
+          PGDATABASE: "test_db",
+        },
+        pgConnectionOverride: conn,
+        clockOverride: () => fixedNow,
+      };
+      const code = await runGateway(parseGatewayArgs("prune-idempotency"), ctx);
+      expect(code).toBe(0);
+      expect(outChunks.join("")).toContain("deleted 17 expired idempotency record");
+    });
+
+    it("PG env missing + no override exits 1 with PG-required error (line 163-167 catch)", async () => {
+      const { io, errChunks } = makeIo();
+      const ctx: GatewayContext = { io, env: {} };
+      const code = await runGateway(parseGatewayArgs("prune-idempotency"), ctx);
+      expect(code).toBe(1);
+      expect(errChunks.join("")).toContain("requires PG env vars");
+    });
+  });
+
+  describe("runGatewayStart error paths", () => {
+    it("serverFactory rejection prints listen-failed error + exits 1 (lines 377-385)", async () => {
+      const failingFactory: typeof import("./gateway-server.js").startGatewayServer = async () => {
+        throw new Error("EADDRINUSE: port 8080 already in use");
+      };
+      const { io, errChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        runtimeOverride: buildRealRuntime(),
+        serverFactory: failingFactory,
+      };
+      const code = await runGateway(parseGatewayArgs("start", "--in-memory"), ctx);
+      expect(code).toBe(1);
+      const err = errChunks.join("");
+      expect(err).toContain("gateway start:");
+      expect(err).toContain("failed to listen");
+      expect(err).toContain("EADDRINUSE");
+    });
+
+    it("--in-memory without runtimeOverride builds in-memory runtime (lines 527-552)", async () => {
+      const { factory, closeCalls } = fakeServerFactory();
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        // NO runtimeOverride — forces buildRuntime to run the in-memory branch.
+        serverFactory: factory,
+        waitForShutdown: () => Promise.resolve(),
+      };
+      const code = await runGateway(parseGatewayArgs("start", "--in-memory"), ctx);
+      expect(code).toBe(0);
+      const out = outChunks.join("");
+      expect(out).toContain("gateway listening on");
+      expect(out).toContain("mode: in_memory");
+      expect(closeCalls.count).toBe(1);
+    });
+
+    it("--in-memory --format=json emits envelope at shutdown (lines 424-431)", async () => {
+      const { factory } = fakeServerFactory();
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        runtimeOverride: buildRealRuntime(),
+        serverFactory: factory,
+        waitForShutdown: () => Promise.resolve(),
+      };
+      const code = await runGateway(
+        parseGatewayArgs("start", "--in-memory", "--format", "json"),
+        ctx,
+      );
+      expect(code).toBe(0);
+      const out = outChunks.join("");
+      // JSON envelope emits "kind": "started" + "kind": "stopped"
+      // on the non-human format branch (the start + stop events
+      // bracket the listening period).
+      expect(out).toContain('"kind": "started"');
+      expect(out).toContain('"mode": "in_memory"');
+    });
+  });
+});
