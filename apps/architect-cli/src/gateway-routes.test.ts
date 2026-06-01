@@ -11,6 +11,7 @@ import { parseArgs } from "./cli.js";
 import type { IoStreams } from "./format.js";
 import {
   formatPath,
+  formatRoutesGhSummary,
   formatRoutesTable,
   runGatewayRoutes,
   type GatewayRoutesContext,
@@ -1171,5 +1172,229 @@ describe("runGatewayRoutes sync-pack source_pack semantics (M4.10)", () => {
     await runGatewayRoutes(parseRoutesArgs("sync-pack", "operate-erp/core"), ctx);
     const out = outChunks.join("");
     expect(out).toMatch(/use --prune-obsolete to delete/);
+  });
+});
+
+// M4.15.u — `gateway routes list --format csv|tsv|csv-full|gh-
+// summary` extends the M4.15.x polish (csv bulk + csv-full +
+// gh-summary + --no-header + --columns + --csv-separator) to the
+// gateway routes registry surface.
+describe("runGatewayRoutes list --format csv|tsv|csv-full|gh-summary (M4.15.u)", () => {
+  it("--format csv emits 7-col header + one row per route", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([
+      fixtureRoute({ id: "rt_route0001", method: "GET" }),
+      fixtureRoute({
+        id: "rt_route0002",
+        method: "POST",
+        isDeprecated: true,
+        deprecatedSince: "2026-01-15T00:00:00Z",
+      }),
+    ]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines[0]).toBe("route_id,method,path,version,operation,scopes,deprecated");
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toBe("rt_route0001,GET,/v1/tenants,v1,tenants.create,tenants:write,no");
+    expect(lines[2]).toBe("rt_route0002,POST,/v1/tenants,v1,tenants.create,tenants:write,yes");
+  });
+
+  it("--format csv emits header-only on empty result (no human empty-state)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    const out = outChunks.join("");
+    expect(out.trim()).toBe("route_id,method,path,version,operation,scopes,deprecated");
+    expect(out).not.toContain("no routes");
+  });
+
+  it("--format tsv emits tab-separated 7-col output", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute()]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "tsv"), ctx);
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines[0]).toBe("route_id\tmethod\tpath\tversion\toperation\tscopes\tdeprecated");
+    expect(lines[1]).toContain("rt_route0001\tPOST\t/v1/tenants");
+  });
+
+  it("--format csv joins required_scopes with `;` (no comma collisions)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([
+      fixtureRoute({ requiredScopes: ["tenants:write", "tenants:admin", "audit:read"] }),
+    ]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "csv"), ctx);
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    // Scopes cell uses semicolons, not commas — so no quote-escape needed
+    // and the cell parses cleanly under default comma separator.
+    expect(lines[1]).toContain("tenants:write;tenants:admin;audit:read");
+    expect(lines[1]).not.toContain('";"');
+  });
+
+  it("--format csv-full emits 15-col header + all RouteDefinition fields", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([
+      fixtureRoute({
+        id: "rt_full0001",
+        isDeprecated: true,
+        deprecatedSince: "2026-01-15T00:00:00.000Z",
+        sunsetAt: "2026-06-15T00:00:00.000Z",
+        successorOperationId: "tenants.create.v2",
+        rateLimitPolicyId: "rlp_default01",
+        idempotencyRequired: true,
+        requestSchemaSha256: "a".repeat(64),
+        responseSchemaSha256: "b".repeat(64),
+        sourcePack: "retail-fnb",
+      }),
+    ]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines[0]).toBe(
+      "id,operation_id,method,path,api_version,is_deprecated,deprecated_since,sunset_at,successor_operation_id,required_scopes,rate_limit_policy_id,idempotency_required,request_schema_sha256,response_schema_sha256,source_pack",
+    );
+    expect(lines[1]).toContain("rt_full0001,tenants.create,POST,/v1/tenants,v1,true");
+    expect(lines[1]).toContain("2026-01-15T00:00:00.000Z");
+    expect(lines[1]).toContain("rlp_default01");
+    expect(lines[1]).toContain("a".repeat(64));
+    expect(lines[1]).toContain("b".repeat(64));
+    expect(lines[1]).toContain("retail-fnb");
+  });
+
+  it("--format csv-full preserves null cells (deprecatedSince/sunsetAt/sourcePack)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute()]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "csv-full"), ctx);
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    // null deprecated_since + sunset_at + successor_operation_id + null
+    // schemas + null source_pack → adjacent empty cells.
+    expect(lines[1]).toContain("rt_route0001,tenants.create,POST,/v1/tenants,v1,false,,,,");
+  });
+
+  it("--format csv --no-header skips header row", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute({ id: "rt_route0001" })]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("list", "--format", "csv", "--no-header"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const out = outChunks.join("");
+    expect(out).not.toContain("route_id,method");
+    expect(out.trim()).toBe("rt_route0001,POST,/v1/tenants,v1,tenants.create,tenants:write,no");
+  });
+
+  it("--format csv --columns route_id,method narrows + reorders", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute({ id: "rt_route0001" })]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("list", "--format", "csv", "--columns", "method,route_id"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines[0]).toBe("method,route_id");
+    expect(lines[1]).toBe("POST,rt_route0001");
+  });
+
+  it("--format csv --columns rejects unknown column with valid-list hint", async () => {
+    const { io, outChunks, errChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute()]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("list", "--format", "csv", "--columns", "bogus"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("gateway routes list:");
+    expect(errChunks.join("")).toContain("unknown column 'bogus'");
+    expect(errChunks.join("")).toContain("route_id");
+    expect(outChunks.join("")).toBe("");
+  });
+
+  it("--format csv --csv-separator '|' overrides comma", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute({ id: "rt_route0001" })]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("list", "--format", "csv", "--csv-separator", "|"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const lines = outChunks.join("").trim().split("\n");
+    expect(lines[0]).toBe("route_id|method|path|version|operation|scopes|deprecated");
+  });
+
+  it("--format csv --csv-separator '\"' rejected with usage error", async () => {
+    const { io, errChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute()]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(
+      parseRoutesArgs("list", "--format", "csv", "--csv-separator", '"'),
+      ctx,
+    );
+    expect(code).toBe(2);
+    expect(errChunks.join("")).toContain("--csv-separator cannot be");
+  });
+
+  it("--format gh-summary emits Markdown with route-count + deprecated summary + table", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([
+      fixtureRoute({ id: "rt_route0001" }),
+      fixtureRoute({
+        id: "rt_route0002",
+        isDeprecated: true,
+        deprecatedSince: "2026-01-15T00:00:00Z",
+        sunsetAt: "2026-06-15T00:00:00Z",
+      }),
+      fixtureRoute({ id: "rt_route0003", sourcePack: "retail-fnb" }),
+    ]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "gh-summary"), ctx);
+    expect(code).toBe(0);
+    const out = outChunks.join("");
+    expect(out).toContain("## Gateway routes");
+    expect(out).toContain(
+      "**Routes:** 3 | **Deprecated:** 1 | **Sunset scheduled:** 1 | **From packs:** 1",
+    );
+    expect(out).toContain("| Route ID | Method | Path | Version | Operation | Deprecated |");
+    expect(out).toContain(
+      "| `rt_route0001` | `POST` | `/v1/tenants` | `v1` | `tenants.create` | no |",
+    );
+    // Deprecated route shows sunset cell with warning emoji + timestamp.
+    expect(out).toContain(":warning: sunset `2026-06-15T00:00:00Z`");
+  });
+
+  it("--format gh-summary emits '_No routes registered._' on empty result", async () => {
+    const md = formatRoutesGhSummary([]);
+    expect(md).toContain("## Gateway routes");
+    expect(md).toContain("_No routes registered._");
+    expect(md).not.toContain("**Routes:**");
+  });
+
+  it("--format json preserves original envelope shape (count + routes intact)", async () => {
+    const { io, outChunks } = makeIo();
+    const { registry } = fakeRegistry([fixtureRoute({ id: "rt_route0001" })]);
+    const ctx: GatewayRoutesContext = { io, env: {}, registryOverride: registry };
+    const code = await runGatewayRoutes(parseRoutesArgs("list", "--format", "json"), ctx);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(outChunks.join("")) as {
+      count: number;
+      routes: RouteDefinition[];
+    };
+    expect(parsed.count).toBe(1);
+    expect(parsed.routes[0]?.id).toBe("rt_route0001");
   });
 });

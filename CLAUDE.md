@@ -21,7 +21,7 @@ M2.X.5.aa.z.1 + M2.X.5.aa.z.2 + M2.X.5.aa.z.3 + M2.X.5.aa.z.4 +
 M2.X.5.aa.z.5 + M2.X.5.aa.z.6 + M2.X.5.aa.z.7 + M2.X.5.aa.z.8 +
 M2.X.5.aa.z.9 + M2.X.5.aa.z.10 + M2.X.5.aa.z.11 +
 M2.X.5.aa.z.12 + M2.X.5.aa.z.13 + M2.X.5.aa.z.14 +
-M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
+M2.X.5.aa.z.15 + M2.X.5.aa.z.16 + M2.X.5.aa.z.17 + M2.X.5.aa.z.18 + M2.X.5.aa.z.19 + M2.X.5.aa.z.20 + M2.X.5.aa.z.21 + M2.X.5.aa.z.22 + M2.X.5.aa.z.23 + M2.X.5.aa.z.24 + M2.X.5.aa.z.25 + M2.X.5.aa.z.26 + M2.X.5.aa.z.27 + M2.X.5.aa.z.28 + M2.X.5.aa.z.29 + M2.X.5.aa.z.30 + M2.X.6 + M2.X.11 + M2.X.11.x + M2.X.12 + M2.X.13 + M2.X.14 + M2.X.15 + M2.X.16 + M5.10.5 + M6.6.x + M6.6.y + M6.7 + M6.7.x + M6.7.y + M6.7.z + M6.7.z.embed + M6.7.zz + M6.7.zz.dry-run + M6.7.zz.tenant + M6.7.zz.tenant.dashboard + M6.7.zz.tenant.opt-out + M6.7.zz.tenant.opt-out.reason + M6.7.zz.tenant.opt-out.expiry + M6.7.zz.tenant.opt-out.alerts + M6.7.zz.tenant.opt-out.cli + M6.7.zz.tenant.opt-out.cli.effective + M6.7.zz.tenant.opt-out.cli.mutate + M6.7.zz.tenant.opt-out.cli.list + M6.7.zz.tenant.retention-set + M6.7.zz.tenant.retention-delete + M6.7.zz.tenant.opt-out.history + M6.7.zz.tenant.opt-out.cli.restore + M6.7.zz.tenant.opt-out.history-retention + M6.7.zz.tenant.opt-out.cli.diff-history + M6.7.zz.tenant.opt-out.cli.prune + M6.7.zz.tenant.opt-out.cli.history.cursor + M6.7.zz.tenant.opt-out.cli.restore.dry-run + M6.7.zz.tenant.batch + M6.7.zz.tenant.opt-out.cli.diff + M6.7.zz.tenant.opt-out.cli.diff.vs-platform + M6.7.zz.tenant.opt-out.cli.diff.cross-table + M6.7.zz.tenant.opt-out.cli.diff.exit-on-divergence + M6.7.zz.tenant.opt-out.cli.effective-batch + M6.7.zz.tenant.opt-out.cli.diff.add-tenant + M6.7.zz.tenant.opt-out.cli.diff.threshold + M6.7.zz.tenant.opt-out.history.actor-join + M6.7.zz.tenant.opt-out.cli.history.actor-filter + M6.7.zz.tenant.opt-out.cli.history.attributes + M6.7.zz.tenant.opt-out.cli.diff.add-table + M6.7.zz.tenant.opt-out.cli.diff-timeline + M6.7.zz.tenant.opt-out.cli.diff-timeline.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-timeline.add-tenant + M6.7.zz.tenant.opt-out.cli.diff-timeline.cross-table + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.cursor + M6.7.zz.tenant.opt-out.history.before-id + M6.7.zz.tenant.opt-out.cli.diff-timeline.before-id + M6.7.zz.tenant.opt-out.cli.diff-history.kind-filter + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-actor + M6.7.zz.tenant.opt-out.cli.diff-timeline.multi-kind + M6.7.zz.tenant.opt-out.cli.history.range + M6.7.zz.tenant.opt-out.cli.diff-timeline.range + M6.7.zz.tenant.opt-out.cli.diff-history.actor-filter + M6.7.zz.tenant.opt-out.cli.diff-history.with-actor-names + M6.7.zz.tenant.opt-out.cli.diff-history.actor-not + M6.7.zz.tenant.opt-out.cli.history.actor-not + M6.7.zz.tenant.opt-out.cli.diff-timeline.actor-not + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not + M6.7.zz.tenant.opt-out.cli.history.system-only + M6.7.zz.tenant.opt-out.cli.history.actor-not.multi + M6.7.zz.tenant.opt-out.cli.history.actor-filter.multi + M6.7.zz.tenant.opt-out.cli.diff-history.system-only + M6.7.zz.tenant.opt-out.cli.diff-timeline.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.system-only + M6.7.zz.tenant.opt-out.cli.diff-history.kind.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id.multi + M6.7.zz.tenant.opt-out.cli.diff-history.actor-id-not.multi + M6.7.zz.tenant.opt-out.cli.diff-history.per-side.multi + M6.7.zz.tenant.opt-out.cli.history.kind.multi + M6.7.zz.tenant.opt-out.cli.history.kind-not.multi + M6.7.zz.tenant.opt-out.cli.diff-timeline.kind-not.multi + M6.7.zz.tenant.opt-out.cli.json-envelope.conventions + M6.7.zz.tenant.opt-out.cli.history.envelope-rename + M6.7.zz.tenant.opt-out.cli.contradiction-detection + M6.7.zz.tenant.opt-out.cli.csv-format + M6.7.zz.tenant.opt-out.cli.explain-flag + M6.7.zz.tenant.opt-out.cli.explain-flag.raw-sql + M6.7.zz.tenant.opt-out.cli.semantic-contradiction + M6.7.zz.tenant.opt-out.cli.format-tsv-ndjson-separator + M6.7.zz.tenant.opt-out.cli.summary + M6.7.zz.tenant.opt-out.cli.json-envelope.two-level-naming + M6.7.zz.tenant.opt-out.cli.summary.time-bucket + M6.7.zz.tenant.opt-out.cli.summary.cross-tab + M6.7.zz.tenant.opt-out.cli.summary.gap-fill + M6.7.zz.tenant.opt-out.cli.summary.timezone + M6.7.zz.tenant.opt-out.cli.summary.top-min-count + M6.7.zz.tenant.opt-out.cli.operator-guide + M6.7.zz.tenant.opt-out.cli.explain-analyze + M6.7.zz.tenant.opt-out.cli.format-yaml + M6.7.zz.tenant.opt-out.cli.summary.top-per-group + M6.7.zz.tenant.opt-out.cli.summary.bottom-per-group + M-maint.typecheck-test-debt + M-maint.typecheck-tests + M-maint.ci-gate + M-maint.lint-flat-config + M-maint.prettier-gate + M6.8 + M6.8.x + M6.8.x.trace + M6.8.x.trace.embed + M6.8.x.trace.embed.pricing + M6.8.y + M8 + M8.1 + M8.2 + M8.3 + M8.4 + M8.5 + M8.6 + M8.7 + M8.8 + M8.8.x + M4.11 + M4.11.x + M4.12 + M4.13 + M4.14 + M4.14.x + M4.14.w + M4.14.t + M4.14.s + M4.14.r + M4.14.u + M4.14.v + M4.14.q + M4.14.p + M4.15.u + M4.15.t + M4.15.s + M4.15.r + M4.15.q + M4.15.p + M4.15.o + M4.15.n + M4.15.m + M4.15.l + M4.15.k + M4.15.j + M4.15.i + M4.15.h + M4.15.g + M4.15.f + M4.15.e + M4.15.d + M4.15.c + M4.15.b + M4.15.a + M4.14.o + M4.14.n + M4.14.m + M4.14.l + M4.14.k + M4.14.j + M4.14.i + M4.14.h + M4.14.g + M4.14.f + M4.14.e + M4.14.d + M4.14.c + M4.14.b + M4.14.a + M-maint.coverage +
 M2.X.6.x + M2.X.7 + M2.X.8 + M2.X.9 + M2.X.10 + M3 +
 M3.5 +
 M3.6 + M3.7 + M4 + M4.5 + M4.6 + M4.7 + M4.7.5 + M4.7.6 + M4.8 +
@@ -16876,6 +16876,260 @@ across both housekeeping dashboards AND the three
 retention query actions — the slug-resolution
 pattern is fully extended across the M4.14.o-
 family.
+M4.15.u extends the M4.15.t pivot
+pattern from sessions list to the
+gateway routes registry — another
+list-style surface that previously
+only answered in json + human.
+Brings the M4.15.x output-format
+polish (csv bulk + csv-full all-
+fields + gh-summary Markdown +
+--no-header + --columns + --csv-
+separator) to gateway routes for
+API-surface auditing, deprecation-
+window triage, pre-sunset
+alerting, and per-pack route
+inventory exports. Compact csv =
+7 cols matching formatRoutesTable
+exactly (route_id, method, path,
+version, operation, scopes,
+deprecated) with path rendered
+via formatPath(r) producing
+`/v1/tenants/:tenant_id` format
+and scopes joined with `;`
+semicolon (NOT comma — keeps cell
+parseable in pandas under default
+comma separator without RFC-4180
+quote-escape overhead). csv-full
+= 15 cols all RouteDefinition
+fields (adds operation_id,
+deprecated_since, sunset_at,
+successor_operation_id, required_
+scopes, rate_limit_policy_id,
+idempotency_required, request +
+response SHA-256s, source_pack)
+— widest CSV in the CLI yet but
+acceptable for spreadsheet +
+pandas workflows. gh-summary =
+`## Gateway routes` header + 4-
+metric summary line (Routes /
+Deprecated / Sunset scheduled /
+From packs) + per-route Markdown
+table with informational sunset
+emoji `:warning: sunset
+<timestamp>` in Deprecated
+column for at-a-glance pre-
+sunset triage visibility. gh-
+summary verdict slot
+intentionally empty (no
+:white_check_mark: / :warning:
+based on deprecated counts) —
+routes list is a query surface
+not a gate; per-route sunset
+emoji is informational
+visibility not verdict;
+operators wanting a gate
+("fail CI if deprecated > N")
+should filter output and exit-
+on-count separately. Reused
+shared format-layer helpers
+from M4.15.p (formatCsv
+noHeader opt) + M4.15.q
+(applyColumnsFilter + parse
+ColumnsFlag with unknown-
+column validation showing
+full format-specific column
+list). Empty-state per format
+matches M4.15.t convention:
+csv/tsv/csv-full header-only
+(no human "no routes
+registered" text), gh-summary
+`_No routes registered._`
+italic, human preserves
+existing "no routes
+registered." message.
+Rejected — add csv/gh-summary
+to gateway routes register +
+unregister (single-action
+commands no tabular shape;
+out of scope), include path_
+segments as JSON column in
+csv-full instead of rendered
+path string (rendered
+formatPath is what operators
+want for audit exports; raw
+segments already in --format
+json), join scopes with pipe
+`|` instead of semicolon
+(pipe is common custom
+separator choice; semicolons
+keep nested-delimiter
+convention universal), add
+per-method summary to gh-
+summary "GET: 5, POST: 3,
+PUT: 2" (useful but defer;
+4-metric summary covers
+common audit needs), surface
+sunset urgency as "sunset in
+N days" relative time
+(requires knowing "today"
+from context; absolute
+timestamps easier to audit),
+group gh-summary routes by
+sourcePack as <details>
+blocks (useful for big route
+tables but adds complexity;
+defer), add verdict emoji to
+gh-summary "⚠️ N deprecated
+routes detected" (converts
+query surface into pseudo-
+gate; operators wanting gate
+should pipe filtered output
+to own exit-on-count logic).
+Drawbacks — empty-state
+behavior inconsistent
+between human "no routes
+registered." text and csv
+header-only (matches M4.15.t
+precedent; shell operators
+switching formats may be
+surprised), gh-summary
+Deprecated column has 3
+states no / :warning: yes /
+:warning: sunset <ts> rather
+than 2 (pure yes/no would be
+shorter but hides actionable
+sunset timestamp which is
+the actionable detail for
+operators triaging pre-
+sunset routes), csv-full
+15 cols widest CSV in CLI
+(acceptable; CSV parsers
+handle it), no --from-pack
+filter flag (operators pipe
+csv | grep `,retail-fnb$`;
+--from-pack <slug> could
+come later future Q). 14 new
+tests under "runGatewayRoutes
+list --format csv|tsv|csv-
+full|gh-summary (M4.15.u)" —
+--format csv emits 7-col
+header + one row per route
+(verifies all 7 column
+headers + deprecated yes/no
+rendering), --format csv
+emits header-only on empty
+result no human empty-state,
+--format tsv emits tab-
+separated 7-col output,
+--format csv joins required_
+scopes with `;` no comma
+collisions (verifies cell
+parses cleanly without RFC-
+4180 quote-escape), --format
+csv-full emits 15-col header
++ all RouteDefinition fields
+(verifies SHA-256 + sunset
++ source pack + rate-limit
+policy all present), --format
+csv-full preserves null cells
+(deprecated_since/sunset_at/
+successor_operation_id/null
+schemas/null source_pack all
+render as adjacent empty
+commas), --format csv --no-
+header skips header line,
+--format csv --columns
+method,route_id narrows +
+reorders, --format csv
+--columns rejects unknown
+column with valid-list hint
+(error contains "route_id"
+valid column listing),
+--format csv --csv-separator
+'|' overrides comma,
+--format csv --csv-separator
+'"' rejected with usage
+error, --format gh-summary
+emits Markdown with route-
+count + deprecated summary
++ table (3-route fixture
+yields "Routes: 3 |
+Deprecated: 1 | Sunset
+scheduled: 1 | From packs:
+1" header + per-route table
++ ":warning: sunset
+<timestamp>" cell for
+sunset-scheduled route),
+--format gh-summary emits
+`_No routes registered._`
+on empty (verified via
+direct formatRoutesGhSummary
+call), --format json
+preserves original envelope
+shape (count + routes
+intact backward-
+compatibility verified).
+gateway-routes.test.ts
+grows 63 → 77 tests (+14).
+Workspace test count 9,999
+→ 10,013 (+14) crossing
+the 10k milestone. Coverage
+gate passes — gateway-
+routes.ts at 88.15%
+statements / 88.61%
+branches / 86.36%
+functions / 88.15% lines
+(slight uptick across
+branches from M4.15.t
+baseline via 4 new format
+branches + emitRoutesCsv
+helper + buildRoutesCsv
+{Compact,Full}Rows +
+formatRoutesGhSummary; all
+above 80/70/80/80
+thresholds). ADR-0308
+documents design + 7
+rejected alternatives + 6
+future Qs (--from-pack
+<slug> filter for per-
+pack audits, --include-
+pack-stats subhead in
+gh-summary "From pack
+retail-fnb: 5 routes (2
+deprecated)", --sort
+path|method|version for
+custom ordering currently
+registry order, --
+deprecated-only filter
+for deprecation-audit
+workflows, `gateway
+routes show <rt_id>
+--format csv-full`
+single-row variant
+matching M4.15.j
+precedent, output pack-
+registry sync diff as
+gh-summary when register-
+pack ships a diff).
+The M4.15.x output-format
+polish has now extended
+from the original tenants/
+policies/retention/
+housekeeping diff family
+to TWO additional non-
+diff list-style surfaces
+(sessions list M4.15.t,
+gateway routes list
+M4.15.u) with the same
+composition guarantees
+(--no-header + --columns
++ --csv-separator)
+backed by shared format-
+layer helpers. The
+workspace crosses 10k
+tests for the first
+time.
 M4.15.t pivots from the tenants/
 policies/retention/housekeeping
 diff family to `sessions list` —

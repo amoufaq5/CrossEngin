@@ -8,7 +8,15 @@ import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@cr
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printError, printJson, printSuccess } from "./format.js";
+import {
+  applyColumnsFilter,
+  parseColumnsFlag,
+  printCsv,
+  printError,
+  printJson,
+  printSuccess,
+  printTsv,
+} from "./format.js";
 import { generatePackRoutes, type PackRouteRecord } from "./gateway-pack-routes.js";
 import {
   listAvailablePacks,
@@ -117,9 +125,46 @@ async function runRoutesList(
   ctx: RunContext,
   registry: PostgresRouteRegistry,
 ): Promise<number> {
+  // M4.15.u — CSV/TSV bulk export + gh-summary Markdown for the
+  // gateway routes registry. Same polish shipped to tenants list
+  // across M4.15.b/f/p/q + sessions list at M4.15.t: compact 7-col
+  // csv (matches human formatRoutesTable columns) + 15-col csv-full
+  // (all RouteDefinition fields) + gh-summary for CI step summary
+  // integration. --no-header + --columns + --csv-separator honored
+  // via shared format-layer helpers.
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(ctx.io, "gateway routes list: --csv-separator cannot be '\"' or newline");
+    return 2;
+  }
+  const noHeader = getBooleanFlag(command, "no-header");
+  const columnsFilter = parseColumnsFlag(getStringFlag(command, "columns"));
+
   const routes = await registry.listAll();
   if (command.format === "json") {
     printJson(ctx.io, { count: routes.length, routes });
+    return 0;
+  }
+  if (command.format === "csv" || command.format === "tsv") {
+    return emitRoutesCsv(ctx, routes, {
+      full: false,
+      separator: csvSeparatorFlag ?? ",",
+      tsv: command.format === "tsv",
+      noHeader,
+      columnsFilter,
+    });
+  }
+  if (command.format === "csv-full") {
+    return emitRoutesCsv(ctx, routes, {
+      full: true,
+      separator: csvSeparatorFlag ?? ",",
+      tsv: false,
+      noHeader,
+      columnsFilter,
+    });
+  }
+  if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatRoutesGhSummary(routes));
     return 0;
   }
   if (routes.length === 0) {
@@ -128,6 +173,142 @@ async function runRoutesList(
   }
   ctx.io.stdout.write(formatRoutesTable(routes));
   return 0;
+}
+
+interface RoutesCsvOpts {
+  readonly full: boolean;
+  readonly separator: string;
+  readonly tsv: boolean;
+  readonly noHeader: boolean;
+  readonly columnsFilter: ReadonlyArray<string> | null;
+}
+
+function emitRoutesCsv(
+  ctx: RunContext,
+  routes: readonly RouteDefinition[],
+  opts: RoutesCsvOpts,
+): number {
+  const { headers, rows } = opts.full
+    ? buildRoutesCsvFullRows(routes)
+    : buildRoutesCsvCompactRows(routes);
+  let outHeaders: ReadonlyArray<string> = headers;
+  let outRows: ReadonlyArray<ReadonlyArray<unknown>> = rows;
+  if (opts.columnsFilter !== null) {
+    const filtered = applyColumnsFilter(headers, rows, opts.columnsFilter);
+    if (!filtered.ok) {
+      printError(ctx.io, `gateway routes list: ${filtered.error}`);
+      return 2;
+    }
+    outHeaders = filtered.headers;
+    outRows = filtered.rows;
+  }
+  if (opts.tsv) {
+    printTsv(ctx.io, outHeaders, outRows, { noHeader: opts.noHeader });
+  } else {
+    printCsv(ctx.io, outHeaders, outRows, opts.separator, { noHeader: opts.noHeader });
+  }
+  return 0;
+}
+
+// M4.15.u — compact CSV: 7 cols matching formatRoutesTable. scopes
+// joined by `;` (CSV-safe — comma would conflict with default
+// separator unless quoted; semicolon keeps the cell parseable in
+// pandas without RFC-4180 quoting overhead).
+function buildRoutesCsvCompactRows(routes: readonly RouteDefinition[]): {
+  headers: ReadonlyArray<string>;
+  rows: ReadonlyArray<ReadonlyArray<unknown>>;
+} {
+  const headers = ["route_id", "method", "path", "version", "operation", "scopes", "deprecated"];
+  const rows = routes.map((r) => [
+    r.id,
+    r.method,
+    formatPath(r),
+    r.apiVersion,
+    r.operationId,
+    r.requiredScopes.length === 0 ? "" : r.requiredScopes.join(";"),
+    r.isDeprecated ? "yes" : "no",
+  ]);
+  return { headers, rows };
+}
+
+// M4.15.u — csv-full: all 15 RouteDefinition fields. required_scopes
+// + path use ; / / separators (no comma collisions). SHA-256
+// fingerprints + nullable timestamps emitted verbatim.
+function buildRoutesCsvFullRows(routes: readonly RouteDefinition[]): {
+  headers: ReadonlyArray<string>;
+  rows: ReadonlyArray<ReadonlyArray<unknown>>;
+} {
+  const headers = [
+    "id",
+    "operation_id",
+    "method",
+    "path",
+    "api_version",
+    "is_deprecated",
+    "deprecated_since",
+    "sunset_at",
+    "successor_operation_id",
+    "required_scopes",
+    "rate_limit_policy_id",
+    "idempotency_required",
+    "request_schema_sha256",
+    "response_schema_sha256",
+    "source_pack",
+  ];
+  const rows = routes.map((r) => [
+    r.id,
+    r.operationId,
+    r.method,
+    formatPath(r),
+    r.apiVersion,
+    r.isDeprecated,
+    r.deprecatedSince,
+    r.sunsetAt,
+    r.successorOperationId,
+    r.requiredScopes.length === 0 ? "" : r.requiredScopes.join(";"),
+    r.rateLimitPolicyId,
+    r.idempotencyRequired,
+    r.requestSchemaSha256,
+    r.responseSchemaSha256,
+    r.sourcePack,
+  ]);
+  return { headers, rows };
+}
+
+// M4.15.u — gh-summary Markdown. Header counts + deprecated count
+// + sunset-window summary + table. No verdict emoji — routes list
+// is a query surface, not a gate (deprecated/sunset surfacing is
+// informational; operators wanting a gate filter deprecated routes
+// via grep/jq and exit-on-count themselves).
+export function formatRoutesGhSummary(routes: readonly RouteDefinition[]): string {
+  const lines: string[] = [];
+  lines.push(`## Gateway routes`);
+  lines.push("");
+  if (routes.length === 0) {
+    lines.push(`_No routes registered._`);
+    return lines.join("\n") + "\n";
+  }
+  const deprecated = routes.filter((r) => r.isDeprecated).length;
+  const sunsetSoon = routes.filter((r) => r.sunsetAt !== null).length;
+  const fromPacks = routes.filter((r) => r.sourcePack !== null).length;
+  lines.push(
+    `**Routes:** ${routes.length} | **Deprecated:** ${deprecated} | **Sunset scheduled:** ${sunsetSoon} | **From packs:** ${fromPacks}`,
+  );
+  lines.push("");
+  lines.push(`| Route ID | Method | Path | Version | Operation | Deprecated |`);
+  lines.push(`|----------|--------|------|---------|-----------|------------|`);
+  for (const r of routes) {
+    const deprecatedCell = r.isDeprecated
+      ? r.sunsetAt !== null
+        ? `:warning: sunset \`${r.sunsetAt}\``
+        : `:warning: yes`
+      : "no";
+    lines.push(
+      `| \`${r.id}\` | \`${r.method}\` | \`${formatPath(r)}\` | \`${r.apiVersion}\` | \`${r.operationId}\` | ${deprecatedCell} |`,
+    );
+  }
+  lines.push("");
+  return lines.join("\n") + "\n";
 }
 
 async function runRoutesRegister(
