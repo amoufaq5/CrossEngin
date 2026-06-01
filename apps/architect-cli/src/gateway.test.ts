@@ -14,7 +14,7 @@ import { parseArgs } from "./cli.js";
 import type { IoStreams } from "./format.js";
 import { buildDefaultGatewayHandlers } from "./gateway-handlers.js";
 import type { FetchLike } from "./gateway-jwks.js";
-import { runGateway, type GatewayContext } from "./gateway.js";
+import { formatPruneIdempotencyGhSummary, runGateway, type GatewayContext } from "./gateway.js";
 import type {
   RequestLogEntry,
   RunningGatewayServer,
@@ -2648,5 +2648,202 @@ describe("runGateway housekeeping --threshold-alert compound AND/OR (M4.14.n)", 
     );
     expect(code).toBe(2);
     expect(errChunks.join("")).toContain("mixed AND/OR");
+  });
+});
+
+// M4.15.x — `gateway prune-idempotency --format gh-summary` Markdown
+// rendering for CI step output. Dry-run path is informational (no
+// verdict — operator hasn't decided yet); actual-delete emits a
+// success verdict (prune is operationally idempotent — 0 deleted is
+// the same outcome as N from the gate perspective).
+describe("runGateway prune-idempotency --format gh-summary (M4.15.x)", () => {
+  const fixedNow = new Date("2026-05-26T12:00:00.000Z");
+
+  it("--dry-run --format gh-summary emits dry-run title + Would delete + informational footer", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [{ count: "42" }], rowCount: 1 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--dry-run", "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = outChunks.join("");
+    expect(output).toContain("## Gateway: prune idempotency (dry-run)");
+    expect(output).toContain("**As of:** `2026-05-26T12:00:00.000Z`");
+    expect(output).toContain("**Would delete:** 42 record(s)");
+    expect(output).toContain("_Dry-run: no records deleted.");
+    expect(output).toContain("`--dry-run`");
+    // No verdict emoji (dry-run is informational, not a gate).
+    expect(output).not.toContain(":white_check_mark:");
+    expect(output).not.toContain(":x:");
+    // No scope line (no scope flags set).
+    expect(output).not.toContain("**Scope:**");
+  });
+
+  it("--format gh-summary (actual delete) emits success verdict + Deleted count", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [], rowCount: 7 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = outChunks.join("");
+    expect(output).toContain("## Gateway: prune idempotency");
+    expect(output).not.toContain("(dry-run)");
+    expect(output).toContain("**Deleted:** 7 record(s)");
+    expect(output).toContain(":white_check_mark: **Prune succeeded** — 7 record(s) deleted.");
+  });
+
+  it("--format gh-summary with 0 deletes emits 'Nothing to prune' success verdict", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [], rowCount: 0 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs("prune-idempotency", "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = outChunks.join("");
+    expect(output).toContain("**Deleted:** 0 record(s)");
+    expect(output).toContain(
+      ":white_check_mark: **Nothing to prune** — 0 records matched the scope.",
+    );
+    expect(output).not.toContain("Prune succeeded");
+  });
+
+  it("--format gh-summary emits Scope line when --operation-id + --method + --limit are set", async () => {
+    const { conn } = fakePgConnection(() => ({ rows: [], rowCount: 3 }));
+    const { io, outChunks } = makeIo();
+    const ctx: GatewayContext = {
+      io,
+      env: {},
+      idempotencyStoreOverride: new PostgresIdempotencyStore(conn),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runGateway(
+      parseGatewayArgs(
+        "prune-idempotency",
+        "--format",
+        "gh-summary",
+        "--operation-id",
+        "tenants.create",
+        "--method",
+        "POST",
+        "--limit",
+        "100",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = outChunks.join("");
+    expect(output).toContain("**Scope:** operationId=`tenants.create` | method=`POST` | limit=100");
+    expect(output).toContain(":white_check_mark: **Prune succeeded** — 3 record(s) deleted.");
+  });
+});
+
+// M4.15.x — direct formatPruneIdempotencyGhSummary unit tests for
+// the rendering helper independent of the PG plumbing.
+describe("formatPruneIdempotencyGhSummary (M4.15.x)", () => {
+  const asOf = new Date("2026-05-26T12:00:00.000Z");
+
+  it("dry-run path: emits title with (dry-run) suffix + Would delete label + no verdict", () => {
+    const md = formatPruneIdempotencyGhSummary({
+      dryRun: true,
+      asOf,
+      count: 100,
+      scope: {},
+    });
+    expect(md).toContain("## Gateway: prune idempotency (dry-run)");
+    expect(md).toContain("**Would delete:** 100 record(s)");
+    expect(md).toContain("_Dry-run: no records deleted.");
+    expect(md).not.toContain(":white_check_mark:");
+  });
+
+  it("actual delete with count > 0: emits Prune succeeded verdict", () => {
+    const md = formatPruneIdempotencyGhSummary({
+      dryRun: false,
+      asOf,
+      count: 50,
+      scope: {},
+    });
+    expect(md).toContain(":white_check_mark: **Prune succeeded** — 50 record(s) deleted.");
+    expect(md).not.toContain("(dry-run)");
+    expect(md).not.toContain("Would delete");
+  });
+
+  it("actual delete with count === 0: emits Nothing to prune verdict (distinct phrasing)", () => {
+    const md = formatPruneIdempotencyGhSummary({
+      dryRun: false,
+      asOf,
+      count: 0,
+      scope: {},
+    });
+    expect(md).toContain(":white_check_mark: **Nothing to prune** — 0 records matched the scope.");
+    expect(md).not.toContain("Prune succeeded");
+  });
+
+  it("scope line only emitted when at least one scope field is set", () => {
+    const empty = formatPruneIdempotencyGhSummary({
+      dryRun: true,
+      asOf,
+      count: 1,
+      scope: {},
+    });
+    expect(empty).not.toContain("**Scope:**");
+
+    const withOp = formatPruneIdempotencyGhSummary({
+      dryRun: true,
+      asOf,
+      count: 1,
+      scope: { operationId: "tenants.create" },
+    });
+    expect(withOp).toContain("**Scope:** operationId=`tenants.create`");
+    expect(withOp).not.toContain("method=");
+    expect(withOp).not.toContain("limit=");
+
+    const withMethod = formatPruneIdempotencyGhSummary({
+      dryRun: true,
+      asOf,
+      count: 1,
+      scope: { method: "POST" },
+    });
+    expect(withMethod).toContain("**Scope:** method=`POST`");
+    expect(withMethod).not.toContain("operationId=");
+
+    const withLimit = formatPruneIdempotencyGhSummary({
+      dryRun: true,
+      asOf,
+      count: 1,
+      scope: { limit: 50 },
+    });
+    expect(withLimit).toContain("**Scope:** limit=50");
+  });
+
+  it("scope line joins multiple fields with ` | ` separator in operationId/method/limit order", () => {
+    const md = formatPruneIdempotencyGhSummary({
+      dryRun: false,
+      asOf,
+      count: 5,
+      scope: { operationId: "tenants.update", method: "PATCH", limit: 200 },
+    });
+    expect(md).toContain("**Scope:** operationId=`tenants.update` | method=`PATCH` | limit=200");
   });
 });

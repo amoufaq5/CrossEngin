@@ -183,6 +183,15 @@ async function runGatewayPruneIdempotency(
           method: method ?? null,
           limit: limit ?? null,
         });
+      } else if (command.format === "gh-summary") {
+        ctx.io.stdout.write(
+          formatPruneIdempotencyGhSummary({
+            dryRun: true,
+            asOf: now,
+            count,
+            scope,
+          }),
+        );
       } else {
         printSuccess(
           ctx.io,
@@ -202,6 +211,15 @@ async function runGatewayPruneIdempotency(
         method: method ?? null,
         limit: limit ?? null,
       });
+    } else if (command.format === "gh-summary") {
+      ctx.io.stdout.write(
+        formatPruneIdempotencyGhSummary({
+          dryRun: false,
+          asOf: now,
+          count: deleted,
+          scope,
+        }),
+      );
     } else {
       printSuccess(
         ctx.io,
@@ -216,6 +234,60 @@ async function runGatewayPruneIdempotency(
     );
     return 1;
   }
+}
+
+// M4.15.x — gh-summary Markdown for `gateway prune-idempotency`.
+// Dry-run and actual-delete paths share the same shape but differ
+// on title suffix + verdict. Dry-run is informational (no verdict
+// emoji — the operator hasn't decided yet); actual-delete emits
+// a success verdict (the prune is operationally idempotent — 0
+// deleted is the same outcome as N deleted from the gate
+// perspective).
+export interface PruneIdempotencyGhSummaryInput {
+  readonly dryRun: boolean;
+  readonly asOf: Date;
+  readonly count: number;
+  readonly scope: {
+    operationId?: string;
+    method?: IdempotencyMethod;
+    limit?: number;
+  };
+}
+
+export function formatPruneIdempotencyGhSummary(input: PruneIdempotencyGhSummaryInput): string {
+  const lines: string[] = [];
+  const titleSuffix = input.dryRun ? " (dry-run)" : "";
+  lines.push(`## Gateway: prune idempotency${titleSuffix}`);
+  lines.push("");
+  lines.push(`**As of:** \`${input.asOf.toISOString()}\`  `);
+  const countLabel = input.dryRun ? "Would delete" : "Deleted";
+  lines.push(`**${countLabel}:** ${input.count} record(s)`);
+  // Scope line emitted only when at least one scope field is set
+  // (omitting it on the no-scope case keeps the header tight).
+  const scopeParts: string[] = [];
+  if (input.scope.operationId !== undefined) {
+    scopeParts.push(`operationId=\`${input.scope.operationId}\``);
+  }
+  if (input.scope.method !== undefined) {
+    scopeParts.push(`method=\`${input.scope.method}\``);
+  }
+  if (input.scope.limit !== undefined) {
+    scopeParts.push(`limit=${input.scope.limit}`);
+  }
+  if (scopeParts.length > 0) {
+    lines.push(`**Scope:** ${scopeParts.join(" | ")}`);
+  }
+  lines.push("");
+  if (input.dryRun) {
+    lines.push(`_Dry-run: no records deleted. Re-run without \`--dry-run\` to delete._`);
+  } else if (input.count === 0) {
+    // 0 deletes is still a successful gate outcome — nothing
+    // matched the scope (or scope was empty + no expired records).
+    lines.push(`:white_check_mark: **Nothing to prune** — 0 records matched the scope.`);
+  } else {
+    lines.push(`:white_check_mark: **Prune succeeded** — ${input.count} record(s) deleted.`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 function renderScopeSuffix(scope: {
