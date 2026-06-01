@@ -14,9 +14,17 @@ import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@cr
 
 import { DEFAULT_TENANT_ID } from "./chat.js";
 import type { ParsedCommand } from "./cli.js";
-import { getStringFlag } from "./cli.js";
+import { getBooleanFlag, getStringFlag } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { printError, printJson, printSuccess } from "./format.js";
+import {
+  applyColumnsFilter,
+  parseColumnsFlag,
+  printCsv,
+  printError,
+  printJson,
+  printSuccess,
+  printTsv,
+} from "./format.js";
 
 const DEFAULT_LIST_LIMIT = 20;
 
@@ -108,9 +116,45 @@ async function runSessionsList(
     printError(ctx.io, `sessions list: invalid --limit: ${limitFlag ?? ""}`);
     return 2;
   }
+  // M4.15.t — CSV/TSV bulk export + gh-summary Markdown rendering for
+  // sessions list. Adds the same polish shipped to tenants list across
+  // M4.15.b/f/p/q: compact 6-col csv (matches human-format columns) +
+  // 12-col csv-full (all ArchitectSessionRecord fields) + gh-summary
+  // for CI step summary integration. --no-header + --columns +
+  // --csv-separator honored via the shared format-layer helpers.
+  const csvSeparatorFlag = getStringFlag(command, "csv-separator");
+  if (csvSeparatorFlag !== null && (csvSeparatorFlag === '"' || /[\n\r]/.test(csvSeparatorFlag))) {
+    printError(ctx.io, "sessions list: --csv-separator cannot be '\"' or newline");
+    return 2;
+  }
+  const noHeader = getBooleanFlag(command, "no-header");
+  const columnsFilter = parseColumnsFlag(getStringFlag(command, "columns"));
+
   const records = await stores.sessions.listForTenant({ tenantId, limit });
   if (command.format === "json") {
     printJson(ctx.io, { tenantId, count: records.length, sessions: records });
+    return 0;
+  }
+  if (command.format === "csv" || command.format === "tsv") {
+    return emitSessionsCsv(ctx, records, {
+      full: false,
+      separator: csvSeparatorFlag ?? ",",
+      tsv: command.format === "tsv",
+      noHeader,
+      columnsFilter,
+    });
+  }
+  if (command.format === "csv-full") {
+    return emitSessionsCsv(ctx, records, {
+      full: true,
+      separator: csvSeparatorFlag ?? ",",
+      tsv: false,
+      noHeader,
+      columnsFilter,
+    });
+  }
+  if (command.format === "gh-summary") {
+    ctx.io.stdout.write(formatSessionsGhSummary(tenantId, records));
     return 0;
   }
   if (records.length === 0) {
@@ -119,6 +163,134 @@ async function runSessionsList(
   }
   ctx.io.stdout.write(formatSessionsTable(records) + "\n");
   return 0;
+}
+
+interface SessionsCsvOpts {
+  readonly full: boolean;
+  readonly separator: string;
+  readonly tsv: boolean;
+  readonly noHeader: boolean;
+  readonly columnsFilter: ReadonlyArray<string> | null;
+}
+
+function emitSessionsCsv(
+  ctx: RunContext,
+  records: readonly ArchitectSessionRecord[],
+  opts: SessionsCsvOpts,
+): number {
+  const { headers, rows } = opts.full
+    ? buildSessionsCsvFullRows(records)
+    : buildSessionsCsvCompactRows(records);
+  let outHeaders: ReadonlyArray<string> = headers;
+  let outRows: ReadonlyArray<ReadonlyArray<unknown>> = rows;
+  if (opts.columnsFilter !== null) {
+    const filtered = applyColumnsFilter(headers, rows, opts.columnsFilter);
+    if (!filtered.ok) {
+      printError(ctx.io, `sessions list: ${filtered.error}`);
+      return 2;
+    }
+    outHeaders = filtered.headers;
+    outRows = filtered.rows;
+  }
+  if (opts.tsv) {
+    printTsv(ctx.io, outHeaders, outRows, { noHeader: opts.noHeader });
+  } else {
+    printCsv(ctx.io, outHeaders, outRows, opts.separator, { noHeader: opts.noHeader });
+  }
+  return 0;
+}
+
+// M4.15.t — compact CSV: 6 cols matching the human-format columns.
+// status is a derived field (in_progress / ended) based on endedAt.
+// cost_usd uses .toFixed(6) for stable currency precision in
+// downstream spreadsheets.
+function buildSessionsCsvCompactRows(records: readonly ArchitectSessionRecord[]): {
+  headers: ReadonlyArray<string>;
+  rows: ReadonlyArray<ReadonlyArray<unknown>>;
+} {
+  const headers = ["session_id", "model", "started_at", "turns", "cost_usd", "status"];
+  const rows = records.map((r) => [
+    r.sessionId,
+    r.model,
+    r.startedAt,
+    r.turnCount,
+    r.costUsd.toFixed(6),
+    r.endedAt === null ? "in_progress" : "ended",
+  ]);
+  return { headers, rows };
+}
+
+// M4.15.t — csv-full: all 12 ArchitectSessionRecord fields including
+// the system prompt SHA + per-token counts. Useful for full audit
+// exports / cost-attribution joins against meta.llm_cost_ceilings.
+function buildSessionsCsvFullRows(records: readonly ArchitectSessionRecord[]): {
+  headers: ReadonlyArray<string>;
+  rows: ReadonlyArray<ReadonlyArray<unknown>>;
+} {
+  const headers = [
+    "id",
+    "tenant_id",
+    "session_id",
+    "model",
+    "system_prompt_sha256",
+    "started_at",
+    "ended_at",
+    "turn_count",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cost_usd",
+  ];
+  const rows = records.map((r) => [
+    r.id,
+    r.tenantId,
+    r.sessionId,
+    r.model,
+    r.systemPromptSha256,
+    r.startedAt,
+    r.endedAt,
+    r.turnCount,
+    r.inputTokens,
+    r.outputTokens,
+    r.cachedInputTokens,
+    r.costUsd.toFixed(6),
+  ]);
+  return { headers, rows };
+}
+
+// M4.15.t — gh-summary Markdown for sessions list. Cost summary
+// (total + sum of turns / tokens) in the header so operators
+// scanning CI step output can spot expensive cohorts at a glance.
+// No verdict emoji — sessions list is a query surface, not a gate.
+export function formatSessionsGhSummary(
+  tenantId: string,
+  records: readonly ArchitectSessionRecord[],
+): string {
+  const lines: string[] = [];
+  lines.push(`## Sessions for tenant \`${tenantId}\``);
+  lines.push("");
+  if (records.length === 0) {
+    lines.push(`_No sessions found._`);
+    return lines.join("\n") + "\n";
+  }
+  const totalCost = records.reduce((s, r) => s + r.costUsd, 0);
+  const totalTurns = records.reduce((s, r) => s + r.turnCount, 0);
+  const totalIn = records.reduce((s, r) => s + r.inputTokens, 0);
+  const totalOut = records.reduce((s, r) => s + r.outputTokens, 0);
+  lines.push(
+    `**Sessions:** ${records.length} | **Total cost:** $${totalCost.toFixed(4)} | **Total turns:** ${totalTurns} | **Input tokens:** ${totalIn.toLocaleString("en-US")} | **Output tokens:** ${totalOut.toLocaleString("en-US")}`,
+  );
+  lines.push("");
+  lines.push(`| Session | Model | Started | Turns | Cost (USD) | Status |`);
+  lines.push(`|---------|-------|---------|-------|------------|--------|`);
+  for (const r of records) {
+    const status = r.endedAt === null ? "in_progress" : "ended";
+    lines.push(
+      `| \`${r.sessionId}\` | \`${r.model}\` | \`${r.startedAt}\` | ${r.turnCount} | $${r.costUsd.toFixed(6)} | ${status} |`,
+    );
+  }
+  lines.push("");
+  return lines.join("\n") + "\n";
 }
 
 async function runSessionsShow(

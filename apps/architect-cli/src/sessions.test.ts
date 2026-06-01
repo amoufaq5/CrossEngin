@@ -11,6 +11,7 @@ import type { RunContext } from "./commands.js";
 import {
   formatSessionReplay,
   formatSessionShow,
+  formatSessionsGhSummary,
   formatSessionsTable,
   runSessions,
   type SessionsStores,
@@ -441,5 +442,269 @@ describe("formatSessionShow / formatSessionReplay (rendering)", () => {
     });
     expect(text).toContain("3 turn(s)");
     expect(text).toContain("cost=$0.002000");
+  });
+});
+
+// M4.15.t — `sessions list --format csv|tsv|csv-full|gh-summary`
+// tests. Adds the same polish shipped to tenants list across M4.15.
+// b/f/p/q/i. Composes --no-header (M4.15.p), --columns (M4.15.q),
+// --csv-separator. gh-summary surface is a query report (cost-
+// summary header + table), not a verdict gate so no warning emoji.
+describe("runSessions list --format csv|tsv|csv-full|gh-summary (M4.15.t)", () => {
+  it("--format csv emits 6-col header + one row per session", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({
+          sessions: [
+            makeSession({ sessionId: "cli-a", turnCount: 3, costUsd: 0.001 }),
+            makeSession({
+              sessionId: "cli-b",
+              endedAt: "2026-05-17T11:00:00.000Z",
+              turnCount: 5,
+              costUsd: 0.005,
+            }),
+          ],
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("session_id,model,started_at,turns,cost_usd,status");
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toBe(
+      "cli-a,claude-sonnet-4-6,2026-05-17T10:00:00.000Z,3,0.001000,in_progress",
+    );
+    expect(lines[2]).toBe("cli-b,claude-sonnet-4-6,2026-05-17T10:00:00.000Z,5,0.005000,ended");
+  });
+
+  it("--format csv preserves header on empty result (does not emit empty-state text)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv"),
+      { ...ctx, storesOverride: fakeStores({ sessions: [] }) },
+    );
+    expect(code).toBe(0);
+    // CSV format = data shape; header row only (no human-readable empty-state).
+    expect(out().trim()).toBe("session_id,model,started_at,turns,cost_usd,status");
+    expect(out()).not.toContain("no sessions");
+  });
+
+  it("--format tsv emits tab-separated 6-col output", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "tsv"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({
+          sessions: [makeSession({ sessionId: "cli-a", turnCount: 3 })],
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("session_id\tmodel\tstarted_at\tturns\tcost_usd\tstatus");
+    expect(lines[1]).toContain("cli-a\tclaude-sonnet-4-6");
+  });
+
+  it("--format csv-full emits 12-col header + all ArchitectSessionRecord fields", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv-full"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({
+          sessions: [
+            makeSession({
+              sessionId: "cli-full",
+              systemPromptSha256: "a".repeat(64),
+              inputTokens: 1234,
+              outputTokens: 567,
+              cachedInputTokens: 89,
+              costUsd: 0.012,
+              endedAt: "2026-05-17T11:00:00.000Z",
+            }),
+          ],
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe(
+      "id,tenant_id,session_id,model,system_prompt_sha256,started_at,ended_at,turn_count,input_tokens,output_tokens,cached_input_tokens,cost_usd",
+    );
+    expect(lines[1]).toContain("a".repeat(64));
+    expect(lines[1]).toContain("1234");
+    expect(lines[1]).toContain("0.012000");
+  });
+
+  it("--format csv-full preserves null endedAt + null systemPromptSha256 as empty cells", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv-full"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({
+          sessions: [makeSession()],
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    // empty system_prompt_sha256 cell + empty ended_at cell.
+    expect(lines[1]).toContain(`,${TENANT},cli-test,claude-sonnet-4-6,,2026-05-17T10:00:00.000Z,,`);
+  });
+
+  it("--format csv --no-header skips header line", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv", "--no-header"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({ sessions: [makeSession({ sessionId: "cli-a" })] }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).not.toContain("session_id,model");
+    expect(out().trim()).toBe(
+      "cli-a,claude-sonnet-4-6,2026-05-17T10:00:00.000Z,0,0.000000,in_progress",
+    );
+  });
+
+  it("--format csv --columns session_id,cost_usd narrows + reorders", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed(
+        "sessions",
+        "list",
+        "--tenant-id",
+        TENANT,
+        "--format",
+        "csv",
+        "--columns",
+        "session_id,cost_usd",
+      ),
+      {
+        ...ctx,
+        storesOverride: fakeStores({
+          sessions: [makeSession({ sessionId: "cli-a", costUsd: 0.005 })],
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("session_id,cost_usd");
+    expect(lines[1]).toBe("cli-a,0.005000");
+  });
+
+  it("--format csv --columns rejects unknown column with valid-list hint", async () => {
+    const { ctx, err } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv", "--columns", "bogus"),
+      { ...ctx, storesOverride: fakeStores({ sessions: [makeSession()] }) },
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("sessions list:");
+    expect(err()).toContain("unknown column 'bogus'");
+    expect(err()).toContain("session_id");
+  });
+
+  it("--format csv --csv-separator '|' overrides comma", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv", "--csv-separator", "|"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({ sessions: [makeSession({ sessionId: "cli-a" })] }),
+      },
+    );
+    expect(code).toBe(0);
+    const lines = out().trim().split("\n");
+    expect(lines[0]).toBe("session_id|model|started_at|turns|cost_usd|status");
+    expect(lines[1]).toBe(
+      "cli-a|claude-sonnet-4-6|2026-05-17T10:00:00.000Z|0|0.000000|in_progress",
+    );
+  });
+
+  it("--format csv --csv-separator '\"' rejected with usage error", async () => {
+    const { ctx, err } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "csv", "--csv-separator", '"'),
+      { ...ctx, storesOverride: fakeStores({ sessions: [makeSession()] }) },
+    );
+    expect(code).toBe(2);
+    expect(err()).toContain("--csv-separator cannot be");
+  });
+
+  it("--format gh-summary emits Markdown with cost-summary header + per-session table", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "gh-summary"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({
+          sessions: [
+            makeSession({
+              sessionId: "cli-a",
+              turnCount: 3,
+              inputTokens: 1000,
+              outputTokens: 500,
+              costUsd: 0.01,
+            }),
+            makeSession({
+              sessionId: "cli-b",
+              endedAt: "2026-05-17T11:00:00.000Z",
+              turnCount: 5,
+              inputTokens: 2000,
+              outputTokens: 800,
+              costUsd: 0.025,
+            }),
+          ],
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`## Sessions for tenant \`${TENANT}\``);
+    // Header summary: 2 sessions, $0.035 total, 8 turns total.
+    expect(output).toContain("**Sessions:** 2");
+    expect(output).toContain("**Total cost:** $0.0350");
+    expect(output).toContain("**Total turns:** 8");
+    expect(output).toContain("**Input tokens:** 3,000");
+    expect(output).toContain("**Output tokens:** 1,300");
+    // Per-session table.
+    expect(output).toContain("| Session | Model | Started | Turns | Cost (USD) | Status |");
+    expect(output).toContain("| `cli-a` |");
+    expect(output).toContain("in_progress");
+    expect(output).toContain("ended");
+  });
+
+  it("--format gh-summary emits '_No sessions found._' on empty result", async () => {
+    const md = formatSessionsGhSummary(TENANT, []);
+    expect(md).toContain(`## Sessions for tenant \`${TENANT}\``);
+    expect(md).toContain("_No sessions found._");
+    expect(md).not.toContain("**Sessions:**");
+  });
+
+  it("--format json preserves original envelope shape (action/count/sessions intact)", async () => {
+    const { ctx, out } = buffers();
+    const code = await runSessions(
+      parsed("sessions", "list", "--tenant-id", TENANT, "--format", "json"),
+      {
+        ...ctx,
+        storesOverride: fakeStores({ sessions: [makeSession({ sessionId: "cli-a" })] }),
+      },
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      tenantId: string;
+      count: number;
+      sessions: Array<{ sessionId: string }>;
+    };
+    expect(env.tenantId).toBe(TENANT);
+    expect(env.count).toBe(1);
+    expect(env.sessions[0]!.sessionId).toBe("cli-a");
   });
 });
