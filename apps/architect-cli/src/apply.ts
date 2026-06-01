@@ -13,6 +13,7 @@ import {
   looksLikeProductionDatabase,
   parsePgEnvConfig,
   type ApplyReport,
+  type PgConnection,
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
@@ -36,7 +37,17 @@ interface ResolvedPlan {
   readonly packSchema: string;
 }
 
-export async function runApply(command: ParsedCommand, ctx: RunContext): Promise<number> {
+// M4.15.y — Apply-specific context extension. Test-only injection
+// points to skip PG plumbing (pgConnectionOverride) or replace the
+// MigrationApplier with a stub that returns a manufactured ApplyReport
+// (applierOverride). Production uses neither; the bin entry passes a
+// plain RunContext and TS structurally widens it to ApplyContext.
+export interface ApplyContext extends RunContext {
+  readonly pgConnectionOverride?: PgConnection;
+  readonly applierOverride?: { apply(): Promise<ApplyReport> };
+}
+
+export async function runApply(command: ParsedCommand, ctx: ApplyContext): Promise<number> {
   const dryRun = getBooleanFlag(command, "dry-run");
   const confirm = getBooleanFlag(command, "confirm");
   const packSlug = getStringFlag(command, "pack");
@@ -71,27 +82,36 @@ export async function runApply(command: ParsedCommand, ctx: RunContext): Promise
   if (dryRun) {
     return emitDryRun(ctx.io, command, plan);
   }
-  let config: ReturnType<typeof parsePgEnvConfig>;
-  try {
-    config = parsePgEnvConfig(ctx.env);
-  } catch (err) {
-    printError(ctx.io, `apply: ${err instanceof Error ? err.message : String(err)}`);
-    return 2;
+  // M4.15.y — when applierOverride is set, skip PG env validation
+  // entirely (test injects an apply-result stub). pgConnectionOverride
+  // skips createNodePgConnection but still requires the applier to be
+  // constructed with the connection.
+  let conn: PgConnection | null = null;
+  if (ctx.applierOverride === undefined) {
+    let config: ReturnType<typeof parsePgEnvConfig>;
+    try {
+      config = parsePgEnvConfig(ctx.env);
+    } catch (err) {
+      printError(ctx.io, `apply: ${err instanceof Error ? err.message : String(err)}`);
+      return 2;
+    }
+    if (looksLikeProductionDatabase(config.database) && !confirm) {
+      printError(
+        ctx.io,
+        `apply: refusing to apply against production-looking database '${config.database}' without --confirm`,
+      );
+      return 2;
+    }
+    conn = ctx.pgConnectionOverride ?? createNodePgConnection(config);
   }
-  if (looksLikeProductionDatabase(config.database) && !confirm) {
-    printError(
-      ctx.io,
-      `apply: refusing to apply against production-looking database '${config.database}' without --confirm`,
-    );
-    return 2;
-  }
-  const conn = createNodePgConnection(config);
   try {
-    const applier = new MigrationApplier({
-      connection: conn,
-      schema: META_SCHEMA_NAME,
-      statements: [...plan.metaStatements, ...plan.packStatements],
-    });
+    const applier =
+      ctx.applierOverride ??
+      new MigrationApplier({
+        connection: conn!,
+        schema: META_SCHEMA_NAME,
+        statements: [...plan.metaStatements, ...plan.packStatements],
+      });
     const report = await applier.apply();
     if (command.format === "json") {
       printJson(ctx.io, { ...report, pack: plan.pack?.slug ?? null });
@@ -126,11 +146,11 @@ export async function runApply(command: ParsedCommand, ctx: RunContext): Promise
     printError(ctx.io, `apply: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   } finally {
-    await conn.close().catch(() => undefined);
+    if (conn !== null) await conn.close().catch(() => undefined);
   }
 }
 
-class PackValidationError extends Error {
+export class PackValidationError extends Error {
   readonly kind = "pack_validation_error" as const;
 
   constructor(slug: string, errors: ReadonlyArray<{ path: string; message: string }>) {

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import { parseArgs, type ParsedCommand } from "./cli.js";
-import { formatApplyDryRunGhSummary, formatApplyReportGhSummary, runApply } from "./apply.js";
+import type { ApplyReport } from "@crossengin/kernel-pg";
+
+import {
+  PackValidationError,
+  formatApplyDryRunGhSummary,
+  formatApplyReportGhSummary,
+  runApply,
+  type ApplyContext,
+} from "./apply.js";
 import type { RunContext } from "./commands.js";
 
 function buffers(env: NodeJS.ProcessEnv = {}): {
@@ -471,5 +479,272 @@ describe("formatApplyDryRunGhSummary (M4.15.w)", () => {
     expect(md).toContain("## Apply (dry-run): meta schema + pack `retail-fnb`");
     expect(md).toContain("**Pack:** `retail-fnb` (schema `public`)");
     expect(md).toContain("**Statements planned:** 80 (50 meta + 30 pack) | **Meta tables:** 12");
+  });
+});
+
+// M4.15.y — coverage maintenance pass. apply.ts at 74.58% statements
+// after M4.15.w shipped (live-apply path uncovered because tests
+// couldn't bypass createNodePgConnection). Adds ApplyContext with
+// applierOverride test-injection so the live-apply path exercises
+// end-to-end with a manufactured ApplyReport, plus direct tests for
+// the PackValidationError class which previously had zero coverage.
+function makeReport(overrides: Partial<ApplyReport> = {}): ApplyReport {
+  return {
+    totalStatements: 50,
+    executed: 50,
+    skipped: 0,
+    failed: 0,
+    durationMs: 100,
+    preconditions: { ok: true, problems: [], serverVersionNum: 140005, extensions: ["pg_uuidv7"] },
+    statements: [],
+    haltedAt: null,
+    ...overrides,
+  };
+}
+
+describe("runApply (live) with applierOverride (M4.15.y)", () => {
+  it("clean apply succeeds with human format + exit 0", async () => {
+    const { ctx, out } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: { apply: async () => makeReport() },
+    };
+    const code = await runApply(parsed("apply"), ctxWithOverride);
+    expect(code).toBe(0);
+    const output = out();
+    // formatApplyReport human output mentions counts.
+    expect(output).toContain("50");
+  });
+
+  it("clean apply with --pack appends pack-applied success message", async () => {
+    const { ctx, out } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: { apply: async () => makeReport({ totalStatements: 80, executed: 80 }) },
+    };
+    const code = await runApply(parsed("apply", "--pack=operate-erp/core"), ctxWithOverride);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("applied pack 'operate-erp/core'");
+  });
+
+  it("--format json envelope includes report fields + pack slug", async () => {
+    const { ctx, out } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: { apply: async () => makeReport({ executed: 42, skipped: 8 }) },
+    };
+    const code = await runApply(
+      parsed("apply", "--pack=operate-erp/core", "--format", "json"),
+      ctxWithOverride,
+    );
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as {
+      executed: number;
+      skipped: number;
+      pack: string | null;
+    };
+    expect(env.executed).toBe(42);
+    expect(env.skipped).toBe(8);
+    expect(env.pack).toBe("operate-erp/core");
+  });
+
+  it("--format json without --pack reports pack: null", async () => {
+    const { ctx, out } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: { apply: async () => makeReport() },
+    };
+    const code = await runApply(parsed("apply", "--format", "json"), ctxWithOverride);
+    expect(code).toBe(0);
+    const env = JSON.parse(out()) as { pack: string | null };
+    expect(env.pack).toBeNull();
+  });
+
+  it("--format gh-summary emits Markdown apply report via live path", async () => {
+    const { ctx, out } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: { apply: async () => makeReport() },
+    };
+    const code = await runApply(parsed("apply", "--format", "gh-summary"), ctxWithOverride);
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Apply: meta schema");
+    expect(output).toContain(":white_check_mark: **Apply succeeded**");
+  });
+
+  it("exit 1 when report.failed > 0 (failed-statements path)", async () => {
+    const { ctx } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: {
+        apply: async () =>
+          makeReport({
+            failed: 1,
+            executed: 25,
+            statements: [
+              {
+                statementHash: "deadbeef",
+                excerpt: "CREATE TABLE x",
+                durationMs: 5,
+                succeeded: false,
+                errorMessage: "syntax error",
+                skipped: false,
+              },
+            ],
+            haltedAt: 25,
+          }),
+      },
+    };
+    const code = await runApply(parsed("apply"), ctxWithOverride);
+    expect(code).toBe(1);
+  });
+
+  it("exit 1 when preconditions.ok is false (precondition-failure path)", async () => {
+    const { ctx } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: {
+        apply: async () =>
+          makeReport({
+            executed: 0,
+            preconditions: {
+              ok: false,
+              problems: [
+                {
+                  code: "MISSING_EXTENSION",
+                  message: "pg_uuidv7 not installed",
+                  remedy: "CREATE EXTENSION pg_uuidv7;",
+                },
+              ],
+              serverVersionNum: 140005,
+              extensions: [],
+            },
+          }),
+      },
+    };
+    const code = await runApply(parsed("apply"), ctxWithOverride);
+    expect(code).toBe(1);
+  });
+
+  it("exit 1 when applier.apply() throws (error-message printed)", async () => {
+    const { ctx, err } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: {
+        apply: async () => {
+          throw new Error("connection refused");
+        },
+      },
+    };
+    const code = await runApply(parsed("apply"), ctxWithOverride);
+    expect(code).toBe(1);
+    expect(err()).toContain("apply:");
+    expect(err()).toContain("connection refused");
+  });
+
+  it("exit 1 when applier.apply() throws non-Error (String fallback)", async () => {
+    const { ctx, err } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: {
+        apply: async () => {
+          throw "string thrown" as never;
+        },
+      },
+    };
+    const code = await runApply(parsed("apply"), ctxWithOverride);
+    expect(code).toBe(1);
+    expect(err()).toContain("apply: string thrown");
+  });
+
+  it("pgConnectionOverride path: real MigrationApplier construction + applier.apply() error → exit 1 + conn.close called", async () => {
+    // Covers the live-apply branch where applierOverride is NOT set —
+    // exercises line 105 (pgConnectionOverride ?? createNodePgConnection),
+    // lines 110-114 (new MigrationApplier construction), and the
+    // catch block when the connection's withAdvisoryLock throws. Also
+    // verifies the conn.close in finally actually fires.
+    let closeCount = 0;
+    const fakeConn = {
+      query: async () => {
+        throw new Error("query rejected");
+      },
+      transaction: async <T>(fn: (tx: typeof fakeConn) => Promise<T>) => fn(fakeConn),
+      withAdvisoryLock: async () => {
+        throw new Error("lock acquisition failed");
+      },
+      close: async () => {
+        closeCount++;
+      },
+    };
+    const { ctx, err } = buffers({
+      PGHOST: "localhost",
+      PGUSER: "postgres",
+      PGDATABASE: "crossengin_test", // non-production-looking
+    });
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      pgConnectionOverride: fakeConn as never,
+    };
+    const code = await runApply(parsed("apply"), ctxWithOverride);
+    expect(code).toBe(1);
+    expect(err()).toContain("apply:");
+    expect(err()).toContain("lock acquisition failed");
+    expect(closeCount).toBe(1);
+  });
+
+  it("--format gh-summary with precondition failure emits :x: Apply blocked verdict", async () => {
+    const { ctx, out } = buffers();
+    const ctxWithOverride: ApplyContext = {
+      ...ctx,
+      applierOverride: {
+        apply: async () =>
+          makeReport({
+            executed: 0,
+            preconditions: {
+              ok: false,
+              problems: [
+                {
+                  code: "POSTGRES_TOO_OLD",
+                  message: "PG 13 too old",
+                  remedy: null,
+                },
+              ],
+              serverVersionNum: 130001,
+              extensions: [],
+            },
+          }),
+      },
+    };
+    const code = await runApply(parsed("apply", "--format", "gh-summary"), ctxWithOverride);
+    expect(code).toBe(1);
+    expect(out()).toContain(":x: **Apply blocked**");
+  });
+});
+
+describe("PackValidationError class (M4.15.y)", () => {
+  it("stores name + kind discriminator + summarized message", () => {
+    const err = new PackValidationError("retail-fnb", [
+      { path: "entities[0].name", message: "missing required field" },
+      { path: "workflows[1].states", message: "must have at least one initial state" },
+    ]);
+    expect(err.name).toBe("PackValidationError");
+    expect(err.kind).toBe("pack_validation_error");
+    expect(err.message).toContain("pack 'retail-fnb' failed validation:");
+    expect(err.message).toContain("entities[0].name: missing required field");
+    expect(err.message).toContain("workflows[1].states: must have at least one initial state");
+    // Errors joined with `; ` separator.
+    expect(err.message).toContain("; ");
+  });
+
+  it("is an instanceof Error (catchable via err instanceof Error)", () => {
+    const err = new PackValidationError("p", []);
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("handles empty errors list gracefully (no separator artifacts)", () => {
+    const err = new PackValidationError("empty-pack", []);
+    expect(err.message).toBe("pack 'empty-pack' failed validation: ");
   });
 });
