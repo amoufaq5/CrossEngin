@@ -1701,6 +1701,18 @@ describe("runRetention housekeeping --tenant <slug> (M4.14.o)", () => {
             ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
             : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
         }
+        // M4.15.al — reverse slug lookup. Inverts slugMap (slug→uuid) to
+        // find the slug for a given UUID. Tests with empty slugMap get
+        // no slug back (preserves M4.15.aj backward-compat behavior).
+        // Positioned BEFORE the generic FROM meta. fallback so the
+        // SELECT slug query gets the slug-shaped response not stats.
+        if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+          const id = String(params?.[0] ?? "");
+          const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+          return slug !== undefined
+            ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
         // Per-table stats fallback for the housekeeping gather queries.
         if (sql.includes("FROM meta.")) {
           return {
@@ -1800,8 +1812,11 @@ describe("runRetention housekeeping --tenant <slug> (M4.14.o)", () => {
       } as RetentionContext,
     );
     expect(code).toBe(0);
-    // No SELECT against meta.tenants — the UUID short-circuited.
-    expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
+    // M4.15.al — UUID short-circuits the FORWARD slug→UUID lookup, but
+    // adds an opt-in REVERSE UUID→slug lookup for audit-trail visibility.
+    // The invariant is now "no forward lookup", not "no meta.tenants at
+    // all".
+    expect(queries.some((q) => q.includes("SELECT id FROM meta.tenants WHERE slug"))).toBe(false);
   });
 
   it("slug + --all-tenants still exits 2 (mutual exclusivity preserved across slug input)", async () => {
@@ -1819,5 +1834,96 @@ describe("runRetention housekeeping --tenant <slug> (M4.14.o)", () => {
     );
     expect(code).toBe(2);
     expect(err()).toContain("mutually exclusive");
+  });
+
+  // M4.15.al — Extend slug round-trip pattern (forward + reverse) to the
+  // retention housekeeping JSON envelope. No gh-summary surface on this
+  // dashboard yet — JSON only. Mirrors M4.15.aj + M4.15.ak from tenant
+  // housekeeping (cross-dashboard) to the per-dashboard view. Closes
+  // ADR-0323 Q4 + ADR-0324 Q3.
+  describe("slug round-trip (M4.15.al)", () => {
+    it("--tenant <slug> + --format json emits tenantSlug alongside tenantId", async () => {
+      const { ctx, out } = buffers();
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+      const code = await runRetention(
+        parsed("retention", "housekeeping", "--tenant", "acme-prod", "--format", "json"),
+        {
+          ...ctx,
+          pgConnectionOverride: conn,
+          retentionOverride: retention,
+          clockOverride: () => fixedNow,
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out()) as {
+        tenantId: string;
+        tenantSlug?: string;
+      };
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect(env.tenantSlug).toBe("acme-prod");
+    });
+
+    it("--tenant <uuid> + reverse-lookup hit surfaces tenantSlug from meta.tenants", async () => {
+      const { ctx, out } = buffers();
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+      const code = await runRetention(
+        parsed("retention", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+        {
+          ...ctx,
+          pgConnectionOverride: conn,
+          retentionOverride: retention,
+          clockOverride: () => fixedNow,
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out()) as {
+        tenantId: string;
+        tenantSlug?: string;
+      };
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect(env.tenantSlug).toBe("acme-prod");
+    });
+
+    it("--tenant <uuid> + reverse-lookup miss preserves bare-UUID shape (backward compat)", async () => {
+      const { ctx, out } = buffers();
+      // Empty slugMap → reverse lookup returns no row → tenantSlug undefined.
+      const conn = fakeConnWithSlug({});
+      const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+      const code = await runRetention(
+        parsed("retention", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+        {
+          ...ctx,
+          pgConnectionOverride: conn,
+          retentionOverride: retention,
+          clockOverride: () => fixedNow,
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out()) as Record<string, unknown>;
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect("tenantSlug" in env).toBe(false);
+    });
+
+    it("--all-tenants omits tenantSlug — no slug resolution happens in matrix mode", async () => {
+      const { ctx, out } = buffers();
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const retention = fakeRetention({ platform: [], tenant: [], preview: [] });
+      const code = await runRetention(
+        parsed("retention", "housekeeping", "--all-tenants", "--format", "json"),
+        {
+          ...ctx,
+          pgConnectionOverride: conn,
+          retentionOverride: retention,
+          clockOverride: () => fixedNow,
+        } as RetentionContext,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(out()) as Record<string, unknown>;
+      expect(env.allTenants).toBe(true);
+      expect("tenantSlug" in env).toBe(false);
+      expect("tenantId" in env).toBe(false);
+    });
   });
 });

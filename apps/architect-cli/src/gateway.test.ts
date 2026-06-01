@@ -2331,6 +2331,16 @@ describe("runGateway housekeeping --tenant <slug> (M4.14.o)", () => {
             ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
             : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
         }
+        // M4.15.al — reverse slug lookup. Inverts slugMap (slug→uuid) to
+        // find the slug for a given UUID. Tests with empty slugMap get
+        // no slug back (preserves M4.15.aj backward-compat behavior).
+        if (sql.includes("SELECT slug FROM meta.tenants WHERE id")) {
+          const id = String(params?.[0] ?? "");
+          const slug = Object.entries(slugMap).find(([, v]) => v === id)?.[0];
+          return slug !== undefined
+            ? ({ rows: [{ slug }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
         if (sql.includes("FROM meta.gateway_pipeline_executions")) {
           return {
             rows: [{ total: "50000", oldest: "2026-04-01T00:00:00.000Z" }],
@@ -2453,7 +2463,132 @@ describe("runGateway housekeeping --tenant <slug> (M4.14.o)", () => {
     };
     const code = await runGateway(parseGatewayArgs("housekeeping", "--tenant", RESOLVED_UUID), ctx);
     expect(code).toBe(0);
-    expect(queries.some((q) => q.includes("FROM meta.tenants"))).toBe(false);
+    // M4.15.al — UUID short-circuits the FORWARD slug→UUID lookup, but
+    // adds an opt-in REVERSE UUID→slug lookup for audit-trail visibility.
+    // The invariant is now "no forward lookup", not "no meta.tenants at
+    // all".
+    expect(queries.some((q) => q.includes("SELECT id FROM meta.tenants WHERE slug"))).toBe(false);
+  });
+
+  // M4.15.al — Extend slug round-trip pattern (forward + reverse, both
+  // formats) from tenant housekeeping (cross-dashboard view from
+  // M4.15.ai/aj/ak) to gateway housekeeping (operator-domain
+  // dashboard). Both gh-summary header AND JSON envelope get the
+  // round-trip; tenantSlug field threads through HousekeepingReport
+  // so `...report` spread and `formatHousekeepingReportGhSummary`
+  // both pick it up automatically. Closes ADR-0323 Q4 + ADR-0324 Q3.
+  describe("slug round-trip (M4.15.al)", () => {
+    it("--tenant <slug> + --format json emits tenantSlug alongside tenantId", async () => {
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        pgConnectionOverride: conn,
+        retentionOverride: fakeRetention(),
+        idempotencyStoreOverride: fakeIdempotencyStore(),
+        clockOverride: () => fixedNow,
+      };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--tenant", "acme-prod", "--format", "json"),
+        ctx,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(outChunks.join("")) as {
+        tenantId: string;
+        tenantSlug?: string;
+      };
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect(env.tenantSlug).toBe("acme-prod");
+    });
+
+    it("--tenant <slug> + --format gh-summary surfaces slug in **Tenant:** header", async () => {
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        pgConnectionOverride: conn,
+        retentionOverride: fakeRetention(),
+        idempotencyStoreOverride: fakeIdempotencyStore(),
+        clockOverride: () => fixedNow,
+      };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--tenant", "acme-prod", "--format", "gh-summary"),
+        ctx,
+      );
+      expect(code).toBe(0);
+      const output = outChunks.join("");
+      expect(output).toContain(`**Tenant:** \`${RESOLVED_UUID}\` (slug: \`acme-prod\`)`);
+    });
+
+    it("--tenant <uuid> + reverse-lookup hit surfaces slug round-trip in both formats", async () => {
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        pgConnectionOverride: conn,
+        retentionOverride: fakeRetention(),
+        idempotencyStoreOverride: fakeIdempotencyStore(),
+        clockOverride: () => fixedNow,
+      };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+        ctx,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(outChunks.join("")) as {
+        tenantId: string;
+        tenantSlug?: string;
+      };
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect(env.tenantSlug).toBe("acme-prod");
+    });
+
+    it("--tenant <uuid> + reverse-lookup miss preserves bare-UUID shape (backward compat)", async () => {
+      // Empty slugMap → reverse lookup returns no row → tenantSlug undefined.
+      const conn = fakeConnWithSlug({});
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        pgConnectionOverride: conn,
+        retentionOverride: fakeRetention(),
+        idempotencyStoreOverride: fakeIdempotencyStore(),
+        clockOverride: () => fixedNow,
+      };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--tenant", RESOLVED_UUID, "--format", "json"),
+        ctx,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(outChunks.join("")) as Record<string, unknown>;
+      expect(env.tenantId).toBe(RESOLVED_UUID);
+      expect("tenantSlug" in env).toBe(false);
+    });
+
+    it("--all-tenants omits tenantSlug — no slug resolution happens in matrix mode", async () => {
+      const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID });
+      const { io, outChunks } = makeIo();
+      const ctx: GatewayContext = {
+        io,
+        env: {},
+        pgConnectionOverride: conn,
+        retentionOverride: fakeRetention(),
+        idempotencyStoreOverride: fakeIdempotencyStore(),
+        clockOverride: () => fixedNow,
+      };
+      const code = await runGateway(
+        parseGatewayArgs("housekeeping", "--all-tenants", "--format", "json"),
+        ctx,
+      );
+      expect(code).toBe(0);
+      const env = JSON.parse(outChunks.join("")) as Record<string, unknown>;
+      expect(env.allTenants).toBe(true);
+      expect("tenantSlug" in env).toBe(false);
+      expect("tenantId" in env).toBe(false);
+    });
   });
 });
 

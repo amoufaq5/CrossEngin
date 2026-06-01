@@ -11,7 +11,7 @@ import {
   runHousekeepingWatchLoop,
   type WatchOverride,
 } from "./housekeeping-watch.js";
-import { resolveTenantIdentifier } from "./tenant-resolver.js";
+import { resolveTenantIdentifier, reverseTenantSlug } from "./tenant-resolver.js";
 import {
   evaluateAlertCompound,
   formatTrippedAlertsGhSummaryTable,
@@ -100,6 +100,13 @@ export interface HousekeepingReport {
   // downstream JSON consumers know which tenant the tenantPolicy fields
   // correspond to.
   readonly tenantId?: string;
+  // M4.15.al — present only under `--tenant <uuid|slug>` when a slug
+  // round-trip applies: either operator typed a slug (preserved as-is)
+  // OR operator typed a UUID and meta.tenants has a matching row
+  // (reverse lookup). Mirrors M4.15.aj + M4.15.ak pattern from tenant
+  // housekeeping (cross-dashboard) to the per-dashboard view. Closes
+  // ADR-0323 Q4 + ADR-0324 Q3.
+  readonly tenantSlug?: string;
   // M4.14.q — present only under `--all-tenants` matrix mode so JSON
   // consumers can discriminate single-tenant vs matrix shapes without
   // probing per-table fields.
@@ -115,6 +122,10 @@ export interface GatherHousekeepingInput {
   // (Option B: drill-down only; aggregates stay cross-tenant for mental-
   // model continuity, zero new substrate queries).
   readonly tenantId?: string;
+  // M4.15.al — threaded by the dispatcher when slug round-trip applies.
+  // gatherHousekeepingReport passes it through onto the report verbatim
+  // (no substrate query). Closes ADR-0323 Q4 + ADR-0324 Q3.
+  readonly tenantSlug?: string;
   // M4.14.q — when set, every table report includes a `tenantOverrides`
   // array listing every per-tenant override on that table. Mutually
   // exclusive with tenantId; aggregates stay cross-tenant.
@@ -224,6 +235,7 @@ export async function gatherHousekeepingReport(
     asOf: input.now.toISOString(),
     tables,
     ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
+    ...(input.tenantSlug !== undefined ? { tenantSlug: input.tenantSlug } : {}),
     ...(input.allTenants === true ? { allTenants: true as const } : {}),
   };
 }
@@ -325,6 +337,21 @@ export async function runGatewayHousekeeping(
     tenantId = resolved.tenantId;
   }
 
+  // M4.15.al — slug round-trip for both gh-summary header AND JSON
+  // envelope. Mirrors M4.15.aj + M4.15.ak pattern from tenant
+  // housekeeping (cross-dashboard) to the per-dashboard view. Slug
+  // input → preserve operator-typed value. UUID input → reverse-
+  // lookup canonical slug from meta.tenants. Best-effort: reverse
+  // lookup degrades silently. Closes ADR-0323 Q4 + ADR-0324 Q3.
+  let tenantSlug: string | undefined;
+  if (tenantFlag !== null && tenantId !== undefined) {
+    if (tenantFlag !== tenantId) {
+      tenantSlug = tenantFlag;
+    } else {
+      tenantSlug = await reverseTenantSlug(conn, tenantId);
+    }
+  }
+
   // Shared gather closure for both single-shot + watch modes.
   const gather = async (): Promise<HousekeepingReport> => {
     const now = ctx.clockOverride !== undefined ? ctx.clockOverride() : new Date();
@@ -334,6 +361,7 @@ export async function runGatewayHousekeeping(
       idempotencyStore,
       now,
       tenantId,
+      tenantSlug,
       allTenants,
     });
   };
@@ -450,7 +478,14 @@ export function formatHousekeepingReportGhSummary(input: HousekeepingReportGhSum
   lines.push("");
   lines.push(`**As of:** \`${report.asOf}\`  `);
   if (report.tenantId !== undefined) {
-    lines.push(`**Tenant:** \`${report.tenantId}\`  `);
+    // M4.15.al — surface tenant slug round-trip in the header when
+    // operator-typed slug differs from resolved UUID OR reverse lookup
+    // found a slug for UUID input. Closes ADR-0323 Q4 + ADR-0324 Q3.
+    if (report.tenantSlug !== undefined && report.tenantSlug !== report.tenantId) {
+      lines.push(`**Tenant:** \`${report.tenantId}\` (slug: \`${report.tenantSlug}\`)  `);
+    } else {
+      lines.push(`**Tenant:** \`${report.tenantId}\`  `);
+    }
   }
   if (report.allTenants === true) {
     lines.push(`**Scope:** all tenants  `);

@@ -15,7 +15,7 @@ import {
   runHousekeepingWatchLoop,
   type WatchOverride,
 } from "./housekeeping-watch.js";
-import { resolveTenantIdentifier } from "./tenant-resolver.js";
+import { resolveTenantIdentifier, reverseTenantSlug } from "./tenant-resolver.js";
 import {
   evaluateAlertCompound,
   parseThresholdAlertFlags,
@@ -91,6 +91,13 @@ export interface RetentionHousekeepingReport {
   // M4.14.u — echoed when `--tenant <uuid>` filter is set so JSON consumers
   // know which tenant the per-table tenantPolicy fields correspond to.
   readonly tenantId?: string;
+  // M4.15.al — present only under `--tenant <uuid|slug>` when a slug
+  // round-trip applies: either operator typed a slug (preserved as-is)
+  // OR operator typed a UUID and meta.tenants has a matching row
+  // (reverse lookup). Mirrors M4.15.aj + M4.15.ak pattern from tenant
+  // housekeeping (cross-dashboard) to the per-dashboard view. Closes
+  // ADR-0323 Q4 + ADR-0324 Q3.
+  readonly tenantSlug?: string;
   // M4.14.q — echoed when `--all-tenants` matrix mode is set so JSON
   // consumers can discriminate single-tenant vs matrix shapes without
   // probing per-table fields.
@@ -108,6 +115,10 @@ export interface GatherRetentionHousekeepingInput {
   // regardless of filter) — the filter is a drill-down on tenant-specific
   // policy state, not an aggregate scope.
   readonly tenantId?: string;
+  // M4.15.al — threaded by the dispatcher when slug round-trip applies.
+  // gatherRetentionHousekeepingReport passes it through onto the report
+  // verbatim (no substrate query). Closes ADR-0323 Q4 + ADR-0324 Q3.
+  readonly tenantSlug?: string;
   // M4.14.q — when set, the report includes a per-table tenantOverrides
   // array listing every per-tenant override on that table. Mutually
   // exclusive with tenantId; aggregate fields stay cross-tenant for the
@@ -197,6 +208,7 @@ export async function gatherRetentionHousekeepingReport(
   return {
     asOf: input.now.toISOString(),
     ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
+    ...(input.tenantSlug !== undefined ? { tenantSlug: input.tenantSlug } : {}),
     ...(input.allTenants === true ? { allTenants: true as const } : {}),
     tables,
   };
@@ -304,6 +316,22 @@ export async function runRetentionHousekeeping(
       tenantId = resolved.tenantId;
     }
 
+    // M4.15.al — slug round-trip for the JSON envelope (no gh-summary
+    // surface on retention housekeeping yet). Mirrors M4.15.aj +
+    // M4.15.ak pattern from tenant housekeeping (cross-dashboard) to
+    // the per-dashboard view. Slug input → preserve operator-typed
+    // value. UUID input → reverse-lookup canonical slug from
+    // meta.tenants. Best-effort: reverse lookup degrades silently.
+    // Closes ADR-0323 Q4 + ADR-0324 Q3.
+    let tenantSlug: string | undefined;
+    if (tenantFlag !== null && tenantId !== undefined) {
+      if (tenantFlag !== tenantId) {
+        tenantSlug = tenantFlag;
+      } else {
+        tenantSlug = await reverseTenantSlug(conn, tenantId);
+      }
+    }
+
     // Shared gather/render closures used by both single-shot and watch modes.
     // gather() reads the clock per call so each watch tick reflects current
     // time (operators expect `asOf` to move).
@@ -315,6 +343,7 @@ export async function runRetentionHousekeeping(
         retention,
         now,
         tenantId,
+        tenantSlug,
         allTenants,
       });
     };
