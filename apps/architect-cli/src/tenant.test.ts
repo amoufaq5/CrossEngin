@@ -6008,3 +6008,158 @@ describe("formatTenantHousekeepingReportGhSummary (M4.15.aa)", () => {
     expect(md).toContain("**Gateway tables:**");
   });
 });
+
+// M4.15.ae — coverage maintenance pass on tenant.ts. After M4.15.aa
+// shipped tenant-housekeeping gh-summary, tenant.ts sat at 89.69%
+// statements. Targets the cheap PG-env-missing exits + flag-
+// mutual-exclusivity checks + simple early-exit branches that the
+// production paths normally bypass via pgConnectionOverride. Fifth
+// M-maint.coverage milestone in the M4.15.x series.
+describe("tenant.ts coverage maintenance (M4.15.ae)", () => {
+  describe("PG-env-missing exits (no pgConnectionOverride)", () => {
+    it("tenant housekeeping returns exit 1 when PG env vars missing (lines 238-249)", async () => {
+      const { io, err } = makeIo();
+      // No pgConnectionOverride + no PG env → parsePgEnvConfig throws
+      // → catch branch prints error + exit 1.
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(parsed("tenant", "housekeeping"), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("tenant housekeeping:");
+      expect(err()).toContain("requires PG env vars");
+    });
+
+    it("tenant policies returns exit 1 when PG env vars missing (lines 857-868)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(
+        parsed("tenant", "policies", "00000000-0000-4000-8000-00000000000a"),
+        ctx,
+      );
+      expect(code).toBe(1);
+      expect(err()).toContain("tenant policies:");
+      expect(err()).toContain("requires PG env vars");
+    });
+
+    it("tenant policies --diff returns exit 1 when PG env vars missing (lines 954-965)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(
+        parsed(
+          "tenant",
+          "policies",
+          "00000000-0000-4000-8000-00000000000a",
+          "--diff",
+          "00000000-0000-4000-8000-00000000000b",
+        ),
+        ctx,
+      );
+      expect(code).toBe(1);
+      expect(err()).toContain("tenant policies:");
+      expect(err()).toContain("requires PG env vars");
+    });
+  });
+
+  describe("tenant housekeeping --diff + --watch mutual exclusivity (lines 175-180)", () => {
+    it("--diff + --watch rejected with explanatory error (exit 2)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(
+        parsed(
+          "tenant",
+          "housekeeping",
+          "--tenant",
+          "00000000-0000-4000-8000-00000000000a",
+          "--diff",
+          "00000000-0000-4000-8000-00000000000b",
+          "--watch",
+        ),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("tenant housekeeping:");
+      expect(err()).toContain("--diff and --watch are mutually exclusive");
+    });
+  });
+
+  describe("tenant housekeeping --tenant + --all-tenants mutual exclusivity (lines 127-132)", () => {
+    it("--tenant + --all-tenants rejected with explanatory error (exit 2)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      // --tenant and --all-tenants conflict — check fires BEFORE the
+      // --diff + --all-tenants check at lines 167-173.
+      const code = await runTenant(
+        parsed(
+          "tenant",
+          "housekeeping",
+          "--tenant",
+          "00000000-0000-4000-8000-00000000000a",
+          "--all-tenants",
+        ),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("tenant housekeeping:");
+      expect(err()).toContain("--tenant and --all-tenants are mutually exclusive");
+    });
+  });
+
+  describe("tenant policies flag mutual-exclusivity validation", () => {
+    it("--diff + --vs-tier rejected with explanatory error (lines 800-804)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      // Both define the RHS — incompatible. Check fires before PG.
+      const code = await runTenant(
+        parsed(
+          "tenant",
+          "policies",
+          "00000000-0000-4000-8000-00000000000a",
+          "--diff",
+          "00000000-0000-4000-8000-00000000000b",
+          "--vs-tier",
+          "pro",
+        ),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("tenant policies:");
+      expect(err()).toContain("--diff and --vs-tier are mutually exclusive");
+    });
+
+    it("--vs-tier + --explain rejected with explanatory error (lines 820-825)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(
+        parsed(
+          "tenant",
+          "policies",
+          "00000000-0000-4000-8000-00000000000a",
+          "--vs-tier",
+          "pro",
+          "--explain",
+        ),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("tenant policies:");
+      expect(err()).toContain("--vs-tier and --explain are mutually exclusive");
+    });
+
+    it("--add-tenant without --diff rejected with explanatory error (lines 806-811)", async () => {
+      const { io, err } = makeIo();
+      const ctx: TenantContext = { io, env: {} };
+      const code = await runTenant(
+        parsed(
+          "tenant",
+          "policies",
+          "00000000-0000-4000-8000-00000000000a",
+          "--add-tenant",
+          "00000000-0000-4000-8000-00000000000b",
+        ),
+        ctx,
+      );
+      expect(code).toBe(2);
+      expect(err()).toContain("tenant policies:");
+      expect(err()).toContain("--add-tenant requires --diff");
+    });
+  });
+});
