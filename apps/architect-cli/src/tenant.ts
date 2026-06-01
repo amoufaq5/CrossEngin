@@ -56,6 +56,7 @@ import {
 import { resolveTenantIdentifier } from "./tenant-resolver.js";
 import {
   evaluateAlertCompound,
+  formatTrippedAlertsGhSummaryTable,
   parseThresholdAlertFlags,
   renderTrippedAlert,
   type AlertableFieldSpec,
@@ -408,6 +409,25 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
         retention: report.retention,
         alerts: report.tripped,
       });
+    } else if (command.format === "gh-summary") {
+      // M4.15.aa — Cross-dashboard Markdown for CI step summary
+      // integration. Mirrors the gateway-side gh-summary from M4.15.z
+      // but renders two substrate sections (Gateway + Retention) under
+      // a single `## Tenant housekeeping` title. Reuses the shared
+      // formatTrippedAlertsGhSummaryTable helper for the alerts
+      // section. Verdict semantic matches M4.15.z: alerts not
+      // evaluated → no verdict; evaluated + none tripped →
+      // :white_check_mark:; tripped → :x: + exit 3.
+      ctx.io.stdout.write(
+        formatTenantHousekeepingReportGhSummary({
+          gateway: report.gateway,
+          retention: report.retention,
+          tripped: report.tripped,
+          tenantId,
+          allTenants: allTenants === true,
+          hadAlerts: alerts.length > 0,
+        }),
+      );
     } else {
       renderHumanReport(ctx, report.gateway, report.retention, tenantId, allTenants);
       if (report.tripped.length > 0) {
@@ -497,6 +517,85 @@ function readRetentionField(
     default:
       return null;
   }
+}
+
+// M4.15.aa — gh-summary Markdown renderer for tenant housekeeping
+// (cross-dashboard). Two substrate sections (Gateway + Retention)
+// under a single `## Tenant housekeeping` title. Reuses the
+// formatTrippedAlertsGhSummaryTable helper from threshold-alert.ts
+// for the alerts section (so this surface and gateway-housekeeping
+// emit the same alert-table shape). Verdict semantic matches
+// M4.15.z: alerts not evaluated → no verdict, evaluated + none
+// tripped → :white_check_mark:, tripped → :x: + exit 3.
+export interface TenantHousekeepingReportGhSummaryInput {
+  readonly gateway: HousekeepingReport;
+  readonly retention: RetentionHousekeepingReport;
+  readonly tripped: ReadonlyArray<TrippedAlert>;
+  readonly tenantId?: string;
+  readonly allTenants: boolean;
+  readonly hadAlerts: boolean;
+}
+
+export function formatTenantHousekeepingReportGhSummary(
+  input: TenantHousekeepingReportGhSummaryInput,
+): string {
+  const lines: string[] = [];
+  lines.push(`## Tenant housekeeping`);
+  lines.push("");
+  lines.push(`**As of:** \`${input.gateway.asOf}\`  `);
+  if (input.tenantId !== undefined) {
+    lines.push(`**Tenant:** \`${input.tenantId}\`  `);
+  }
+  if (input.allTenants) {
+    lines.push(`**Scope:** all tenants  `);
+  }
+  lines.push(
+    `**Gateway tables:** ${input.gateway.tables.length} | **Retention tables:** ${input.retention.tables.length}`,
+  );
+  lines.push("");
+  lines.push(`### Gateway substrate`);
+  lines.push("");
+  lines.push(`| Table | Total rows | Oldest | Would prune | Retention |`);
+  lines.push(`|-------|-----------:|--------|------------:|-----------|`);
+  for (const t of input.gateway.tables) {
+    const oldest = t.oldestAt === null ? "—" : `\`${t.oldestAt}\``;
+    const retention =
+      t.pruneSemantic === "expires_at"
+        ? "_TTL-managed_"
+        : t.retentionDays === null
+          ? "—"
+          : `${t.retentionDays}d`;
+    lines.push(
+      `| \`${t.tableName}\` | ${t.totalRowCount.toLocaleString("en-US")} | ${oldest} | ${t.wouldPruneCount.toLocaleString("en-US")} | ${retention} |`,
+    );
+  }
+  lines.push("");
+  lines.push(`### Retention substrate`);
+  lines.push("");
+  lines.push(`| Table | Total rows | Oldest | Would prune | Retention | Enabled |`);
+  lines.push(`|-------|-----------:|--------|------------:|-----------|---------|`);
+  for (const t of input.retention.tables) {
+    const oldest = t.oldestAt === null ? "—" : `\`${t.oldestAt}\``;
+    const retention = t.retentionDays === null ? "—" : `${t.retentionDays}d`;
+    const enabled = t.enabled === null ? "—" : t.enabled ? "yes" : "no";
+    lines.push(
+      `| \`${t.tableName}\` | ${t.totalRowCount.toLocaleString("en-US")} | ${oldest} | ${t.wouldPruneCount.toLocaleString("en-US")} | ${retention} | ${enabled} |`,
+    );
+  }
+  lines.push("");
+  if (input.tripped.length > 0) {
+    lines.push(`### Threshold alerts (${input.tripped.length})`);
+    lines.push("");
+    lines.push(formatTrippedAlertsGhSummaryTable(input.tripped).trimEnd());
+    lines.push("");
+    lines.push(
+      `:x: **${input.tripped.length} threshold alert(s) tripped** — exit 3 (CI gate failed).`,
+    );
+  } else if (input.hadAlerts) {
+    lines.push(`:white_check_mark: **All threshold alerts passed.**`);
+  }
+  // No verdict when hadAlerts === false (query surface, not a gate).
+  return lines.join("\n") + "\n";
 }
 
 function renderHumanReport(

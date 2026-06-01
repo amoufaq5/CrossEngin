@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 
 import { parseArgs } from "./cli.js";
 import type { IoStreams } from "./format.js";
-import { runTenant, type TenantContext } from "./tenant.js";
+import {
+  formatTenantHousekeepingReportGhSummary,
+  runTenant,
+  type TenantContext,
+} from "./tenant.js";
 
 function makeIo(): { io: IoStreams; out: () => string; err: () => string } {
   const outChunks: string[] = [];
@@ -5672,5 +5676,335 @@ describe("runTenant policies --diff --format gh-summary axis-aware (M4.15.s)", (
     const output = out();
     expect(output).toContain(":white_check_mark:");
     expect(output).toContain("**All comparisons match on the tier axis.**");
+  });
+});
+
+// M4.15.aa — `tenant housekeeping --format gh-summary` Markdown for
+// CI step output. Mirrors M4.15.z (gateway housekeeping gh-summary)
+// to the cross-dashboard view. Reuses the threshold-alert helpers
+// shipped in M4.15.z. Verdict semantic identical: alerts not
+// evaluated → no verdict; evaluated + none tripped → :white_check_
+// mark:; tripped → :x: + exit 3.
+describe("runTenant housekeeping --format gh-summary (M4.15.aa)", () => {
+  it("emits Markdown with ## title + As of + table-count metadata + two substrate sections", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Tenant housekeeping");
+    expect(output).toContain(`**As of:** \`${fixedNow.toISOString()}\``);
+    expect(output).toContain(`**Tenant:** \`${RESOLVED_UUID}\``);
+    expect(output).toContain("**Gateway tables:** 3 | **Retention tables:** 6");
+    expect(output).toContain("### Gateway substrate");
+    expect(output).toContain("### Retention substrate");
+    // Gateway substrate uses 5-col header (no Enabled column).
+    expect(output).toContain("| Table | Total rows | Oldest | Would prune | Retention |");
+    // Retention substrate uses 6-col header (adds Enabled column).
+    expect(output).toContain("| Table | Total rows | Oldest | Would prune | Retention | Enabled |");
+    expect(output).toContain("`gateway_pipeline_executions`");
+    expect(output).toContain("`workflow_traces`");
+    // No verdict line (no alerts evaluated).
+    expect(output).not.toContain(":white_check_mark:");
+    expect(output).not.toContain(":x:");
+  });
+
+  it("with --all-tenants emits Scope: all tenants line + no Tenant: line", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--all-tenants", "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("**Scope:** all tenants");
+    expect(output).not.toContain("**Tenant:**");
+  });
+
+  it("emits :white_check_mark: verdict when --threshold-alert evaluated + none tripped", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--format",
+        "gh-summary",
+        "--threshold-alert",
+        "totalRowCount:>999999999999",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(":white_check_mark: **All threshold alerts passed.**");
+    expect(output).not.toContain("### Threshold alerts");
+  });
+
+  it("emits :x: verdict + tripped-alerts table when alerts trip (exit 3)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--format",
+        "gh-summary",
+        "--threshold-alert",
+        "totalRowCount:>1",
+      ),
+      ctx,
+    );
+    expect(code).toBe(3);
+    const output = out();
+    expect(output).toContain("### Threshold alerts (");
+    expect(output).toContain("| Table | Field | Actual | Threshold | Age |");
+    expect(output).toContain(":x: **");
+    expect(output).toContain("threshold alert(s) tripped");
+    expect(output).toContain("exit 3 (CI gate failed)");
+  });
+
+  it("--watch + --format gh-summary rejected via parseWatchFlags (exit 2)", async () => {
+    const conn = fakeConn({});
+    const { io, err } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--format",
+        "gh-summary",
+        "--watch",
+      ),
+      ctx,
+    );
+    expect(code).toBe(2);
+    const errOut = err();
+    expect(errOut).toContain("tenant housekeeping:");
+    expect(
+      errOut.includes("gh-summary") || errOut.includes("requires --format human or json"),
+    ).toBe(true);
+  });
+});
+
+// M4.15.aa — direct unit tests for formatTenantHousekeepingReportGh
+// Summary (cross-dashboard renderer).
+describe("formatTenantHousekeepingReportGhSummary (M4.15.aa)", () => {
+  const baseGateway = {
+    asOf: "2026-05-29T12:00:00.000Z",
+    tables: [
+      {
+        tableName: "gateway_pipeline_executions",
+        pruneSemantic: "retention_days" as const,
+        totalRowCount: 50000,
+        oldestAt: "2026-04-01T00:00:00.000Z",
+        wouldPruneCount: 1042,
+        retentionDays: 30,
+        lastPrunedAt: null,
+      },
+      {
+        tableName: "gateway_idempotency_records",
+        pruneSemantic: "expires_at" as const,
+        totalRowCount: 1200,
+        oldestAt: null,
+        wouldPruneCount: 300,
+        retentionDays: null,
+        lastPrunedAt: null,
+      },
+    ],
+  };
+
+  const baseRetention = {
+    asOf: "2026-05-29T12:00:00.000Z",
+    tables: [
+      {
+        tableName: "workflow_traces",
+        totalRowCount: 100000,
+        oldestAt: "2026-03-01T00:00:00.000Z",
+        wouldPruneCount: 5000,
+        retentionDays: 90,
+        enabled: true,
+        lastPrunedAt: null,
+        perTenantPolicyCount: 3,
+      },
+      {
+        tableName: "llm_call_traces",
+        totalRowCount: 2000000,
+        oldestAt: null,
+        wouldPruneCount: 0,
+        retentionDays: null,
+        enabled: null,
+        lastPrunedAt: null,
+        perTenantPolicyCount: 0,
+      },
+    ],
+  };
+
+  it("renders gateway substrate retention column: 'Nd' for retention-governed, _TTL-managed_ for expires_at", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: false,
+    });
+    // gateway_pipeline_executions: retention_days, 30 days
+    expect(md).toMatch(/\| `gateway_pipeline_executions` \| 50,000 \|.*\| 30d \|/);
+    // gateway_idempotency_records: expires_at → _TTL-managed_
+    expect(md).toMatch(/\| `gateway_idempotency_records` \|.*\| _TTL-managed_ \|/);
+  });
+
+  it("renders retention substrate Enabled column: yes/no/— for enabled/disabled/null", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: false,
+    });
+    // workflow_traces: enabled=true → yes
+    expect(md).toMatch(/\| `workflow_traces` \|.*\| yes \|/);
+    // llm_call_traces: enabled=null → —
+    expect(md).toMatch(/\| `llm_call_traces` \|.*\| — \|/);
+  });
+
+  it("renders null oldestAt as '—' in both substrates", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: false,
+    });
+    // gateway_idempotency_records: oldestAt=null
+    expect(md).toMatch(/\| `gateway_idempotency_records` \| 1,200 \| — \|/);
+    // llm_call_traces: oldestAt=null
+    expect(md).toMatch(/\| `llm_call_traces` \| 2,000,000 \| — \|/);
+  });
+
+  it("no verdict line when hadAlerts === false (query surface, not gate)", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: false,
+    });
+    expect(md).not.toContain(":white_check_mark:");
+    expect(md).not.toContain(":x:");
+  });
+
+  it("emits :white_check_mark: success verdict when hadAlerts === true + no tripped", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: true,
+    });
+    expect(md).toContain(":white_check_mark: **All threshold alerts passed.**");
+  });
+
+  it("emits :x: failure verdict + tripped-alerts table when tripped > 0", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [
+        {
+          tableName: "workflow_traces",
+          fieldName: "totalRowCount",
+          actual: 100000,
+          spec: "totalRowCount:>50000",
+          combinator: "SINGLE",
+          op: "GT",
+          thresholdRaw: "50000",
+          trippedClauses: [
+            {
+              fieldName: "totalRowCount",
+              op: "GT",
+              actual: 100000,
+              thresholdRaw: "50000",
+              clauseRaw: "totalRowCount:>50000",
+            },
+          ],
+        },
+      ],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: true,
+    });
+    expect(md).toContain("### Threshold alerts (1)");
+    expect(md).toContain("| Table | Field | Actual | Threshold | Age |");
+    expect(md).toContain("`workflow_traces`");
+    expect(md).toContain("100,000");
+    expect(md).toContain(":x: **1 threshold alert(s) tripped**");
+    expect(md).toContain("exit 3 (CI gate failed)");
+  });
+
+  it("omits Tenant + Scope lines when neither tenantId nor allTenants set (cross-tenant default)", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: baseGateway,
+      retention: baseRetention,
+      tripped: [],
+      allTenants: false,
+      hadAlerts: false,
+    });
+    expect(md).not.toContain("**Tenant:**");
+    expect(md).not.toContain("**Scope:**");
+    expect(md).toContain("**Gateway tables:**");
   });
 });
