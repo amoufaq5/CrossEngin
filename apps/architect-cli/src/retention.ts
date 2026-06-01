@@ -778,11 +778,16 @@ async function runRetentionListPolicies(
     return 0;
   }
   if (command.format === "gh-summary") {
+    // M4.15.ai — pass operator's original --tenant input as tenantSlug
+    // when it was a slug (raw value differs from resolved UUID) so the
+    // **Filtered:** line surfaces `tenant=\`<uuid>\` (slug: \`<slug>\`)`.
+    // UUID input → tenantRaw === tenantFilter → no round-trip rendered.
     ctx.io.stdout.write(
       formatPoliciesListGhSummary({
         platform: filteredPlatform,
         tenantPolicies: filteredTenant,
         tenantFilter,
+        tenantSlug: tenantRaw !== null && tenantRaw !== tenantFilter ? tenantRaw : undefined,
         tableFilter,
       }),
     );
@@ -809,6 +814,13 @@ export interface PoliciesListGhSummaryInput {
   readonly platform: ReadonlyArray<RetentionPolicyRow>;
   readonly tenantPolicies: ReadonlyArray<TenantRetentionPolicyRow>;
   readonly tenantFilter: string | null;
+  // M4.15.ai — operator's original --tenant input when it was a slug
+  // (not the resolved UUID). When set and differs from tenantFilter,
+  // the **Filtered:** line surfaces `tenant=\`<uuid>\` (slug: \`<slug>\`)`
+  // so CI step summaries echo back the human-readable identifier the
+  // operator typed. When undefined OR equal to tenantFilter (UUID input),
+  // preserves M4.15.ag bare-UUID shape exactly.
+  readonly tenantSlug?: string | null;
   readonly tableFilter: string | null;
 }
 
@@ -818,7 +830,17 @@ export function formatPoliciesListGhSummary(input: PoliciesListGhSummaryInput): 
   lines.push("");
   if (input.tenantFilter !== null || input.tableFilter !== null) {
     const parts: string[] = [];
-    if (input.tenantFilter !== null) parts.push(`tenant=\`${input.tenantFilter}\``);
+    if (input.tenantFilter !== null) {
+      if (
+        input.tenantSlug !== undefined &&
+        input.tenantSlug !== null &&
+        input.tenantSlug !== input.tenantFilter
+      ) {
+        parts.push(`tenant=\`${input.tenantFilter}\` (slug: \`${input.tenantSlug}\`)`);
+      } else {
+        parts.push(`tenant=\`${input.tenantFilter}\``);
+      }
+    }
     if (input.tableFilter !== null) parts.push(`table=\`${input.tableFilter}\``);
     lines.push(`**Filtered:** ${parts.join(" | ")}  `);
   }

@@ -18020,3 +18020,120 @@ describe("formatPoliciesListGhSummary (M4.15.ag)", () => {
     expect(md).not.toContain(":x:");
   });
 });
+
+// M4.15.ai — per-tenant slug round-trip in retention list-policies
+// gh-summary `**Filtered:**` line. When operators pass --tenant <slug>
+// instead of --tenant <uuid>, the gh-summary surfaces both values as
+// `tenant=\`<uuid>\` (slug: \`<slug>\`)` so CI step summaries echo
+// back the human-readable identifier the operator typed. UUID input
+// preserves M4.15.ag bare-UUID shape verbatim (backward-compatible).
+// Closes ADR-0320 future Q3.
+describe("retention list-policies gh-summary slug round-trip (M4.15.ai)", () => {
+  const RESOLVED_UUID_AI = "00000000-0000-4000-8000-00000000000a";
+
+  function fakeConnWithSlug(slugMap: Record<string, string>): PgConnection {
+    return {
+      query: async <T>(sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("SELECT id FROM meta.tenants WHERE slug")) {
+          const slug = String(params?.[0] ?? "");
+          const id = slugMap[slug];
+          return id !== undefined
+            ? ({ rows: [{ id }], rowCount: 1 } as unknown as PgQueryResult<T>)
+            : ({ rows: [], rowCount: 0 } as unknown as PgQueryResult<T>);
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  it("--tenant <slug> --format gh-summary renders both UUID + slug in **Filtered:** line", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({ "acme-prod": RESOLVED_UUID_AI });
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", "acme-prod", "--format", "gh-summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`**Filtered:** tenant=\`${RESOLVED_UUID_AI}\` (slug: \`acme-prod\`)`);
+  });
+
+  it("--tenant <uuid> --format gh-summary preserves M4.15.ag bare-UUID shape (no round-trip)", async () => {
+    const { ctx, out } = buffers();
+    const conn = fakeConnWithSlug({});
+    const fakeRetentionMock = {
+      listPolicies: async () => [],
+      listTenantPolicies: async () => [],
+    } as unknown as PostgresTraceRetention;
+    const code = await runRetention(
+      parsed("retention", "list-policies", "--tenant", RESOLVED_UUID_AI, "--format", "gh-summary"),
+      {
+        ...ctx,
+        retentionOverride: fakeRetentionMock,
+        pgConnectionOverride: conn,
+      } as RetentionContext,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`**Filtered:** tenant=\`${RESOLVED_UUID_AI}\``);
+    expect(output).not.toContain("(slug:");
+  });
+
+  it("formatPoliciesListGhSummary renders slug round-trip when tenantSlug !== tenantFilter", () => {
+    const md = formatPoliciesListGhSummary({
+      platform: [],
+      tenantPolicies: [],
+      tenantFilter: RESOLVED_UUID_AI,
+      tenantSlug: "acme-prod",
+      tableFilter: null,
+    });
+    expect(md).toContain(`**Filtered:** tenant=\`${RESOLVED_UUID_AI}\` (slug: \`acme-prod\`)`);
+  });
+
+  it("formatPoliciesListGhSummary omits slug suffix when tenantSlug === tenantFilter (UUID input)", () => {
+    const md = formatPoliciesListGhSummary({
+      platform: [],
+      tenantPolicies: [],
+      tenantFilter: RESOLVED_UUID_AI,
+      tenantSlug: RESOLVED_UUID_AI,
+      tableFilter: null,
+    });
+    expect(md).toContain(`**Filtered:** tenant=\`${RESOLVED_UUID_AI}\``);
+    expect(md).not.toContain("(slug:");
+  });
+
+  it("formatPoliciesListGhSummary omits slug suffix when tenantSlug undefined", () => {
+    const md = formatPoliciesListGhSummary({
+      platform: [],
+      tenantPolicies: [],
+      tenantFilter: RESOLVED_UUID_AI,
+      tableFilter: null,
+    });
+    expect(md).toContain(`**Filtered:** tenant=\`${RESOLVED_UUID_AI}\``);
+    expect(md).not.toContain("(slug:");
+  });
+
+  it("formatPoliciesListGhSummary slug round-trip composes with --table filter", () => {
+    const md = formatPoliciesListGhSummary({
+      platform: [],
+      tenantPolicies: [],
+      tenantFilter: RESOLVED_UUID_AI,
+      tenantSlug: "acme-prod",
+      tableFilter: "workflow_traces",
+    });
+    expect(md).toContain(
+      `**Filtered:** tenant=\`${RESOLVED_UUID_AI}\` (slug: \`acme-prod\`) | table=\`workflow_traces\``,
+    );
+  });
+});

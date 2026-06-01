@@ -6013,6 +6013,114 @@ describe("formatTenantHousekeepingReportGhSummary (M4.15.aa)", () => {
   });
 });
 
+// M4.15.ai — per-tenant slug round-trip in tenant housekeeping
+// gh-summary header. When operators pass --tenant <slug> instead of
+// --tenant <uuid>, the gh-summary `**Tenant:**` line surfaces both
+// values as `**Tenant:** \`<uuid>\` (slug: \`<slug>\`)` so CI step
+// summaries echo back the human-readable identifier the operator
+// typed. UUID input preserves M4.15.aa bare-UUID shape verbatim
+// (backward-compatible). Closes ADR-0314 future Q4.
+describe("tenant housekeeping gh-summary slug round-trip (M4.15.ai)", () => {
+  it("--tenant <slug> renders both UUID + slug in **Tenant:** header line", async () => {
+    const conn = fakeConn({ "acme-prod": RESOLVED_UUID });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", "acme-prod", "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`**Tenant:** \`${RESOLVED_UUID}\` (slug: \`acme-prod\`)`);
+  });
+
+  it("--tenant <uuid> preserves M4.15.aa bare-UUID shape (no round-trip line)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed("tenant", "housekeeping", "--tenant", RESOLVED_UUID, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(`**Tenant:** \`${RESOLVED_UUID}\``);
+    expect(output).not.toContain("(slug:");
+  });
+
+  it("formatTenantHousekeepingReportGhSummary renders slug round-trip when tenantSlug !== tenantId", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: {
+        asOf: "2026-05-29T12:00:00.000Z",
+        tables: [],
+      },
+      retention: {
+        asOf: "2026-05-29T12:00:00.000Z",
+        tables: [],
+      },
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      tenantSlug: "acme-prod",
+      allTenants: false,
+      hadAlerts: false,
+    });
+    expect(md).toContain(`**Tenant:** \`${RESOLVED_UUID}\` (slug: \`acme-prod\`)`);
+  });
+
+  it("formatTenantHousekeepingReportGhSummary omits slug suffix when tenantSlug === tenantId (UUID input)", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: {
+        asOf: "2026-05-29T12:00:00.000Z",
+        tables: [],
+      },
+      retention: {
+        asOf: "2026-05-29T12:00:00.000Z",
+        tables: [],
+      },
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      tenantSlug: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: false,
+    });
+    expect(md).toContain(`**Tenant:** \`${RESOLVED_UUID}\``);
+    expect(md).not.toContain("(slug:");
+  });
+
+  it("formatTenantHousekeepingReportGhSummary omits slug suffix when tenantSlug undefined", () => {
+    const md = formatTenantHousekeepingReportGhSummary({
+      gateway: {
+        asOf: "2026-05-29T12:00:00.000Z",
+        tables: [],
+      },
+      retention: {
+        asOf: "2026-05-29T12:00:00.000Z",
+        tables: [],
+      },
+      tripped: [],
+      tenantId: RESOLVED_UUID,
+      allTenants: false,
+      hadAlerts: false,
+    });
+    expect(md).toContain(`**Tenant:** \`${RESOLVED_UUID}\``);
+    expect(md).not.toContain("(slug:");
+  });
+});
+
 // M4.15.ae — coverage maintenance pass on tenant.ts. After M4.15.aa
 // shipped tenant-housekeeping gh-summary, tenant.ts sat at 89.69%
 // statements. Targets the cheap PG-env-missing exits + flag-

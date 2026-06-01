@@ -418,12 +418,17 @@ async function runTenantHousekeeping(command: ParsedCommand, ctx: TenantContext)
       // section. Verdict semantic matches M4.15.z: alerts not
       // evaluated → no verdict; evaluated + none tripped →
       // :white_check_mark:; tripped → :x: + exit 3.
+      // M4.15.ai — pass operator's original --tenant input as tenantSlug
+      // when it was a slug (resolver was called) so the header surfaces
+      // `**Tenant:** \`<uuid>\` (slug: \`<slug>\`)`. UUID input → tenantFlag
+      // === tenantId → renderer treats matching values as no-round-trip.
       ctx.io.stdout.write(
         formatTenantHousekeepingReportGhSummary({
           gateway: report.gateway,
           retention: report.retention,
           tripped: report.tripped,
           tenantId,
+          tenantSlug: tenantFlag !== null && tenantFlag !== tenantId ? tenantFlag : undefined,
           allTenants: allTenants === true,
           hadAlerts: alerts.length > 0,
         }),
@@ -532,6 +537,13 @@ export interface TenantHousekeepingReportGhSummaryInput {
   readonly retention: RetentionHousekeepingReport;
   readonly tripped: ReadonlyArray<TrippedAlert>;
   readonly tenantId?: string;
+  // M4.15.ai — operator's original --tenant input when it was a slug
+  // (not the resolved UUID). When set and differs from tenantId, the
+  // gh-summary header surfaces `**Tenant:** \`<uuid>\` (slug: \`<slug>\`)`
+  // so CI step summaries echo back the human-readable identifier the
+  // operator typed. When undefined OR equal to tenantId (UUID input),
+  // header preserves M4.15.aa bare-UUID shape exactly.
+  readonly tenantSlug?: string;
   readonly allTenants: boolean;
   readonly hadAlerts: boolean;
 }
@@ -544,7 +556,11 @@ export function formatTenantHousekeepingReportGhSummary(
   lines.push("");
   lines.push(`**As of:** \`${input.gateway.asOf}\`  `);
   if (input.tenantId !== undefined) {
-    lines.push(`**Tenant:** \`${input.tenantId}\`  `);
+    if (input.tenantSlug !== undefined && input.tenantSlug !== input.tenantId) {
+      lines.push(`**Tenant:** \`${input.tenantId}\` (slug: \`${input.tenantSlug}\`)  `);
+    } else {
+      lines.push(`**Tenant:** \`${input.tenantId}\`  `);
+    }
   }
   if (input.allTenants) {
     lines.push(`**Scope:** all tenants  `);
