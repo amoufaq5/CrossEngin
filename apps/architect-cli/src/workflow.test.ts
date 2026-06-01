@@ -7,7 +7,7 @@ import type { WorkflowDefinition } from "@crossengin/workflow-engine";
 
 import { parseArgs, type ParsedCommand } from "./cli.js";
 import type { RunContext } from "./commands.js";
-import { runWorkflow } from "./workflow.js";
+import { formatValidateGhSummary, runWorkflow } from "./workflow.js";
 
 function buffers(): { ctx: RunContext; out: () => string; err: () => string } {
   const out: string[] = [];
@@ -279,5 +279,209 @@ describe("runWorkflow validate", () => {
     expect(env.issues.length).toBeGreaterThan(0);
     expect(env.issues[0]!.code).toBe("schema_error");
     expect(env.issues[0]!.severity).toBe("error");
+  });
+});
+
+// M4.15.v — `workflow validate --format gh-summary` Markdown
+// rendering for CI step output. Clean definitions emit the success
+// verdict; validation errors block with :x:; --strict + warnings
+// block with :warning: strict; warnings alone emit a non-blocking
+// :warning: passed-with-warnings note. Schema-error path uses the
+// same shape with definitionId/Key marked as schema-rejected.
+describe("runWorkflow validate --format gh-summary (M4.15.v)", () => {
+  it("emits :white_check_mark: verdict for clean definition (no issues)", async () => {
+    const { ctx, out } = buffers();
+    const path = await tempFile(JSON.stringify(cleanDefinition));
+    const code = await runWorkflow(
+      parsed("workflow", "validate", path, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Workflow validate");
+    expect(output).toContain(`**File:** \`${path}\``);
+    expect(output).toContain(`**Definition:** \`wfd_clitest123\` (\`cli.test.workflow\`)`);
+    expect(output).toContain("**Errors:** 0 | **Warnings:** 0");
+    expect(output).toContain(":white_check_mark: **Definition is valid**");
+    expect(output).not.toContain("| Severity | Code |");
+  });
+
+  it("emits :warning: passed-with-warnings verdict for unreachable-state warning (exit 0)", async () => {
+    // Definition with an unreachable terminal state — validateDefinition
+    // emits an `unreachable_state` warning (severity: "warning"), so
+    // the gate stays open (exit 0) and the gh-summary verdict is the
+    // non-blocking "passed with warnings" form.
+    const def: WorkflowDefinition = {
+      ...cleanDefinition,
+      states: [
+        ...cleanDefinition.states,
+        {
+          name: "orphan",
+          kind: "terminal_failure",
+          label: "Orphan",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+    };
+    const { ctx, out } = buffers();
+    const path = await tempFile(JSON.stringify(def));
+    const code = await runWorkflow(
+      parsed("workflow", "validate", path, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Workflow validate");
+    expect(output).toContain("**Errors:** 0 | **Warnings:** 1");
+    expect(output).toContain("### Issues (1)");
+    expect(output).toContain("| Severity | Code | Path | Message |");
+    expect(output).toContain(":warning: warning");
+    expect(output).toContain("unreachable_state");
+    expect(output).toContain(":warning: **Validation passed with warnings**");
+    expect(output).toContain("1 warning(s) (non-blocking)");
+  });
+
+  it("--strict promotes warnings to strict-failure verdict (exit 3)", async () => {
+    const def: WorkflowDefinition = {
+      ...cleanDefinition,
+      states: [
+        ...cleanDefinition.states,
+        {
+          name: "orphan",
+          kind: "terminal_failure",
+          label: "Orphan",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+    };
+    const { ctx, out } = buffers();
+    const path = await tempFile(JSON.stringify(def));
+    const code = await runWorkflow(
+      parsed("workflow", "validate", path, "--format", "gh-summary", "--strict"),
+      ctx,
+    );
+    expect(code).toBe(3);
+    const output = out();
+    expect(output).toContain(":warning: **Strict validation failed**");
+    expect(output).toContain("1 warning(s) under `--strict`");
+  });
+
+  it("schema-error path emits gh-summary with (schema-rejected) definition + :x: verdict", async () => {
+    const { ctx, out } = buffers();
+    const path = await tempFile('{"id": "not-wfd-prefix"}');
+    const code = await runWorkflow(
+      parsed("workflow", "validate", path, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(2);
+    const output = out();
+    expect(output).toContain("## Workflow validate");
+    expect(output).toContain("**Definition:** `(schema-rejected)` (`(schema-rejected)`)");
+    expect(output).toContain(":x: error");
+    expect(output).toContain("schema_error");
+    expect(output).toContain(":x: **Validation failed**");
+  });
+
+  it("formatValidateGhSummary direct: warnings without --strict emit non-blocking verdict", () => {
+    const md = formatValidateGhSummary({
+      path: "/tmp/def.json",
+      definitionId: "wfd_test",
+      definitionKey: "test.workflow",
+      issues: [
+        {
+          severity: "warning",
+          code: "dead_end_state",
+          path: "states[1]",
+          message: "state 'pending' has no outgoing transitions",
+        },
+      ],
+      strict: false,
+    });
+    expect(md).toContain("**Errors:** 0 | **Warnings:** 1");
+    expect(md).toContain(":warning: warning");
+    expect(md).toContain(":warning: **Validation passed with warnings**");
+    expect(md).toContain("1 warning(s) (non-blocking)");
+    expect(md).not.toContain(":x:");
+  });
+
+  it("formatValidateGhSummary direct: warnings with --strict emit strict-failure verdict", () => {
+    const md = formatValidateGhSummary({
+      path: "/tmp/def.json",
+      definitionId: "wfd_test",
+      definitionKey: "test.workflow",
+      issues: [
+        {
+          severity: "warning",
+          code: "dead_end_state",
+          path: "states[1]",
+          message: "state 'pending' has no outgoing transitions",
+        },
+      ],
+      strict: true,
+    });
+    expect(md).toContain(":warning: **Strict validation failed**");
+    expect(md).toContain("1 warning(s) under `--strict`");
+    expect(md).not.toContain(":x:");
+  });
+
+  it("formatValidateGhSummary direct: errors-first ordering preserved in mixed-severity table", () => {
+    const md = formatValidateGhSummary({
+      path: "/tmp/def.json",
+      definitionId: "wfd_test",
+      definitionKey: "test.workflow",
+      issues: [
+        {
+          severity: "warning",
+          code: "dead_end_state",
+          path: "states[1]",
+          message: "warning A",
+        },
+        {
+          severity: "error",
+          code: "unreachable_state",
+          path: "states[2]",
+          message: "error B",
+        },
+        {
+          severity: "warning",
+          code: "dead_end_state",
+          path: "states[3]",
+          message: "warning C",
+        },
+      ],
+      strict: false,
+    });
+    // Error should appear before warnings in the table even though
+    // it's middle in input order. Find the row positions.
+    const errorPos = md.indexOf("error B");
+    const warningAPos = md.indexOf("warning A");
+    const warningCPos = md.indexOf("warning C");
+    expect(errorPos).toBeGreaterThan(-1);
+    expect(errorPos).toBeLessThan(warningAPos);
+    expect(errorPos).toBeLessThan(warningCPos);
+    // Verdict reflects errors take precedence.
+    expect(md).toContain(":x: **Validation failed** — 1 error(s) block publish.");
+  });
+
+  it("formatValidateGhSummary direct: pipe characters in message are escaped", () => {
+    const md = formatValidateGhSummary({
+      path: "/tmp/def.json",
+      definitionId: "wfd_test",
+      definitionKey: "test.workflow",
+      issues: [
+        {
+          severity: "error",
+          code: "unknown_variable_in_action",
+          path: "transitions[0]",
+          message: "variable a|b|c not found",
+        },
+      ],
+      strict: false,
+    });
+    expect(md).toContain("variable a\\|b\\|c not found");
   });
 });
