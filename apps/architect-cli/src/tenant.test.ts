@@ -5226,3 +5226,451 @@ describe("runTenant policies --diff --axis filter (M4.15.l)", () => {
     expect(err()).toContain("invalid --axis 'garbage'");
   });
 });
+
+// M4.15.s — `tenant policies --diff --axis <axis> --format gh-summary`
+// axis-aware Markdown rendering tests. Closes ADR-0299 Q4. Title +
+// section header + verdict text reflect the axis scope; the now-
+// redundant Axis column drops out of the table when filtering.
+// Without --axis the original M4.15.e shape (with Axis column +
+// generic labels) is preserved.
+describe("runTenant policies --diff --format gh-summary axis-aware (M4.15.s)", () => {
+  it("--axis retention sets title suffix + section header + verdict label", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 30,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+        },
+      ],
+      [TENANT_B]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 90,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+        },
+      ],
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "retention",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant policies (retention axis)");
+    expect(output).toMatch(/### Retention field changes \(\d+\)/);
+    // Axis column dropped — narrower 3-col table.
+    expect(output).toContain("| Field | Left | Right |");
+    expect(output).not.toContain("| Axis | Field |");
+    expect(output).toMatch(/:warning: \*\*Retention divergence detected\*\*/);
+  });
+
+  it("--axis costCeiling uses 'Cost ceiling' sentence-case label", async () => {
+    const conn = fakePoliciesConn({
+      costCeilingRows: {
+        [RESOLVED_UUID]: [
+          {
+            max_usd_per_request: "2.00000000",
+            max_usd_per_window: "100.00000000",
+            window_seconds: 3600,
+            effective_from: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        [TENANT_B]: [],
+      },
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "costCeiling",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant policies (costCeiling axis)");
+    expect(output).toMatch(/### Cost ceiling field changes \(\d+\)/);
+    expect(output).toMatch(/:warning: \*\*Cost ceiling divergence detected\*\*/);
+  });
+
+  it("--axis tier uses 'Tier' label", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "tier",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant policies (tier axis)");
+    expect(output).toMatch(/### Tier field changes \(\d+\)/);
+    expect(output).toMatch(/:warning: \*\*Tier divergence detected\*\*/);
+  });
+
+  it("--axis retention with empty fieldDiffs uses axis-scoped 'No retention differences' verdict", async () => {
+    // Identical retention on both sides → 0 diffs under --axis retention.
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({
+      [RESOLVED_UUID]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 30,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+        },
+      ],
+      [TENANT_B]: [
+        {
+          tableName: "workflow_traces",
+          retentionDays: 30,
+          enabled: true,
+          optOut: false,
+          optOutReason: null,
+          optOutUntil: null,
+        },
+      ],
+    });
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "retention",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(":white_check_mark:");
+    expect(output).toContain("**No retention differences**");
+    expect(output).toContain("on this axis");
+  });
+
+  it("without --axis preserves M4.15.e generic shape (Axis column present, generic labels)", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed("tenant", "policies", RESOLVED_UUID, "--diff", TENANT_B, "--format", "gh-summary"),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // Title has NO axis suffix.
+    expect(output).toContain("## Diff: tenant policies\n");
+    expect(output).not.toContain("(retention axis)");
+    expect(output).not.toContain("(tier axis)");
+    // Generic header + Axis column present.
+    expect(output).toMatch(/### Field changes \(\d+\)/);
+    expect(output).toContain("| Axis | Field | Left | Right |");
+    expect(output).toMatch(/:warning: \*\*Divergence detected\*\*/);
+  });
+
+  it("--axis tier with --add-tenant N-way: multi-comparison title scoped + per-comparison table Axis column dropped", async () => {
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "pro",
+            display_name: "Pro",
+            max_usd_per_request: "1.00000000",
+            max_usd_per_window: "100.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_C]: [
+          {
+            tier_id: "enterprise",
+            display_name: "Enterprise",
+            max_usd_per_request: "5.00000000",
+            max_usd_per_window: "1000.00000000",
+            window_seconds: 86400,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--axis",
+        "tier",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Multi-comparison diff: tenant policies (tier axis)");
+    // 2 comparisons, each with Axis column dropped.
+    expect(output).toContain("| Field | Left | Right |");
+    expect(output).not.toContain("| Axis | Field |");
+    expect(output).toMatch(/:warning: \*\*Tier divergence detected\*\* in at least one comparison/);
+  });
+
+  it("--axis tier N-way with all-match scenario uses axis-scoped success verdict", async () => {
+    // All 3 tenants on the same tier → 0 fieldVariations under --axis tier.
+    const conn = fakePoliciesConn({
+      tierRows: {
+        [RESOLVED_UUID]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_B]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+        [TENANT_C]: [
+          {
+            tier_id: "free",
+            display_name: "Free",
+            max_usd_per_request: "0.05000000",
+            max_usd_per_window: "5.00000000",
+            window_seconds: 3600,
+          },
+        ],
+      },
+    });
+    const retention = fakeRetentionForPolicies({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: retention,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "policies",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--axis",
+        "tier",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain(":white_check_mark:");
+    expect(output).toContain("**All comparisons match on the tier axis.**");
+  });
+});
