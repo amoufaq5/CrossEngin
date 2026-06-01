@@ -1555,11 +1555,14 @@ async function runTenantHousekeepingDiff(
           printCsv(ctx.io, HOUSEKEEPING_DIFF_CSV_HEADERS, rows, sepResult.separator);
         }
       } else if (command.format === "gh-summary") {
+        // M4.15.ah — pass axisFilter so the renderer scopes the title,
+        // section header, verdict text + drops Axis column.
         renderHousekeepingDiffGhSummary(
           ctx,
           { tenantId: anchorSide.tenantId, input: anchorSide.input },
           { tenantId: rhs.tenantId, input: rhs.input },
           fieldDiffs,
+          axisFilter,
         );
       } else {
         renderHousekeepingDiffHuman(
@@ -1631,10 +1634,12 @@ async function runTenantHousekeepingDiff(
         printCsv(ctx.io, headers, allRows, sepResult.separator);
       }
     } else if (command.format === "gh-summary") {
+      // M4.15.ah — axis-aware multi-comparison rendering.
       renderHousekeepingMultiDiffGhSummary(
         ctx,
         { tenantId: anchorSide.tenantId, input: anchorSide.input },
         comparisons,
+        axisFilter,
       );
     } else {
       renderHousekeepingMultiDiffHuman(ctx, anchorSide, comparisons);
@@ -2751,35 +2756,81 @@ function renderPoliciesMultiDiffGhSummary(
 // M4.15.e — Markdown summary for single-comparison housekeeping
 // diff. Extra `Table` column compared to policies since
 // HousekeepingFieldDiff keys by (axis, tableName, field).
+// M4.15.s mirror — sentence-case axis labels for gh-summary section
+// headers + verdict lines. 2-axis (gateway/retention) vs policies'
+// 3-axis. When --axis is set, every fieldDiff has the same axis so
+// the section header reflects that scope + the Axis column drops
+// out of the table (redundant).
+const HOUSEKEEPING_AXIS_LABELS: Record<"gateway" | "retention", string> = {
+  gateway: "Gateway",
+  retention: "Retention",
+};
+
+// M4.15.ah — When `axisFilter` is set (from --axis gateway|retention),
+// the title, section header, and verdict text reflect that scope
+// ("## Diff: tenant housekeeping (gateway axis)" / "### Gateway field
+// changes (N)" / ":warning: Gateway divergence detected"). Axis
+// column drops from the table (every row shares the same axis).
+// Mirrors M4.15.s policies axis-aware treatment exactly (2-axis vs
+// 3-axis only difference).
 function renderHousekeepingDiffGhSummary(
   ctx: TenantContext,
   left: { readonly tenantId: string; readonly input: string },
   right: { readonly tenantId: string; readonly input: string },
   fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>,
+  axisFilter: "gateway" | "retention" | null = null,
 ): void {
-  ctx.io.stdout.write(`## Diff: tenant housekeeping\n\n`);
+  const axisLabel = axisFilter !== null ? HOUSEKEEPING_AXIS_LABELS[axisFilter] : null;
+  const titleSuffix = axisLabel !== null ? ` (${axisFilter} axis)` : "";
+  ctx.io.stdout.write(`## Diff: tenant housekeeping${titleSuffix}\n\n`);
   ctx.io.stdout.write(`**Left:** \`${left.tenantId}\` (input: \`${left.input}\`)  \n`);
   ctx.io.stdout.write(`**Right:** \`${right.tenantId}\` (input: \`${right.input}\`)\n\n`);
   if (fieldDiffs.length === 0) {
-    ctx.io.stdout.write(`:white_check_mark: **No differences** — both tenants match.\n`);
+    const matchText =
+      axisLabel !== null
+        ? `**No ${axisLabel.toLowerCase()} differences** — both tenants match on this axis.`
+        : `**No differences** — both tenants match.`;
+    ctx.io.stdout.write(`:white_check_mark: ${matchText}\n`);
     return;
   }
-  ctx.io.stdout.write(`### Field changes (${fieldDiffs.length})\n\n`);
-  ctx.io.stdout.write(`| Axis | Table | Field | Left | Right |\n`);
-  ctx.io.stdout.write(`|------|-------|-------|------|-------|\n`);
-  for (const d of fieldDiffs) {
-    ctx.io.stdout.write(
-      `| ${d.axis} | \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
-    );
+  const sectionTitle =
+    axisLabel !== null
+      ? `### ${axisLabel} field changes (${fieldDiffs.length})`
+      : `### Field changes (${fieldDiffs.length})`;
+  ctx.io.stdout.write(`${sectionTitle}\n\n`);
+  if (axisFilter !== null) {
+    // Drop Axis column — every row has the same value.
+    ctx.io.stdout.write(`| Table | Field | Left | Right |\n`);
+    ctx.io.stdout.write(`|-------|-------|------|-------|\n`);
+    for (const d of fieldDiffs) {
+      ctx.io.stdout.write(
+        `| \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+      );
+    }
+  } else {
+    ctx.io.stdout.write(`| Axis | Table | Field | Left | Right |\n`);
+    ctx.io.stdout.write(`|------|-------|-------|------|-------|\n`);
+    for (const d of fieldDiffs) {
+      ctx.io.stdout.write(
+        `| ${d.axis} | \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+      );
+    }
   }
-  ctx.io.stdout.write(
-    `\n:warning: **Divergence detected** — ${fieldDiffs.length} field(s) differ.\n`,
-  );
+  const verdictText =
+    axisLabel !== null
+      ? `**${axisLabel} divergence detected** — ${fieldDiffs.length} field(s) differ.`
+      : `**Divergence detected** — ${fieldDiffs.length} field(s) differ.`;
+  ctx.io.stdout.write(`\n:warning: ${verdictText}\n`);
 }
 
 // M4.15.e — Markdown summary for N-way housekeeping diff. Same
 // shape as policies multi but with the 5-column housekeeping
 // table (extra Table column).
+//
+// M4.15.ah — When `axisFilter` is set, title gets suffix
+// "(gateway axis)" or "(retention axis)", per-comparison tables
+// drop the Axis column, and verdict text mentions the axis.
+// Mirrors M4.15.s policies N-way axis-aware shape exactly.
 function renderHousekeepingMultiDiffGhSummary(
   ctx: TenantContext,
   anchor: { readonly tenantId: string; readonly input: string },
@@ -2787,8 +2838,11 @@ function renderHousekeepingMultiDiffGhSummary(
     readonly right: { readonly tenantId: string; readonly input: string };
     readonly fieldDiffs: ReadonlyArray<HousekeepingFieldDiff>;
   }>,
+  axisFilter: "gateway" | "retention" | null = null,
 ): void {
-  ctx.io.stdout.write(`## Multi-comparison diff: tenant housekeeping\n\n`);
+  const axisLabel = axisFilter !== null ? HOUSEKEEPING_AXIS_LABELS[axisFilter] : null;
+  const titleSuffix = axisLabel !== null ? ` (${axisFilter} axis)` : "";
+  ctx.io.stdout.write(`## Multi-comparison diff: tenant housekeeping${titleSuffix}\n\n`);
   ctx.io.stdout.write(`**Anchor:** \`${anchor.tenantId}\` (input: \`${anchor.input}\`)  \n`);
   ctx.io.stdout.write(`**Comparisons:** ${comparisons.length}\n\n`);
   let maxDivergence = 0;
@@ -2802,12 +2856,22 @@ function renderHousekeepingMultiDiffGhSummary(
       ctx.io.stdout.write(`:white_check_mark: No differences.\n\n`);
       continue;
     }
-    ctx.io.stdout.write(`| Axis | Table | Field | Left | Right |\n`);
-    ctx.io.stdout.write(`|------|-------|-------|------|-------|\n`);
-    for (const d of c.fieldDiffs) {
-      ctx.io.stdout.write(
-        `| ${d.axis} | \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
-      );
+    if (axisFilter !== null) {
+      ctx.io.stdout.write(`| Table | Field | Left | Right |\n`);
+      ctx.io.stdout.write(`|-------|-------|------|-------|\n`);
+      for (const d of c.fieldDiffs) {
+        ctx.io.stdout.write(
+          `| \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+        );
+      }
+    } else {
+      ctx.io.stdout.write(`| Axis | Table | Field | Left | Right |\n`);
+      ctx.io.stdout.write(`|------|-------|-------|------|-------|\n`);
+      for (const d of c.fieldDiffs) {
+        ctx.io.stdout.write(
+          `| ${d.axis} | \`${d.tableName}\` | \`${d.field}\` | ${formatMdValue(d.valueA)} | ${formatMdValue(d.valueB)} |\n`,
+        );
+      }
     }
     ctx.io.stdout.write(`\n`);
   }
@@ -2816,9 +2880,17 @@ function renderHousekeepingMultiDiffGhSummary(
     `**Summary:** ${comparisons.length} comparisons, max divergence ${maxDivergence} field${maxDivergence === 1 ? "" : "s"}.\n`,
   );
   if (maxDivergence === 0) {
-    ctx.io.stdout.write(`:white_check_mark: **All comparisons match.**\n`);
+    const matchText =
+      axisLabel !== null
+        ? `**All comparisons match on the ${axisFilter} axis.**`
+        : `**All comparisons match.**`;
+    ctx.io.stdout.write(`:white_check_mark: ${matchText}\n`);
   } else {
-    ctx.io.stdout.write(`:warning: **Divergence detected** in at least one comparison.\n`);
+    const verdictText =
+      axisLabel !== null
+        ? `**${axisLabel} divergence detected** in at least one comparison.`
+        : `**Divergence detected** in at least one comparison.`;
+    ctx.io.stdout.write(`:warning: ${verdictText}\n`);
   }
 }
 

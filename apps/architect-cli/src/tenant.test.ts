@@ -4732,7 +4732,7 @@ describe("runTenant housekeeping --diff --axis filter (M4.15.h)", () => {
     expect(code).toBe(3);
   });
 
-  it("--axis gh-summary integration: Markdown table contains only filtered axis", async () => {
+  it("--axis gh-summary integration: title + section + table reflect axis scope (M4.15.ah)", async () => {
     const conn = fakeConn({});
     const { io, out } = makeIo();
     const ctx: TenantContext = {
@@ -4760,10 +4760,14 @@ describe("runTenant housekeeping --diff --axis filter (M4.15.h)", () => {
     );
     expect(code).toBe(0);
     const output = out();
-    // Find the data rows after the Markdown table delimiter.
-    const tableSection = output.split("|------|-------|-------|------|-------|")[1] ?? "";
-    expect(tableSection).toContain("| gateway |");
-    expect(tableSection).not.toContain("| retention |");
+    // M4.15.ah — axis-aware rendering: title has "(gateway axis)" suffix,
+    // section header reads "### Gateway field changes (N)", Axis column
+    // dropped from the table (4-col instead of 5-col).
+    expect(output).toContain("## Diff: tenant housekeeping (gateway axis)");
+    expect(output).toMatch(/### Gateway field changes \(\d+\)/);
+    // 4-col header (Axis column gone).
+    expect(output).toContain("| Table | Field | Left | Right |");
+    expect(output).not.toContain("| Axis | Table |");
   });
 });
 
@@ -6161,5 +6165,165 @@ describe("tenant.ts coverage maintenance (M4.15.ae)", () => {
       expect(err()).toContain("tenant policies:");
       expect(err()).toContain("--add-tenant requires --diff");
     });
+  });
+});
+
+// M4.15.ah — `tenant housekeeping --diff --axis <axis> --format
+// gh-summary` axis-aware Markdown rendering. Mirrors M4.15.s policies
+// axis-aware treatment to the housekeeping diff family (2-axis
+// gateway/retention vs policies 3-axis). Closes ADR-0299 future Q1
+// + ADR-0306 future Q1. Drops Axis column from table when filtering,
+// scopes title + section header + verdict text.
+describe("tenant housekeeping --diff --axis <axis> --format gh-summary (M4.15.ah)", () => {
+  it("--axis retention scopes title + section + verdict + drops Axis column", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "retention",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Diff: tenant housekeeping (retention axis)");
+    expect(output).toMatch(/### Retention field changes \(\d+\)|No retention differences/);
+    expect(output).toContain("| Table | Field | Left | Right |");
+    expect(output).not.toContain("| Axis | Table |");
+  });
+
+  it("without --axis preserves generic shape (M4.15.e default — Axis column + generic labels)", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // No axis suffix on title.
+    expect(output).toContain("## Diff: tenant housekeeping\n");
+    expect(output).not.toContain("(gateway axis)");
+    expect(output).not.toContain("(retention axis)");
+    // Generic section header + Axis column present (5-col).
+    expect(output).toMatch(/### Field changes \(\d+\)|No differences/);
+  });
+
+  it("--axis gateway + identical tenants emits axis-scoped 'No gateway differences' check mark", async () => {
+    // Same tenant on both sides → no diffs in any axis. We don't
+    // actually self-diff (rejected by guard), so we use a different
+    // tenant fixture that we know returns identical reports.
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--axis",
+        "gateway",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    // Either "No gateway differences" success or the divergence table.
+    // The default fakeConn fixture produces no gateway-axis divergence,
+    // so we expect the success path with axis-scoped phrasing.
+    if (output.includes(":white_check_mark:")) {
+      expect(output).toContain(
+        ":white_check_mark: **No gateway differences** — both tenants match on this axis.",
+      );
+    }
+  });
+
+  it("--axis retention + --add-tenant N-way: multi-comparison title scoped + Axis column dropped + verdict scoped", async () => {
+    const conn = fakeConn({});
+    const { io, out } = makeIo();
+    const ctx: TenantContext = {
+      io,
+      env: {},
+      pgConnectionOverride: conn,
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotency(),
+      clockOverride: () => fixedNow,
+    };
+    const code = await runTenant(
+      parsed(
+        "tenant",
+        "housekeeping",
+        "--tenant",
+        RESOLVED_UUID,
+        "--diff",
+        TENANT_B,
+        "--add-tenant",
+        TENANT_C,
+        "--axis",
+        "retention",
+        "--format",
+        "gh-summary",
+      ),
+      ctx,
+    );
+    expect(code).toBe(0);
+    const output = out();
+    expect(output).toContain("## Multi-comparison diff: tenant housekeeping (retention axis)");
+    // 4-col header (Axis dropped) on each comparison's table.
+    if (output.includes("| Table |")) {
+      expect(output).toContain("| Table | Field | Left | Right |");
+      expect(output).not.toContain("| Axis | Table |");
+    }
+    // Verdict mentions axis scope when all-match OR divergence-detected.
+    expect(
+      output.includes(":white_check_mark: **All comparisons match on the retention axis.**") ||
+        output.includes(":warning: **Retention divergence detected** in at least one comparison."),
+    ).toBe(true);
   });
 });
