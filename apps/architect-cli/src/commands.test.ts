@@ -678,3 +678,184 @@ describe("runVersion", () => {
     expect(parsedResult.metaTablesCount).toBe(42);
   });
 });
+
+// M4.15.ab — coverage maintenance pass on commands.ts. After M4.14
+// shipped error handling on init/validate/diff/hash/patch/chat, the
+// catch branches + JSON format-error branches were never exercised
+// by tests, leaving commands.ts at 86.46% statements / 79.66%
+// branches. These tests target the specific uncovered lines
+// surfaced by the v8 coverage report (78-80, 110-129, 152-154,
+// 179-181, 208-218, 230-232, 240-242).
+describe("commands.ts coverage maintenance (M4.15.ab)", () => {
+  describe("runValidate error paths", () => {
+    it("--format=json on duplicate-trait manifest emits {ok:false, errors:[...]} envelope", async () => {
+      const dir = await tempDir();
+      const path = join(dir, "manifest.json");
+      // Manifest passes ManifestSchema.parse (well-formed) but
+      // tryValidateManifest's validateManifest detects duplicate trait
+      // names — exercises lines 110-116 (the ok=false JSON branch).
+      const badManifest = {
+        ...emptyManifest({ name: "T", slug: "t" }),
+        traits: [
+          { name: "foo", fields: [] },
+          { name: "foo", fields: [] },
+        ],
+      };
+      await writeFile(path, JSON.stringify(badManifest), "utf8");
+      const { ctx, out } = buffers();
+      const code = await runValidate(parsed("validate", path, "--format=json"), ctx);
+      expect(code).toBe(1);
+      const env = JSON.parse(out()) as {
+        ok: boolean;
+        errors: Array<{ path: string; message: string }>;
+      };
+      expect(env.ok).toBe(false);
+      expect(env.errors.length).toBeGreaterThan(0);
+      expect(env.errors[0]!.message).toContain("duplicate");
+    });
+
+    it("on duplicate-trait manifest with human format, emits validation error text (exit 1)", async () => {
+      const dir = await tempDir();
+      const path = join(dir, "manifest.json");
+      const badManifest = {
+        ...emptyManifest({ name: "T", slug: "t" }),
+        traits: [
+          { name: "foo", fields: [] },
+          { name: "foo", fields: [] },
+        ],
+      };
+      await writeFile(path, JSON.stringify(badManifest), "utf8");
+      const { ctx, err } = buffers();
+      const code = await runValidate(parsed("validate", path), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("duplicate");
+    });
+
+    it("returns exit 2 when path is missing", async () => {
+      const { ctx, err } = buffers();
+      const code = await runValidate(parsed("validate"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("validate: missing path");
+    });
+
+    it("--format=json on file-not-found preserves human error (printError, not JSON envelope)", async () => {
+      const { ctx, err } = buffers();
+      // readManifestFile catch branch — falls through to printError
+      // (not JSON; the file-read error isn't a manifest-shape issue).
+      const code = await runValidate(
+        parsed("validate", "/nonexistent/manifest.json", "--format=json"),
+        ctx,
+      );
+      expect(code).toBe(1);
+      expect(err()).toContain("validate:");
+    });
+  });
+
+  describe("runDiff error paths", () => {
+    it("returns exit 1 when oldPath doesn't exist", async () => {
+      const dir = await tempDir();
+      const b = join(dir, "b.json");
+      await writeManifest(b, emptyManifest({ name: "T", slug: "t" }));
+      const { ctx, err } = buffers();
+      const code = await runDiff(parsed("diff", "/nonexistent/a.json", b), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("diff:");
+    });
+
+    it("returns exit 1 when newPath doesn't exist", async () => {
+      const dir = await tempDir();
+      const a = join(dir, "a.json");
+      await writeManifest(a, emptyManifest({ name: "T", slug: "t" }));
+      const { ctx, err } = buffers();
+      const code = await runDiff(parsed("diff", a, "/nonexistent/b.json"), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("diff:");
+    });
+  });
+
+  describe("runHash error paths", () => {
+    it("returns exit 2 when path is missing", async () => {
+      const { ctx, err } = buffers();
+      const code = await runHash(parsed("hash"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("hash: missing path");
+    });
+  });
+
+  describe("runPatch error paths", () => {
+    it("returns exit 1 when patch file doesn't exist (readManifestFile catch)", async () => {
+      const dir = await tempDir();
+      const base = join(dir, "base.json");
+      await writeManifest(base, emptyManifest({ name: "T", slug: "t" }));
+      const { ctx, err } = buffers();
+      const code = await runPatch(parsed("patch", base, "/nonexistent/patch.json"), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("patch:");
+    });
+
+    it("returns exit 1 when writeManifestFile fails (--output to a refused path)", async () => {
+      const dir = await tempDir();
+      const base = join(dir, "base.json");
+      const patch = join(dir, "patch.json");
+      const manifest = emptyManifest({ name: "T", slug: "t" });
+      await writeManifest(base, manifest);
+      await writeManifest(patch, manifest);
+      // Existing file at the --output path without --force triggers
+      // the writeManifestFile "refusing to overwrite" branch.
+      const existing = join(dir, "existing.json");
+      await writeFile(existing, "{}", "utf8");
+      const { ctx, err } = buffers();
+      const code = await runPatch(parsed("patch", base, patch, `--output=${existing}`), ctx);
+      expect(code).toBe(1);
+      expect(err()).toContain("patch:");
+      expect(err()).toContain("refusing to overwrite");
+    });
+
+    it("emits JSON envelope on success when --format=json", async () => {
+      const dir = await tempDir();
+      const base = join(dir, "base.json");
+      const patch = join(dir, "patch.json");
+      const manifest = emptyManifest({ name: "T", slug: "t" });
+      await writeManifest(base, manifest);
+      await writeManifest(patch, manifest);
+      const { ctx, out } = buffers();
+      const code = await runPatch(parsed("patch", base, patch, "--format=json"), ctx);
+      expect(code).toBe(0);
+      const env = JSON.parse(out()) as { ok: boolean; path: string; hash: string };
+      expect(env.ok).toBe(true);
+      expect(env.path).toBe(base);
+      expect(env.hash).toMatch(/^[0-9a-f]+$/);
+    });
+  });
+
+  describe("runChat flag validation", () => {
+    it("returns exit 2 when --format is not human or json", async () => {
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+      const code = await runChat(parsed("chat", "--format=csv"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("chat:");
+      expect(err()).toContain("--format must be 'human' or 'json'");
+    });
+
+    it("returns exit 2 when --max-tokens is not a positive integer", async () => {
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+      const code = await runChat(parsed("chat", "--max-tokens=not-a-number"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("chat: invalid --max-tokens");
+    });
+
+    it("returns exit 2 when --max-tokens is zero", async () => {
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+      const code = await runChat(parsed("chat", "--max-tokens=0"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("chat: invalid --max-tokens");
+    });
+
+    it("returns exit 2 when --max-tokens is negative", async () => {
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" } });
+      const code = await runChat(parsed("chat", "--max-tokens=-100"), ctx);
+      expect(code).toBe(2);
+      expect(err()).toContain("chat: invalid --max-tokens");
+    });
+  });
+});
