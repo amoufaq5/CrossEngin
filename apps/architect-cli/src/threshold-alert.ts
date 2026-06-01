@@ -607,3 +607,56 @@ function formatDurationMs(ms: number): string {
   if (ms < 86_400_000) return `${(ms / 3_600_000).toFixed(1)}h`;
   return `${(ms / 86_400_000).toFixed(1)}d`;
 }
+
+// M4.15.z — gh-summary Markdown row for a single tripped alert.
+// Returns one Markdown table row (matching the | Table | Field |
+// Actual | Threshold | Age | header from formatTrippedAlertsGh
+// SummaryTable). Compound alerts render the per-clause "what was
+// actual" detail joined with `<br>` line breaks inside the cell —
+// keeps the table shape (5 cols) consistent without forcing the
+// renderer to handle row-spanning Markdown (which GitHub doesn't).
+export function formatTrippedAlertGhSummaryRow(alert: TrippedAlert): string {
+  if (alert.combinator !== "SINGLE" && alert.trippedClauses.length > 1) {
+    const fieldList = alert.trippedClauses.map((c) => `\`${c.fieldName}\``).join("<br>");
+    const actualList = alert.trippedClauses
+      .map((c) => mdFormatAlertValue(c.actual, c.ageMs))
+      .join("<br>");
+    const escapedSpec = mdEscapeAlertCell(alert.spec);
+    return `| \`${alert.tableName}\` | ${fieldList} | ${actualList} | \`${escapedSpec}\` _(compound)_ | — |`;
+  }
+  const escapedSpec = mdEscapeAlertCell(alert.spec);
+  return `| \`${alert.tableName}\` | \`${alert.fieldName}\` | ${mdFormatAlertValue(alert.actual, undefined)} | \`${escapedSpec}\` | ${alert.ageMs !== undefined ? formatDurationMs(alert.ageMs) : "—"} |`;
+}
+
+// Markdown-safe rendering of an actual value: null sentinel,
+// numbers with toLocaleString thousands separators, strings
+// backtick-wrapped + pipe-escaped. ageMs (when set) appended as
+// `(age 1.5h)` suffix.
+function mdFormatAlertValue(actual: number | string | null, ageMs: number | undefined): string {
+  const formatted =
+    actual === null
+      ? "`null` _(never set)_"
+      : typeof actual === "number"
+        ? `\`${actual.toLocaleString("en-US")}\``
+        : `\`${mdEscapeAlertCell(actual)}\``;
+  return ageMs !== undefined ? `${formatted} _(age ${formatDurationMs(ageMs)})_` : formatted;
+}
+
+function mdEscapeAlertCell(s: string): string {
+  // Pipe-escape + backslash-escape for Markdown table cells.
+  return s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
+
+// M4.15.z — multi-alert gh-summary table (header + N rows). Caller
+// emits the section ## title separately; this helper produces the
+// table block as a single string with trailing newline.
+export function formatTrippedAlertsGhSummaryTable(tripped: ReadonlyArray<TrippedAlert>): string {
+  if (tripped.length === 0) return "";
+  const lines: string[] = [];
+  lines.push(`| Table | Field | Actual | Threshold | Age |`);
+  lines.push(`|-------|-------|--------|-----------|-----|`);
+  for (const alert of tripped) {
+    lines.push(formatTrippedAlertGhSummaryRow(alert));
+  }
+  return lines.join("\n") + "\n";
+}

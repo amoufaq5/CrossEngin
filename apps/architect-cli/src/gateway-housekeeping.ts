@@ -14,6 +14,7 @@ import {
 import { resolveTenantIdentifier } from "./tenant-resolver.js";
 import {
   evaluateAlertCompound,
+  formatTrippedAlertsGhSummaryTable,
   parseThresholdAlertFlags,
   renderTrippedAlert,
   type AlertableFieldSpec,
@@ -259,7 +260,11 @@ export async function runGatewayHousekeeping(
   buildConnection: () => PgConnection,
 ): Promise<number> {
   // Parse --watch + --watch-interval BEFORE PG resolution so misuse exits
-  // cleanly without burning a connection.
+  // cleanly without burning a connection. parseWatchFlags rejects every
+  // --format other than human|json under --watch, which subsumes the
+  // M4.15.z gh-summary case (gh-summary is one-shot for $GITHUB_STEP_
+  // SUMMARY; streaming per-tick Markdown would produce duplicate
+  // headers + concat-broken tables anyway).
   const watchFlags = parseWatchFlags(command, ctx.io, "gateway housekeeping");
   if (typeof watchFlags === "number") return watchFlags;
 
@@ -401,6 +406,20 @@ export async function runGatewayHousekeeping(
     const tripped = alerts.length > 0 ? evaluateAlertsForReport(report, alerts) : [];
     if (command.format === "json") {
       printJson(ctx.io, { action: "gateway.housekeeping", ...report, alerts: tripped });
+    } else if (command.format === "gh-summary") {
+      // M4.15.z — Markdown for CI step summary. Per-table grid +
+      // tripped-alerts table (when any) + verdict footer. Alerts
+      // evaluation drives the verdict: tripped > 0 → :x: gate
+      // failed, else :white_check_mark: (only when alerts were
+      // actually evaluated; otherwise no verdict — housekeeping
+      // without alerts is a query surface not a gate).
+      ctx.io.stdout.write(
+        formatHousekeepingReportGhSummary({
+          report,
+          tripped,
+          hadAlerts: alerts.length > 0,
+        }),
+      );
     } else {
       renderHumanReport(ctx, report);
       if (tripped.length > 0) renderTrippedAlertsHuman(ctx, tripped);
@@ -410,6 +429,61 @@ export async function runGatewayHousekeeping(
     printError(ctx.io, `gateway housekeeping: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
+}
+
+// M4.15.z — gh-summary Markdown renderer for the housekeeping
+// dashboard. Per-table grid (Table | Total rows | Oldest | Would
+// prune | Retention days) + optional tripped-alerts section. Verdict
+// footer fires only when alerts were evaluated (--threshold-alert
+// supplied); without alerts the surface is a query report not a
+// gate so no verdict line appears.
+export interface HousekeepingReportGhSummaryInput {
+  readonly report: HousekeepingReport;
+  readonly tripped: ReadonlyArray<TrippedAlert>;
+  readonly hadAlerts: boolean;
+}
+
+export function formatHousekeepingReportGhSummary(input: HousekeepingReportGhSummaryInput): string {
+  const lines: string[] = [];
+  const { report, tripped, hadAlerts } = input;
+  lines.push(`## Gateway housekeeping`);
+  lines.push("");
+  lines.push(`**As of:** \`${report.asOf}\`  `);
+  if (report.tenantId !== undefined) {
+    lines.push(`**Tenant:** \`${report.tenantId}\`  `);
+  }
+  if (report.allTenants === true) {
+    lines.push(`**Scope:** all tenants  `);
+  }
+  lines.push(`**Tables:** ${report.tables.length}`);
+  lines.push("");
+  lines.push(`| Table | Total rows | Oldest | Would prune | Retention |`);
+  lines.push(`|-------|-----------:|--------|------------:|-----------|`);
+  for (const t of report.tables) {
+    const rowCount = t.totalRowCount.toLocaleString("en-US");
+    const oldest = t.oldestAt === null ? "—" : `\`${t.oldestAt}\``;
+    const wouldPrune = t.wouldPruneCount.toLocaleString("en-US");
+    const retention =
+      t.pruneSemantic === "expires_at"
+        ? "_TTL-managed_"
+        : t.retentionDays === null
+          ? "—"
+          : `${t.retentionDays}d`;
+    lines.push(`| \`${t.tableName}\` | ${rowCount} | ${oldest} | ${wouldPrune} | ${retention} |`);
+  }
+  lines.push("");
+  if (tripped.length > 0) {
+    lines.push(`### Threshold alerts (${tripped.length})`);
+    lines.push("");
+    lines.push(formatTrippedAlertsGhSummaryTable(tripped).trimEnd());
+    lines.push("");
+    lines.push(`:x: **${tripped.length} threshold alert(s) tripped** — exit 3 (CI gate failed).`);
+  } else if (hadAlerts) {
+    // Alerts evaluated, none tripped — clean gate.
+    lines.push(`:white_check_mark: **All threshold alerts passed.**`);
+  }
+  // No verdict when hadAlerts === false (query surface, not a gate).
+  return lines.join("\n") + "\n";
 }
 
 // Evaluate every alert against every table row in the report. asOf drives

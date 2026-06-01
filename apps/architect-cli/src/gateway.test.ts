@@ -2847,3 +2847,330 @@ describe("formatPruneIdempotencyGhSummary (M4.15.x)", () => {
     expect(md).toContain("**Scope:** operationId=`tenants.update` | method=`PATCH` | limit=200");
   });
 });
+
+// M4.15.z — `gateway housekeeping --format gh-summary` Markdown
+// rendering. Extends the M4.15.x CI gate gh-summary pattern to the
+// unified housekeeping dashboard. Verdict fires only when alerts
+// were evaluated (--threshold-alert supplied). --format gh-summary
+// is incompatible with --watch (one-shot only).
+describe("runGateway housekeeping --format gh-summary (M4.15.z)", () => {
+  const fixedNow = new Date("2026-05-29T12:00:00.000Z");
+
+  // Reuse fixtures from the housekeeping (M4.14) describe block above.
+  function fakeStatsConnection(
+    perTable: Record<string, { total: string; oldest: string | null }>,
+  ): PgConnection {
+    return {
+      query: async <T>(sql: string, _params?: readonly unknown[]) => {
+        for (const [name, stats] of Object.entries(perTable)) {
+          if (sql.includes(`FROM meta.${name}`)) {
+            return { rows: [stats], rowCount: 1 } as unknown as PgQueryResult<T>;
+          }
+        }
+        return { rows: [], rowCount: 0 } as unknown as PgQueryResult<T>;
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>) => fn({} as PgConnection),
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+  }
+
+  function fakeRetention(): PostgresTraceRetention {
+    return {
+      listPolicies: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          retentionDays: 30,
+          enabled: true,
+          lastPrunedAt: "2026-05-28T00:00:00.000Z",
+        },
+        {
+          tableName: "rate_limit_decisions",
+          retentionDays: 7,
+          enabled: true,
+          lastPrunedAt: null,
+        },
+      ],
+      previewPrune: async () => [
+        {
+          tableName: "gateway_pipeline_executions",
+          status: "previewed",
+          retentionDays: 30,
+          wouldDeleteCount: 1042,
+          cutoffMs: 0,
+        },
+        {
+          tableName: "rate_limit_decisions",
+          status: "previewed",
+          retentionDays: 7,
+          wouldDeleteCount: 9876,
+          cutoffMs: 0,
+        },
+      ],
+    } as unknown as PostgresTraceRetention;
+  }
+
+  function fakeIdempotencyStore(wouldDelete: number): PostgresIdempotencyStore {
+    return {
+      previewDeleteExpired: async () => wouldDelete,
+    } as unknown as PostgresIdempotencyStore;
+  }
+
+  function makeCtx(io: IoStreams): GatewayContext {
+    return {
+      io,
+      env: {},
+      pgConnectionOverride: fakeStatsConnection({
+        gateway_pipeline_executions: { total: "50000", oldest: "2026-04-01T00:00:00.000Z" },
+        gateway_idempotency_records: { total: "1200", oldest: "2026-05-25T00:00:00.000Z" },
+        rate_limit_decisions: { total: "987654", oldest: "2026-03-15T00:00:00.000Z" },
+      }),
+      retentionOverride: fakeRetention(),
+      idempotencyStoreOverride: fakeIdempotencyStore(300),
+      clockOverride: () => fixedNow,
+    };
+  }
+
+  it("emits Markdown with ## header + As of + Tables count + per-table grid", async () => {
+    const { io, outChunks } = makeIo();
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--format", "gh-summary"),
+      makeCtx(io),
+    );
+    expect(code).toBe(0);
+    const out = outChunks.join("");
+    expect(out).toContain("## Gateway housekeeping");
+    expect(out).toContain(`**As of:** \`${fixedNow.toISOString()}\``);
+    expect(out).toContain("**Tables:** 3");
+    expect(out).toContain("| Table | Total rows | Oldest | Would prune | Retention |");
+    // Locale-formatted thousands separators.
+    expect(out).toContain("50,000");
+    expect(out).toContain("987,654");
+    expect(out).toContain("1,042");
+    expect(out).toContain("9,876");
+    // Retention column: retention-governed tables show days; idempotency table shows _TTL-managed_.
+    expect(out).toContain("30d");
+    expect(out).toContain("7d");
+    expect(out).toContain("_TTL-managed_");
+    // No verdict (no alerts evaluated).
+    expect(out).not.toContain(":white_check_mark:");
+    expect(out).not.toContain(":x:");
+  });
+
+  it("emits :white_check_mark: verdict when alerts evaluated + none tripped", async () => {
+    const { io, outChunks } = makeIo();
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--format",
+        "gh-summary",
+        "--threshold-alert",
+        "wouldPruneCount:>10000000",
+      ),
+      makeCtx(io),
+    );
+    expect(code).toBe(0);
+    const out = outChunks.join("");
+    expect(out).toContain(":white_check_mark: **All threshold alerts passed.**");
+  });
+
+  it("emits :x: verdict + tripped-alerts table when alerts trip (exit 3)", async () => {
+    const { io, outChunks } = makeIo();
+    const code = await runGateway(
+      parseGatewayArgs(
+        "housekeeping",
+        "--format",
+        "gh-summary",
+        "--threshold-alert",
+        "totalRowCount:>100000",
+      ),
+      makeCtx(io),
+    );
+    expect(code).toBe(3);
+    const out = outChunks.join("");
+    expect(out).toContain("### Threshold alerts (1)");
+    expect(out).toContain("| Table | Field | Actual | Threshold | Age |");
+    // The single tripped clause is on rate_limit_decisions (987,654 > 100,000).
+    expect(out).toContain("`rate_limit_decisions`");
+    expect(out).toContain("`totalRowCount`");
+    expect(out).toContain("987,654");
+    expect(out).toContain(":x: **1 threshold alert(s) tripped**");
+    expect(out).toContain("exit 3 (CI gate failed)");
+  });
+
+  // M4.15.z's --format gh-summary + --watch incompatibility check fires
+  // BEFORE the more-general parseWatchFlags format-validation, but
+  // parseWatchFlags ALSO rejects gh-summary under --watch with a
+  // different (broader) message. Either error path is acceptable
+  // semantically — the operator gets an exit-2 + clear message.
+  it("--watch + --format gh-summary rejected with explanatory error (exit 2)", async () => {
+    const { io, errChunks } = makeIo();
+    const code = await runGateway(
+      parseGatewayArgs("housekeeping", "--format", "gh-summary", "--watch"),
+      makeCtx(io),
+    );
+    expect(code).toBe(2);
+    const err = errChunks.join("");
+    expect(err).toContain("gateway housekeeping:");
+    // Either error message is acceptable — both communicate the
+    // incompatibility. parseWatchFlags currently wins because it
+    // runs first.
+    expect(err.includes("gh-summary") || err.includes("requires --format human or json")).toBe(
+      true,
+    );
+  });
+});
+
+// M4.15.z — direct unit tests for the threshold-alert Markdown
+// helpers (formatTrippedAlertGhSummaryRow + formatTrippedAlertsGh
+// SummaryTable). Lives in gateway.test.ts since the gateway is the
+// primary consumer, but the helpers are exported from threshold-
+// alert.ts and reusable by future surfaces (tenant housekeeping).
+describe("threshold-alert gh-summary helpers (M4.15.z)", () => {
+  it("formatTrippedAlertGhSummaryRow renders single-clause alert (numeric actual + no age)", async () => {
+    const { formatTrippedAlertGhSummaryRow } = await import("./threshold-alert.js");
+    const row = formatTrippedAlertGhSummaryRow({
+      tableName: "workflow_traces",
+      fieldName: "totalRowCount",
+      actual: 50000,
+      spec: "totalRowCount GT 10000 ON workflow_traces",
+      combinator: "SINGLE",
+      trippedClauses: [
+        {
+          fieldName: "totalRowCount",
+          op: "GT",
+          actual: 50000,
+          threshold: 10000,
+          clauseRaw: "totalRowCount GT 10000",
+        },
+      ],
+    });
+    expect(row).toBe(
+      "| `workflow_traces` | `totalRowCount` | `50,000` | `totalRowCount GT 10000 ON workflow_traces` | — |",
+    );
+  });
+
+  it("formatTrippedAlertGhSummaryRow renders single-clause alert with ageMs (timestamp staleness)", async () => {
+    const { formatTrippedAlertGhSummaryRow } = await import("./threshold-alert.js");
+    const row = formatTrippedAlertGhSummaryRow({
+      tableName: "workflow_traces",
+      fieldName: "oldestAt",
+      actual: "2026-04-01T00:00:00.000Z",
+      spec: "oldestAt OLDER_THAN 30d ON workflow_traces",
+      combinator: "SINGLE",
+      ageMs: 90 * 24 * 60 * 60 * 1000,
+      trippedClauses: [
+        {
+          fieldName: "oldestAt",
+          op: "GT",
+          actual: "2026-04-01T00:00:00.000Z",
+          threshold: 30 * 24 * 60 * 60 * 1000,
+          clauseRaw: "oldestAt OLDER_THAN 30d",
+        },
+      ],
+    });
+    // Age column populated; spec quoted.
+    expect(row).toContain("90.0d");
+    expect(row).toContain("`oldestAt OLDER_THAN 30d ON workflow_traces`");
+  });
+
+  it("formatTrippedAlertGhSummaryRow renders null actual as `null` _(never set)_", async () => {
+    const { formatTrippedAlertGhSummaryRow } = await import("./threshold-alert.js");
+    const row = formatTrippedAlertGhSummaryRow({
+      tableName: "workflow_traces",
+      fieldName: "lastPrunedAt",
+      actual: null,
+      spec: "lastPrunedAt OLDER_THAN 1d ON workflow_traces",
+      combinator: "SINGLE",
+      trippedClauses: [
+        {
+          fieldName: "lastPrunedAt",
+          op: "GT",
+          actual: null,
+          threshold: 86400000,
+          clauseRaw: "lastPrunedAt OLDER_THAN 1d",
+        },
+      ],
+    });
+    expect(row).toContain("`null` _(never set)_");
+  });
+
+  it("formatTrippedAlertGhSummaryRow renders compound (AND/OR) with <br>-joined cells", async () => {
+    const { formatTrippedAlertGhSummaryRow } = await import("./threshold-alert.js");
+    const row = formatTrippedAlertGhSummaryRow({
+      tableName: "workflow_traces",
+      fieldName: "totalRowCount",
+      actual: 50000,
+      spec: "totalRowCount GT 10000 AND wouldPruneCount GT 1000 ON workflow_traces",
+      combinator: "AND",
+      trippedClauses: [
+        {
+          fieldName: "totalRowCount",
+          op: "GT",
+          actual: 50000,
+          threshold: 10000,
+          clauseRaw: "totalRowCount GT 10000",
+        },
+        {
+          fieldName: "wouldPruneCount",
+          op: "GT",
+          actual: 5000,
+          threshold: 1000,
+          clauseRaw: "wouldPruneCount GT 1000",
+        },
+      ],
+    });
+    expect(row).toContain("`totalRowCount`<br>`wouldPruneCount`");
+    expect(row).toContain("`50,000`<br>`5,000`");
+    expect(row).toContain("_(compound)_");
+    expect(row.endsWith("— |")).toBe(true);
+  });
+
+  it("formatTrippedAlertsGhSummaryTable returns empty string on empty input", async () => {
+    const { formatTrippedAlertsGhSummaryTable } = await import("./threshold-alert.js");
+    expect(formatTrippedAlertsGhSummaryTable([])).toBe("");
+  });
+
+  it("formatTrippedAlertsGhSummaryTable renders header + per-alert rows", async () => {
+    const { formatTrippedAlertsGhSummaryTable } = await import("./threshold-alert.js");
+    const out = formatTrippedAlertsGhSummaryTable([
+      {
+        tableName: "workflow_traces",
+        fieldName: "totalRowCount",
+        actual: 100,
+        spec: "totalRowCount GT 10 ON workflow_traces",
+        combinator: "SINGLE",
+        trippedClauses: [
+          {
+            fieldName: "totalRowCount",
+            op: "GT",
+            actual: 100,
+            threshold: 10,
+            clauseRaw: "totalRowCount GT 10",
+          },
+        ],
+      },
+      {
+        tableName: "rate_limit_decisions",
+        fieldName: "wouldPruneCount",
+        actual: 5000,
+        spec: "wouldPruneCount GT 1000 ON rate_limit_decisions",
+        combinator: "SINGLE",
+        trippedClauses: [
+          {
+            fieldName: "wouldPruneCount",
+            op: "GT",
+            actual: 5000,
+            threshold: 1000,
+            clauseRaw: "wouldPruneCount GT 1000",
+          },
+        ],
+      },
+    ]);
+    const lines = out.trim().split("\n");
+    expect(lines[0]).toBe("| Table | Field | Actual | Threshold | Age |");
+    expect(lines[1]).toBe("|-------|-------|--------|-----------|-----|");
+    expect(lines[2]).toContain("`workflow_traces`");
+    expect(lines[3]).toContain("`rate_limit_decisions`");
+  });
+});
