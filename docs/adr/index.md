@@ -117,3 +117,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 31 | 0057 | 4,500 | Drafted alongside `@crossengin/ai-architect-pg` (Phase 2 M5.7) |
 | 32 | 0058 | 4,500 | Drafted alongside `@crossengin/pack-erp-core` (Phase 2 M7) |
 | 33 | 0059 | 4,500 | Drafted alongside `@crossengin/ai-router` (Phase 2 M6.5) |
+| 34 | 0060 | 4,500 | Drafted alongside `@crossengin/observability-runtime` (Phase 2 M8) |

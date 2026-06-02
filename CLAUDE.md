@@ -15,8 +15,31 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
 M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 landed: **51 packages + 1 app, 119 meta-schema tables, 5,768
-tests**, all green, no type errors. M6.5 added
+M7 + M8 landed: **52 packages + 1 app, 119 meta-schema tables,
+5,859 tests**, all green, no type errors. **Phase 2's eight
+milestones (M1–M8) are now complete.** M8 added
+`@crossengin/observability-runtime` — the SLO enforcement loop.
+7 modules: clock (Clock/FixedClock + parseDurationMs), window
+(RequestOutcome ingest + RollingWindow per-surface counts),
+burn-rate (multi-window Google-SRE burn-rate evaluation —
+fast-burn 1h/5m@14.4×→sev2, slow-burn 6h/30m@6×→sev3, fires
+only when both windows clear the multiplier + minSamples),
+synthetics (SyntheticTracker + consecutive-failure detection),
+enforcement (pure planners: planIncidentDeclaration →
+schema-valid declared IncidentRecord, planPageDirective →
+AlertRouteResolution, planKillSwitchActivation →
+triggered_active KillSwitch with automated_metric_breach
+trigger; severity→alert-severity map; INC-/fks_ id formatters),
+tracing (TraceCollector stitches gateway→workflow→notifications
+spans into a tree), engine (SloEnforcementEngine: recordOutcome
++ evaluate → breach_opened/breach_ongoing/recovered decisions,
+dedups one incident per ongoing breach, mints cross-linked
+incident + kill-switch ids). Pure runtime, no new META_ tables —
+emits records typed by existing contracts (IncidentRecord →
+META_INCIDENTS, KillSwitch → feature-flag tables). The exit
+criterion runs end-to-end in tests: a 5xx burst on
+`POST /v1/orders` declares a SEV2 incident, pages on-call, and
+rolls `ff_checkout01` back to its safe value. M6.5 added
 `@crossengin/ai-router` — the orchestration layer between
 consumers and `LlmProvider` implementations. 5 modules: retry
 (exponential backoff + isRetryable check + withRetry wrapper),
@@ -162,7 +185,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0059 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0060 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -174,7 +197,9 @@ M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
 human-in-the-loop approval), ADR-0057 covers M5.7 (chat
 persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`pack-erp-core` — first vertical pack), ADR-0059 covers M6.5
-(`ai-router` — provider router with retry / cost / latency).
+(`ai-router` — provider router with retry / cost / latency),
+ADR-0060 covers M8 (`observability-runtime` — SLO enforcement
+loop).
 
 ## Architecture in 90 seconds
 
@@ -394,6 +419,29 @@ re-exporting everything.
   letters, cost ledger.
 - **`observability`** — SLO definitions, error budget compute,
   redaction, synthetics, OTel-style tracing.
+- **`observability-runtime`** — the SLO enforcement loop (pure,
+  in-process; consumes observability + incident-response +
+  feature-flags contracts). 7 modules: clock (Clock/FixedClock +
+  parseDurationMs), window (RequestOutcome ingest + RollingWindow
+  per-surface counts + failureRate), burn-rate (multi-window
+  Google-SRE evaluation: DEFAULT_BURN_RATE_THRESHOLDS fast-burn
+  1h/5m@14.4×→sev2 + slow-burn 6h/30m@6×→sev3; burnRate =
+  failureRate / (1−target); fires only when both windows clear
+  the multiplier and the long window has ≥minSamples),
+  synthetics (SyntheticTracker + consecutiveFailures +
+  evaluateSynthetic against SyntheticCheckDeclaration),
+  enforcement (planIncidentDeclaration → schema-valid declared
+  IncidentRecord; planPageDirective → AlertRouteResolution;
+  planKillSwitchActivation → triggered_active KillSwitch with
+  automated_metric_breach trigger; SEVERITY_TO_ALERT_SEVERITY;
+  formatIncidentId/formatKillSwitchId; FlagRollbackSchema),
+  tracing (RecordedSpan + childContext + TraceCollector that
+  stitches gateway→workflow→notifications spans into a tree),
+  engine (SloEnforcementEngine: recordOutcome + evaluate →
+  breach_opened/breach_ongoing/recovered; one incident per
+  ongoing breach; mints cross-linked incident + kill-switch ids).
+  No new META_ tables — emits records typed by existing
+  contracts.
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
 - **`rate-limiting`** — unified rate-limit + quota contracts. 6
@@ -797,6 +845,24 @@ hash + apply via the existing CLI flow. Pattern set for future
 verticals (healthcare, retail, construction): same module shape,
 same cross-validators, optional `meta.extends` lineage.
 
+**No longer deferred (as of M8):** SLO enforcement.
+`@crossengin/observability-runtime` turns the inert SLO / alert /
+synthetic / trace definitions from `@crossengin/observability`
+into a running enforcement loop. `SloEnforcementEngine`
+ingests `RequestOutcome`s, computes multi-window Google-SRE burn
+rates against each SLO's availability target, and on a breach
+emits an `EnforcementPlan`: a schema-valid declared
+`IncidentRecord` (→ META_INCIDENTS), an on-call `PageDirective`
+resolved from the `AlertPolicy`, and a `triggered_active`
+`KillSwitch` that rolls the offending flag back to its safe
+value. One incident per ongoing breach (dedup), with a
+`recovered` decision when the burn clears. `TraceCollector`
+stitches gateway→workflow→notifications spans into a tree. Pure
+in-process runtime (no new META_ tables); persistence +
+percentile-based latency enforcement are the future
+`observability-runtime-pg` (M8.5). **Phase 2's eight milestones
+(M1–M8) are complete.**
+
 **No longer deferred (as of M5.7):** chat audit trail. The new
 `@crossengin/ai-architect-pg` package persists every chat
 session, message, tool invocation, and write proposal to four
@@ -864,7 +930,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0059 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0060 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -879,7 +945,8 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
 M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
 Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
-(`ai-router`). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+(`ai-router`), ADR-0060 covers Phase 2 M8
+(`observability-runtime` — SLO enforcement loop). When you ship
+a new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.
