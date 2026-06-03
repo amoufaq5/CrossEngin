@@ -1,7 +1,14 @@
+import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { columnIndex, columnPlanForEntity } from "./column-plan.js";
+import {
+  columnIndex,
+  columnPlanForEntity,
+  columnPlansForManifest,
+  referencedEntities,
+  topologicalEntityOrder,
+} from "./column-plan.js";
 
 const WIDGET: Entity = {
   name: "Widget",
@@ -30,10 +37,12 @@ describe("columnPlanForEntity", () => {
     expect(byField.get("status")?.sqlType).toBe("TEXT");
   });
 
-  it("suffixes a reference column with _id and types it UUID", () => {
+  it("suffixes a reference column with _id, types it TEXT (matches TEXT id), and records the target", () => {
     const owner = columnIndex(plan).get("owner");
     expect(owner?.column).toBe("owner_id");
-    expect(owner?.sqlType).toBe("UUID");
+    expect(owner?.sqlType).toBe("TEXT");
+    expect(owner?.referenceTarget).toBe("Account");
+    expect(columnIndex(plan).get("sku")?.referenceTarget).toBeNull();
   });
 
   it("flags encrypt-at-rest only for phi/regulated classifications", () => {
@@ -45,5 +54,52 @@ describe("columnPlanForEntity", () => {
 
   it("rejects an invalid schema name", () => {
     expect(() => columnPlanForEntity(WIDGET, { schema: "bad; DROP" })).toThrow(/invalid schema/);
+  });
+});
+
+const ACCOUNT: Entity = { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] };
+const LINE: Entity = {
+  name: "OrderLine",
+  fields: [
+    { name: "qty", type: { kind: "integer" } },
+    { name: "order", type: { kind: "reference", target: "Order" } },
+  ],
+};
+const ORDER: Entity = {
+  name: "Order",
+  fields: [{ name: "account", type: { kind: "reference", target: "Account" } }],
+};
+
+function plansOf(...entities: Entity[]): ReturnType<typeof columnPlansForManifest> {
+  return columnPlansForManifest({ entities } as unknown as Manifest, { schema: "tenant_app" });
+}
+
+describe("referencedEntities", () => {
+  it("lists distinct reference targets", () => {
+    const plan = columnPlanForEntity(ORDER, { schema: "tenant_app" });
+    expect(referencedEntities(plan)).toEqual(["Account"]);
+  });
+});
+
+describe("topologicalEntityOrder", () => {
+  it("orders a referenced entity before the entity that references it", () => {
+    const order = topologicalEntityOrder(plansOf(LINE, ORDER, ACCOUNT));
+    expect(order.indexOf("Account")).toBeLessThan(order.indexOf("Order"));
+    expect(order.indexOf("Order")).toBeLessThan(order.indexOf("OrderLine"));
+  });
+
+  it("ignores references to entities not in the set", () => {
+    // OrderLine → Order, but Order absent ⇒ no constraint on ordering
+    const order = topologicalEntityOrder(plansOf(LINE, ACCOUNT));
+    expect(order).toContain("OrderLine");
+    expect(order).toContain("Account");
+    expect(order).toHaveLength(2);
+  });
+
+  it("returns all nodes even with a reference cycle", () => {
+    const a: Entity = { name: "A", fields: [{ name: "b", type: { kind: "reference", target: "B" } }] };
+    const b: Entity = { name: "B", fields: [{ name: "a", type: { kind: "reference", target: "A" } }] };
+    const order = topologicalEntityOrder(plansOf(a, b));
+    expect([...order].sort()).toEqual(["A", "B"]);
   });
 });

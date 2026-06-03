@@ -59,6 +59,24 @@ describe("ColumnMappedEntityStore — ensureSchema", () => {
     expect(all).toContain('CREATE TABLE IF NOT EXISTS "tenant_app"."widget"');
     expect(all).toContain("ENABLE ROW LEVEL SECURITY");
   });
+
+  it("creates referenced tables first, then adds composite foreign keys", async () => {
+    const account: Entity = { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] };
+    const order: Entity = { name: "Order", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] };
+    const cap = capturePg();
+    const s = new ColumnMappedEntityStore(cap.conn, { entities: [order, account] } as unknown as Manifest, { schema: "tenant_app" });
+    await s.ensureSchema();
+    const sqls = cap.calls.map((c) => c.sql);
+    const createAccount = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."account"'));
+    const createOrder = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."order"'));
+    const addFk = sqls.findIndex((q) => q.includes('ADD CONSTRAINT "fk_order_account_id"'));
+    expect(createAccount).toBeGreaterThanOrEqual(0);
+    // referenced table (account) created before the referencing table (order)
+    expect(createAccount).toBeLessThan(createOrder);
+    // FK added only after both tables exist
+    expect(addFk).toBeGreaterThan(createOrder);
+    expect(sqls[addFk]).toContain('REFERENCES "tenant_app"."account" ("tenant_id", "id")');
+  });
 });
 
 describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => {

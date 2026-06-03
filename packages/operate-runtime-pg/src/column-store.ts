@@ -18,10 +18,11 @@ import {
 import {
   columnIndex,
   columnPlansForManifest,
+  topologicalEntityOrder,
   type ColumnMapping,
   type EntityTablePlan,
 } from "./column-plan.js";
-import { emitEntityTableDdl } from "./entity-ddl.js";
+import { emitEntityTableDdl, emitForeignKeyDdl } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -90,7 +91,12 @@ export class ColumnMappedEntityStore implements EntityStore {
     return idx;
   }
 
-  /** Applies idempotent CREATE TABLE / RLS / comment DDL for every entity table. */
+  /**
+   * Applies idempotent DDL for every entity table. Two-phase: all tables are
+   * created first (in topological reference order — a referenced table before
+   * the one that references it), then all foreign keys are added once every
+   * target exists. The two-phase split keeps reference *cycles* safe to apply.
+   */
   async ensureSchema(): Promise<void> {
     const schema = [...this.plans.values()][0]?.schema;
     if (schema !== undefined) {
@@ -99,8 +105,19 @@ export class ColumnMappedEntityStore implements EntityStore {
     if (this.hasEncryptedColumns()) {
       await ensurePgcryptoExtension(this.conn);
     }
-    for (const plan of this.plans.values()) {
+    const order = topologicalEntityOrder(this.plans);
+    for (const name of order) {
+      const plan = this.plans.get(name);
+      if (plan === undefined) continue;
       for (const stmt of emitEntityTableDdl(plan)) {
+        await this.conn.query(stmt);
+      }
+    }
+    const known = new Set(this.plans.keys());
+    for (const name of order) {
+      const plan = this.plans.get(name);
+      if (plan === undefined) continue;
+      for (const stmt of emitForeignKeyDdl(plan, known)) {
         await this.conn.query(stmt);
       }
     }

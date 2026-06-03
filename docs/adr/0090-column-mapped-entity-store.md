@@ -105,9 +105,10 @@ a demonstrated drop-in for the JSONB one.
     equality first cut (the column's native type drives the meaningful win —
     sorting). Typed/operator filters ride the same `ListFilter` shape later.
 - **Foreign keys on reference columns.**
-  - **Decision.** Deferred — cross-entity FKs within tenant data (and their
-    apply ordering) are a separate concern; the column is typed `UUID` and named
-    `<ref>_id`, leaving the FK as an additive migration.
+  - **Decision.** Deferred here; **delivered in ADR-0092 (P1.12).** Reference
+    columns are now `TEXT` (matching the TEXT `id`) and `ensureSchema` adds a
+    composite `(tenant_id, <ref>_id) → (tenant_id, id)` FK in a cycle-safe
+    two-phase, topologically-ordered apply.
 
 ## Consequences
 

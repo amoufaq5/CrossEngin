@@ -2,7 +2,7 @@ import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
 import { columnPlanForEntity } from "./column-plan.js";
-import { emitEntityTableDdl } from "./entity-ddl.js";
+import { emitEntityTableDdl, emitForeignKeyDdl } from "./entity-ddl.js";
 
 const WIDGET: Entity = {
   name: "Widget",
@@ -48,5 +48,32 @@ describe("emitEntityTableDdl", () => {
 
   it("does not comment unclassified columns", () => {
     expect(sql).not.toContain(`"sku" IS 'crossengin`);
+  });
+});
+
+describe("emitForeignKeyDdl", () => {
+  const ORDER: Entity = {
+    name: "Order",
+    fields: [
+      { name: "account", type: { kind: "reference", target: "Account" } },
+      { name: "note", type: { kind: "text" } },
+    ],
+  };
+  const plan = columnPlanForEntity(ORDER, { schema: "tenant_app" });
+
+  it("emits a composite (tenant_id, <ref>_id) FK to the target's (tenant_id, id)", () => {
+    const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"])).join("\n");
+    expect(sql).toContain('DROP CONSTRAINT IF EXISTS "fk_order_account_id"');
+    expect(sql).toContain('ADD CONSTRAINT "fk_order_account_id"');
+    expect(sql).toContain('FOREIGN KEY ("tenant_id", "account_id") REFERENCES "tenant_app"."account" ("tenant_id", "id") ON DELETE RESTRICT');
+  });
+
+  it("skips a reference whose target is not a known table", () => {
+    expect(emitForeignKeyDdl(plan, new Set(["Order"]))).toEqual([]);
+  });
+
+  it("emits nothing for an entity with no references", () => {
+    const acct = columnPlanForEntity({ name: "Account", fields: [{ name: "name", type: { kind: "text" } }] }, { schema: "tenant_app" });
+    expect(emitForeignKeyDdl(acct, new Set(["Account"]))).toEqual([]);
   });
 });

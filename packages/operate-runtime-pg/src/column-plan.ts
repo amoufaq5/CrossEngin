@@ -16,6 +16,8 @@ export interface ColumnMapping {
   readonly notNull: boolean;
   readonly classification: DataClassification | null;
   readonly encryptAtRest: boolean;
+  /** For a reference field: the target entity name (so a FK can be emitted), else null. */
+  readonly referenceTarget: string | null;
 }
 
 /** The full plan for one entity's per-tenant table (domain columns only). */
@@ -30,13 +32,18 @@ const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
 function mappingForField(field: Field): ColumnMapping {
   const classification = field.classification ?? null;
+  const isReference = field.type.kind === "reference";
   return {
     field: field.name,
     column: columnNameForField(field),
-    sqlType: fieldTypeToPostgresType(field.type),
+    // Reference columns are TEXT, not UUID: they hold the target's TEXT `id`
+    // (the column store keeps TEXT ids for cross-store parity), so a composite
+    // FK to `(tenant_id, id)` type-checks.
+    sqlType: isReference ? "TEXT" : fieldTypeToPostgresType(field.type),
     notNull: field.required === true,
     classification,
     encryptAtRest: classification !== null && requiresEncryptionAtRest(classification),
+    referenceTarget: field.type.kind === "reference" ? field.type.target : null,
   };
 }
 
@@ -73,4 +80,66 @@ export function columnPlansForManifest(
     out.set(entity.name, columnPlanForEntity(entity, opts));
   }
   return out;
+}
+
+/** The distinct reference targets of a plan (deduped, in column order). */
+export function referencedEntities(plan: EntityTablePlan): readonly string[] {
+  const seen = new Set<string>();
+  for (const c of plan.columns) {
+    if (c.referenceTarget !== null) seen.add(c.referenceTarget);
+  }
+  return [...seen];
+}
+
+/**
+ * Orders entity names so a referenced entity precedes the entity that references
+ * it (Kahn's algorithm over the reference graph) — the order to create tables in
+ * so a FK target already exists. References to entities not in the set are
+ * ignored; on a cycle the remaining nodes are appended in insertion order (FKs
+ * are added in a second pass, so a cycle is still safe to apply).
+ */
+export function topologicalEntityOrder(plans: ReadonlyMap<string, EntityTablePlan>): readonly string[] {
+  const names = [...plans.keys()];
+  const present = new Set(names);
+  const deps = new Map<string, Set<string>>();
+  const indegree = new Map<string, number>();
+  for (const name of names) {
+    deps.set(name, new Set());
+    indegree.set(name, 0);
+  }
+  for (const name of names) {
+    const plan = plans.get(name);
+    if (plan === undefined) continue;
+    for (const target of referencedEntities(plan)) {
+      if (!present.has(target) || target === name) continue;
+      // edge target → name; name depends on target
+      const set = deps.get(name);
+      if (set !== undefined && !set.has(target)) {
+        set.add(target);
+        indegree.set(name, (indegree.get(name) ?? 0) + 1);
+      }
+    }
+  }
+  const ready = names.filter((n) => (indegree.get(n) ?? 0) === 0);
+  const ordered: string[] = [];
+  const emitted = new Set<string>();
+  while (ready.length > 0) {
+    const next = ready.shift()!;
+    if (emitted.has(next)) continue;
+    ordered.push(next);
+    emitted.add(next);
+    for (const name of names) {
+      if (emitted.has(name)) continue;
+      const set = deps.get(name);
+      if (set?.has(next)) {
+        set.delete(next);
+        if (set.size === 0) ready.push(name);
+      }
+    }
+  }
+  // append any nodes left in a cycle, in insertion order
+  for (const name of names) {
+    if (!emitted.has(name)) ordered.push(name);
+  }
+  return ordered;
 }
