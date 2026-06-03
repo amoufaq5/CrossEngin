@@ -6513,6 +6513,8 @@ export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
       notNull: true,
       check: "sequence_cursor >= 0",
     },
+    { name: "claimed_by", type: "TEXT" },
+    { name: "lease_expires_at", type: "TIMESTAMPTZ" },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -6527,6 +6529,10 @@ export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
     {
       name: "idx_workflow_activities_next_retry",
       columns: ["next_retry_at"],
+    },
+    {
+      name: "idx_workflow_activities_retry_claim",
+      columns: ["status", "next_retry_at", "lease_expires_at"],
     },
     {
       name: "idx_workflow_activities_timeout",

@@ -417,6 +417,79 @@ describe("fireTimer (per-unit, for the distributed worker)", () => {
   });
 });
 
+describe("retryActivity (per-unit, for the activity retry executor)", () => {
+  const activityDef: WorkflowDefinition = {
+    ...definitionFixture(),
+    states: [
+      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "working",
+        kind: "intermediate",
+        label: "Working",
+        onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 7 } } }],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    ],
+    transitions: [
+      { name: "start", fromState: "draft", toState: "working", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      { name: "complete", fromState: "working", toState: "done", trigger: { kind: "activity_completed", activityKey: "work" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+    ],
+    initialState: "draft",
+  };
+
+  /** Registry whose "work" activity fails on attempt 1, succeeds on attempt 2 — capturing the input it saw. */
+  function flakyRegistry(): { registry: ActivityRegistry; inputs: unknown[] } {
+    const registry = createDefaultRegistry();
+    const inputs: unknown[] = [];
+    registry.registerForActivity(activityDef.id, "work", async (inv) => {
+      inputs.push(inv.input);
+      return inv.attemptNumber === 1
+        ? { status: "failed", errorCode: "FLAKY", errorMessage: "first attempt fails", retryable: true }
+        : { status: "succeeded", output: { ok: true } };
+    });
+    return { registry, inputs };
+  }
+
+  async function activityId(engine: ReturnType<typeof makeEngine>["engine"], instanceId: string): Promise<string> {
+    const events = await engine.listEvents(instanceId);
+    return events.find((e) => e.kind === "activity_scheduled")!.activityId!;
+  }
+
+  it("re-runs a failed activity (with its original input) and completes the workflow", async () => {
+    const { registry, inputs } = flakyRegistry();
+    const { engine } = makeEngine({ definition: activityDef, registry });
+    const state = await engine.startInstance({ definitionId: activityDef.id, tenantId: TENANT });
+    // attempt 1 failed inline; instance is parked in "working"
+    expect((await engine.getInstanceState(state.instanceId))?.currentState).toBe("working");
+    const aId = await activityId(engine, state.instanceId);
+
+    const result = await engine.retryActivity({ instanceId: state.instanceId, activityId: aId });
+    expect(result).toMatchObject({ retried: true, status: "succeeded", activityId: aId });
+    expect((await engine.getInstanceState(state.instanceId))?.currentState).toBe("done");
+    expect(inputs).toEqual([{ n: 7 }, { n: 7 }]); // original input replayed on retry
+  });
+
+  it("is a no-op for an activity that already succeeded", async () => {
+    const { registry } = flakyRegistry();
+    const { engine } = makeEngine({ definition: activityDef, registry });
+    const state = await engine.startInstance({ definitionId: activityDef.id, tenantId: TENANT });
+    const aId = await activityId(engine, state.instanceId);
+    await engine.retryActivity({ instanceId: state.instanceId, activityId: aId }); // succeeds
+    const again = await engine.retryActivity({ instanceId: state.instanceId, activityId: aId });
+    expect(again.retried).toBe(false);
+  });
+
+  it("is a no-op for an unknown activity / instance", async () => {
+    const { registry } = flakyRegistry();
+    const { engine } = makeEngine({ definition: activityDef, registry });
+    const state = await engine.startInstance({ definitionId: activityDef.id, tenantId: TENANT });
+    expect((await engine.retryActivity({ instanceId: state.instanceId, activityId: "wfa_nope" })).retried).toBe(false);
+    expect((await engine.retryActivity({ instanceId: "wfi_nope", activityId: "wfa_x" })).retried).toBe(false);
+  });
+});
+
 describe("schedule_activity action", () => {
   it("runs the registered handler and emits scheduled+started+completed", async () => {
     const def: WorkflowDefinition = {

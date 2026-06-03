@@ -1510,6 +1510,13 @@ describe("table column shapes", () => {
     expect(META_WORKFLOW_TIMERS.indexes?.some((i) => i.name === "idx_workflow_timers_claim")).toBe(true);
   });
 
+  it("META_WORKFLOW_ACTIVITIES carries retry-claim lease columns + index", () => {
+    const cols = META_WORKFLOW_ACTIVITIES.columns.map((c) => c.name);
+    expect(cols).toContain("claimed_by");
+    expect(cols).toContain("lease_expires_at");
+    expect(META_WORKFLOW_ACTIVITIES.indexes?.some((i) => i.name === "idx_workflow_activities_retry_claim")).toBe(true);
+  });
+
   it("META_WORKFLOW_EVENTS enforces append-only per-instance ordering via unique (instance, sequence)", () => {
     expect(
       META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns,

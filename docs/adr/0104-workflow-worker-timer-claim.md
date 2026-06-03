@@ -92,6 +92,7 @@ covers any residual race.
   bulk worker.
 - **The engine grew a reusable per-unit fire** (`fireTimer`) that a future async
   activity executor / retry path can mirror.
-- **An async activity queue + retry executor remain the deeper P2 follow-up** —
-  the same claim/lease + per-unit-execute pattern, applied to activities (which
-  currently run inline).
+- **An activity retry executor is delivered in ADR-0105 (P2.2)** — the same
+  claim/lease + per-unit-execute pattern (`retryActivity`), applied to failed
+  activities. A full async activity *queue* (decouple schedule from execute)
+  remains the deeper follow-up.

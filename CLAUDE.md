@@ -19,9 +19,9 @@ M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
 P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
-P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1** landed: **60 packages +
-2 apps, 123 meta-schema tables, 6,405 tests**, all green, no type
-errors.
+P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2** landed: **60
+packages + 2 apps, 123 meta-schema tables, 6,416 tests**, all
+green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
 `@crossengin/workflow-worker` runs the workflow runtime as a worker
@@ -47,8 +47,23 @@ disjoint batch via `FOR UPDATE SKIP LOCKED` (stamping the lease,
 returning timer id + instance `wfi_` ref), and `ClaimingTimerWorker.
 runOnce` claims a batch + fires each via `fireTimer` (releasing the
 lease on any that didn't fire). N claiming workers drain timers **in
-parallel** — no global lock (SKIP LOCKED partitions). An async
-activity queue + retry executor stay the deeper P2 follow-up. P1 added
+parallel** — no global lock (SKIP LOCKED partitions). **P2.2
+(ADR-0105) added the activity retry executor** —
+`WorkflowEngine.retryActivity({instanceId, activityId})` re-runs a
+failed/timed-out activity at the next attempt with its **original
+input** (now persisted on the `activity_scheduled` event) and
+advances the workflow on success (idempotent: succeeded/in-flight/
+unknown → no-op; shares a `runActivityAttempt` helper extracted
+from inline scheduling). `meta.workflow_activities` gained the same
+`claimed_by`/`lease_expires_at` lease columns + a retry-claim index;
+`PostgresActivityRetryClaimStore.claimDueRetries` claims
+failed/timed-out, not-exhausted (`attempt_number < max_attempts`),
+backoff-elapsed activities via `FOR UPDATE SKIP LOCKED`; and
+`RetryExecutorWorker.runOnce` claims a batch + re-runs each via
+`retryActivity`, releasing the lease after each attempt (in a
+`finally`). N retry workers drain retries in parallel. A full async
+activity *queue* (decouple schedule from execute) + backoff
+`next_retry_at` population stay the deeper follow-up. P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
 `manifest → routes → handlers` compiler derives a `RouteSpec` per
@@ -682,7 +697,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0104 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0105 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -708,7 +723,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -817,8 +832,8 @@ re-exporting everything.
   expected projection vs stored rows; bulkResync iterates with
   pagination + maxInstances cap for periodic CI / observability
   guards).
-- **`workflow-worker`** — Phase 3 P2 + P2.1: the distributed worker.
-  4 modules: lock-key (advisoryLockKey(namespace) → a stable signed
+- **`workflow-worker`** — Phase 3 P2 + P2.1 + P2.2: the distributed
+  worker. 6 modules: lock-key (advisoryLockKey(namespace) → a stable signed
   64-bit pg advisory-lock key from sha256), worker (WorkflowWorker.
   tickOnce runs engine.tickTimers(now) inside conn.withAdvisoryLock
   so N worker processes serialize on one lock — only one ticks at a
@@ -834,10 +849,17 @@ re-exporting everything.
   columns), claiming-worker (ClaimingTimerWorker.runOnce claims a
   batch + fires each via engine.fireTimer, releasing the lease on any
   that didn't fire — N of these drain timers in parallel, no global
-  lock since SKIP LOCKED partitions). No new META tables (2 columns +
-  1 index on workflow_timers). The engine's WorkflowEngine.fireTimer
-  (per-unit, idempotent) lives in workflow-runtime. An async activity
-  queue + retry executor are the deeper follow-up.
+  lock since SKIP LOCKED partitions), activity-claim-store (P2.2:
+  PostgresActivityRetryClaimStore.claimDueRetries claims
+  failed/timed-out, not-exhausted, backoff-elapsed activities via FOR
+  UPDATE SKIP LOCKED + lease), retry-worker (RetryExecutorWorker.
+  runOnce claims a batch + re-runs each via engine.retryActivity,
+  releasing the lease in a finally). The engine's per-unit primitives
+  WorkflowEngine.fireTimer + retryActivity (both idempotent, replaying
+  the original activity input) live in workflow-runtime. No new META
+  tables (lease columns + indexes on workflow_timers + workflow_
+  activities). A full async activity queue + backoff next_retry_at
+  population are the deeper follow-up.
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces + a replayer. 5 modules:
   idempotency-store (INSERT … ON CONFLICT DO UPDATE on tenant+
@@ -1923,7 +1945,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0104 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0105 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1989,7 +2011,7 @@ Phase 3 P1.21 (field selection / projection on list + read in
 `operate-runtime`), ADR-0102 covers Phase 3 P1.22 (SQL-level
 projection pushdown in the column store), ADR-0103 covers Phase 3
 P2 (`workflow-worker` — the distributed tick worker over the PG
-event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers; ADRs 0080-0085 reserved for P3-P8).
+event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

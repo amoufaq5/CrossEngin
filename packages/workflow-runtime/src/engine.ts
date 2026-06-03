@@ -69,6 +69,13 @@ export interface FireTimerResult {
   readonly timerName: string | null;
 }
 
+export interface RetryActivityResult {
+  readonly retried: boolean;
+  readonly instanceId: string;
+  readonly activityId: string;
+  readonly status: "succeeded" | "failed" | "timed_out" | null;
+}
+
 export class WorkflowEngine {
   private readonly eventLog: EventLog;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -601,12 +608,78 @@ export class WorkflowEngine {
         kind,
         definitionActivityKey: activityKey,
         attemptNumber: 1,
+        input: inputData,
         inputSha256: sha256(JSON.stringify(inputData)),
       },
       correlationId: null,
       causationEventId: null,
     });
 
+    await this.runActivityAttempt(instanceId, definition, tenantId, activityId, activityKey, kind, inputData, 1);
+  }
+
+  /**
+   * Re-runs a previously-scheduled activity that ended in `failed`/`timed_out`,
+   * at the next attempt number, with its **original input** (persisted on the
+   * `activity_scheduled` event). The per-unit retry path a distributed executor
+   * uses after claiming a due retry. A no-op (`retried: false`) if the activity
+   * already succeeded/cancelled, has a retry in flight (last event is
+   * `activity_started`), or the instance/activity is unknown/terminal — so it's
+   * safe to drive from a leased claim.
+   */
+  async retryActivity(input: {
+    instanceId: string;
+    activityId: string;
+  }): Promise<RetryActivityResult> {
+    const miss: RetryActivityResult = { retried: false, instanceId: input.instanceId, activityId: input.activityId, status: null };
+    const state = await this.getInstanceState(input.instanceId);
+    if (state === null) return miss;
+    if (state.status === "completed" || state.status === "cancelled" || state.status === "compensated") return miss;
+    const definition = this.definitions.get(state.definitionId);
+    if (definition === undefined) return miss;
+    const events = await this.eventLog.listByInstance(input.instanceId);
+    let activityKey: string | null = null;
+    let kind = "transformation";
+    let activityInput: Record<string, unknown> = {};
+    let attempts = 0;
+    let lastKind: string | null = null;
+    for (const e of events) {
+      if (e.activityId !== input.activityId) continue;
+      if (e.kind === "activity_scheduled") {
+        activityKey = typeof e.payload["definitionActivityKey"] === "string" ? (e.payload["definitionActivityKey"] as string) : null;
+        kind = typeof e.payload["kind"] === "string" ? (e.payload["kind"] as string) : "transformation";
+        activityInput = (e.payload["input"] as Record<string, unknown>) ?? {};
+      } else if (e.kind === "activity_started") {
+        attempts += 1;
+      }
+      lastKind = e.kind;
+    }
+    // retry only a settled failure (not in-flight, not succeeded)
+    if (activityKey === null || (lastKind !== "activity_failed" && lastKind !== "activity_timed_out")) return miss;
+    const outcome = await this.runActivityAttempt(
+      input.instanceId,
+      definition,
+      state.tenantId,
+      input.activityId,
+      activityKey,
+      kind,
+      activityInput,
+      attempts + 1,
+    );
+    return { retried: true, instanceId: input.instanceId, activityId: input.activityId, status: outcome };
+  }
+
+  /** Runs one activity attempt: `activity_started` → handler → completed/failed/timed_out + transition. */
+  private async runActivityAttempt(
+    instanceId: string,
+    definition: WorkflowDefinition,
+    tenantId: string,
+    activityId: string,
+    activityKey: string,
+    kind: string,
+    inputData: Record<string, unknown>,
+    attemptNumber: number,
+  ): Promise<"succeeded" | "failed" | "timed_out"> {
     const handler =
       this.registry.resolve({
         kind: kind as never,
@@ -630,7 +703,7 @@ export class WorkflowEngine {
       timerId: null,
       childInstanceId: null,
       variableName: null,
-      payload: {},
+      payload: { attemptNumber },
       correlationId: null,
       causationEventId: null,
     });
@@ -644,7 +717,7 @@ export class WorkflowEngine {
         definitionId: definition.id,
         definitionActivityKey: activityKey,
         kind: kind as never,
-        attemptNumber: 1,
+        attemptNumber,
         input: inputData,
         variables: state?.variables ?? {},
       });
@@ -709,7 +782,7 @@ export class WorkflowEngine {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { errorCode: outcome.errorCode, errorMessage: outcome.errorMessage },
+        payload: { errorCode: outcome.errorCode, errorMessage: outcome.errorMessage, attemptNumber },
         correlationId: null,
         causationEventId: null,
       });
@@ -742,11 +815,12 @@ export class WorkflowEngine {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { errorMessage: outcome.errorMessage },
+        payload: { errorMessage: outcome.errorMessage, attemptNumber },
         correlationId: null,
         causationEventId: null,
       });
     }
+    return outcome.status;
   }
 
   private async applyScheduleTimer(
