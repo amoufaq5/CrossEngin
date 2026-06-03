@@ -11,14 +11,18 @@ const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', t
  * RLS enabled with the standard tenant-isolation policy
  * (`DROP POLICY IF EXISTS` → `CREATE POLICY`, so re-runs are safe), and a
  * `crossengin.data_class=…[; crossengin.encrypt=at_rest]` comment per classified
- * column (the same convention the kernel-pg encryption applier reads).
+ * column (the same convention the kernel-pg encryption applier reads). A column
+ * flagged `encryptAtRest` is stored as `BYTEA` (pgcrypto ciphertext), not its
+ * plaintext type.
  */
 export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
   const columnLines: string[] = [
     `${quoteIdent("tenant_id")} UUID NOT NULL`,
     `${quoteIdent("id")} TEXT NOT NULL`,
-    ...plan.columns.map((c) => `${quoteIdent(c.column)} ${c.sqlType}${c.notNull ? " NOT NULL" : ""}`),
+    ...plan.columns.map(
+      (c) => `${quoteIdent(c.column)} ${c.encryptAtRest ? "BYTEA" : c.sqlType}${c.notNull ? " NOT NULL" : ""}`,
+    ),
     `${quoteIdent("created_at")} TIMESTAMPTZ NOT NULL DEFAULT now()`,
     `${quoteIdent("updated_at")} TIMESTAMPTZ NOT NULL DEFAULT now()`,
     `PRIMARY KEY (${quoteIdent("tenant_id")}, ${quoteIdent("id")})`,

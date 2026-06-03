@@ -1,6 +1,11 @@
 import { qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  ensurePgcryptoExtension,
+  pgpSymDecryptExpr,
+  pgpSymEncryptExpr,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import {
   decodeCursor,
   encodeCursor,
@@ -20,8 +25,17 @@ import { emitEntityTableDdl } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
+/**
+ * The default SQL *reference* yielding the column-encryption key — never the raw
+ * key text. Overridable via `encryptionKeyRef`; matches the kernel-pg
+ * `crossengin-pg encrypt` default.
+ */
+export const DEFAULT_ENCRYPTION_KEY_REF = "current_setting('app.column_encryption_key')";
+
 export interface ColumnMappedEntityStoreOptions {
   readonly schema?: string;
+  /** SQL expression yielding the pgcrypto key (a reference, never the raw key). */
+  readonly encryptionKeyRef?: string;
 }
 
 /**
@@ -31,14 +45,16 @@ export interface ColumnMappedEntityStoreOptions {
  * classification/encryption comments) derived from the entity's fields. Records
  * map field ↔ column on every op; `listPage` sorts on the **native** column type
  * (a real `ORDER BY <column>`, not JSONB text) and filters by safe text-cast
- * equality. At-rest encryption of `phi`/`regulated` columns is carried as a DDL
- * comment (for the kernel-pg encryption applier); transparent encrypt-on-write
- * through this store is the follow-up.
+ * equality. A `phi`/`regulated` column is stored as a pgcrypto-encrypted `BYTEA`
+ * (`pgp_sym_encrypt` on write, `pgp_sym_decrypt` on read) with the key supplied
+ * by SQL reference; encrypted columns are excluded from sort/filter (you can't
+ * meaningfully order ciphertext).
  */
 export class ColumnMappedEntityStore implements EntityStore {
   private readonly conn: PgConnection;
   private readonly plans: ReadonlyMap<string, EntityTablePlan>;
   private readonly indexes: Map<string, ReadonlyMap<string, ColumnMapping>> = new Map();
+  private readonly keyRef: string;
 
   constructor(
     conn: PgConnection,
@@ -47,6 +63,16 @@ export class ColumnMappedEntityStore implements EntityStore {
   ) {
     this.conn = conn;
     this.plans = columnPlansForManifest(manifest, { schema: opts.schema ?? "public" });
+    const keyRef = opts.encryptionKeyRef ?? DEFAULT_ENCRYPTION_KEY_REF;
+    if (keyRef.trim().length === 0) throw new Error("encryptionKeyRef must be a non-empty SQL reference");
+    this.keyRef = keyRef;
+  }
+
+  private hasEncryptedColumns(): boolean {
+    for (const plan of this.plans.values()) {
+      if (plan.columns.some((c) => c.encryptAtRest)) return true;
+    }
+    return false;
   }
 
   private planFor(entity: string): EntityTablePlan {
@@ -70,6 +96,9 @@ export class ColumnMappedEntityStore implements EntityStore {
     if (schema !== undefined) {
       await this.conn.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)};`);
     }
+    if (this.hasEncryptedColumns()) {
+      await ensurePgcryptoExtension(this.conn);
+    }
     for (const plan of this.plans.values()) {
       for (const stmt of emitEntityTableDdl(plan)) {
         await this.conn.query(stmt);
@@ -91,14 +120,14 @@ export class ColumnMappedEntityStore implements EntityStore {
       const where = [`${quoteIdent("tenant_id")} = $1`];
       for (const filter of query.filters) {
         const mapping = idx.get(filter.field);
-        if (mapping === undefined) continue;
+        if (mapping === undefined || mapping.encryptAtRest) continue;
         params.push(filter.value);
         where.push(`${quoteIdent(mapping.column)}::text = $${params.length.toString()}`);
       }
       const order: string[] = [];
       for (const sort of query.sort) {
         const mapping = idx.get(sort.field);
-        if (mapping === undefined) continue;
+        if (mapping === undefined || mapping.encryptAtRest) continue;
         order.push(`${quoteIdent(mapping.column)} ${sort.direction === "desc" ? "DESC" : "ASC"}`);
       }
       order.push(`${quoteIdent("id")} ASC`);
@@ -143,16 +172,16 @@ export class ColumnMappedEntityStore implements EntityStore {
     const qualified = qualifyTable(plan.schema, plan.table);
     const id = resolveRecordId(record);
     const columns = [quoteIdent("tenant_id"), quoteIdent("id")];
+    const placeholders = ["$1", "$2"];
     const values: unknown[] = [tenantId, id];
     const stored: EntityRecord = { id };
     for (const mapping of plan.columns) {
       const v = record[mapping.field];
       if (v === undefined) continue;
       columns.push(quoteIdent(mapping.column));
-      values.push(v);
+      placeholders.push(this.writePlaceholder(mapping, v, values));
       stored[mapping.field] = v;
     }
-    const placeholders = values.map((_, i) => `$${(i + 1).toString()}`);
     await withTenantContext(this.conn, tenantId, async (tx) => {
       await tx.query(
         `INSERT INTO ${qualified} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
@@ -176,8 +205,7 @@ export class ColumnMappedEntityStore implements EntityStore {
       for (const mapping of plan.columns) {
         const v = patch[mapping.field];
         if (v === undefined) continue;
-        params.push(v);
-        sets.push(`${quoteIdent(mapping.column)} = $${params.length.toString()}`);
+        sets.push(`${quoteIdent(mapping.column)} = ${this.writePlaceholder(mapping, v, params)}`);
       }
       sets.push(`${quoteIdent("updated_at")} = now()`);
       const res = await tx.query<Record<string, unknown>>(
@@ -205,7 +233,29 @@ export class ColumnMappedEntityStore implements EntityStore {
   }
 
   private selectList(plan: EntityTablePlan): string {
-    return [quoteIdent("id"), ...plan.columns.map((c) => quoteIdent(c.column))].join(", ");
+    const cols = [quoteIdent("id")];
+    for (const c of plan.columns) {
+      cols.push(
+        c.encryptAtRest
+          ? `${pgpSymDecryptExpr(quoteIdent(c.column), this.keyRef)} AS ${quoteIdent(c.column)}`
+          : quoteIdent(c.column),
+      );
+    }
+    return cols.join(", ");
+  }
+
+  /**
+   * Appends a write value to `params` and returns its SQL placeholder. An
+   * encrypted column binds the plaintext as text and wraps it in
+   * `pgp_sym_encrypt(…::text, keyRef)`; a plaintext column binds the raw value.
+   */
+  private writePlaceholder(mapping: ColumnMapping, value: unknown, params: unknown[]): string {
+    if (mapping.encryptAtRest) {
+      params.push(String(value));
+      return pgpSymEncryptExpr(`$${params.length.toString()}::text`, this.keyRef);
+    }
+    params.push(value);
+    return `$${params.length.toString()}`;
   }
 }
 

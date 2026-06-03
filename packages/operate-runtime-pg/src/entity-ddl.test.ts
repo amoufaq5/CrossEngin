@@ -26,6 +26,11 @@ describe("emitEntityTableDdl", () => {
     expect(sql).toContain('PRIMARY KEY ("tenant_id", "id")');
   });
 
+  it("stores an encrypt-at-rest (phi) column as BYTEA, not its plaintext type", () => {
+    expect(sql).toContain('"ssn" BYTEA');
+    expect(sql).not.toContain('"ssn" TEXT');
+  });
+
   it("enables RLS with an idempotent tenant-isolation policy", () => {
     expect(sql).toContain("ENABLE ROW LEVEL SECURITY");
     expect(sql).toContain('DROP POLICY IF EXISTS "widget_tenant_isolation"');

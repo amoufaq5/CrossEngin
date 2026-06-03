@@ -14,8 +14,11 @@ const WIDGET: Entity = {
     { name: "price", type: { kind: "decimal", precision: 12, scale: 2 } },
     { name: "status", type: { kind: "enum", values: ["active", "archived"] } },
     { name: "owner", type: { kind: "reference", target: "Account" } },
+    { name: "mrn", type: { kind: "text" }, classification: "phi" },
   ],
 };
+
+const KEY_REF = "current_setting('app.column_encryption_key')";
 
 const MANIFEST = { entities: [WIDGET] } as unknown as Manifest;
 
@@ -123,6 +126,61 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).toContain('ORDER BY "id" ASC');
     expect(sel.params).toEqual([TENANT, 6, 0]);
+  });
+});
+
+describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => {
+  it("ensureSchema provisions pgcrypto when a phi column exists", async () => {
+    const cap = capturePg();
+    await store(cap).ensureSchema();
+    expect(cap.calls.some((c) => /CREATE EXTENSION IF NOT EXISTS pgcrypto/i.test(c.sql))).toBe(true);
+  });
+
+  it("create encrypts a phi value with pgp_sym_encrypt(...::text, keyRef), binding plaintext as text", async () => {
+    const cap = capturePg();
+    await store(cap).create(TENANT, "Widget", { id: "w1", sku: "S1", mrn: 12345 });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain(`pgp_sym_encrypt($4::text, ${KEY_REF})`);
+    // tenant, id, sku, then the mrn plaintext coerced to text
+    expect(insert.params).toEqual([TENANT, "w1", "S1", "12345"]);
+  });
+
+  it("get decrypts a phi column via pgp_sym_decrypt(...) AS the column", async () => {
+    const cap = capturePg([{ id: "w1", sku: "S1", mrn: "999-99-9999" }]);
+    const record = await store(cap).get(TENANT, "Widget", "w1");
+    const select = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(select.sql).toContain(`pgp_sym_decrypt("mrn", ${KEY_REF}) AS "mrn"`);
+    expect(record).toMatchObject({ mrn: "999-99-9999" });
+  });
+
+  it("update re-encrypts a patched phi column", async () => {
+    const cap = capturePg([{ id: "w1", mrn: "x" }]);
+    await store(cap).update(TENANT, "Widget", "w1", { mrn: "new" });
+    const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+    expect(upd.sql).toContain(`"mrn" = pgp_sym_encrypt($3::text, ${KEY_REF})`);
+    expect(upd.params).toEqual([TENANT, "w1", "new"]);
+  });
+
+  it("excludes encrypted columns from filter + sort (can't order ciphertext)", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "mrn", direction: "asc" }],
+      filters: [{ field: "mrn", value: "x" }],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).not.toContain('"mrn" DESC');
+    expect(sel.sql).toContain('ORDER BY "id" ASC');
+    expect(sel.params).toEqual([TENANT, 6, 0]); // no filter bound for mrn
+  });
+
+  it("honors a custom encryptionKeyRef", async () => {
+    const cap = capturePg();
+    const s = new ColumnMappedEntityStore(cap.conn, MANIFEST, { schema: "tenant_app", encryptionKeyRef: "$$kref$$" });
+    await s.create(TENANT, "Widget", { id: "w1", mrn: "z" });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain("pgp_sym_encrypt($3::text, $$kref$$)");
   });
 });
 

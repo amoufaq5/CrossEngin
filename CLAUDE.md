@@ -17,9 +17,9 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10**
-landed: **59 packages + 2 apps, 123 meta-schema tables, 6,300
-tests**, all green, no type errors.
+M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
+P1.11** landed: **59 packages + 2 apps, 123 meta-schema tables,
+6,307 tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -121,9 +121,20 @@ real `ORDER BY "col"`, not JSONB text) and filters by safe
 `"col"::text = $n`. `id` stays TEXT for cross-store record parity.
 `operate-server --store pg-columns` provisions the typed tables at
 boot (`ensureSchema`) and serves a pack from them — a demonstrated
-drop-in for the JSONB store. Transparent store-level encryption of
-PHI columns stays the follow-up (the at-rest comment is emitted so
-the existing `crossengin-pg encrypt` tooling covers them).
+drop-in for the JSONB store. **P1.11 (ADR-0091) closed the last
+ADR-0090 follow-up — transparent at-rest encryption** in the
+column store: a `phi`/`regulated` column is emitted as `BYTEA` and
+the store wires pgcrypto in — `pgp_sym_encrypt($n::text, keyRef)`
+on write, `pgp_sym_decrypt("col", keyRef) AS "col"` on read (key
+by SQL *reference*, default `current_setting('app.column_
+encryption_key')`, never inlined), `ensureSchema` runs `CREATE
+EXTENSION IF NOT EXISTS pgcrypto`, and encrypted columns are
+excluded from sort/filter (can't order ciphertext). PHI is
+ciphertext at rest and plaintext to authorized callers,
+transparently — closing the classification arc end-to-end through
+the serving store (declare `phi` → comment → redaction → BYTEA →
+encrypt-on-write/decrypt-on-read). Searchable encryption + key
+rotation stay the deferred crypto follow-ups.
 M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
@@ -544,7 +555,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0090 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0091 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -561,7 +572,9 @@ Postgres EntityStore under tenant RLS), ADR-0087 covers P1.7
 (apps/operate-server — the runnable serving binary), ADR-0088
 covers P1.8 (list pagination + filtering from the ListView),
 ADR-0089 covers P1.9 (edge/Workers fetch adapter), ADR-0090 covers
-P1.10 (column-mapped entity store — typed per-entity tables)).
+P1.10 (column-mapped entity store — typed per-entity tables),
+ADR-0091 covers P1.11 (transparent at-rest encryption in the
+column-mapped store)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -771,14 +784,21 @@ re-exporting everything.
   + columnNameForField, carrying classification + encryptAtRest),
   entity-ddl (emitEntityTableDdl → idempotent CREATE TABLE IF NOT
   EXISTS with (tenant_id, TEXT id) PK + RLS via DROP/CREATE POLICY +
-  crossengin.data_class=…[; encrypt=at_rest] comments), column-store
+  crossengin.data_class=…[; encrypt=at_rest] comments; a phi/
+  regulated column is emitted as BYTEA), column-store
   (ColumnMappedEntityStore implements EntityStore over real per-
-  entity tables: ensureSchema applies the DDL, CRUD maps record↔
-  column, listPage sorts on the native column type + filters by
-  `"col"::text = $n`; fields absent from the plan are dropped). TEXT
-  id keeps cross-store record parity; `operate-server --store
-  pg-columns` provisions + serves from the typed tables. Transparent
-  encrypt-on-write is the follow-up (the at-rest comment is emitted).
+  entity tables: ensureSchema applies the DDL (+ CREATE EXTENSION
+  pgcrypto when encrypted columns exist), CRUD maps record↔column,
+  listPage sorts on the native column type + filters by
+  `"col"::text = $n`; fields absent from the plan are dropped).
+  P1.11: transparent at-rest encryption — a phi/regulated column is
+  pgp_sym_encrypt($n::text, keyRef) on write + pgp_sym_decrypt("col",
+  keyRef) AS "col" on read (key by SQL reference, default
+  current_setting('app.column_encryption_key'), never inlined);
+  encrypted columns excluded from sort/filter. TEXT id keeps cross-
+  store record parity; `operate-server --store pg-columns` provisions
+  + serves from the typed tables (PHI ciphertext at rest, plaintext
+  to authorized callers).
 - **`apps/operate-server`** — Phase 3 P1.7 + P1.9: the runnable
   serving binary (second app under `apps/`, after `architect-cli`)
   + an edge/Workers fetch adapter. 7
@@ -1712,7 +1732,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0090 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0091 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1759,8 +1779,9 @@ serving binary over `buildOperateGateway`), ADR-0088 covers Phase 3
 P1.8 (list pagination + filtering from the ListView), ADR-0089
 covers Phase 3 P1.9 (edge/Workers fetch adapter in `apps/operate-
 server`), ADR-0090 covers Phase 3 P1.10 (column-mapped entity
-store — typed per-entity tables in `operate-runtime-pg`; ADRs
-0080-0085 reserved for P3-P8).
+store — typed per-entity tables in `operate-runtime-pg`), ADR-0091
+covers Phase 3 P1.11 (transparent at-rest encryption in the column-
+mapped store; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

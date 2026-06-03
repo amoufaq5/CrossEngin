@@ -96,11 +96,10 @@ a demonstrated drop-in for the JSONB one.
     typing; the same id flows through in-memory / JSONB / column stores. A UUID
     PK is a per-pack option later if a pack wants it.
 - **Transparent encrypt-on-write through the store.**
-  - **Decision.** Deferred (same layering as M7.8.5). The store writes plaintext
-    typed columns and emits the at-rest **comment**; the kernel-pg
-    `EncryptionMigrator` rewrites a PHI column to `BYTEA` + a decrypting view
-    out-of-band. Wiring `pgp_sym_encrypt`/`decrypt` into the store's read/write
-    SQL is the follow-up.
+  - **Decision.** Deferred here; **delivered in ADR-0091 (P1.11).** The store now
+    emits a `phi`/`regulated` column as `BYTEA` and wires
+    `pgp_sym_encrypt`/`pgp_sym_decrypt` (key by SQL reference) into its
+    read/write SQL, so PHI is encrypted at rest transparently.
 - **Bind typed filter values (not `::text` cast).**
   - **Decision.** Text-cast equality is correct + injection-safe for the
     equality first cut (the column's native type drives the meaningful win —
