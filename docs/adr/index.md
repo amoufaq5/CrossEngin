@@ -125,3 +125,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 39 | 0065 | 4,500 | Drafted alongside `@crossengin/pack-erp-healthcare` (Phase 2 M7.5) |
 | 40 | 0066 | 4,000 | Drafted alongside field-level data classification in `types` + `kernel` (Phase 2 M7.6) |
 | 41 | 0067 | 4,000 | Drafted alongside acting on data classification (auth redaction + DDL encryption hints) (Phase 2 M7.7) |
+| 42 | 0068 | 4,000 | Drafted alongside gateway response redaction in `api-gateway-runtime` (Phase 2 M7.7.5) |

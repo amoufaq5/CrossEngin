@@ -15,10 +15,25 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 + M7.5 + M7.6 + M7.7 + M8 + M8.5 + M8.6 + M8.7 landed:
-**55 packages + 1 app, 122 meta-schema tables, 6,056 tests**, all
-green, no type errors. **Phase 2's eight milestones (M1–M8) are
-complete.** M7.7 acted on the M7.6 data classification (auth +
+M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M8 + M8.5 + M8.6 + M8.7
+landed: **55 packages + 1 app, 122 meta-schema tables, 6,069
+tests**, all green, no type errors. **Phase 2's eight milestones
+(M1–M8) are complete.** M7.7.5 wired the M7.7 classification
+redaction into the API gateway: `api-gateway-runtime`'s
+`transform_response` stage (previously a no-op) now strips
+classified fields from JSON responses per-caller. A new
+`redaction.ts` ships `ResponseRedactionSpec` (classifiedFields +
+roles map + `rolesForPrincipal` scope→role bridge + optional
+entityPermissions/policy), a `RedactionRegistry` /
+`MapRedactionRegistry` (operationId → spec),
+`computeRedactedFields` (bridges the gateway `ResolvedPrincipal`
+to an auth `Principal`, fail-closed: unknown roles map to an
+unprivileged sentinel rather than throwing), and `redactJsonValue`
+(pure tree-walk that drops named fields across records / arrays /
+`{data:[…]}` wrappers). `GatewayRuntimeOptions.redactionRegistry`
+is opt-in; the stage records `redacted_N_fields` in the
+`PipelineExecution` audit. Handlers return the full record; the
+edge redacts. M7.7 acted on the M7.6 data classification (auth +
 kernel + types enhancement, no new package): a sensitive field
 (pii/phi/regulated/commercial_sensitive) with no explicit `read`
 grant is now redacted-by-default for non-privileged principals
@@ -303,7 +318,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0067 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0068 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -327,7 +342,8 @@ covers M7.5 (`pack-erp-healthcare` — second vertical pack via
 `meta.extends`), ADR-0066 covers M7.6 (field-level data
 classification in `types` + `kernel`), ADR-0067 covers M7.7
 (acting on the classification — auth default redaction + DDL
-encryption hints).
+encryption hints), ADR-0068 covers M7.7.5 (gateway response
+redaction by classification).
 
 ## Architecture in 90 seconds
 
@@ -416,7 +432,12 @@ re-exporting everything.
   bulkVerify paginate over META_GATEWAY_PIPELINE_EXECUTIONS;
   summarize computes pass/deny/error counts + p50/p95 latency).
 - **`api-gateway-runtime`** — HTTP gateway middleware
-  (fourth impure package). 7 modules: adapters (RequestAdapter +
+  (fourth impure package). 8 modules: redaction
+  (ResponseRedactionSpec + RedactionRegistry/MapRedactionRegistry
+  + computeRedactedFields fail-closed scope→role bridge +
+  redactJsonValue tree-walk; `transform_response` strips
+  classified fields per-caller when a redactionRegistry is set);
+  adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
   buildIncomingRequest helper), stores (PrincipalResolver +
   IdempotencyStore + RateLimitChecker + RouteRegistry interfaces
@@ -1107,9 +1128,30 @@ migration applier has an at-rest-encryption signal in
 `validateWriteMask` are untouched; the classification-aware
 variants are additive opt-ins. PHI is now fail-closed (masked +
 encryption-hinted) from the field declaration alone. Wiring the
-redaction into the gateway response transform + choosing the
-encryption mechanism (pgcrypto vs envelope via crypto) are the
-deferred M7.7.5 / encryption ADR.
+redaction into the gateway is M7.7.5 (below); choosing the
+encryption mechanism (pgcrypto vs envelope via crypto) is the
+deferred encryption ADR.
+
+**No longer deferred (as of M7.7.5):** edge redaction.
+`@crossengin/api-gateway-runtime`'s `transform_response` stage
+applies the M7.7 classification redaction to JSON responses. A
+new `redaction.ts` ships `ResponseRedactionSpec` (classified
+fields + roles map + a `rolesForPrincipal` scope→role bridge,
+since the gateway `ResolvedPrincipal` carries scopes not roles +
+optional entityPermissions/policy), `RedactionRegistry` /
+`MapRedactionRegistry`, `computeRedactedFields` (fail-closed —
+unknown roles map to an unprivileged sentinel, never throwing
+into an unredacted fallback), and `redactJsonValue` (a pure
+tree-walk dropping named fields across records / arrays /
+`{data:[…]}` wrappers). `GatewayRuntimeOptions.redactionRegistry`
+is opt-in; with none set, `transform_response` is the prior
+no-op. The stage records `redacted_N_fields` in the
+`PipelineExecution` audit, and the response is rebuilt through
+`outgoingResponseFromJson` so `content-length` stays correct. A
+front-desk principal reading `GET /v1/patients` gets
+`mrn`/demographics dropped; a clinician gets them — same handler.
+A manifest-derived registry (`redactionRegistryFromManifest`) is
+the deferred M7.7.6.
 
 **No longer deferred (as of M8):** SLO enforcement.
 `@crossengin/observability-runtime` turns the inert SLO / alert /
@@ -1237,7 +1279,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0067 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0068 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1261,7 +1303,8 @@ enforcement persistence), ADR-0062 covers Phase 2 M8.6
 (`ai-providers-openai` — second LlmProvider), ADR-0065 covers
 Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack),
 ADR-0066 covers Phase 2 M7.6 (field-level data classification),
-ADR-0067 covers Phase 2 M7.7 (acting on data classification).
+ADR-0067 covers Phase 2 M7.7 (acting on data classification),
+ADR-0068 covers Phase 2 M7.7.5 (gateway response redaction).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
