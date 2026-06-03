@@ -61,6 +61,58 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  apps/operate-server:
+    dependencies:
+      '@crossengin/api-gateway':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway
+      '@crossengin/api-gateway-runtime':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway-runtime
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../../packages/kernel
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../../packages/kernel-pg
+      '@crossengin/operate-runtime':
+        specifier: workspace:*
+        version: link:../../packages/operate-runtime
+      '@crossengin/operate-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/operate-runtime-pg
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-core
+      '@crossengin/pack-erp-grocery':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-grocery
+      '@crossengin/pack-erp-healthcare':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-healthcare
+      '@crossengin/pack-erp-retail':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-retail
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/access-reviews:
     dependencies:
       '@crossengin/crypto':

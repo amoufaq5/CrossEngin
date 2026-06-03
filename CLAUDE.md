@@ -17,8 +17,9 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1 + P1.5 + P1.6** landed: **59 packages + 1 app,
-123 meta-schema tables, 6,217 tests**, all green, no type errors.
+M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7** landed: **59 packages +
+2 apps, 123 meta-schema tables, 6,254 tests**, all green, no type
+errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -58,8 +59,23 @@ tenant/schema throws before reaching SQL. It satisfies the exact
 {store: new PostgresEntityStore(conn), …})` serves the retail pack
 from Postgres with no other change. Column-mapped per-entity tables
 (DDL from the pack) stay the deeper follow-up behind the same
-contract. ADR-0078 Q1+Q2+Q3 resolved; Q4 (`apps/operate-server`),
-Q5 (list pagination) remain. M7.9.1 added
+contract. **P1.7 (ADR-0087) resolved ADR-0078 Q4** — `apps/operate-
+server` is the runnable serving binary, the second app under
+`apps/`. A thin Node `http` shell over `buildOperateGateway`:
+`OperateHttpServer.dispatch(raw, body)` maps a framework-neutral
+`RawHttpRequest` → the 17-stage pipeline → a `RawHttpResponse`
+(unknown method → 405 problem doc); `serve(--pack erp-retail|… |
+--manifest f.json --store memory|pg --api-key key:role:tenant)`
+loads + **resolves** the manifest at boot (retail → core, grocery
+→ retail → core merge), builds the store (`InMemoryEntityStore` or
+a `PostgresEntityStore` over `parsePgEnvConfig()`), wires API-key
+auth (fail-closed: unknown token → 401), and listens. A real
+loopback test boots it and gets a 200; every other module is
+tested offline over `RawHttpRequest`/mock Node req-res. The HTTP
+edge preserves every P1 guarantee — per-caller `unit_cost`
+redaction, RBAC 403, lifecycle — now over raw HTTP. ADR-0078
+Q1+Q2+Q3+Q4 resolved; only Q5 (list pagination) remains.
+M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -479,7 +495,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0087 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -492,7 +508,8 @@ marketplace install → P6 multi-region → P7 AI Architect in prod
 → P8 production hardening + GA; ADRs 0080-0085 lock P3-P8; ADR-0078
 covers P1, ADR-0079 covers P1.5 (gateway body parsing + handler
 outcome mapping), ADR-0086 covers P1.6 (operate-runtime-pg —
-Postgres EntityStore under tenant RLS)).
+Postgres EntityStore under tenant RLS), ADR-0087 covers P1.7
+(apps/operate-server — the runnable serving binary)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -686,6 +703,25 @@ re-exporting everything.
   unchanged. One new META table (operate_entity_records); the
   column-mapped per-entity store is the deeper follow-up behind the
   same contract.
+- **`apps/operate-server`** — Phase 3 P1.7: the runnable serving
+  binary (second app under `apps/`, after `architect-cli`). 6
+  modules: http (RawHttpRequest/RawHttpResponse + parseMethod +
+  splitTarget + rawToIncoming → a gateway IncomingRequest),
+  principals (parseApiKeySpec key:role:tenant + buildPrincipalWiring
+  → OpaqueTokenLookup + InMemoryPrincipalResolver + scope→role
+  bridge, fail-closed), manifest-source (loadBuiltinPack resolves a
+  vertical pack's meta.extends lineage against a registry of all
+  packs; loadManifestFromJson parses+validates a pre-resolved doc),
+  server (OperateHttpServer.dispatch maps raw → handleRequest →
+  RawHttpResponse, unknown method → 405; buildOperateHttpServer
+  composes manifest+store+keys), cli (parseServeArgs: --pack/
+  --manifest exactly one, --port, --store memory|pg, --schema,
+  --scheme, repeatable --api-key, --help/--version), node (thin
+  Node http binding: createNodeRequestListener reads the body +
+  dispatches + writes, throw → 500 problem doc; serve() loads the
+  manifest, builds the store, listens, returns a close handle).
+  `operate-server` bin. A real loopback test boots it for a 200;
+  all other logic is offline-tested.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -1176,8 +1212,9 @@ following are intentionally out of scope until contracts settle:
   (Anthropic ships its real client in M2.7 — see below.)
 - Real cryptography. Signature fields are typed as strings; the
   actual HMAC/ed25519 computation is not in this codebase.
-- Customer-facing apps under `apps/` other than `architect-cli`.
-  UI lives in `views` as type definitions only.
+- Customer-facing *UI* apps under `apps/`. UI lives in `views` as
+  type definitions only. (Two server-side apps exist:
+  `architect-cli` and, as of P1.7, `operate-server`.)
 
 **No longer deferred (as of M1):** kernel DDL execution. The
 `kernel-pg` package executes meta-schema DDL against a real
@@ -1593,7 +1630,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0087 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1634,8 +1671,10 @@ is the Phase 3 plan, ADR-0078 covers Phase 3 P1
 ADR-0079 covers Phase 3 P1.5 (gateway request-body parsing +
 handler-returned outcome mapping in `api-gateway-runtime`),
 ADR-0086 covers Phase 3 P1.6 (`operate-runtime-pg` — the Postgres
-`EntityStore` over `meta.operate_entity_records` under tenant RLS;
-ADRs 0080-0085 reserved for P3-P8).
+`EntityStore` over `meta.operate_entity_records` under tenant RLS),
+ADR-0087 covers Phase 3 P1.7 (`apps/operate-server` — the runnable
+serving binary over `buildOperateGateway`; ADRs 0080-0085 reserved
+for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
