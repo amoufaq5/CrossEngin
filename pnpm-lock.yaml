@@ -976,6 +976,49 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  packages/operate-runtime:
+    dependencies:
+      '@crossengin/api-gateway':
+        specifier: workspace:*
+        version: link:../api-gateway
+      '@crossengin/api-gateway-runtime':
+        specifier: workspace:*
+        version: link:../api-gateway-runtime
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
+      '@crossengin/pack-erp-retail':
+        specifier: workspace:*
+        version: link:../pack-erp-retail
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/pack-erp-core:
     dependencies:
       '@crossengin/auth':

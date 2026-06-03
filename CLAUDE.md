@@ -17,8 +17,25 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 landed: **57 packages + 1 app, 122 meta-schema tables, 6,170
-tests**, all green, no type errors. M7.9.1 added
+M8.7 + **Phase 3 P1** landed: **58 packages + 1 app, 122
+meta-schema tables, 6,189 tests**, all green, no type errors.
+**Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
+`@crossengin/operate-runtime` — the serving keystone that
+composes a resolved manifest into a live multi-tenant API. A
+`manifest → routes → handlers` compiler derives a `RouteSpec` per
+entity operation (5 CRUD + one per `entityLifecycle` transition,
+camelCase operationIds + kebab-plural paths), `buildSpecHandler`
+returns an RBAC-enforcing (`rbacCheck`) gateway `Handler` over an
+injectable `EntityStore` (`InMemoryEntityStore` now; Postgres
+RLS-backed next), and `compileOperateServer` / `buildOperateGateway`
+wire routes + handlers + `redactionRegistryFromManifest` into a
+`GatewayRuntime`. End-to-end through the real gateway: a cashier
+`GET /v1/products` gets `unit_cost` redacted, a manager gets it,
+each request emits a `PipelineExecution`. Two gateway gaps the
+serving app surfaced are the P1.5 follow-up: `parse_request`
+doesn't populate `parsedBody` (write path is handler-tested), and
+a handler 4xx is recorded "pass" (tripping the pass-not-4xx
+invariant). M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -438,7 +455,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0077 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0078 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -447,7 +464,7 @@ bridge from running pillars to a deployed multi-vertical product
 (P1 `operate-server` serving app → P2 distributed workers → P3
 `operate-web` renderer → P4 gov/edu/construction packs → P5
 marketplace install → P6 multi-region → P7 AI Architect in prod
-→ P8 production hardening + GA; ADRs 0078-0085 lock each).
+→ P8 production hardening + GA; ADRs 0078-0085 lock each; ADR-0078 covers P1).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -605,6 +622,19 @@ re-exporting everything.
   dispatch_handler → transform_response → apply_security_headers
   → emit_audit; halts on terminating outcomes; merges
   DEFAULT_SECURITY_HEADERS on pass).
+- **`operate-runtime`** — Phase 3 P1 serving keystone: composes a
+  resolved manifest into a live multi-tenant API. 5 modules: slugs
+  (camelCase operationIds + kebab-plural paths + rt_ route ids),
+  store (EntityStore interface + InMemoryEntityStore; Postgres
+  RLS-backed binding is next), operations (manifestRouteSpecs →
+  a RouteSpec per entity op: 5 CRUD + one per entityLifecycle
+  transition; routeFromSpec → schema-valid RouteDefinition),
+  handlers (buildSpecHandler: rbacCheck-enforced CRUD + transition
+  over the store, returns the full record — redaction at the edge),
+  compile (compileOperateServer → routes + handlers +
+  redactionRegistryFromManifest; buildOperateGateway → a wired
+  GatewayRuntime). Serves the retail pack end-to-end with per-caller
+  redaction + lifecycle, each request emitting a PipelineExecution.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -1512,7 +1542,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0077 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0078 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
