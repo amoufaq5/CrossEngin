@@ -1,8 +1,9 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { columnPlanForEntity } from "./column-plan.js";
-import { emitEntityTableDdl, emitForeignKeyDdl, onDeleteClause } from "./entity-ddl.js";
+import { columnPlanForEntity, joinTablePlansForManifest } from "./column-plan.js";
+import type { Manifest } from "@crossengin/kernel/manifest";
+import { emitEntityTableDdl, emitForeignKeyDdl, emitJoinTableDdl, onDeleteClause } from "./entity-ddl.js";
 
 const WIDGET: Entity = {
   name: "Widget",
@@ -100,5 +101,30 @@ describe("onDeleteClause", () => {
     expect(onDeleteClause("restrict", "x_id")).toBe("ON DELETE RESTRICT");
     expect(onDeleteClause("cascade", "x_id")).toBe("ON DELETE CASCADE");
     expect(onDeleteClause("set_null", "x_id")).toBe('ON DELETE SET NULL ("x_id")');
+  });
+});
+
+describe("emitJoinTableDdl", () => {
+  const manifest = { relations: [{ kind: "many_to_many", left: "Course", right: "Student" }] } as unknown as Manifest;
+  const plan = joinTablePlansForManifest(manifest, { schema: "tenant_app" })[0]!;
+
+  it("creates a tenant-scoped link table with a composite PK + RLS", () => {
+    const sql = emitJoinTableDdl(plan, new Set(["Course", "Student"])).join("\n");
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS "tenant_app"."course_student"');
+    expect(sql).toContain('PRIMARY KEY ("tenant_id", "course_id", "student_id")');
+    expect(sql).toContain("ENABLE ROW LEVEL SECURITY");
+    expect(sql).toContain('DROP POLICY IF EXISTS "course_student_tenant_isolation"');
+  });
+
+  it("adds composite ON DELETE CASCADE FKs to both sides", () => {
+    const sql = emitJoinTableDdl(plan, new Set(["Course", "Student"])).join("\n");
+    expect(sql).toContain('FOREIGN KEY ("tenant_id", "course_id") REFERENCES "tenant_app"."course" ("tenant_id", "id") ON DELETE CASCADE');
+    expect(sql).toContain('FOREIGN KEY ("tenant_id", "student_id") REFERENCES "tenant_app"."student" ("tenant_id", "id") ON DELETE CASCADE');
+  });
+
+  it("skips a FK whose side is not a known entity table", () => {
+    const sql = emitJoinTableDdl(plan, new Set(["Course"])).join("\n");
+    expect(sql).toContain('"course_id"'); // table still created
+    expect(sql).not.toContain('REFERENCES "tenant_app"."student"');
   });
 });

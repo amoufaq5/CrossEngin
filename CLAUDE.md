@@ -18,8 +18,8 @@ M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
-P1.11 + P1.12 + P1.13** landed: **59 packages + 2 apps, 123 meta-
-schema tables, 6,321 tests**, all green, no type errors.
+P1.11 + P1.12 + P1.13 + P1.14** landed: **59 packages + 2 apps,
+123 meta-schema tables, 6,328 tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -151,7 +151,17 @@ relation's `onDelete` (`restrict|cascade|set_null`) by
 `"<from>.<field>"`, and `emitForeignKeyDdl` applies it per
 reference (default RESTRICT); `set_null` uses the column-list form
 `ON DELETE SET NULL ("<ref>_id")` so `tenant_id` is never nulled
-(PG≥15). M7.9.1 added
+(PG≥15). **P1.14 (ADR-0094) added `many_to_many` join tables** —
+`joinTablePlansForManifest` derives a `<left>_<right>` link table
+per m2m relation (`<left>_id`/`<right>_id` columns; self-relations
+disambiguate to `_left_id`/`_right_id`), and `emitJoinTableDdl`
+provisions it tenant-scoped: `(tenant_id, <left>_id, <right>_id)`
+composite PK + RLS + a composite `ON DELETE CASCADE` FK from each
+side to its entity's `(tenant_id, id)` (same-tenant links, cascade-
+cleaned). `ensureSchema` adds them in a third phase after the
+entity tables. The column store now models the manifest's full
+relational intent — 1:N references *and* M:N associations; a
+link/unlink API over the rows is the open follow-up. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -571,7 +581,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0093 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0094 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -592,7 +602,8 @@ P1.10 (column-mapped entity store — typed per-entity tables),
 ADR-0091 covers P1.11 (transparent at-rest encryption in the
 column-mapped store), ADR-0092 covers P1.12 (foreign keys +
 topological apply order in the column store), ADR-0093 covers P1.13
-(per-relation delete semantics in the column store)).
+(per-relation delete semantics in the column store), ADR-0094
+covers P1.14 (many_to_many join tables in the column store)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -810,11 +821,14 @@ re-exporting everything.
   (tenant_id, id) FK, idempotent; P1.13 onDeleteClause +
   relationDeleteIndex drive ON DELETE restrict|cascade|set_null per
   many_to_one relation, set_null via the column-list form so
-  tenant_id is never nulled), column-store
+  tenant_id is never nulled; P1.14 emitJoinTableDdl provisions a
+  many_to_many link table — (tenant_id, <left>_id, <right>_id) PK +
+  RLS + composite ON DELETE CASCADE FKs to both sides), column-store
   (ColumnMappedEntityStore implements EntityStore over real per-
-  entity tables: ensureSchema applies the DDL two-phase (all tables
-  in topological order, then all FKs — cycle-safe) (+ CREATE
-  EXTENSION pgcrypto when encrypted columns exist), CRUD maps record↔
+  entity tables: ensureSchema applies the DDL in phases (all tables
+  in topological order, then all FKs — cycle-safe, then m2m join
+  tables) (+ CREATE EXTENSION pgcrypto when encrypted columns
+  exist), CRUD maps record↔
   column, listPage sorts on the native column type + filters by
   `"col"::text = $n`; fields absent from the plan are dropped).
   P1.11: transparent at-rest encryption — a phi/regulated column is
@@ -1758,7 +1772,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0093 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0094 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1809,8 +1823,9 @@ store — typed per-entity tables in `operate-runtime-pg`), ADR-0091
 covers Phase 3 P1.11 (transparent at-rest encryption in the column-
 mapped store), ADR-0092 covers Phase 3 P1.12 (foreign keys +
 topological apply order in the column store), ADR-0093 covers
-Phase 3 P1.13 (per-relation delete semantics in the column store;
-ADRs 0080-0085 reserved for P3-P8).
+Phase 3 P1.13 (per-relation delete semantics in the column store),
+ADR-0094 covers Phase 3 P1.14 (many_to_many join tables in the
+column store; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

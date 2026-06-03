@@ -6,6 +6,7 @@ import {
   columnIndex,
   columnPlanForEntity,
   columnPlansForManifest,
+  joinTablePlansForManifest,
   referencedEntities,
   relationDeleteIndex,
   topologicalEntityOrder,
@@ -79,6 +80,44 @@ describe("referencedEntities", () => {
   it("lists distinct reference targets", () => {
     const plan = columnPlanForEntity(ORDER, { schema: "tenant_app" });
     expect(referencedEntities(plan)).toEqual(["Account"]);
+  });
+});
+
+describe("joinTablePlansForManifest", () => {
+  it("derives a join table per many_to_many with <left>_id / <right>_id columns", () => {
+    const manifest = {
+      relations: [
+        { kind: "many_to_many", left: "Course", right: "Student" },
+        { kind: "many_to_one", from: "X", field: "y", to: "Y" }, // ignored
+      ],
+    } as unknown as Manifest;
+    const plans = joinTablePlansForManifest(manifest, { schema: "tenant_app" });
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({
+      table: "course_student",
+      leftEntity: "Course",
+      rightEntity: "Student",
+      leftColumn: "course_id",
+      rightColumn: "student_id",
+    });
+  });
+
+  it("disambiguates a self many_to_many with _left_id / _right_id", () => {
+    const manifest = { relations: [{ kind: "many_to_many", left: "Person", right: "Person" }] } as unknown as Manifest;
+    const plan = joinTablePlansForManifest(manifest, { schema: "tenant_app" })[0]!;
+    expect(plan.table).toBe("person_person");
+    expect(plan.leftColumn).toBe("person_left_id");
+    expect(plan.rightColumn).toBe("person_right_id");
+  });
+
+  it("emits a duplicate relation's table once", () => {
+    const manifest = {
+      relations: [
+        { kind: "many_to_many", left: "A", right: "B" },
+        { kind: "many_to_many", left: "A", right: "B" },
+      ],
+    } as unknown as Manifest;
+    expect(joinTablePlansForManifest(manifest, { schema: "tenant_app" })).toHaveLength(1);
   });
 });
 

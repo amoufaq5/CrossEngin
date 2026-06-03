@@ -20,12 +20,14 @@ import type { OnDelete } from "@crossengin/types/meta-schema";
 import {
   columnIndex,
   columnPlansForManifest,
+  joinTablePlansForManifest,
   relationDeleteIndex,
   topologicalEntityOrder,
   type ColumnMapping,
   type EntityTablePlan,
+  type JoinTablePlan,
 } from "./column-plan.js";
-import { emitEntityTableDdl, emitForeignKeyDdl } from "./entity-ddl.js";
+import { emitEntityTableDdl, emitForeignKeyDdl, emitJoinTableDdl } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -60,6 +62,7 @@ export class ColumnMappedEntityStore implements EntityStore {
   private readonly indexes: Map<string, ReadonlyMap<string, ColumnMapping>> = new Map();
   private readonly keyRef: string;
   private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
+  private readonly joinPlans: readonly JoinTablePlan[];
 
   constructor(
     conn: PgConnection,
@@ -67,8 +70,10 @@ export class ColumnMappedEntityStore implements EntityStore {
     opts: ColumnMappedEntityStoreOptions = {},
   ) {
     this.conn = conn;
-    this.plans = columnPlansForManifest(manifest, { schema: opts.schema ?? "public" });
+    const schema = opts.schema ?? "public";
+    this.plans = columnPlansForManifest(manifest, { schema });
     this.deletePolicies = relationDeleteIndex(manifest);
+    this.joinPlans = joinTablePlansForManifest(manifest, { schema });
     const keyRef = opts.encryptionKeyRef ?? DEFAULT_ENCRYPTION_KEY_REF;
     if (keyRef.trim().length === 0) throw new Error("encryptionKeyRef must be a non-empty SQL reference");
     this.keyRef = keyRef;
@@ -124,6 +129,12 @@ export class ColumnMappedEntityStore implements EntityStore {
       if (plan === undefined) continue;
       const onDeleteFor = (field: string): OnDelete | undefined => this.deletePolicies.get(`${plan.entity}.${field}`);
       for (const stmt of emitForeignKeyDdl(plan, known, onDeleteFor)) {
+        await this.conn.query(stmt);
+      }
+    }
+    // phase 3: many_to_many join tables (their FKs reference entity tables, now created)
+    for (const joinPlan of this.joinPlans) {
+      for (const stmt of emitJoinTableDdl(joinPlan, known)) {
         await this.conn.query(stmt);
       }
     }

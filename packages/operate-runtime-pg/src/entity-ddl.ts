@@ -1,7 +1,7 @@
 import { qualifyTable, quoteIdent, toTableName } from "@crossengin/kernel/ddl";
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
-import type { EntityTablePlan } from "./column-plan.js";
+import type { EntityTablePlan, JoinTablePlan } from "./column-plan.js";
 
 const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
 
@@ -78,6 +78,22 @@ export function onDeleteClause(policy: OnDelete, refColumn: string): string {
  * it re-runnable; applied in a second pass after all tables exist (so reference
  * cycles are safe).
  */
+/** Emits the idempotent DROP/ADD pair for one composite tenant-scoped FK. */
+function compositeFkStmts(
+  qualified: string,
+  constraint: string,
+  refColumn: string,
+  targetTable: string,
+  onDelete: string,
+): string[] {
+  return [
+    `ALTER TABLE ${qualified} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint)};`,
+    `ALTER TABLE ${qualified} ADD CONSTRAINT ${quoteIdent(constraint)} ` +
+      `FOREIGN KEY (${quoteIdent("tenant_id")}, ${quoteIdent(refColumn)}) ` +
+      `REFERENCES ${targetTable} (${quoteIdent("tenant_id")}, ${quoteIdent("id")}) ${onDelete};`,
+  ];
+}
+
 export function emitForeignKeyDdl(
   plan: EntityTablePlan,
   knownEntities: ReadonlySet<string>,
@@ -88,13 +104,58 @@ export function emitForeignKeyDdl(
   for (const col of plan.columns) {
     if (col.referenceTarget === null || !knownEntities.has(col.referenceTarget)) continue;
     const targetTable = qualifyTable(plan.schema, toTableName(col.referenceTarget));
-    const constraint = `fk_${plan.table}_${col.column}`;
     const policy = onDeleteFor?.(col.field) ?? "restrict";
-    stmts.push(`ALTER TABLE ${qualified} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint)};`);
     stmts.push(
-      `ALTER TABLE ${qualified} ADD CONSTRAINT ${quoteIdent(constraint)} ` +
-        `FOREIGN KEY (${quoteIdent("tenant_id")}, ${quoteIdent(col.column)}) ` +
-        `REFERENCES ${targetTable} (${quoteIdent("tenant_id")}, ${quoteIdent("id")}) ${onDeleteClause(policy, col.column)};`,
+      ...compositeFkStmts(qualified, `fk_${plan.table}_${col.column}`, col.column, targetTable, onDeleteClause(policy, col.column)),
+    );
+  }
+  return stmts;
+}
+
+/**
+ * Emits idempotent DDL for a `many_to_many` join table: a tenant-scoped link
+ * table with `(tenant_id, <left>_id, <right>_id)` PK + RLS and a **composite**
+ * FK from each side to its entity's `(tenant_id, id)` — `ON DELETE CASCADE`, so
+ * deleting either linked row removes the association (no dangling links). Both
+ * FK targets are required to exist (created in the entity-table phase); a side
+ * not in `knownEntities` is skipped.
+ */
+export function emitJoinTableDdl(plan: JoinTablePlan, knownEntities: ReadonlySet<string>): string[] {
+  const qualified = qualifyTable(plan.schema, plan.table);
+  const policyName = `${plan.table}_tenant_isolation`;
+  const columnLines = [
+    `${quoteIdent("tenant_id")} UUID NOT NULL`,
+    `${quoteIdent(plan.leftColumn)} TEXT NOT NULL`,
+    `${quoteIdent(plan.rightColumn)} TEXT NOT NULL`,
+    `${quoteIdent("created_at")} TIMESTAMPTZ NOT NULL DEFAULT now()`,
+    `PRIMARY KEY (${quoteIdent("tenant_id")}, ${quoteIdent(plan.leftColumn)}, ${quoteIdent(plan.rightColumn)})`,
+  ];
+  const stmts: string[] = [
+    `CREATE TABLE IF NOT EXISTS ${qualified} (\n  ${columnLines.join(",\n  ")}\n);`,
+    `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
+    `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,
+    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);`,
+  ];
+  if (knownEntities.has(plan.leftEntity)) {
+    stmts.push(
+      ...compositeFkStmts(
+        qualified,
+        `fk_${plan.table}_${plan.leftColumn}`,
+        plan.leftColumn,
+        qualifyTable(plan.schema, toTableName(plan.leftEntity)),
+        "ON DELETE CASCADE",
+      ),
+    );
+  }
+  if (knownEntities.has(plan.rightEntity)) {
+    stmts.push(
+      ...compositeFkStmts(
+        qualified,
+        `fk_${plan.table}_${plan.rightColumn}`,
+        plan.rightColumn,
+        qualifyTable(plan.schema, toTableName(plan.rightEntity)),
+        "ON DELETE CASCADE",
+      ),
     );
   }
   return stmts;

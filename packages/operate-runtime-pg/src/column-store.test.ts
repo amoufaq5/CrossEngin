@@ -90,6 +90,23 @@ describe("ColumnMappedEntityStore — ensureSchema", () => {
     const fk = cap.calls.map((c) => c.sql).find((q) => q.includes('ADD CONSTRAINT "fk_order_account_id"'))!;
     expect(fk).toContain("ON DELETE CASCADE");
   });
+
+  it("provisions a many_to_many join table after the entity tables exist", async () => {
+    const course: Entity = { name: "Course", fields: [{ name: "title", type: { kind: "text" } }] };
+    const student: Entity = { name: "Student", fields: [{ name: "name", type: { kind: "text" } }] };
+    const manifest = {
+      entities: [course, student],
+      relations: [{ kind: "many_to_many", left: "Course", right: "Student" }],
+    } as unknown as Manifest;
+    const cap = capturePg();
+    await new ColumnMappedEntityStore(cap.conn, manifest, { schema: "tenant_app" }).ensureSchema();
+    const sqls = cap.calls.map((c) => c.sql);
+    const createCourse = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."course"'));
+    const createJoin = sqls.findIndex((q) => q.includes('CREATE TABLE IF NOT EXISTS "tenant_app"."course_student"'));
+    const joinFk = sqls.find((q) => q.includes('ADD CONSTRAINT "fk_course_student_course_id"'));
+    expect(createJoin).toBeGreaterThan(createCourse); // entity tables first
+    expect(joinFk).toContain('REFERENCES "tenant_app"."course" ("tenant_id", "id") ON DELETE CASCADE');
+  });
 });
 
 describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => {

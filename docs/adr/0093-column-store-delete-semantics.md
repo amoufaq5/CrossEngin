@@ -85,5 +85,6 @@ is unchanged.
   columns (P1.10), PHI encryption (P1.11), composite FKs (P1.12), and now
   per-relation delete behavior (P1.13) — all behind the one `EntityStore`
   contract.
-- **A join-table mapping for `many_to_many` remains the open relational
-  follow-up**, behind the same plan/DDL seams.
+- **A join-table mapping for `many_to_many`** is **delivered in ADR-0094
+  (P1.14).** A link/unlink API over the association rows remains the open
+  follow-up, behind the same plan/DDL seams.

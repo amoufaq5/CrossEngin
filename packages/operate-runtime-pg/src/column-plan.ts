@@ -92,6 +92,51 @@ export function referencedEntities(plan: EntityTablePlan): readonly string[] {
   return [...seen];
 }
 
+/** The plan for one `many_to_many` join table: two tenant-scoped link columns. */
+export interface JoinTablePlan {
+  readonly schema: string;
+  readonly table: string;
+  readonly leftEntity: string;
+  readonly rightEntity: string;
+  readonly leftColumn: string;
+  readonly rightColumn: string;
+}
+
+/**
+ * Derives a join-table plan per `many_to_many` relation: the table is
+ * `<left>_<right>` (snake), with `<left>_id` / `<right>_id` link columns (a
+ * self-relation disambiguates to `<table>_left_id` / `<table>_right_id`).
+ * Duplicate table names (e.g. a relation declared twice) are emitted once.
+ */
+export function joinTablePlansForManifest(
+  manifest: Manifest,
+  opts: { readonly schema: string },
+): readonly JoinTablePlan[] {
+  if (!SCHEMA_RE.test(opts.schema)) {
+    throw new Error(`invalid schema name: ${JSON.stringify(opts.schema)}`);
+  }
+  const out: JoinTablePlan[] = [];
+  const seen = new Set<string>();
+  for (const rel of manifest.relations ?? []) {
+    if (rel.kind !== "many_to_many") continue;
+    const leftTable = toTableName(rel.left);
+    const rightTable = toTableName(rel.right);
+    const table = `${leftTable}_${rightTable}`;
+    if (seen.has(table)) continue;
+    seen.add(table);
+    const selfRef = rel.left === rel.right;
+    out.push({
+      schema: opts.schema,
+      table,
+      leftEntity: rel.left,
+      rightEntity: rel.right,
+      leftColumn: selfRef ? `${leftTable}_left_id` : `${leftTable}_id`,
+      rightColumn: selfRef ? `${rightTable}_right_id` : `${rightTable}_id`,
+    });
+  }
+  return out;
+}
+
 /**
  * Indexes the manifest's `many_to_one` relations by `"<fromEntity>.<field>"` →
  * its `onDelete` policy, so the FK emitter can choose RESTRICT / CASCADE /
