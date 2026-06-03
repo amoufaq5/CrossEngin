@@ -2,7 +2,7 @@ import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
 import { columnPlanForEntity } from "./column-plan.js";
-import { emitEntityTableDdl, emitForeignKeyDdl } from "./entity-ddl.js";
+import { emitEntityTableDdl, emitForeignKeyDdl, onDeleteClause } from "./entity-ddl.js";
 
 const WIDGET: Entity = {
   name: "Widget",
@@ -75,5 +75,30 @@ describe("emitForeignKeyDdl", () => {
   it("emits nothing for an entity with no references", () => {
     const acct = columnPlanForEntity({ name: "Account", fields: [{ name: "name", type: { kind: "text" } }] }, { schema: "tenant_app" });
     expect(emitForeignKeyDdl(acct, new Set(["Account"]))).toEqual([]);
+  });
+
+  it("defaults to ON DELETE RESTRICT with no policy resolver", () => {
+    const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"])).join("\n");
+    expect(sql).toContain("ON DELETE RESTRICT");
+  });
+
+  it("applies a per-relation onDelete policy (cascade)", () => {
+    const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"]), (f) =>
+      f === "account" ? "cascade" : undefined,
+    ).join("\n");
+    expect(sql).toContain("REFERENCES \"tenant_app\".\"account\" (\"tenant_id\", \"id\") ON DELETE CASCADE");
+  });
+
+  it("uses the column-list SET NULL form (nulls only <ref>_id, never tenant_id)", () => {
+    const sql = emitForeignKeyDdl(plan, new Set(["Account", "Order"]), () => "set_null").join("\n");
+    expect(sql).toContain('ON DELETE SET NULL ("account_id")');
+  });
+});
+
+describe("onDeleteClause", () => {
+  it("maps each policy to its SQL clause", () => {
+    expect(onDeleteClause("restrict", "x_id")).toBe("ON DELETE RESTRICT");
+    expect(onDeleteClause("cascade", "x_id")).toBe("ON DELETE CASCADE");
+    expect(onDeleteClause("set_null", "x_id")).toBe('ON DELETE SET NULL ("x_id")');
   });
 });

@@ -1,4 +1,5 @@
 import { qualifyTable, quoteIdent, toTableName } from "@crossengin/kernel/ddl";
+import type { OnDelete } from "@crossengin/types/meta-schema";
 
 import type { EntityTablePlan } from "./column-plan.js";
 
@@ -50,26 +51,50 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
 }
 
 /**
+ * Builds the `ON DELETE` clause for a reference's composite FK. `restrict` and
+ * `cascade` are version-agnostic; `set_null` uses the **column-list** form so
+ * only the `<ref>_id` column is nulled — never `tenant_id` (a plain `SET NULL`
+ * would null every FK column, including the tenant). The column-list form
+ * requires Postgres ≥ 15.
+ */
+export function onDeleteClause(policy: OnDelete, refColumn: string): string {
+  switch (policy) {
+    case "cascade":
+      return "ON DELETE CASCADE";
+    case "set_null":
+      return `ON DELETE SET NULL (${quoteIdent(refColumn)})`;
+    case "restrict":
+      return "ON DELETE RESTRICT";
+  }
+}
+
+/**
  * Emits idempotent foreign-key DDL for a plan's reference columns. Each
  * reference is a **composite** FK `(tenant_id, <ref>_id) → target (tenant_id,
  * id)`, so a reference can only point to a row in the *same tenant* (the PK is
  * `(tenant_id, id)`). A target not in `knownEntities` is skipped (no table to
- * reference). `DROP CONSTRAINT IF EXISTS` → `ADD CONSTRAINT` keeps it
- * re-runnable; applied in a second pass after all tables exist (so reference
+ * reference). The `ON DELETE` behavior is per-relation via `onDeleteFor(field)`
+ * (defaulting to RESTRICT). `DROP CONSTRAINT IF EXISTS` → `ADD CONSTRAINT` keeps
+ * it re-runnable; applied in a second pass after all tables exist (so reference
  * cycles are safe).
  */
-export function emitForeignKeyDdl(plan: EntityTablePlan, knownEntities: ReadonlySet<string>): string[] {
+export function emitForeignKeyDdl(
+  plan: EntityTablePlan,
+  knownEntities: ReadonlySet<string>,
+  onDeleteFor?: (field: string) => OnDelete | undefined,
+): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
   const stmts: string[] = [];
   for (const col of plan.columns) {
     if (col.referenceTarget === null || !knownEntities.has(col.referenceTarget)) continue;
     const targetTable = qualifyTable(plan.schema, toTableName(col.referenceTarget));
     const constraint = `fk_${plan.table}_${col.column}`;
+    const policy = onDeleteFor?.(col.field) ?? "restrict";
     stmts.push(`ALTER TABLE ${qualified} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint)};`);
     stmts.push(
       `ALTER TABLE ${qualified} ADD CONSTRAINT ${quoteIdent(constraint)} ` +
         `FOREIGN KEY (${quoteIdent("tenant_id")}, ${quoteIdent(col.column)}) ` +
-        `REFERENCES ${targetTable} (${quoteIdent("tenant_id")}, ${quoteIdent("id")}) ON DELETE RESTRICT;`,
+        `REFERENCES ${targetTable} (${quoteIdent("tenant_id")}, ${quoteIdent("id")}) ${onDeleteClause(policy, col.column)};`,
     );
   }
   return stmts;

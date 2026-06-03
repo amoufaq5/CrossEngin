@@ -93,5 +93,7 @@ is unchanged.
   transparent PHI encryption (P1.11), and now FKs + ordered DDL (P1.12) — the
   column-mapped store models a manifest's entities as a genuine relational
   schema, all behind the one `EntityStore` contract.
-- **Per-relation delete semantics + UUID-id packs remain optional refinements**
-  behind the existing plan/DDL seams.
+- **Per-relation delete semantics** are **delivered in ADR-0093 (P1.13)** — the
+  FK now honors the manifest relation's `onDelete`. UUID-id packs +
+  `many_to_many` join tables remain optional refinements behind the existing
+  plan/DDL seams.

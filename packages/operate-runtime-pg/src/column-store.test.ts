@@ -77,6 +77,19 @@ describe("ColumnMappedEntityStore — ensureSchema", () => {
     expect(addFk).toBeGreaterThan(createOrder);
     expect(sqls[addFk]).toContain('REFERENCES "tenant_app"."account" ("tenant_id", "id")');
   });
+
+  it("drives the FK ON DELETE behavior from the manifest's relation onDelete", async () => {
+    const account: Entity = { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] };
+    const order: Entity = { name: "Order", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] };
+    const manifest = {
+      entities: [order, account],
+      relations: [{ kind: "many_to_one", from: "Order", field: "account", to: "Account", onDelete: "cascade" }],
+    } as unknown as Manifest;
+    const cap = capturePg();
+    await new ColumnMappedEntityStore(cap.conn, manifest, { schema: "tenant_app" }).ensureSchema();
+    const fk = cap.calls.map((c) => c.sql).find((q) => q.includes('ADD CONSTRAINT "fk_order_account_id"'))!;
+    expect(fk).toContain("ON DELETE CASCADE");
+  });
 });
 
 describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => {

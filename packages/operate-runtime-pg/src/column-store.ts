@@ -15,9 +15,12 @@ import {
   type ListQuery,
 } from "@crossengin/operate-runtime";
 
+import type { OnDelete } from "@crossengin/types/meta-schema";
+
 import {
   columnIndex,
   columnPlansForManifest,
+  relationDeleteIndex,
   topologicalEntityOrder,
   type ColumnMapping,
   type EntityTablePlan,
@@ -56,6 +59,7 @@ export class ColumnMappedEntityStore implements EntityStore {
   private readonly plans: ReadonlyMap<string, EntityTablePlan>;
   private readonly indexes: Map<string, ReadonlyMap<string, ColumnMapping>> = new Map();
   private readonly keyRef: string;
+  private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
 
   constructor(
     conn: PgConnection,
@@ -64,6 +68,7 @@ export class ColumnMappedEntityStore implements EntityStore {
   ) {
     this.conn = conn;
     this.plans = columnPlansForManifest(manifest, { schema: opts.schema ?? "public" });
+    this.deletePolicies = relationDeleteIndex(manifest);
     const keyRef = opts.encryptionKeyRef ?? DEFAULT_ENCRYPTION_KEY_REF;
     if (keyRef.trim().length === 0) throw new Error("encryptionKeyRef must be a non-empty SQL reference");
     this.keyRef = keyRef;
@@ -117,7 +122,8 @@ export class ColumnMappedEntityStore implements EntityStore {
     for (const name of order) {
       const plan = this.plans.get(name);
       if (plan === undefined) continue;
-      for (const stmt of emitForeignKeyDdl(plan, known)) {
+      const onDeleteFor = (field: string): OnDelete | undefined => this.deletePolicies.get(`${plan.entity}.${field}`);
+      for (const stmt of emitForeignKeyDdl(plan, known, onDeleteFor)) {
         await this.conn.query(stmt);
       }
     }

@@ -7,6 +7,7 @@ import {
   columnPlanForEntity,
   columnPlansForManifest,
   referencedEntities,
+  relationDeleteIndex,
   topologicalEntityOrder,
 } from "./column-plan.js";
 
@@ -78,6 +79,24 @@ describe("referencedEntities", () => {
   it("lists distinct reference targets", () => {
     const plan = columnPlanForEntity(ORDER, { schema: "tenant_app" });
     expect(referencedEntities(plan)).toEqual(["Account"]);
+  });
+});
+
+describe("relationDeleteIndex", () => {
+  it("indexes many_to_one onDelete policies by <from>.<field>", () => {
+    const manifest = {
+      relations: [
+        { kind: "many_to_one", from: "Order", field: "account", to: "Account", onDelete: "cascade" },
+        { kind: "many_to_one", from: "OrderLine", field: "order", to: "Order", onDelete: "set_null" },
+        { kind: "many_to_one", from: "X", field: "y", to: "Y" }, // no onDelete → not indexed
+        { kind: "one_to_many", from: "Account", field: "orders", to: "Order" }, // not a FK-bearing side
+      ],
+    } as unknown as Manifest;
+    const index = relationDeleteIndex(manifest);
+    expect(index.get("Order.account")).toBe("cascade");
+    expect(index.get("OrderLine.order")).toBe("set_null");
+    expect(index.has("X.y")).toBe(false);
+    expect(index.has("Account.orders")).toBe(false);
   });
 });
 

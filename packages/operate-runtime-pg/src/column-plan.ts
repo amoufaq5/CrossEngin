@@ -6,6 +6,7 @@ import {
   type DataClassification,
   type Entity,
   type Field,
+  type OnDelete,
 } from "@crossengin/types/meta-schema";
 
 /** One manifest field's mapping to a typed SQL column. */
@@ -89,6 +90,22 @@ export function referencedEntities(plan: EntityTablePlan): readonly string[] {
     if (c.referenceTarget !== null) seen.add(c.referenceTarget);
   }
   return [...seen];
+}
+
+/**
+ * Indexes the manifest's `many_to_one` relations by `"<fromEntity>.<field>"` →
+ * its `onDelete` policy, so the FK emitter can choose RESTRICT / CASCADE /
+ * SET NULL per reference instead of a blanket default. Only `many_to_one`
+ * relations carry a FK-bearing column on the `from` entity.
+ */
+export function relationDeleteIndex(manifest: Manifest): ReadonlyMap<string, OnDelete> {
+  const out = new Map<string, OnDelete>();
+  for (const rel of manifest.relations ?? []) {
+    if (rel.kind === "many_to_one" && rel.onDelete !== undefined) {
+      out.set(`${rel.from}.${rel.field}`, rel.onDelete);
+    }
+  }
+  return out;
 }
 
 /**

@@ -144,3 +144,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 58 | 0090 | 4,500 | Drafted alongside the column-mapped entity store — typed per-entity tables in `operate-runtime-pg` (Phase 3 P1.10) |
 | 59 | 0091 | 4,000 | Drafted alongside transparent at-rest encryption in the column-mapped store (Phase 3 P1.11) |
 | 60 | 0092 | 4,000 | Drafted alongside foreign keys + topological apply order in the column store (Phase 3 P1.12) |
+| 61 | 0093 | 3,500 | Drafted alongside per-relation delete semantics in the column store (Phase 3 P1.13) |
