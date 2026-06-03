@@ -11,6 +11,7 @@ export interface ServeOptions {
   readonly apiKeys: readonly string[];
   readonly jwksKeys: readonly string[];
   readonly jwksFile: string | null;
+  readonly jwksUrl: string | null;
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
   readonly defaultScheme: "http" | "https";
@@ -48,6 +49,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const apiKeys: string[] = [];
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
+  let jwksUrl: string | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
   let help = false;
@@ -100,6 +102,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--jwks-file" || arg.startsWith("--jwks-file=")) {
       jwksFile = takeValue(arg, next, "--jwks-file");
       i += consumed();
+    } else if (arg === "--jwks-url" || arg.startsWith("--jwks-url=")) {
+      jwksUrl = takeValue(arg, next, "--jwks-url");
+      i += consumed();
     } else if (arg === "--jwt-issuer" || arg.startsWith("--jwt-issuer=")) {
       jwtIssuer = takeValue(arg, next, "--jwt-issuer");
       i += consumed();
@@ -111,7 +116,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     }
   }
 
-  if ((jwksKeys.length > 0 || jwksFile !== null) && (jwtIssuer === null || jwtAudience === null)) {
+  if (
+    (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
+    (jwtIssuer === null || jwtAudience === null)
+  ) {
     throw new CliUsageError("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
 
@@ -133,6 +141,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     apiKeys,
     jwksKeys,
     jwksFile,
+    jwksUrl,
     jwtIssuer,
     jwtAudience,
     defaultScheme,
@@ -161,6 +170,7 @@ Options:
   --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable)
   --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
   --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
+  --jwks-url <url>     Remote JWKS endpoint (cached, refetched on kid rotation)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
   --help, -h           Show this help

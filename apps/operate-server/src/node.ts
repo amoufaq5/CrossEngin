@@ -9,6 +9,7 @@ import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operat
 import type { ServeOptions } from "./cli.js";
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
+import { RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
   parseApiKeySpec,
@@ -101,11 +102,13 @@ async function resolveJwtConfig(options: ServeOptions): Promise<JwtVerifyConfig 
       specs.push({ kid: k.kid, publicKeyBase64: k.publicKeyBase64 });
     }
   }
-  if (specs.length === 0) return null;
+  if (specs.length === 0 && options.jwksUrl === null) return null;
   if (options.jwtIssuer === null || options.jwtAudience === null) {
     throw new Error("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
-  return { jwksProvider: buildJwksProvider(specs), issuer: options.jwtIssuer, audience: options.jwtAudience };
+  const jwksProvider =
+    options.jwksUrl !== null ? new RemoteJwksProvider({ url: options.jwksUrl }) : buildJwksProvider(specs);
+  return { jwksProvider, issuer: options.jwtIssuer, audience: options.jwtAudience };
 }
 
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<EntityStore> {

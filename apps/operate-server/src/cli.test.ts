@@ -77,5 +77,20 @@ describe("parseServeArgs", () => {
 
   it("requires issuer + audience when a JWKS is configured", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-key", "k:v"])).toThrow(/issuer.*audience/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-url", "https://idp/jwks"])).toThrow(/issuer.*audience/);
+  });
+
+  it("parses a remote --jwks-url", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--jwks-url",
+      "https://idp/.well-known/jwks.json",
+      "--jwt-issuer",
+      "https://idp/",
+      "--jwt-audience",
+      "https://api/",
+    ]);
+    expect(opts.jwksUrl).toBe("https://idp/.well-known/jwks.json");
   });
 });

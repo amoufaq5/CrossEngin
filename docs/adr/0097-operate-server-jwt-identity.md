@@ -75,9 +75,9 @@ uses.
     **delivered in ADR-0098 (P1.18)** — the credential tenant is now
     authoritative and a contradicting header is a `tenant_mismatch` 401.
 - **Remote JWKS URL fetch (with rotation).**
-  - **Decision.** Deferred — `--jwks-key`/`--jwks-file` cover the operator
-    supplying the IdP's current keys; a caching remote-JWKS `JwksProvider`
-    (fetch + `kid` rotation) is a drop-in behind the interface.
+  - **Decision.** Deferred here; **delivered in ADR-0099 (P1.19)** — a caching
+    `RemoteJwksProvider` (`--jwks-url`, fetch + `kid` rotation) is a drop-in
+    behind the `JwksProvider` interface.
 - **Map JWT scopes to roles via a configurable table.**
   - **Decision.** Scope-as-role (the manifest's role names are the scopes) keeps
     parity with the api-key path; a scope→role mapping is additive later.
