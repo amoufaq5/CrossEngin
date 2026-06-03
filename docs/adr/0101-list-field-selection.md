@@ -79,5 +79,5 @@ it dropped by redaction. So projection needs no access gating.
 - **The P1 list surface is feature-complete.** Keyset pagination + typed filters
   (P1.16) + field selection (P1.21), all from the manifest's `ListView`, across
   every store.
-- **SQL-level projection pushdown remains an optional efficiency follow-up**,
-  behind the `?fields` contract.
+- **SQL-level projection pushdown** is **delivered in ADR-0102 (P1.22)** — the
+  column store selects only the projected (+ sort) columns.

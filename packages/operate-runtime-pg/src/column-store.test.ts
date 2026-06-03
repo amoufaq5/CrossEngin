@@ -219,6 +219,31 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
     expect(sel.sql).toContain('"id" > $4');
     expect(sel.params).toEqual([TENANT, "20", "20", "b", 6]);
   });
+
+  it("pushes ?fields into the SELECT: only id + requested + sort columns", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+      fields: ["sku"],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"sku"'); // requested
+    expect(sel.sql).toContain('"price"'); // sort column (needed for the cursor)
+    expect(sel.sql).toContain('"id"'); // always
+    expect(sel.sql).not.toContain('"status"'); // not selected
+    expect(sel.sql).not.toContain('"owner_id"'); // not selected
+  });
+
+  it("selects all columns when there is no ?fields projection", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", { limit: 5, cursor: null, sort: [], filters: [] });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"status"');
+    expect(sel.sql).toContain('"owner_id"');
+  });
 });
 
 describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => {

@@ -75,9 +75,9 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
     switch (spec.action) {
       case "list": {
         const config = spec.listConfig ?? FALLBACK_LIST_CONFIG;
-        const query = parseListQuery(request.query, config);
-        const page = await ctx.store.listPage(tenantId, spec.entity, query);
         const fields = parseFields(request.query);
+        const query = { ...parseListQuery(request.query, config), ...(fields !== null ? { fields } : {}) };
+        const page = await ctx.store.listPage(tenantId, spec.entity, query);
         const data = fields === null ? page.records : page.records.map((r) => projectRecord(r, fields));
         return json(200, {
           data,

@@ -169,8 +169,12 @@ export class ColumnMappedEntityStore implements EntityStore {
       };
       const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
       const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
+      // ?fields pushdown: SELECT only the requested columns + the sort columns
+      // (needed to build the keyset cursor). The handler re-projects to the
+      // exact requested set, so selecting sort columns isn't visible to clients.
+      const only = this.projectionColumns(query, idx);
       const res = await tx.query<Record<string, unknown>>(
-        `SELECT ${this.selectList(plan)}
+        `SELECT ${this.selectList(plan, only)}
            FROM ${qualified}
           WHERE ${where}
           ORDER BY ${orderBy}
@@ -376,9 +380,38 @@ export class ColumnMappedEntityStore implements EntityStore {
     });
   }
 
-  private selectList(plan: EntityTablePlan): string {
+  /**
+   * Resolves a `query.fields` projection to the column-name set to SELECT —
+   * the requested fields' columns plus the sort fields' columns (needed for the
+   * keyset cursor). Returns undefined when there's no projection (select all).
+   */
+  private projectionColumns(
+    query: ListQuery,
+    idx: ReadonlyMap<string, ColumnMapping>,
+  ): ReadonlySet<string> | undefined {
+    if (query.fields === undefined) return undefined;
+    const cols = new Set<string>();
+    for (const f of query.fields) {
+      const m = idx.get(f);
+      if (m !== undefined) cols.add(m.column);
+    }
+    for (const s of query.sort) {
+      const m = idx.get(s.field);
+      if (m !== undefined) cols.add(m.column);
+    }
+    return cols;
+  }
+
+  /**
+   * The SELECT list: `id` + each domain column (decrypting encrypted columns).
+   * When `only` is given (a set of column names), only those columns are
+   * selected — the `?fields` projection pushed into SQL, so unselected (large /
+   * encrypted) columns are never fetched. `id` is always included.
+   */
+  private selectList(plan: EntityTablePlan, only?: ReadonlySet<string>): string {
     const cols = [quoteIdent("id")];
     for (const c of plan.columns) {
+      if (only !== undefined && !only.has(c.column)) continue;
       cols.push(
         c.encryptAtRest
           ? `${pgpSymDecryptExpr(quoteIdent(c.column), this.keyRef)} AS ${quoteIdent(c.column)}`
