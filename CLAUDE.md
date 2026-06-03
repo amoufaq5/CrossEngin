@@ -15,10 +15,26 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 + M7.5 + M7.6 + M8 + M8.5 + M8.6 + M8.7 landed: **55
-packages + 1 app, 122 meta-schema tables, 6,046 tests**, all
+M6.5 + M7 + M7.5 + M7.6 + M7.7 + M8 + M8.5 + M8.6 + M8.7 landed:
+**55 packages + 1 app, 122 meta-schema tables, 6,056 tests**, all
 green, no type errors. **Phase 2's eight milestones (M1–M8) are
-complete.** M7.6 added field-level data classification (kernel +
+complete.** M7.7 acted on the M7.6 data classification (auth +
+kernel + types enhancement, no new package): a sensitive field
+(pii/phi/regulated/commercial_sensitive) with no explicit `read`
+grant is now redacted-by-default for non-privileged principals
+via `computeClassifiedFieldRedaction` /
+`validateClassifiedWriteMask` in `@crossengin/auth` (explicit
+per-field grants still win; `SensitiveFieldPolicy =
+{privilegedRoles?, redactByDefault?}` parameterizes it), and the
+DDL emitter appends `crossengin.encrypt=at_rest` to the column
+comment for phi/regulated fields (`requiresEncryptionAtRest` in
+types) so the storage layer has an at-rest-encryption signal in
+`pg_catalog`. Fully backward compatible — the original
+`computeFieldRedaction` / `validateWriteMask` are untouched; the
+classification-aware variants are additive opt-ins. Closes the
+loop M7.6 opened: classification now drives masking + an
+encryption hint, not just a catalog comment. M7.6 added
+field-level data classification (kernel +
 types enhancement, no new package): the manifest `FieldSchema`
 gained an optional `classification` (`public | internal |
 commercial_sensitive | pii | phi | regulated`, mirroring jobs'
@@ -287,7 +303,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0066 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0067 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -309,7 +325,9 @@ M8.7 (latency enforcement persistence in
 (`ai-providers-openai` — second real LlmProvider), ADR-0065
 covers M7.5 (`pack-erp-healthcare` — second vertical pack via
 `meta.extends`), ADR-0066 covers M7.6 (field-level data
-classification in `types` + `kernel`).
+classification in `types` + `kernel`), ADR-0067 covers M7.7
+(acting on the classification — auth default redaction + DDL
+encryption hints).
 
 ## Architecture in 90 seconds
 
@@ -461,7 +479,12 @@ re-exporting everything.
 
 ### Identity, security, data
 - **`auth`** — RBAC + ABAC + field-level permissions + write
-  masks. RoleDefinition, RbacGrant, principals.
+  masks. RoleDefinition, RbacGrant, principals. Classification-
+  aware `computeClassifiedFieldRedaction` /
+  `validateClassifiedWriteMask` redact / write-block sensitive
+  fields (from the manifest `classification`) by default unless a
+  `SensitiveFieldPolicy.privilegedRoles` principal reads/writes
+  them; explicit per-field grants still win.
 - **`sso`** — federated identity: SAML 2.0 + OIDC providers,
   SCIM 2.0 provisioning, claim mappings + JIT policies, session
   lifecycle, login audit.
@@ -1067,9 +1090,26 @@ classified field so the class is queryable in `pg_catalog`, and
 an `auditable` entity. `manifestClassifiedFields(manifest)` is
 the compliance inventory; `isFieldSensitive` / `requiresAuditTrail`
 the helpers. `pack-erp-healthcare` classifies its PHI/PII fields
-end-to-end. Acting on the class — default field-redaction in
-`@crossengin/auth`, at-rest encryption hints in DDL — is the
-deferred M7.7.
+end-to-end. Acting on the class is M7.7 (below).
+
+**No longer deferred (as of M7.7):** acting on the data
+classification. `@crossengin/auth` gained
+`computeClassifiedFieldRedaction` / `validateClassifiedWriteMask`:
+a sensitive field (pii/phi/regulated/commercial_sensitive) with
+no explicit `read`/`update` grant is redacted / write-blocked by
+default for non-privileged principals (`SensitiveFieldPolicy =
+{privilegedRoles?, redactByDefault?}`; explicit per-field grants
+still win). The kernel DDL emitter appends
+`crossengin.encrypt=at_rest` to the column comment for
+phi/regulated fields (`requiresEncryptionAtRest` in types), so a
+migration applier has an at-rest-encryption signal in
+`pg_catalog`. The original `computeFieldRedaction` /
+`validateWriteMask` are untouched; the classification-aware
+variants are additive opt-ins. PHI is now fail-closed (masked +
+encryption-hinted) from the field declaration alone. Wiring the
+redaction into the gateway response transform + choosing the
+encryption mechanism (pgcrypto vs envelope via crypto) are the
+deferred M7.7.5 / encryption ADR.
 
 **No longer deferred (as of M8):** SLO enforcement.
 `@crossengin/observability-runtime` turns the inert SLO / alert /
@@ -1197,7 +1237,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0066 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0067 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1220,7 +1260,8 @@ enforcement persistence), ADR-0062 covers Phase 2 M8.6
 (latency enforcement persistence), ADR-0064 covers Phase 2 M2.8
 (`ai-providers-openai` — second LlmProvider), ADR-0065 covers
 Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack),
-ADR-0066 covers Phase 2 M7.6 (field-level data classification).
+ADR-0066 covers Phase 2 M7.6 (field-level data classification),
+ADR-0067 covers Phase 2 M7.7 (acting on data classification).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

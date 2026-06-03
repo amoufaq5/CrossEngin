@@ -1,4 +1,5 @@
 import type { Entity, Field, Trait } from "@crossengin/types/meta-schema";
+import { requiresEncryptionAtRest } from "@crossengin/types/meta-schema";
 import { columnNameForField, emitColumn } from "./column.js";
 import { indexName, qualifyTable, quoteIdent, toTableName } from "./identifiers.js";
 import {
@@ -56,8 +57,12 @@ export function emitColumnComments(entity: Entity, context: EmitContext): string
   for (const field of entity.fields) {
     if (field.classification === undefined) continue;
     const column = columnNameForField(field);
+    const directives = [`crossengin.data_class=${field.classification}`];
+    if (requiresEncryptionAtRest(field.classification)) {
+      directives.push("crossengin.encrypt=at_rest");
+    }
     comments.push(
-      `COMMENT ON COLUMN ${qualifyTable(context.schema, tableName)}.${quoteIdent(column)} IS 'crossengin.data_class=${field.classification}';`,
+      `COMMENT ON COLUMN ${qualifyTable(context.schema, tableName)}.${quoteIdent(column)} IS '${directives.join("; ")}';`,
     );
   }
   return comments;

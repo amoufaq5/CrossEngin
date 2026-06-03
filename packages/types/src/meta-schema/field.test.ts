@@ -6,6 +6,7 @@ import {
   isFieldSensitive,
   isSensitiveDataClass,
   requiresAuditTrail,
+  requiresEncryptionAtRest,
 } from "./field.js";
 
 describe("field data classification", () => {
@@ -43,6 +44,13 @@ describe("field data classification", () => {
     expect(requiresAuditTrail("regulated")).toBe(true);
     expect(requiresAuditTrail("pii")).toBe(false);
     expect(requiresAuditTrail("commercial_sensitive")).toBe(false);
+  });
+
+  it("requires at-rest encryption only for phi + regulated", () => {
+    expect(requiresEncryptionAtRest("phi")).toBe(true);
+    expect(requiresEncryptionAtRest("regulated")).toBe(true);
+    expect(requiresEncryptionAtRest("pii")).toBe(false);
+    expect(requiresEncryptionAtRest("public")).toBe(false);
   });
 
   it("exposes per-field helpers", () => {

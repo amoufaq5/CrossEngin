@@ -19,8 +19,17 @@ describe("emitColumnComments — data classification", () => {
     const comments = emitColumnComments(entity, { schema });
     expect(comments).toHaveLength(2);
     expect(comments[0]).toBe(
-      `COMMENT ON COLUMN "t_acme"."patient"."mrn" IS 'crossengin.data_class=phi';`,
+      `COMMENT ON COLUMN "t_acme"."patient"."mrn" IS 'crossengin.data_class=phi; crossengin.encrypt=at_rest';`,
     );
+  });
+
+  it("adds an at-rest encryption directive for phi but not pii", () => {
+    const comments = emitColumnComments(entity, { schema });
+    const mrn = comments.find((c) => c.includes(`"mrn"`));
+    const account = comments.find((c) => c.includes(`"account_id"`));
+    expect(mrn).toContain("crossengin.encrypt=at_rest");
+    expect(account).toContain("crossengin.data_class=pii");
+    expect(account).not.toContain("encrypt=at_rest");
   });
 
   it("uses the reference column name for reference fields", () => {

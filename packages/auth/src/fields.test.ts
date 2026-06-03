@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
-import { computeFieldRedaction, validateWriteMask } from "./fields.js";
+import {
+  computeClassifiedFieldRedaction,
+  computeFieldRedaction,
+  validateClassifiedWriteMask,
+  validateWriteMask,
+  type ClassifiedField,
+} from "./fields.js";
 import type { EntityPermissions, Principal, RoleDefinition } from "./types.js";
 
 const ROLES: ReadonlyMap<string, RoleDefinition> = new Map([
@@ -106,6 +112,120 @@ describe("validateWriteMask", () => {
       PERMS,
       ROLES,
       ["internal_notes", "narcotic_schedule"],
+    );
+    expect(r.ok).toBe(true);
+  });
+});
+
+const CLINICAL_ROLES: ReadonlyMap<string, RoleDefinition> = new Map([
+  ["clinician", { name: "clinician" }],
+  ["front_desk", { name: "front_desk" }],
+]);
+
+const NO_FIELD_PERMS: EntityPermissions = { read: { roles: ["clinician", "front_desk"] } };
+
+const CLINICAL_FIELDS: readonly ClassifiedField[] = [
+  { name: "mrn", classification: "phi" },
+  { name: "given_name", classification: "pii" },
+  { name: "status" },
+];
+
+describe("computeClassifiedFieldRedaction", () => {
+  it("redacts sensitive fields by default for a non-privileged role", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r.readable).toEqual(["status"]);
+    expect(r.redacted).toEqual(["mrn", "given_name"]);
+  });
+
+  it("reveals sensitive fields to a privileged role", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r.redacted).toEqual([]);
+  });
+
+  it("lets an explicit field read grant override the default", () => {
+    const perms: EntityPermissions = {
+      fields: { mrn: { read: { roles: ["front_desk"] } } },
+    };
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      perms,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r.readable).toContain("mrn");
+    expect(r.redacted).toEqual(["given_name"]);
+  });
+
+  it("never redacts unclassified fields", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "status" }, { name: "label" }],
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r.redacted).toEqual([]);
+  });
+
+  it("honours a custom redactByDefault predicate (phi only)", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"], redactByDefault: (c) => c === "phi" },
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.readable).toEqual(["given_name", "status"]);
+  });
+});
+
+describe("validateClassifiedWriteMask", () => {
+  it("blocks a non-privileged role from writing a sensitive field", () => {
+    const r = validateClassifiedWriteMask(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r).toEqual({ ok: false, rejectedField: "mrn" });
+  });
+
+  it("allows a privileged role to write a sensitive field", () => {
+    const r = validateClassifiedWriteMask(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }, { name: "status" }],
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("lets an explicit update grant override the default", () => {
+    const perms: EntityPermissions = {
+      fields: { mrn: { update: { roles: ["front_desk"] } } },
+    };
+    const r = validateClassifiedWriteMask(
+      principal("front_desk"),
+      perms,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      { privilegedRoles: ["clinician"] },
     );
     expect(r.ok).toBe(true);
   });

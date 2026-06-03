@@ -71,12 +71,21 @@ export const AUDIT_REQUIRED_DATA_CLASSIFICATIONS: ReadonlySet<DataClassification
   "regulated",
 ]);
 
+export const ENCRYPT_AT_REST_DATA_CLASSIFICATIONS: ReadonlySet<DataClassification> = new Set([
+  "phi",
+  "regulated",
+]);
+
 export function isSensitiveDataClass(c: DataClassification): boolean {
   return SENSITIVE_DATA_CLASSIFICATIONS.has(c);
 }
 
 export function requiresAuditTrail(c: DataClassification): boolean {
   return AUDIT_REQUIRED_DATA_CLASSIFICATIONS.has(c);
+}
+
+export function requiresEncryptionAtRest(c: DataClassification): boolean {
+  return ENCRYPT_AT_REST_DATA_CLASSIFICATIONS.has(c);
 }
 
 const FIELD_NAME_REGEX = /^[a-z][a-z0-9_]*$/;

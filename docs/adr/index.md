@@ -124,3 +124,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 38 | 0064 | 4,500 | Drafted alongside `@crossengin/ai-providers-openai` (Phase 2 M2.8) |
 | 39 | 0065 | 4,500 | Drafted alongside `@crossengin/pack-erp-healthcare` (Phase 2 M7.5) |
 | 40 | 0066 | 4,000 | Drafted alongside field-level data classification in `types` + `kernel` (Phase 2 M7.6) |
+| 41 | 0067 | 4,000 | Drafted alongside acting on data classification (auth redaction + DDL encryption hints) (Phase 2 M7.7) |
