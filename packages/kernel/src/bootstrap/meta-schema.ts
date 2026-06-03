@@ -9319,6 +9319,36 @@ export const META_SLO_LATENCY_EVALUATIONS: TableDefinition = {
   },
 };
 
+export const META_OPERATE_ENTITY_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "operate_entity_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "entity", type: "TEXT", notNull: true, check: "entity ~ '^[A-Za-z][A-Za-z0-9_]{0,62}$'" },
+    { name: "record_id", type: "TEXT", notNull: true, check: "char_length(record_id) BETWEEN 1 AND 200" },
+    { name: "document", type: "JSONB", notNull: true },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "operate_entity_records_tenant_entity_record_key",
+      columns: ["tenant_id", "entity", "record_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_operate_entity_records_tenant_entity", columns: ["tenant_id", "entity"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "operate_entity_records_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9442,4 +9472,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_SLO_EVALUATIONS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,
+  META_OPERATE_ENTITY_RECORDS,
 ];

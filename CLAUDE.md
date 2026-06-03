@@ -17,8 +17,8 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1 + P1.5** landed: **58 packages + 1 app, 122
-meta-schema tables, 6,192 tests**, all green, no type errors.
+M8.7 + **Phase 3 P1 + P1.5 + P1.6** landed: **59 packages + 1 app,
+123 meta-schema tables, 6,217 tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -43,8 +43,22 @@ bytes ride on a new `RuntimeIncomingRequest extends IncomingRequest`
 tripping the "pass cannot be 4xx" invariant. operate-runtime now
 serves `POST /v1/products` (body → store), RBAC 403, and a 409
 lifecycle re-fire all through the real gateway; the handler's own
-JSON body is preserved on the error envelope. ADR-0078 Q1+Q2
-resolved; Q3 (Postgres `EntityStore`), Q4 (`apps/operate-server`),
+JSON body is preserved on the error envelope. **P1.6 (ADR-0086)
+resolved ADR-0078 Q3** — `@crossengin/operate-runtime-pg` ships
+`PostgresEntityStore`, a Postgres `EntityStore` over a new
+`meta.operate_entity_records` table (tenant-scoped JSONB document
+store, keyed by `(tenant_id, entity, record_id)`, table #123).
+Every op runs inside `withTenantContext` —
+`SELECT set_config('app.current_tenant_id', $1, true)` in a
+transaction — so the **RLS policy** (not just `WHERE tenant_id =
+$1`) confines reads/writes to the caller's tenant; the tenant id
+rides as a bound parameter, never interpolated, and a malformed
+tenant/schema throws before reaching SQL. It satisfies the exact
+`EntityStore` contract P1 defined, so `buildOperateGateway(manifest,
+{store: new PostgresEntityStore(conn), …})` serves the retail pack
+from Postgres with no other change. Column-mapped per-entity tables
+(DDL from the pack) stay the deeper follow-up behind the same
+contract. ADR-0078 Q1+Q2+Q3 resolved; Q4 (`apps/operate-server`),
 Q5 (list pagination) remain. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
@@ -465,8 +479,9 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 are fully drafted in `docs/adr/` — no reserved
-gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
+ADRs 0001-0079 + 0086 are drafted in `docs/adr/`; ADRs 0080-0085
+are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
+Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
 → M8 SLO enforcement); **ADR-0077 is the Phase 3 plan** — the
@@ -474,9 +489,10 @@ bridge from running pillars to a deployed multi-vertical product
 (P1 `operate-server` serving app → P2 distributed workers → P3
 `operate-web` renderer → P4 gov/edu/construction packs → P5
 marketplace install → P6 multi-region → P7 AI Architect in prod
-→ P8 production hardening + GA; ADRs 0078-0085 lock each; ADR-0078
+→ P8 production hardening + GA; ADRs 0080-0085 lock P3-P8; ADR-0078
 covers P1, ADR-0079 covers P1.5 (gateway body parsing + handler
-outcome mapping)).
+outcome mapping), ADR-0086 covers P1.6 (operate-runtime-pg —
+Postgres EntityStore under tenant RLS)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -653,6 +669,23 @@ re-exporting everything.
   redactionRegistryFromManifest; buildOperateGateway → a wired
   GatewayRuntime). Serves the retail pack end-to-end with per-caller
   redaction + lifecycle, each request emitting a PipelineExecution.
+- **`operate-runtime-pg`** — Phase 3 P1.6: the Postgres `EntityStore`
+  binding for the serving runtime. 3 modules: records (EntityRecordRow
+  zod schema + DocumentRow read projection + generateRecordId
+  (`rec_` shape, parity with the in-memory store) + resolveRecordId +
+  pure mergeRecord + rowToRecord), tenant-context
+  (withTenantContext runs fn inside a transaction after
+  `SELECT set_config('app.current_tenant_id', $1, true)` — tenant id
+  bound, never interpolated; rejects a malformed tenant id before
+  opening the tx), entity-store (PostgresEntityStore implements
+  EntityStore over `meta.operate_entity_records`, a tenant-scoped
+  JSONB document table under RLS: list/get/create/update
+  (SELECT … FOR UPDATE then merge)/remove each wrapped in
+  withTenantContext, plus an admin count; validated schema name is
+  the only interpolated identifier). Drops into buildOperateGateway
+  unchanged. One new META table (operate_entity_records); the
+  column-mapped per-entity store is the deeper follow-up behind the
+  same contract.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -1048,7 +1081,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 122 platform-level Postgres tables. Each new package
+catalog of 123 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
@@ -1560,7 +1593,8 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0079 + 0086 exist as markdown in `docs/adr/` (0080-0085
+reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1598,7 +1632,10 @@ Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage), ADR-0077
 is the Phase 3 plan, ADR-0078 covers Phase 3 P1
 (`operate-runtime` — serving a manifest as a multi-tenant API),
 ADR-0079 covers Phase 3 P1.5 (gateway request-body parsing +
-handler-returned outcome mapping in `api-gateway-runtime`).
+handler-returned outcome mapping in `api-gateway-runtime`),
+ADR-0086 covers Phase 3 P1.6 (`operate-runtime-pg` — the Postgres
+`EntityStore` over `meta.operate_entity_records` under tenant RLS;
+ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
