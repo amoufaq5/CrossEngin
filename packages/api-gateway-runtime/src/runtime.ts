@@ -14,6 +14,11 @@ import { sha256 } from "@crossengin/crypto";
 
 import { type OutgoingResponse, outgoingResponseFromJson } from "./adapters.js";
 import {
+  computeRedactedFields,
+  redactJsonValue,
+  type RedactionRegistry,
+} from "./redaction.js";
+import {
   type JwksProvider,
   parseAuthHeader,
   resolvePrincipalForCredential,
@@ -67,6 +72,7 @@ export interface GatewayRuntimeOptions {
   readonly clock?: { now(): Date };
   readonly defaultApiVersion?: string;
   readonly idempotencyTtlSeconds?: number;
+  readonly redactionRegistry?: RedactionRegistry;
 }
 
 export interface HandleResult {
@@ -91,6 +97,7 @@ export class GatewayRuntime {
   private readonly clock: { now(): Date };
   private readonly defaultApiVersion: string;
   private readonly idempotencyTtlSeconds: number;
+  private readonly redactionRegistry: RedactionRegistry | null;
 
   constructor(opts: GatewayRuntimeOptions) {
     this.routes = opts.routes;
@@ -106,6 +113,7 @@ export class GatewayRuntime {
     this.clock = opts.clock ?? { now: () => new Date() };
     this.defaultApiVersion = opts.defaultApiVersion ?? "v1";
     this.idempotencyTtlSeconds = opts.idempotencyTtlSeconds ?? 86_400;
+    this.redactionRegistry = opts.redactionRegistry ?? null;
   }
 
   async handleRequest(request: IncomingRequest): Promise<HandleResult> {
@@ -855,14 +863,44 @@ export class GatewayRuntime {
 
   private async stageTransformResponse(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
+    const redactedCount = this.applyResponseRedaction(ctx);
     rec.record({
       stage: "transform_response",
       outcome: "pass",
       startedAt,
       completedAt: this.now(),
-      reason: `status_${ctx.finalResponse?.status.toString() ?? "unknown"}`,
+      reason:
+        redactedCount > 0
+          ? `redacted_${redactedCount.toString()}_fields`
+          : `status_${ctx.finalResponse?.status.toString() ?? "unknown"}`,
     });
     return null;
+  }
+
+  private applyResponseRedaction(ctx: PipelineState): number {
+    if (this.redactionRegistry === null) return 0;
+    const route = ctx.routeMatch?.route ?? null;
+    const resp = ctx.finalResponse;
+    if (route === null || resp === null || resp.bodyBytes === null) return 0;
+    const contentType = resp.headers["content-type"] ?? "";
+    if (!contentType.includes("application/json")) return 0;
+    const spec = this.redactionRegistry.specFor(route.operationId);
+    if (spec === null) return 0;
+    const redacted = computeRedactedFields(spec, ctx.principal);
+    if (redacted.length === 0) return 0;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(resp.bodyBytes));
+    } catch {
+      return 0;
+    }
+    const scrubbed = redactJsonValue(parsed, new Set(redacted));
+    ctx.finalResponse = outgoingResponseFromJson({
+      status: resp.status,
+      headers: resp.headers,
+      body: scrubbed,
+    });
+    return redacted.length;
   }
 
   private async stageApplySecurityHeaders(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {

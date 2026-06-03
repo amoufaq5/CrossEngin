@@ -29,6 +29,12 @@ importers:
       '@crossengin/ai-providers-anthropic':
         specifier: workspace:*
         version: link:../../packages/ai-providers-anthropic
+      '@crossengin/ai-providers-openai':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-openai
+      '@crossengin/ai-router':
+        specifier: workspace:*
+        version: link:../../packages/ai-router
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -199,6 +205,31 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  packages/ai-providers-openai:
+    dependencies:
+      '@crossengin/ai-providers':
+        specifier: workspace:*
+        version: link:../ai-providers
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/ai-router:
     dependencies:
       '@crossengin/ai-providers':
@@ -288,6 +319,9 @@ importers:
       '@crossengin/sdk':
         specifier: workspace:*
         version: link:../sdk
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -880,6 +914,68 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  packages/observability-runtime:
+    dependencies:
+      '@crossengin/feature-flags':
+        specifier: workspace:*
+        version: link:../feature-flags
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../incident-response
+      '@crossengin/observability':
+        specifier: workspace:*
+        version: link:../observability
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/observability-runtime-pg:
+    dependencies:
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../incident-response
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../kernel-pg
+      '@crossengin/observability-runtime':
+        specifier: workspace:*
+        version: link:../observability-runtime
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/pack-erp-core:
     dependencies:
       '@crossengin/auth':
@@ -891,6 +987,129 @@ importers:
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
+      '@crossengin/views':
+        specifier: workspace:*
+        version: link:../views
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/pack-erp-grocery:
+    dependencies:
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
+      '@crossengin/pack-erp-retail':
+        specifier: workspace:*
+        version: link:../pack-erp-retail
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
+      '@crossengin/views':
+        specifier: workspace:*
+        version: link:../views
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/pack-erp-healthcare:
+    dependencies:
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
+      '@crossengin/views':
+        specifier: workspace:*
+        version: link:../views
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/pack-erp-retail:
+    dependencies:
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
       '@crossengin/types':
         specifier: workspace:*
         version: link:../types

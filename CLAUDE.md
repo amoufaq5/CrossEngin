@@ -13,10 +13,286 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 landed: **51 packages + 1 app, 119 meta-schema tables, 5,768
-tests**, all green, no type errors. M6.5 added
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
+M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
+M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
++ M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
+M8.7 landed: **57 packages + 1 app, 122 meta-schema tables, 6,170
+tests**, all green, no type errors. M7.9.1 added
+`@crossengin/pack-erp-grocery` — the fourth vertical pack,
+proving **transitive (three-level) `meta.extends` lineage**:
+grocery extends `operate-erp/retail`, which itself extends core,
+so `resolveManifest` recurses grocery → retail → core and merges
+all three (10 entities, 9 roles, 3 workflows, 11 relations). 2
+entities (Supplier → core Account; PerishableLot → retail Product
++ own Supplier; both auditable) with cross-level references that
+resolve only when the whole chain is present — a test asserts
+resolution *throws* when retail is available but core is not.
+`Supplier.contact_email` → pii, `PerishableLot.cost_per_unit` →
+commercial_sensitive; classifications survive the deeper merge
+(retail's `Product.unit_cost` also propagates).
+`compliancePacks: ["haccp"]`. **Phase 2's eight milestones
+(M1–M8) are complete.** M7.9 added `@crossengin/pack-erp-retail`
+— the third vertical pack and the second `meta.extends` consumer,
+proving the pack-extension mechanism generalizes. It declares
+`meta.extends: ["operate-erp/core"]` and resolves to 8 entities
+(4 core + 4 retail: Product / Store / SalesOrder / OrderLine),
+8 relations (two cross-pack: Account→Stores, SalesOrder→Invoice),
+merged roles (retail_admin / store_manager / cashier /
+retail_analyst), a SalesOrder entityLifecycle (cart → placed →
+fulfilled → returned, cancel from cart/placed), 2 jobs, 2 views,
+`compliancePacks: ["pci"]`. Crucially it exercises the
+classification arc on a **non-PHI** domain: `Product.unit_cost` →
+`commercial_sensitive` (redacted from cashiers — explicit
+`fields.unit_cost.read` grant excludes them), `SalesOrder.
+customer_email` → `pii`; no `phi`/`regulated`, so the
+audit-required + encryption-hint invariants correctly don't fire.
+`buildErpRetailPack(opts?)` cross-validates only after
+`resolveManifest` merges core in. M7.8.6 surfaced the
+M7.8/M7.8.5 encryption applier +
+migrator as a `crossengin-pg encrypt` CLI command:
+`encrypt --verify` prints an `EncryptionCoverageReport`
+(`formatEncryptionCoverage`) and exits 1 on drift (plaintext PHI
+/ missing pgcrypto) so CI can gate "zero plaintext PHI columns";
+`encrypt --plan` (default) prints the encrypt-on-write SQL dry-run
+(`formatEncryptionPlan`); `encrypt --apply [--provision]
+[--confirm]` runs the migration (production-guarded). Flags:
+`--schema=<name>` (default meta), `--key-ref=<sql>` (default
+`current_setting('app.column_encryption_key')` — a reference,
+never a raw key). The bin's flag parser was extended to read
+`--k=v` values; the decision/SQL logic stays in tested `src`
+modules so the bin is a thin dispatcher.
+M2.8.6 added per-turn provider + cost attribution to chat:
+`@crossengin/ai-router`'s `DefaultLlmRouter` gained an opt-in
+`onResolved(resolution)` observer (`RouterResolution =
+{task, providerId, modelId, latencyMs, fallbackDepth}`) that fires
+once per successful `complete()` with the provider that actually
+served it (`fallbackDepth>0` ⇒ a fallback was used; it does not
+fire on `AllProvidersExhaustedError`). `architect-cli`'s
+`buildChatProvider` now returns a `describeLastTurn()` label
+(static `anthropic/<model>` for a single provider; router-observer
+-driven `providerId/model (fallback)` for the router), and
+`formatUsageLine(usage, label?)` appends `via <label>` — so the
+human chat footer reads `[tokens in=… out=… cost=$… via
+openai/gpt-4o (fallback)]`. No `CompletionChunk` contract change;
+JSON mode + the `providerOverride` test seam are untouched.
+M2.8.5 wired
+the M6.5 router + the M2.8 OpenAI provider into `architect-cli`'s
+`chat` command — previously it constructed a single
+`AnthropicProvider` directly. The chat engine's provider type was
+narrowed from `LlmProvider` to a structural `CompletionProvider`
+(`{complete()}`), which both a concrete provider and a
+`DefaultLlmRouter` satisfy — no adapter. `buildChatProvider`
+picks the source: `providerOverride` (tests) wins; `--provider
+anthropic|openai` forces a single vendor; `--provider auto`
+(default) builds a `DefaultLlmRouter` (Anthropic primary →
+OpenAI fallback) when **both** `ANTHROPIC_API_KEY` +
+`OPENAI_API_KEY` are set, else the single available provider,
+else an error. `--openai-model` (default gpt-4o) sets the OpenAI
+model. Chat is now multi-vendor with real cross-vendor failover;
+the test seam (`providerOverride`) is untouched, so CI still runs
+offline. M7.8.5
+shipped the encrypt-on-write migration that makes M7.8's
+`plaintext_at_rest` go green: `kernel-pg`'s
+`encryption-migration.ts` converts a hinted plaintext column to a
+pgcrypto-encrypted `BYTEA` column in place — `emitEncryptColumnSql`
+emits the ordered ADD `<col>__enc BYTEA` / UPDATE
+`pgp_sym_encrypt(<col>::text, keyRef)` (NULLs preserved) / DROP /
+RENAME / re-COMMENT directive, `emitDecryptingViewSql` builds a
+`pgp_sym_decrypt` read view, and `EncryptionMigrator.migrateSchema(
+schema, keyRef)` plans (plaintext-only, so re-runs are no-ops) +
+runs each column in its own transaction. Key is always a SQL
+*reference*, never inlined (test-enforced). After migration the
+M7.8 verifier reports the column encrypted-at-rest. The
+transparent *write* path (INSTEAD OF triggers) + key rotation are
+the deferred follow-ups. M7.8 chose the at-rest
+encryption mechanism and shipped its `kernel-pg` applier: a
+`phi`/`regulated` column's `crossengin.encrypt=at_rest` hint
+(M7.7) is fulfilled by **pgcrypto** symmetric encryption
+(`pgp_sym_encrypt`/`pgp_sym_decrypt`, `BYTEA` ciphertext, key by
+SQL *reference* — never inlined), since `@crossengin/crypto` has
+no symmetric cipher. A new `encryption.ts` ships
+`parseColumnDirectives` (the pure inverse of the emitter's
+comment), `introspectEncryptedColumns` (reads `col_description`),
+`ensurePgcryptoExtension` / `pgcryptoInstalled`,
+`pgpSymEncryptExpr`/`DecryptExpr` SQL builders, and
+`summarizeEncryptionCoverage` → an `EncryptionCoverageReport`
+flagging `plaintext_at_rest` (hinted but stored as a plaintext
+type) + `pgcrypto_missing` drift; `EncryptionApplier` ties
+provision + coverage + verify. The column-rewrite-to-BYTEA +
+encrypt-on-write path (a view/trigger using the builders) is the
+explicit follow-up. M7.7.6 closed the
+classification pipeline to zero-config:
+`api-gateway-runtime`'s `redactionRegistryFromManifest(manifest,
+{rolesForPrincipal, policyForEntity?, operationsForEntity?})`
+builds a `RedactionRegistry` straight from a manifest — every
+entity that declares a classified field (`entityClassifiedFields`)
+contributes a `ResponseRedactionSpec` registered under its read
+operationIds (default `<entitylower>.read|list|get`). Input is a
+structural `RedactionManifestInput` (`{entities, permissions,
+roles}`), so the runtime stays off `@crossengin/kernel` while a
+full `Manifest` is still assignable. The deployment supplies only
+what the schema can't know — the scope→role bridge and the
+`SensitiveFieldPolicy` (privilegedRoles); without a policy,
+sensitive fields are redacted for everyone lacking an explicit
+grant (fail-closed). Declaring `classification: "phi"` on a field
+now drives the whole chain — catalog comment, audit invariant,
+encryption hint, default mask, edge redaction — with no
+hand-written spec. M7.7.5 wired the M7.7 classification
+redaction into the API gateway: `api-gateway-runtime`'s
+`transform_response` stage (previously a no-op) now strips
+classified fields from JSON responses per-caller. A new
+`redaction.ts` ships `ResponseRedactionSpec` (classifiedFields +
+roles map + `rolesForPrincipal` scope→role bridge + optional
+entityPermissions/policy), a `RedactionRegistry` /
+`MapRedactionRegistry` (operationId → spec),
+`computeRedactedFields` (bridges the gateway `ResolvedPrincipal`
+to an auth `Principal`, fail-closed: unknown roles map to an
+unprivileged sentinel rather than throwing), and `redactJsonValue`
+(pure tree-walk that drops named fields across records / arrays /
+`{data:[…]}` wrappers). `GatewayRuntimeOptions.redactionRegistry`
+is opt-in; the stage records `redacted_N_fields` in the
+`PipelineExecution` audit. Handlers return the full record; the
+edge redacts. M7.7 acted on the M7.6 data classification (auth +
+kernel + types enhancement, no new package): a sensitive field
+(pii/phi/regulated/commercial_sensitive) with no explicit `read`
+grant is now redacted-by-default for non-privileged principals
+via `computeClassifiedFieldRedaction` /
+`validateClassifiedWriteMask` in `@crossengin/auth` (explicit
+per-field grants still win; `SensitiveFieldPolicy =
+{privilegedRoles?, redactByDefault?}` parameterizes it), and the
+DDL emitter appends `crossengin.encrypt=at_rest` to the column
+comment for phi/regulated fields (`requiresEncryptionAtRest` in
+types) so the storage layer has an at-rest-encryption signal in
+`pg_catalog`. Fully backward compatible — the original
+`computeFieldRedaction` / `validateWriteMask` are untouched; the
+classification-aware variants are additive opt-ins. Closes the
+loop M7.6 opened: classification now drives masking + an
+encryption hint, not just a catalog comment. M7.6 added
+field-level data classification (kernel +
+types enhancement, no new package): the manifest `FieldSchema`
+gained an optional `classification` (`public | internal |
+commercial_sensitive | pii | phi | regulated`, mirroring jobs'
+`DATA_CLASSES`), the DDL emitter writes `COMMENT ON COLUMN …
+'crossengin.data_class=<class>'` for each classified field (so
+the class lands in `pg_catalog`), and `validateManifest` now
+enforces that any `phi`/`regulated` field lives on an
+`auditable` entity. `manifestClassifiedFields(manifest)` returns
+the full `{entity, field, classification}` inventory;
+`entityClassifiedFields` / `isFieldSensitive` /
+`requiresAuditTrail` are the field-level helpers. `pack-erp-
+healthcare` now classifies its PHI/PII fields (Patient.mrn →
+phi, demographics → pii, Observation.value_* → phi) and still
+cross-validates. Foundation for default field-redaction +
+at-rest encryption hints (M7.7). M7.5 added
+`@crossengin/pack-erp-healthcare` — the second
+vertical pack and the first to use `meta.extends` lineage. It
+declares `meta.extends: ["operate-erp/core"]` and references core
+entities (Account, Invoice) by name, so it does NOT cross-validate
+standalone — only once `resolveManifest` merges the core pack in
+(via a `ManifestRegistry`) does `tryValidateManifest` pass (7
+entities = 4 core + 3 healthcare, 7 relations, merged roles, both
+lifecycle workflows). 3 entities (Patient → core Account,
+Encounter → Patient + optional core Invoice, Observation →
+Encounter — all auditable, PHI), 4 relations (two cross-pack:
+Account→Patients + Encounter→Invoice), 4 roles (clinical_admin /
+clinician / front_desk / hipaa_auditor), an Encounter
+entityLifecycle (scheduled → in_progress → completed|cancelled|
+no_show), 2 PHI-tagged jobs (appointment reminder + lab-result
+handler), 2 views, `compliancePacks: ["hipaa"]`. Proves the
+kernel's pack-extension mechanism end-to-end; template for
+pack-erp-retail / -construction / -education. M2.8 added
+`@crossengin/ai-providers-openai` — the second real
+`LlmProvider`, binding OpenAI's Chat Completions + Embeddings
+APIs to the same contract as the Anthropic client (zero runtime
+deps, pure fetch + ReadableStream). 5 modules: pricing (gpt-4.1
+/ gpt-4.1-mini / gpt-4o / gpt-4o-mini / o4-mini + the two
+text-embedding-3 models; computeUsageCost subtracts cached from
+the total prompt_tokens before charging), chat-api (system
+messages stay first-class; assistant toolUses → tool_calls with
+stringified arguments; tool → role:tool + tool_call_id; jsonMode
+→ response_format; stream → stream_options.include_usage),
+streaming (data:/[DONE] SSE parser; assembles tool_calls by
+index; tool_call_end on finish_reason; shared StreamState across
+read boundaries), errors (OpenAiError + isRetryable +
+classifyHttpStatus; 503→service_unavailable), provider
+(OpenAiProvider implements LlmProvider — complete() streaming +
+real embed() via /v1/embeddings + completeNonStreaming;
+capabilities jsonMode + embedding true; Bearer auth + optional
+org/project; FetchLike injection). First provider with working
+embeddings; the ai-router fallback chain is now genuinely
+multi-vendor. M8.7 added
+latency enforcement persistence to
+`@crossengin/observability-runtime-pg`: a `signal`
+('availability' | 'latency', default 'availability') column on
+`meta.slo_enforcement_actions` so one audit table serves both
+engines, plus a new `meta.slo_latency_evaluations` table
+(`slle_` ids, worst_percentile p50/p95/p99, sample_count,
+breaches JSONB, platform-or-tenant RLS) for latency verdict
+snapshots. `buildPersistentLatencySloEngine` wraps a
+`LatencySloEngine` — every decision writes a latency-signal
+enforcement action, every breach_opened writes a latency
+evaluation snapshot. `enforcementActionFromDecision` now accepts
+`EnforcementDecision | LatencyEnforcementDecision` + a `signal`;
+the M8.5 `SloEnforcementReplayer` verifies latency actions
+unchanged (its checks are signal-agnostic). M8.6 added
+latency-target SLO enforcement to `@crossengin/
+observability-runtime` (pure compute, no new package/tables): a
+`LatencySloEngine` that rides the same `recordOutcome()` stream,
+computes p50/p95/p99 over a short rolling window
+(`RollingWindow.latencyStats` + exported `percentile`), and on a
+breach reuses the shared enforcement planners to declare a
+`performance` incident, page on-call, and optionally roll a flag
+back. `latency.ts` is pure: `parseLatencyBudgetMs` ("300ms"/"5s"
+→ ms), `DEFAULT_LATENCY_THRESHOLDS` (latency-page ≥2×→sev2 +
+latency-ticket >1×→sev3, minSamples 20), `evaluateLatencyTarget`
+(fires per declared percentile when observed > budget×multiplier
+and count ≥ minSamples; worst severity wins). One incident per
+ongoing breach; `recovered` when latency drops back under
+budget. Availability (`SloEnforcementEngine`) + latency
+(`LatencySloEngine`) compose over one shared `RollingWindow`.
+M8.5 added
+`@crossengin/observability-runtime-pg` — the Postgres persistence
+sibling for the SLO enforcement loop. 5 modules: records
+(SloEvaluationRecord + SloEnforcementActionRecord schemas +
+sloe_/sloa_ id generators + pure projectors
+evaluationRecordFromVerdict / enforcementActionFromDecision),
+evaluation-store (PostgresSloEvaluationStore — INSERT … ON
+CONFLICT + countBreachesSince), enforcement-action-store
+(PostgresSloEnforcementActionStore — record + listForIncident +
+listRecent + countSince with a row→record mapper),
+persisting-engine (buildPersistentSloEnforcementEngine wraps a
+SloEnforcementEngine so every evaluate() writes an enforcement
+action per decision + an evaluation snapshot per breach_opened;
+tenant resolves from registration → resolveTenantId → kill
+switch), replayer (pure verifyEnforcementActionShape +
+verifyEnforcementHistory — ongoing/recovered-without-open,
+duplicate-open, paged-without-channels, kill-switch-without-flag
+— + summarizeEnforcement + SloEnforcementReplayer). Two new META_
+tables: meta.slo_evaluations + meta.slo_enforcement_actions
+(platform-or-tenant RLS, append-only). M8 added
+`@crossengin/observability-runtime` — the SLO enforcement loop.
+7 modules: clock (Clock/FixedClock + parseDurationMs), window
+(RequestOutcome ingest + RollingWindow per-surface counts),
+burn-rate (multi-window Google-SRE burn-rate evaluation —
+fast-burn 1h/5m@14.4×→sev2, slow-burn 6h/30m@6×→sev3, fires
+only when both windows clear the multiplier + minSamples),
+synthetics (SyntheticTracker + consecutive-failure detection),
+enforcement (pure planners: planIncidentDeclaration →
+schema-valid declared IncidentRecord, planPageDirective →
+AlertRouteResolution, planKillSwitchActivation →
+triggered_active KillSwitch with automated_metric_breach
+trigger; severity→alert-severity map; INC-/fks_ id formatters),
+tracing (TraceCollector stitches gateway→workflow→notifications
+spans into a tree), engine (SloEnforcementEngine: recordOutcome
++ evaluate → breach_opened/breach_ongoing/recovered decisions,
+dedups one incident per ongoing breach, mints cross-linked
+incident + kill-switch ids). Pure runtime, no new META_ tables —
+emits records typed by existing contracts (IncidentRecord →
+META_INCIDENTS, KillSwitch → feature-flag tables). The exit
+criterion runs end-to-end in tests: a 5xx burst on
+`POST /v1/orders` declares a SEV2 incident, pages on-call, and
+rolls `ff_checkout01` back to its safe value. M6.5 added
 `@crossengin/ai-router` — the orchestration layer between
 consumers and `LlmProvider` implementations. 5 modules: retry
 (exponential backoff + isRetryable check + withRetry wrapper),
@@ -162,7 +438,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0059 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0076 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -174,7 +450,28 @@ M5.6 (tool-driven chat), ADR-0056 covers M5.8 (write tools with
 human-in-the-loop approval), ADR-0057 covers M5.7 (chat
 persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`pack-erp-core` — first vertical pack), ADR-0059 covers M6.5
-(`ai-router` — provider router with retry / cost / latency).
+(`ai-router` — provider router with retry / cost / latency),
+ADR-0060 covers M8 (`observability-runtime` — SLO enforcement
+loop), ADR-0061 covers M8.5 (`observability-runtime-pg` — SLO
+enforcement persistence), ADR-0062 covers M8.6 (latency-target
+SLO enforcement in `observability-runtime`), ADR-0063 covers
+M8.7 (latency enforcement persistence in
+`observability-runtime-pg`), ADR-0064 covers M2.8
+(`ai-providers-openai` — second real LlmProvider), ADR-0065
+covers M7.5 (`pack-erp-healthcare` — second vertical pack via
+`meta.extends`), ADR-0066 covers M7.6 (field-level data
+classification in `types` + `kernel`), ADR-0067 covers M7.7
+(acting on the classification — auth default redaction + DDL
+encryption hints), ADR-0068 covers M7.7.5 (gateway response
+redaction by classification), ADR-0069 covers M7.7.6
+(manifest-derived redaction registry), ADR-0070 covers M7.8
+(at-rest encryption mechanism + pgcrypto coverage applier),
+ADR-0071 covers M7.8.5 (encrypt-on-write migration), ADR-0072
+covers M2.8.5 (multi-vendor router in architect-cli chat),
+ADR-0073 covers M2.8.6 (per-turn provider + cost attribution in
+chat), ADR-0074 covers M7.8.6 (`crossengin-pg encrypt` CLI), ADR-0075
+covers M7.9 (`pack-erp-retail` — third vertical pack), ADR-0076
+covers M7.9.1 (`pack-erp-grocery` — transitive pack lineage).
 
 ## Architecture in 90 seconds
 
@@ -204,16 +501,26 @@ re-exporting everything.
 - **`kernel`** — meta-schema (113 tables), DDL emit, manifest
   validate/diff/patch/topology/hash, bootstrap SQL generator.
 - **`kernel-pg`** — Postgres-backed migration applier (first
-  impure package). 7 modules: connection (PgConnection interface
+  impure package). 9 modules: connection (PgConnection interface
   + `parsePgEnvConfig` + node-postgres binding), statement-hash
   (sha256 of normalized SQL), migration-log (`_meta_migrations`
   bookkeeping), preconditions (`pg_uuidv7` extension + PG ≥ 14 +
   CREATE privilege checks), applier (advisory-lock-gated, per-
   statement transactions, halt-on-first-failure, hash-based
   skip), introspection (pg_catalog queries + pure parsers), diff
-  (pure `diffSchema` vs `META_TABLES`). Ships `crossengin-pg`
-  CLI with `apply`, `apply --dry-run`, `drift`, `inspect`,
-  `version` commands.
+  (pure `diffSchema` vs `META_TABLES`), encryption (the M7.7
+  `encrypt=at_rest` hint applier: `parseColumnDirectives`,
+  `introspectEncryptedColumns` via `col_description`,
+  `ensurePgcryptoExtension`, `pgpSymEncrypt/DecryptExpr` builders,
+  `summarizeEncryptionCoverage` → `plaintext_at_rest` /
+  `pgcrypto_missing` drift, `EncryptionApplier`),
+  encryption-migration (the M7.8.5 encrypt-on-write path:
+  `emitEncryptColumnSql` rewrites a plaintext column to encrypted
+  `BYTEA` in place, `emitDecryptingViewSql` builds a
+  `pgp_sym_decrypt` read view, `EncryptionMigrator.migrateSchema`
+  plans plaintext-only + runs per-column transactions). Ships
+  `crossengin-pg` CLI with `apply`, `apply --dry-run`, `drift`,
+  `inspect`, `encrypt --verify|--plan|--apply`, `version` commands.
 - **`workflow-runtime-pg`** — Postgres-backed adapters for the
   workflow runtime. 9 modules: id-mapping
   (WorkflowInstanceIdResolver + WorkflowDefinitionIdResolver,
@@ -263,7 +570,14 @@ re-exporting everything.
   bulkVerify paginate over META_GATEWAY_PIPELINE_EXECUTIONS;
   summarize computes pass/deny/error counts + p50/p95 latency).
 - **`api-gateway-runtime`** — HTTP gateway middleware
-  (fourth impure package). 7 modules: adapters (RequestAdapter +
+  (fourth impure package). 9 modules: redaction
+  (ResponseRedactionSpec + RedactionRegistry/MapRedactionRegistry
+  + computeRedactedFields fail-closed scope→role bridge +
+  redactJsonValue tree-walk; `transform_response` strips
+  classified fields per-caller when a redactionRegistry is set);
+  manifest-redaction (redactionRegistryFromManifest builds the
+  registry from a manifest's classified fields + permissions +
+  roles, no kernel dep); adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
   buildIncomingRequest helper), stores (PrincipalResolver +
   IdempotencyStore + RateLimitChecker + RouteRegistry interfaces
@@ -326,7 +640,12 @@ re-exporting everything.
 
 ### Identity, security, data
 - **`auth`** — RBAC + ABAC + field-level permissions + write
-  masks. RoleDefinition, RbacGrant, principals.
+  masks. RoleDefinition, RbacGrant, principals. Classification-
+  aware `computeClassifiedFieldRedaction` /
+  `validateClassifiedWriteMask` redact / write-block sensitive
+  fields (from the manifest `classification`) by default unless a
+  `SensitiveFieldPolicy.privilegedRoles` principal reads/writes
+  them; explicit per-field grants still win.
 - **`sso`** — federated identity: SAML 2.0 + OIDC providers,
   SCIM 2.0 provisioning, claim mappings + JIT policies, session
   lifecycle, login audit.
@@ -355,7 +674,10 @@ re-exporting everything.
   clean. Tracks per-provider p50/p95 latency for observability +
   future latency-based routing. Throws `CostCeilingExceededError`
   / `ProviderResolutionError` / `AllProvidersExhaustedError` —
-  all non-retryable, so the router doesn't loop on them.
+  all non-retryable, so the router doesn't loop on them. An opt-in
+  `onResolved(RouterResolution)` observer reports the provider that
+  actually served each `complete()` (with `fallbackDepth`), which
+  architect-cli's chat footer turns into a `via <provider>` label.
 - **`ai-providers-anthropic`** — real Anthropic Messages API
   client implementing `LlmProvider`. Zero runtime deps (pure
   `fetch` + `ReadableStream`). 5 modules: pricing (5 Claude 4.x
@@ -373,6 +695,26 @@ re-exporting everything.
   Streaming()` + `embed()` throws invalid_request_error;
   `anthropic-beta` header for prompt caching / tool streaming
   / computer use; `FetchLike` injection for tests).
+- **`ai-providers-openai`** — second real `LlmProvider`, binding
+  OpenAI's Chat Completions + Embeddings APIs. Zero runtime deps.
+  5 modules: pricing (gpt-4.1 / -mini / gpt-4o / -mini / o4-mini
+  + text-embedding-3-small/-large; computeUsageCost subtracts
+  cached_tokens from the total prompt_tokens before charging),
+  chat-api (system messages stay first-class; assistant toolUses
+  → tool_calls with stringified arguments; tool → role:tool +
+  tool_call_id; jsonMode → response_format; stream →
+  stream_options.include_usage; max_completion_tokens),
+  streaming (data:/[DONE] SSE; assembles tool_calls by index;
+  tool_call_end on finish_reason; shared StreamState across read
+  boundaries), errors (OpenAiError + isRetryable +
+  classifyHttpStatus; 503→service_unavailable; retryable =
+  rate_limit/server/service_unavailable/network/timeout),
+  provider (OpenAiProvider implements LlmProvider — complete()
+  streaming + real embed() via /v1/embeddings +
+  completeNonStreaming; capabilities jsonMode + embedding true;
+  Bearer auth + optional org/project; FetchLike injection). The
+  first provider with working embeddings; makes the ai-router
+  fallback chain genuinely multi-vendor.
 - **`ai-architect`** — AI Architect session contract, safety
   policy (refusals, gates, refusal copy, tenant settings, cost
   ceilings, eval gate, incidents, redteam). Plus session-record
@@ -394,6 +736,59 @@ re-exporting everything.
   letters, cost ledger.
 - **`observability`** — SLO definitions, error budget compute,
   redaction, synthetics, OTel-style tracing.
+- **`observability-runtime`** — the SLO enforcement loop (pure,
+  in-process; consumes observability + incident-response +
+  feature-flags contracts). 9 modules: clock (Clock/FixedClock +
+  parseDurationMs), window (RequestOutcome ingest + RollingWindow
+  per-surface counts + failureRate + latencyStats p50/p95/p99 +
+  exported percentile), burn-rate (multi-window
+  Google-SRE evaluation: DEFAULT_BURN_RATE_THRESHOLDS fast-burn
+  1h/5m@14.4×→sev2 + slow-burn 6h/30m@6×→sev3; burnRate =
+  failureRate / (1−target); fires only when both windows clear
+  the multiplier and the long window has ≥minSamples),
+  synthetics (SyntheticTracker + consecutiveFailures +
+  evaluateSynthetic against SyntheticCheckDeclaration),
+  enforcement (planIncidentDeclaration → schema-valid declared
+  IncidentRecord; planPageDirective → AlertRouteResolution;
+  planKillSwitchActivation → triggered_active KillSwitch with
+  automated_metric_breach trigger; SEVERITY_TO_ALERT_SEVERITY;
+  formatIncidentId/formatKillSwitchId; FlagRollbackSchema),
+  tracing (RecordedSpan + childContext + TraceCollector that
+  stitches gateway→workflow→notifications spans into a tree),
+  engine (SloEnforcementEngine: recordOutcome + evaluate →
+  breach_opened/breach_ongoing/recovered; one incident per
+  ongoing breach; mints cross-linked incident + kill-switch ids),
+  latency (parseLatencyBudgetMs + DEFAULT_LATENCY_THRESHOLDS +
+  evaluateLatencyTarget — pure percentile-vs-budget breach
+  evaluation), latency-engine (LatencySloEngine: same shape as
+  the availability engine but for SloLatencyTarget; declares
+  `performance` incidents over a short rolling latency window).
+  No new META_ tables — emits records typed by existing
+  contracts.
+- **`observability-runtime-pg`** — Postgres persistence for the
+  SLO enforcement loop (availability + latency). 7 modules:
+  records (SloEvaluationRecord + SloEnforcementActionRecord +
+  SloLatencyEvaluationRecord zod schemas + sloe_/sloa_/slle_ id
+  generators + pure projectors evaluationRecordFromVerdict /
+  enforcementActionFromDecision (accepts EnforcementDecision |
+  LatencyEnforcementDecision + a signal) /
+  latencyEvaluationRecordFromVerdict), evaluation-store +
+  latency-evaluation-store (PostgresSloEvaluationStore /
+  PostgresSloLatencyEvaluationStore: INSERT … ON CONFLICT DO
+  NOTHING + countBreachesSince), enforcement-action-store
+  (PostgresSloEnforcementActionStore: record + listForIncident +
+  listRecent + countSince + row→record mapper; signal-aware),
+  persisting-engine + latency-persisting-engine
+  (buildPersistentSloEnforcementEngine /
+  buildPersistentLatencySloEngine each wrap their engine — every
+  evaluate() writes an enforcement action per decision + an
+  evaluation snapshot per breach_opened; latency actions tagged
+  signal='latency'), replayer (pure verifyEnforcementActionShape +
+  verifyEnforcementHistory + summarizeEnforcement +
+  SloEnforcementReplayer — signal-agnostic, covers both). Three
+  META_ tables: meta.slo_evaluations + meta.slo_enforcement_actions
+  (+ signal column) + meta.slo_latency_evaluations
+  (platform-or-tenant RLS, append-only, sloe_/sloa_/slle_ ids).
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
 - **`rate-limiting`** — unified rate-limit + quota contracts. 6
@@ -452,6 +847,50 @@ re-exporting everything.
   `tryValidateManifest` end-to-end. Pattern for future
   `pack-erp-healthcare` / `pack-erp-retail` / etc. that extend
   via `meta.extends: ["operate-erp/core"]`.
+- **`pack-erp-healthcare`** — second vertical pack; the first to
+  use `meta.extends`. Declares `meta.extends: ["operate-erp/
+  core"]` and references core entities by name, so it cross-
+  validates only after `resolveManifest(pack, {registry})` merges
+  core in. 3 entities (Patient → core Account; Encounter →
+  Patient + optional core Invoice; Observation → Encounter; all
+  auditable, PHI), 4 relations (two cross-pack: Account→Patients,
+  Encounter→Invoice), 4 roles (clinical_admin / clinician /
+  front_desk / hipaa_auditor) with PHI-restricted Observation
+  writes, an Encounter entityLifecycle (scheduled → in_progress →
+  completed|cancelled|no_show; same-day SLA), 2 PHI jobs
+  (appointment-reminder cron + lab_result_received handler), 2
+  views, `compliancePacks: ["hipaa"]`. `buildErpHealthcarePack
+  (opts?)` returns the standalone (extends-bearing) Manifest;
+  tests resolve it against a core `ManifestRegistry` and pass
+  `tryValidateManifest`. Proves the kernel's pack-extension
+  mechanism end-to-end.
+- **`pack-erp-retail`** — third vertical pack; second `meta.extends`
+  consumer. Declares `meta.extends: ["operate-erp/core"]`; resolves
+  to 8 entities (4 core + Product / Store / SalesOrder / OrderLine,
+  all auditable), 8 relations (cross-pack Account→Stores +
+  SalesOrder→Invoice), 4 roles (retail_admin / store_manager /
+  cashier / retail_analyst), a SalesOrder entityLifecycle (cart →
+  placed → fulfilled → returned), 2 jobs, 2 views,
+  `compliancePacks: ["pci"]`. Exercises the classification arc on a
+  **non-PHI** domain: `Product.unit_cost` → commercial_sensitive
+  (redacted from cashiers via the classification default + an
+  explicit `fields.unit_cost.read` grant), `SalesOrder.
+  customer_email` → pii; no phi/regulated, so the audit + encryption
+  invariants stay dormant. `buildErpRetailPack(opts?)` passes
+  `tryValidateManifest` once resolved against a core registry.
+  Template for `pack-erp-construction` / `-education`.
+- **`pack-erp-grocery`** — fourth vertical pack; proves transitive
+  (three-level) `meta.extends`. Declares `meta.extends:
+  ["operate-erp/retail"]`, so resolving it recurses grocery →
+  retail → core and merges all three (10 entities, 9 roles, 3
+  workflows, 11 relations). 2 entities (Supplier → core Account;
+  PerishableLot → retail Product + own Supplier, 4-state
+  lifecycle), with cross-level references that resolve only when
+  the full chain is present — `resolveManifest` throws if retail
+  is in the registry but core is not. `Supplier.contact_email` →
+  pii, `PerishableLot.cost_per_unit` → commercial_sensitive;
+  classifications propagate through both merge levels (retail's
+  `Product.unit_cost` survives too). `compliancePacks: ["haccp"]`.
 
 ### Business operations
 - **`billing`** — plans, subscriptions, metered usage, invoices,
@@ -555,7 +994,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 115 platform-level Postgres tables. Each new package
+catalog of 122 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
@@ -702,6 +1141,25 @@ The provider is the first concrete `LlmProvider` implementation
 — the Architect agent (M5.5 chat command) can now run against
 a real backend with real cost accounting.
 
+**No longer deferred (as of M2.8):** a second LLM provider.
+`@crossengin/ai-providers-openai` binds OpenAI's Chat
+Completions (`/v1/chat/completions`) + Embeddings
+(`/v1/embeddings`) to the same `LlmProvider` contract, zero
+runtime deps. `OpenAiProvider.complete()` streams the same
+`CompletionChunk` union (parsing `data:`/`[DONE]` SSE,
+assembling `tool_calls` by index, emitting `tool_call_end` on
+`finish_reason`); `embed()` returns real vectors with cost
+(the first provider where `embed()` works — `capabilities.
+embedding = true`). Usage cost subtracts `cached_tokens` from
+OpenAI's total `prompt_tokens` before charging the uncached
+rate. Errors normalize to `OpenAiError` with the same
+`isRetryable()` structural contract the router consumes, so a
+`TaskPolicy` fallback chain (`anthropic/… → openai/…`) now
+fails over across vendors for real. Two independent
+implementations of one wire-format-neutral contract prove the
+`LlmProvider` abstraction; Bedrock / Vertex / Mistral follow the
+same five-module template.
+
 **No longer deferred (as of M3):** workflow execution. The
 `workflow-runtime` package consumes `WorkflowDefinition` shapes
 and actually runs them: starts instances, threads variables,
@@ -797,6 +1255,187 @@ hash + apply via the existing CLI flow. Pattern set for future
 verticals (healthcare, retail, construction): same module shape,
 same cross-validators, optional `meta.extends` lineage.
 
+**No longer deferred (as of M7.5):** pack extension lineage.
+`@crossengin/pack-erp-healthcare` is the first pack to use
+`meta.extends`. It declares `meta.extends: ["operate-erp/core"]`
+and references core entities (Account, Invoice) by name, so it
+does NOT cross-validate standalone — `tryValidateManifest` only
+passes after `resolveManifest(pack, {registry})` merges the core
+pack in (4 + 3 = 7 entities, 3 + 4 relations, merged roles, both
+lifecycle workflows), with the core pack's slug/version/hash
+recorded in `meta.manifestResolution.parents`. Three PHI clinical
+entities (Patient / Encounter / Observation), two cross-pack
+relations (Account→Patients, Encounter→Invoice), HIPAA compliance
+posture, PHI-tagged jobs. The kernel's dormant pack-composition
+mechanism now has a real consumer with a passing cross-validation
+test — the "verticals extend a base" story is demonstrated, not
+just designed.
+
+**No longer deferred (as of M7.6):** field-level data
+classification. The manifest `FieldSchema` carries an optional
+`classification` (`public | internal | commercial_sensitive |
+pii | phi | regulated`). The kernel DDL emitter writes a
+`COMMENT ON COLUMN … 'crossengin.data_class=<class>'` per
+classified field so the class is queryable in `pg_catalog`, and
+`validateManifest` enforces that `phi`/`regulated` fields live on
+an `auditable` entity. `manifestClassifiedFields(manifest)` is
+the compliance inventory; `isFieldSensitive` / `requiresAuditTrail`
+the helpers. `pack-erp-healthcare` classifies its PHI/PII fields
+end-to-end. Acting on the class is M7.7 (below).
+
+**No longer deferred (as of M7.7):** acting on the data
+classification. `@crossengin/auth` gained
+`computeClassifiedFieldRedaction` / `validateClassifiedWriteMask`:
+a sensitive field (pii/phi/regulated/commercial_sensitive) with
+no explicit `read`/`update` grant is redacted / write-blocked by
+default for non-privileged principals (`SensitiveFieldPolicy =
+{privilegedRoles?, redactByDefault?}`; explicit per-field grants
+still win). The kernel DDL emitter appends
+`crossengin.encrypt=at_rest` to the column comment for
+phi/regulated fields (`requiresEncryptionAtRest` in types), so a
+migration applier has an at-rest-encryption signal in
+`pg_catalog`. The original `computeFieldRedaction` /
+`validateWriteMask` are untouched; the classification-aware
+variants are additive opt-ins. PHI is now fail-closed (masked +
+encryption-hinted) from the field declaration alone. Wiring the
+redaction into the gateway is M7.7.5; choosing the encryption
+mechanism is M7.8 (pgcrypto — see below).
+
+**No longer deferred (as of M7.7.5):** edge redaction.
+`@crossengin/api-gateway-runtime`'s `transform_response` stage
+applies the M7.7 classification redaction to JSON responses. A
+new `redaction.ts` ships `ResponseRedactionSpec` (classified
+fields + roles map + a `rolesForPrincipal` scope→role bridge,
+since the gateway `ResolvedPrincipal` carries scopes not roles +
+optional entityPermissions/policy), `RedactionRegistry` /
+`MapRedactionRegistry`, `computeRedactedFields` (fail-closed —
+unknown roles map to an unprivileged sentinel, never throwing
+into an unredacted fallback), and `redactJsonValue` (a pure
+tree-walk dropping named fields across records / arrays /
+`{data:[…]}` wrappers). `GatewayRuntimeOptions.redactionRegistry`
+is opt-in; with none set, `transform_response` is the prior
+no-op. The stage records `redacted_N_fields` in the
+`PipelineExecution` audit, and the response is rebuilt through
+`outgoingResponseFromJson` so `content-length` stays correct. A
+front-desk principal reading `GET /v1/patients` gets
+`mrn`/demographics dropped; a clinician gets them — same handler.
+A manifest-derived registry is M7.7.6 (below).
+
+**No longer deferred (as of M7.7.6):** zero-config redaction.
+`api-gateway-runtime`'s `redactionRegistryFromManifest(manifest,
+{rolesForPrincipal, policyForEntity?, operationsForEntity?})`
+builds the whole `RedactionRegistry` from a manifest: every
+entity with a classified field contributes a spec
+(`redactionSpecForEntity` via `entityClassifiedFields`),
+registered under its read operationIds (default
+`<entitylower>.read|list|get`, overridable). The input is a
+structural `RedactionManifestInput` (`{entities, permissions,
+roles}`) so the runtime never imports `@crossengin/kernel`; a
+full `Manifest` is assignable. The deployment supplies only the
+scope→role bridge and the per-entity `SensitiveFieldPolicy`;
+without a policy, sensitive fields are redacted for everyone
+lacking an explicit grant (fail-closed). `classification: "phi"`
+on a field now drives the entire chain — catalog comment, audit
+invariant, encryption hint, default mask, edge redaction —
+with no hand-written spec. Inferring `privilegedRoles` from the
+entity's write grants + a write-side classification mask are the
+deferred follow-ups.
+
+**No longer deferred (as of M7.8):** the at-rest encryption
+mechanism. The M7.7 `crossengin.encrypt=at_rest` hint is fulfilled
+by **pgcrypto** symmetric encryption (`@crossengin/crypto` has no
+symmetric cipher, so encryption lives in the database). `kernel-pg`'s
+`encryption.ts` reads the hint from `col_description`
+(`parseColumnDirectives` is the pure inverse of the kernel
+emitter's comment), provisions pgcrypto
+(`ensurePgcryptoExtension`), exposes `pgpSymEncryptExpr` /
+`pgpSymDecryptExpr` SQL builders (key by *reference*, never
+inlined — `BYTEA` ciphertext), and `EncryptionApplier.coverage(
+schema)` returns an `EncryptionCoverageReport` flagging
+`plaintext_at_rest` (a PHI column still stored as a plaintext
+type) + `pgcrypto_missing` drift — a HIPAA control can assert
+"zero plaintext PHI columns" against the live catalog. The
+column-rewrite-to-BYTEA + encrypt-on-write path is M7.8.5 (below);
+M7.8 ships the decision, provisioning, builders, and coverage
+verifier.
+
+**No longer deferred (as of M7.8.5):** the encrypt-on-write path.
+`kernel-pg`'s `encryption-migration.ts` makes M7.8's
+`plaintext_at_rest` go green: `emitEncryptColumnSql` converts a
+hinted plaintext column to a pgcrypto-encrypted `BYTEA` column in
+place (ADD `<col>__enc BYTEA` → UPDATE
+`pgp_sym_encrypt(<col>::text, keyRef)` with NULLs preserved → DROP
+→ RENAME → re-COMMENT the directive), `emitDecryptingViewSql`
+builds a `pgp_sym_decrypt` read view for transparent reads, and
+`EncryptionMigrator.migrateSchema(schema, keyRef)` plans (plaintext
+columns only, so re-runs are no-ops) + runs each column in its own
+transaction. Key is always a SQL *reference*, never inlined
+(test-enforced). After migration the M7.8 verifier reports the
+column encrypted-at-rest — closing the data-classification arc
+(declare `phi` → comment + audit invariant → mask + encryption
+hint → edge redaction → at-rest coverage → actual encryption). The
+transparent *write* path (INSTEAD OF triggers) + key rotation are
+the deferred follow-ups.
+
+**No longer deferred (as of M8):** SLO enforcement.
+`@crossengin/observability-runtime` turns the inert SLO / alert /
+synthetic / trace definitions from `@crossengin/observability`
+into a running enforcement loop. `SloEnforcementEngine`
+ingests `RequestOutcome`s, computes multi-window Google-SRE burn
+rates against each SLO's availability target, and on a breach
+emits an `EnforcementPlan`: a schema-valid declared
+`IncidentRecord` (→ META_INCIDENTS), an on-call `PageDirective`
+resolved from the `AlertPolicy`, and a `triggered_active`
+`KillSwitch` that rolls the offending flag back to its safe
+value. One incident per ongoing breach (dedup), with a
+`recovered` decision when the burn clears. `TraceCollector`
+stitches gateway→workflow→notifications spans into a tree. Pure
+in-process runtime (no new META_ tables); records persist via the
+M8.5 sibling. **Phase 2's eight milestones (M1–M8) are complete.**
+
+**No longer deferred (as of M8.5):** SLO enforcement persistence.
+`@crossengin/observability-runtime-pg` is the Postgres sibling
+for the enforcement loop. `buildPersistentSloEnforcementEngine`
+wraps a `SloEnforcementEngine` so every `evaluate()` writes an
+enforcement action per decision (→ `meta.slo_enforcement_actions`)
+and an evaluation snapshot per `breach_opened` (→
+`meta.slo_evaluations`). `PostgresSloEvaluationStore` /
+`PostgresSloEnforcementActionStore` are append-only (`INSERT … ON
+CONFLICT DO NOTHING`); `SloEnforcementReplayer` runs pure drift
+checks (ongoing/recovered-without-open, duplicate-open,
+paged-without-channels, kill-switch-without-flag). Two new
+platform-or-tenant-RLS tables join the burn → incident →
+kill-switch chain so "every SLO breach last week and what it did"
+is one query.
+
+**No longer deferred (as of M8.6):** latency-target enforcement.
+`observability-runtime` now ships `LatencySloEngine` alongside
+the availability `SloEnforcementEngine`. It rides the same
+`recordOutcome()` stream (latency comes from `RequestOutcome.
+latencyMs`), computes p50/p95/p99 over a short rolling window
+(`RollingWindow.latencyStats`), and `evaluateLatencyTarget`
+fires per declared percentile when observed > budget×multiplier
+with ≥minSamples. A breach reuses the shared planners to declare
+a `performance` incident, page on-call, and optionally roll a
+flag back — one incident per ongoing breach, `recovered` when
+latency drops under budget. Pure compute, no new package/tables;
+availability + latency engines compose over one shared
+`RollingWindow`.
+
+**No longer deferred (as of M8.7):** latency enforcement
+persistence. `observability-runtime-pg` now persists latency
+decisions too. A `signal` column on `meta.slo_enforcement_actions`
+('availability' | 'latency', default 'availability') lets one
+audit table serve both engines, and a new
+`meta.slo_latency_evaluations` table holds latency verdict
+snapshots (`slle_` ids, worst_percentile, sample_count, breaches
+JSONB). `buildPersistentLatencySloEngine` wraps a
+`LatencySloEngine` exactly as the availability persisting engine
+does; the shared `enforcementActionFromDecision` accepts both
+decision unions, and the M8.5 `SloEnforcementReplayer` verifies
+latency actions unchanged. "Every SLO breach — availability and
+latency — and what it did" is now one query.
+
 **No longer deferred (as of M5.7):** chat audit trail. The new
 `@crossengin/ai-architect-pg` package persists every chat
 session, message, tool invocation, and write proposal to four
@@ -860,11 +1499,14 @@ one-shot (`--prompt "..."`) and REPL (stdin lines until `/exit`
 / EOF) modes, aggregating per-turn usage into a session total
 with USD cost. Tests inject a stub `LlmProvider` via
 `RunContext.providerOverride`, so CI runs offline without an
-Anthropic key.
+Anthropic key. (M2.8.5: chat now builds a multi-vendor
+`DefaultLlmRouter` via `buildChatProvider` — Anthropic primary →
+OpenAI fallback when both keys are set — through the structural
+`CompletionProvider` type; `--provider auto|anthropic|openai`.)
 
 ## ADRs
 
-ADRs 0001-0059 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0076 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -879,7 +1521,27 @@ covers Phase 2 M2 (`crypto`), ADR-0049 covers Phase 2 M3
 M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
 M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
 Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
-(`ai-router`). When you ship a new package,
-write the matching ADR in the same session, following
-`0000-template.md` and the style of the existing 0026-0037
-batch.
+(`ai-router`), ADR-0060 covers Phase 2 M8
+(`observability-runtime` — SLO enforcement loop), ADR-0061
+covers Phase 2 M8.5 (`observability-runtime-pg` — SLO
+enforcement persistence), ADR-0062 covers Phase 2 M8.6
+(latency-target SLO enforcement), ADR-0063 covers Phase 2 M8.7
+(latency enforcement persistence), ADR-0064 covers Phase 2 M2.8
+(`ai-providers-openai` — second LlmProvider), ADR-0065 covers
+Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack),
+ADR-0066 covers Phase 2 M7.6 (field-level data classification),
+ADR-0067 covers Phase 2 M7.7 (acting on data classification),
+ADR-0068 covers Phase 2 M7.7.5 (gateway response redaction),
+ADR-0069 covers Phase 2 M7.7.6 (manifest-derived redaction
+registry), ADR-0070 covers Phase 2 M7.8 (at-rest encryption
+mechanism + pgcrypto coverage applier), ADR-0071 covers Phase 2
+M7.8.5 (encrypt-on-write migration), ADR-0072 covers Phase 2
+M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
+covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
+chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI),
+ADR-0075 covers Phase 2 M7.9 (pack-erp-retail), ADR-0076 covers
+Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage).
+When you ship
+a new package, write the matching ADR in the same session,
+following `0000-template.md` and the style of the existing
+0026-0037 batch.

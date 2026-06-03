@@ -117,3 +117,20 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 31 | 0057 | 4,500 | Drafted alongside `@crossengin/ai-architect-pg` (Phase 2 M5.7) |
 | 32 | 0058 | 4,500 | Drafted alongside `@crossengin/pack-erp-core` (Phase 2 M7) |
 | 33 | 0059 | 4,500 | Drafted alongside `@crossengin/ai-router` (Phase 2 M6.5) |
+| 34 | 0060 | 4,500 | Drafted alongside `@crossengin/observability-runtime` (Phase 2 M8) |
+| 35 | 0061 | 4,500 | Drafted alongside `@crossengin/observability-runtime-pg` (Phase 2 M8.5) |
+| 36 | 0062 | 4,500 | Drafted alongside latency-SLO enforcement in `observability-runtime` (Phase 2 M8.6) |
+| 37 | 0063 | 4,500 | Drafted alongside latency enforcement persistence in `observability-runtime-pg` (Phase 2 M8.7) |
+| 38 | 0064 | 4,500 | Drafted alongside `@crossengin/ai-providers-openai` (Phase 2 M2.8) |
+| 39 | 0065 | 4,500 | Drafted alongside `@crossengin/pack-erp-healthcare` (Phase 2 M7.5) |
+| 40 | 0066 | 4,000 | Drafted alongside field-level data classification in `types` + `kernel` (Phase 2 M7.6) |
+| 41 | 0067 | 4,000 | Drafted alongside acting on data classification (auth redaction + DDL encryption hints) (Phase 2 M7.7) |
+| 42 | 0068 | 4,000 | Drafted alongside gateway response redaction in `api-gateway-runtime` (Phase 2 M7.7.5) |
+| 43 | 0069 | 4,000 | Drafted alongside manifest-derived redaction registry in `api-gateway-runtime` (Phase 2 M7.7.6) |
+| 44 | 0070 | 4,000 | Drafted alongside at-rest encryption (pgcrypto) coverage applier in `kernel-pg` (Phase 2 M7.8) |
+| 45 | 0071 | 4,000 | Drafted alongside encrypt-on-write migration in `kernel-pg` (Phase 2 M7.8.5) |
+| 46 | 0072 | 4,000 | Drafted alongside multi-vendor router in `architect-cli` chat (Phase 2 M2.8.5) |
+| 47 | 0073 | 4,000 | Drafted alongside per-turn provider+cost attribution in chat (Phase 2 M2.8.6) |
+| 48 | 0074 | 4,000 | Drafted alongside the `crossengin-pg encrypt` CLI command (Phase 2 M7.8.6) |
+| 49 | 0075 | 4,000 | Drafted alongside `@crossengin/pack-erp-retail` (Phase 2 M7.9) |
+| 50 | 0076 | 4,000 | Drafted alongside `@crossengin/pack-erp-grocery` — transitive pack lineage (Phase 2 M7.9.1) |

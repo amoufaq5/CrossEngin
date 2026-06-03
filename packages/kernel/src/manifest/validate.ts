@@ -7,7 +7,8 @@ import {
   type RbacGrant,
   type RoleDefinition,
 } from "@crossengin/auth";
-import type { Entity, Trait } from "@crossengin/types/meta-schema";
+import type { DataClassification, Entity, Trait } from "@crossengin/types/meta-schema";
+import { requiresAuditTrail } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
 import type { JobDeclaration } from "@crossengin/jobs";
@@ -43,6 +44,46 @@ export function validateManifest(manifest: Manifest): void {
   const dashboardIds = validateDashboards(manifest, reportIds);
   validateViews(manifest, entityNames, reportIds, dashboardIds, entityTransitions);
   validateSearch(manifest, entityNames);
+  validateClassifications(manifest);
+}
+
+const AUDITABLE_TRAIT = "auditable";
+
+export interface ClassifiedFieldRef {
+  readonly entity: string;
+  readonly field: string;
+  readonly classification: DataClassification;
+}
+
+export function manifestClassifiedFields(manifest: Manifest): readonly ClassifiedFieldRef[] {
+  const out: ClassifiedFieldRef[] = [];
+  for (const entity of manifest.entities ?? []) {
+    for (const field of entity.fields) {
+      if (field.classification !== undefined) {
+        out.push({
+          entity: entity.name,
+          field: field.name,
+          classification: field.classification,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function validateClassifications(manifest: Manifest): void {
+  for (const [i, entity] of (manifest.entities ?? []).entries()) {
+    const isAuditable = (entity.traits ?? []).includes(AUDITABLE_TRAIT);
+    for (const [j, field] of entity.fields.entries()) {
+      if (field.classification === undefined) continue;
+      if (requiresAuditTrail(field.classification) && !isAuditable) {
+        throw new ManifestValidationError(
+          `entities[${i}].fields[${j}].classification`,
+          `field '${entity.name}.${field.name}' is classified '${field.classification}', which requires the entity to carry the 'auditable' trait`,
+        );
+      }
+    }
+  }
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {

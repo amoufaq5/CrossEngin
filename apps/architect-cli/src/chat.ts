@@ -5,7 +5,6 @@ import type {
   CompletionChunk,
   CompletionRequest,
   LlmMessage,
-  LlmProvider,
   LlmTool,
   Usage,
 } from "@crossengin/ai-providers";
@@ -18,6 +17,16 @@ import {
   type WriteApprovalRequest,
   type WriteApprover,
 } from "./tools.js";
+
+/**
+ * The slice of an `LlmProvider` / `LlmRouter` the chat engine needs — just
+ * `complete()`. Both an `AnthropicProvider` / `OpenAiProvider` and a
+ * `DefaultLlmRouter` satisfy this, so the chat substrate is provider- or
+ * router-agnostic.
+ */
+export interface CompletionProvider {
+  complete(req: CompletionRequest): AsyncIterable<CompletionChunk>;
+}
 
 export type { Transcript } from "@crossengin/ai-architect-pg";
 
@@ -252,7 +261,7 @@ export function jsonChunkRenderer(io: IoStreams): StreamRenderer {
 }
 
 export async function runChatTurn(
-  provider: LlmProvider,
+  provider: CompletionProvider,
   input: ChatTurnInput,
   renderer: StreamRenderer,
 ): Promise<ChatTurnResult> {
@@ -278,7 +287,7 @@ export async function runChatTurn(
 }
 
 async function streamCompletion(
-  provider: LlmProvider,
+  provider: CompletionProvider,
   request: CompletionRequest,
   renderer: StreamRenderer,
 ): Promise<{
@@ -348,7 +357,7 @@ function forwardChunk(chunk: CompletionChunk, renderer: StreamRenderer): void {
   }
 }
 
-export function formatUsageLine(usage: Usage): string {
+export function formatUsageLine(usage: Usage, providerLabel?: string | null): string {
   const parts: string[] = [
     `tokens in=${usage.inputTokens.toString()}`,
     `out=${usage.outputTokens.toString()}`,
@@ -357,6 +366,9 @@ export function formatUsageLine(usage: Usage): string {
     parts.push(`cached=${usage.cachedInputTokens.toString()}`);
   }
   parts.push(`cost=$${usage.cost.toFixed(6)}`);
+  if (providerLabel !== undefined && providerLabel !== null && providerLabel.length > 0) {
+    parts.push(`via ${providerLabel}`);
+  }
   return parts.join(" ");
 }
 
@@ -375,7 +387,7 @@ export function lineReaderFromIterable(iter: AsyncIterable<string>): LineReader 
 }
 
 export interface ChatReplOptions {
-  readonly provider: LlmProvider;
+  readonly provider: CompletionProvider;
   readonly io: IoStreams;
   readonly lines: LineReader;
   readonly systemPrompt: string;
@@ -390,6 +402,7 @@ export interface ChatReplOptions {
   readonly maxToolIterations?: number;
   readonly transcript?: Transcript;
   readonly autoApprove?: boolean;
+  readonly providerLabel?: () => string | null;
 }
 
 export function interactiveApprover(opts: {
@@ -431,7 +444,7 @@ export interface ChatExchangeResult {
 }
 
 export interface ChatExchangeOptions {
-  readonly provider: LlmProvider;
+  readonly provider: CompletionProvider;
   readonly renderer: StreamRenderer;
   readonly io: IoStreams;
   readonly format: "human" | "json";
@@ -447,6 +460,8 @@ export interface ChatExchangeOptions {
   readonly transcript?: Transcript;
   readonly turnIndex?: number;
   readonly autoApprove?: boolean;
+  /** Returns a label for the provider that served the turn (e.g. `openai/gpt-4o`), or null. */
+  readonly providerLabel?: () => string | null;
 }
 
 export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatExchangeResult> {
@@ -499,7 +514,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
   let lastCalls = initial.record.toolCalls;
   if (initial.record.usage !== null) accumulateUsage(accumulated, initial.record.usage);
   if (opts.format === "human" && initial.record.usage !== null) {
-    opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage)}]`);
+    opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage, opts.providerLabel?.())}]`);
   }
   let lastAssistantMessageId: string | null = null;
   if (transcript !== undefined) {
@@ -689,7 +704,7 @@ function decideProposal(
 }
 
 async function streamContinuation(input: {
-  provider: LlmProvider;
+  provider: CompletionProvider;
   renderer: StreamRenderer;
   history: readonly LlmMessage[];
   systemPrompt: string;
@@ -808,6 +823,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       transcript: opts.transcript,
       turnIndex: turns,
       autoApprove: opts.autoApprove,
+      providerLabel: opts.providerLabel,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
@@ -848,6 +864,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       transcript: opts.transcript,
       turnIndex: turns,
       autoApprove: opts.autoApprove,
+      providerLabel: opts.providerLabel,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);

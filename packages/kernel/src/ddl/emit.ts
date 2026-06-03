@@ -1,5 +1,6 @@
 import type { Entity, Field, Trait } from "@crossengin/types/meta-schema";
-import { emitColumn } from "./column.js";
+import { requiresEncryptionAtRest } from "@crossengin/types/meta-schema";
+import { columnNameForField, emitColumn } from "./column.js";
 import { indexName, qualifyTable, quoteIdent, toTableName } from "./identifiers.js";
 import {
   buildColumnNameMap,
@@ -50,8 +51,29 @@ export function emitIndexes(entity: Entity, context: EmitContext): string[] {
   return indexes.map((idx) => makeIndex(context.schema, tableName, idx));
 }
 
+export function emitColumnComments(entity: Entity, context: EmitContext): string[] {
+  const tableName = toTableName(entity.name);
+  const comments: string[] = [];
+  for (const field of entity.fields) {
+    if (field.classification === undefined) continue;
+    const column = columnNameForField(field);
+    const directives = [`crossengin.data_class=${field.classification}`];
+    if (requiresEncryptionAtRest(field.classification)) {
+      directives.push("crossengin.encrypt=at_rest");
+    }
+    comments.push(
+      `COMMENT ON COLUMN ${qualifyTable(context.schema, tableName)}.${quoteIdent(column)} IS '${directives.join("; ")}';`,
+    );
+  }
+  return comments;
+}
+
 export function emitEntity(entity: Entity, context: EmitContext): string[] {
-  return [emitCreateTable(entity, context), ...emitIndexes(entity, context)];
+  return [
+    emitCreateTable(entity, context),
+    ...emitIndexes(entity, context),
+    ...emitColumnComments(entity, context),
+  ];
 }
 
 function makeIndex(schema: string, tableName: string, idx: ResolvedIndex): string {

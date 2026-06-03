@@ -18,6 +18,7 @@ import { ProviderResolutionError } from "./resolve.js";
 import {
   AllProvidersExhaustedError,
   DefaultLlmRouter,
+  type RouterResolution,
 } from "./router.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -269,5 +270,55 @@ describe("DefaultLlmRouter.embed", () => {
       tenantId: TENANT,
     });
     expect(result.vectors).toEqual([[1, 2, 3]]);
+  });
+});
+
+describe("DefaultLlmRouter onResolved observer", () => {
+  function routerWithObserver(
+    providers: ReadonlyMap<string, LlmProvider>,
+    sink: RouterResolution[],
+  ): DefaultLlmRouter {
+    return new DefaultLlmRouter({
+      providers,
+      taskPolicies: POLICIES,
+      getTenantResidency: async () => "unrestricted",
+      retry: { maxAttempts: 3, initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+      clock: () => 0,
+      onResolved: (r) => sink.push(r),
+    });
+  }
+
+  it("reports the primary provider at fallbackDepth 0", async () => {
+    const sink: RouterResolution[] = [];
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "ok")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    for await (const _ of routerWithObserver(providers, sink).complete(fakeReq())) void _;
+    expect(sink).toHaveLength(1);
+    expect(sink[0]).toMatchObject({ providerId: "anthropic", fallbackDepth: 0, task: "executor" });
+  });
+
+  it("reports the fallback provider at fallbackDepth 1 when the primary fails", async () => {
+    const sink: RouterResolution[] = [];
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new StubProvider("openai", "ok")],
+    ]);
+    for await (const _ of routerWithObserver(providers, sink).complete(fakeReq())) void _;
+    expect(sink).toHaveLength(1);
+    expect(sink[0]).toMatchObject({ providerId: "openai", fallbackDepth: 1 });
+  });
+
+  it("does not fire when every provider is exhausted", async () => {
+    const sink: RouterResolution[] = [];
+    const providers = new Map<string, LlmProvider>([
+      ["anthropic", new StubProvider("anthropic", "always_retryable")],
+      ["openai", new StubProvider("openai", "always_retryable")],
+    ]);
+    await expect(async () => {
+      for await (const _ of routerWithObserver(providers, sink).complete(fakeReq())) void _;
+    }).rejects.toBeInstanceOf(AllProvidersExhaustedError);
+    expect(sink).toEqual([]);
   });
 });

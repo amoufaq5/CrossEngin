@@ -128,6 +128,8 @@ export function helpText(): string {
     "  --confirm               Required when PGDATABASE looks like production",
     "  --prompt <text>         With chat, run a one-shot turn and exit",
     "  --model <id>            With chat, pick a Claude model (default: claude-sonnet-4-6)",
+    "  --provider <name>       With chat: auto (default) | anthropic | openai. auto routes Anthropic->OpenAI when both keys are set",
+    "  --openai-model <id>     With chat, the OpenAI fallback/primary model (default: gpt-4o)",
     "  --max-tokens <n>        With chat, cap response tokens (default: 4096)",
     "  --system <text>         With chat, override the system prompt",
     "  --system-file <path>    With chat, load the system prompt from a file",
