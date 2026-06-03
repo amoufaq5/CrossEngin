@@ -15,9 +15,25 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
 M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 + M8 + M8.5 landed: **53 packages + 1 app, 121 meta-schema
-tables, 5,897 tests**, all green, no type errors. **Phase 2's
-eight milestones (M1–M8) are complete.** M8.5 added
+M7 + M8 + M8.5 + M8.6 landed: **53 packages + 1 app, 121
+meta-schema tables, 5,930 tests**, all green, no type errors.
+**Phase 2's eight milestones (M1–M8) are complete.** M8.6 added
+latency-target SLO enforcement to `@crossengin/
+observability-runtime` (pure compute, no new package/tables): a
+`LatencySloEngine` that rides the same `recordOutcome()` stream,
+computes p50/p95/p99 over a short rolling window
+(`RollingWindow.latencyStats` + exported `percentile`), and on a
+breach reuses the shared enforcement planners to declare a
+`performance` incident, page on-call, and optionally roll a flag
+back. `latency.ts` is pure: `parseLatencyBudgetMs` ("300ms"/"5s"
+→ ms), `DEFAULT_LATENCY_THRESHOLDS` (latency-page ≥2×→sev2 +
+latency-ticket >1×→sev3, minSamples 20), `evaluateLatencyTarget`
+(fires per declared percentile when observed > budget×multiplier
+and count ≥ minSamples; worst severity wins). One incident per
+ongoing breach; `recovered` when latency drops back under
+budget. Availability (`SloEnforcementEngine`) + latency
+(`LatencySloEngine`) compose over one shared `RollingWindow`.
+M8.5 added
 `@crossengin/observability-runtime-pg` — the Postgres persistence
 sibling for the SLO enforcement loop. 5 modules: records
 (SloEvaluationRecord + SloEnforcementActionRecord schemas +
@@ -36,9 +52,7 @@ verifyEnforcementHistory — ongoing/recovered-without-open,
 duplicate-open, paged-without-channels, kill-switch-without-flag
 — + summarizeEnforcement + SloEnforcementReplayer). Two new META_
 tables: meta.slo_evaluations + meta.slo_enforcement_actions
-(platform-or-tenant RLS, append-only). Latency-target
-enforcement re-scoped to M8.6 (pure, belongs in
-observability-runtime). M8 added
+(platform-or-tenant RLS, append-only). M8 added
 `@crossengin/observability-runtime` — the SLO enforcement loop.
 7 modules: clock (Clock/FixedClock + parseDurationMs), window
 (RequestOutcome ingest + RollingWindow per-surface counts),
@@ -206,7 +220,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0061 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0062 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -221,7 +235,8 @@ persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`ai-router` — provider router with retry / cost / latency),
 ADR-0060 covers M8 (`observability-runtime` — SLO enforcement
 loop), ADR-0061 covers M8.5 (`observability-runtime-pg` — SLO
-enforcement persistence).
+enforcement persistence), ADR-0062 covers M8.6 (latency-target
+SLO enforcement in `observability-runtime`).
 
 ## Architecture in 90 seconds
 
@@ -443,9 +458,10 @@ re-exporting everything.
   redaction, synthetics, OTel-style tracing.
 - **`observability-runtime`** — the SLO enforcement loop (pure,
   in-process; consumes observability + incident-response +
-  feature-flags contracts). 7 modules: clock (Clock/FixedClock +
+  feature-flags contracts). 9 modules: clock (Clock/FixedClock +
   parseDurationMs), window (RequestOutcome ingest + RollingWindow
-  per-surface counts + failureRate), burn-rate (multi-window
+  per-surface counts + failureRate + latencyStats p50/p95/p99 +
+  exported percentile), burn-rate (multi-window
   Google-SRE evaluation: DEFAULT_BURN_RATE_THRESHOLDS fast-burn
   1h/5m@14.4×→sev2 + slow-burn 6h/30m@6×→sev3; burnRate =
   failureRate / (1−target); fires only when both windows clear
@@ -461,7 +477,12 @@ re-exporting everything.
   stitches gateway→workflow→notifications spans into a tree),
   engine (SloEnforcementEngine: recordOutcome + evaluate →
   breach_opened/breach_ongoing/recovered; one incident per
-  ongoing breach; mints cross-linked incident + kill-switch ids).
+  ongoing breach; mints cross-linked incident + kill-switch ids),
+  latency (parseLatencyBudgetMs + DEFAULT_LATENCY_THRESHOLDS +
+  evaluateLatencyTarget — pure percentile-vs-budget breach
+  evaluation), latency-engine (LatencySloEngine: same shape as
+  the availability engine but for SloLatencyTarget; declares
+  `performance` incidents over a short rolling latency window).
   No new META_ tables — emits records typed by existing
   contracts.
 - **`observability-runtime-pg`** — Postgres persistence for the
@@ -913,8 +934,21 @@ checks (ongoing/recovered-without-open, duplicate-open,
 paged-without-channels, kill-switch-without-flag). Two new
 platform-or-tenant-RLS tables join the burn → incident →
 kill-switch chain so "every SLO breach last week and what it did"
-is one query. Latency-target enforcement (pure compute) is
-re-scoped to M8.6 in `observability-runtime`.
+is one query.
+
+**No longer deferred (as of M8.6):** latency-target enforcement.
+`observability-runtime` now ships `LatencySloEngine` alongside
+the availability `SloEnforcementEngine`. It rides the same
+`recordOutcome()` stream (latency comes from `RequestOutcome.
+latencyMs`), computes p50/p95/p99 over a short rolling window
+(`RollingWindow.latencyStats`), and `evaluateLatencyTarget`
+fires per declared percentile when observed > budget×multiplier
+with ≥minSamples. A breach reuses the shared planners to declare
+a `performance` incident, page on-call, and optionally roll a
+flag back — one incident per ongoing breach, `recovered` when
+latency drops under budget. Pure compute, no new package/tables;
+availability + latency engines compose over one shared
+`RollingWindow`.
 
 **No longer deferred (as of M5.7):** chat audit trail. The new
 `@crossengin/ai-architect-pg` package persists every chat
@@ -1001,7 +1035,8 @@ Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`ai-router`), ADR-0060 covers Phase 2 M8
 (`observability-runtime` — SLO enforcement loop), ADR-0061
 covers Phase 2 M8.5 (`observability-runtime-pg` — SLO
-enforcement persistence). When you ship
+enforcement persistence), ADR-0062 covers Phase 2 M8.6
+(latency-target SLO enforcement). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.

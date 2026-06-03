@@ -3,6 +3,7 @@ import {
   RequestOutcomeSchema,
   RollingWindow,
   failureRate,
+  percentile,
 } from "./window.js";
 
 const base = Date.parse("2026-06-02T12:00:00.000Z");
@@ -123,5 +124,62 @@ describe("RollingWindow", () => {
   it("rejects a non-positive window", () => {
     const w = new RollingWindow();
     expect(() => w.count("s", 0, base)).toThrow();
+  });
+});
+
+describe("percentile", () => {
+  const sorted = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+  it("returns null for an empty list", () => {
+    expect(percentile([], 95)).toBeNull();
+  });
+  it("computes nearest-rank percentiles", () => {
+    expect(percentile(sorted, 50)).toBe(50);
+    expect(percentile(sorted, 95)).toBe(100);
+    expect(percentile(sorted, 90)).toBe(90);
+  });
+  it("clamps p<=0 and p>=100 to the extremes", () => {
+    expect(percentile(sorted, 0)).toBe(10);
+    expect(percentile(sorted, 100)).toBe(100);
+  });
+});
+
+describe("RollingWindow.latencyStats", () => {
+  it("computes p50/p95/p99 over latency samples in the window", () => {
+    const w = new RollingWindow();
+    for (let i = 1; i <= 100; i += 1) {
+      w.record({ surface: "s", outcome: "ok", at: iso(-i), latencyMs: i });
+    }
+    const stats = w.latencyStats("s", 60 * 60_000, base);
+    expect(stats.count).toBe(100);
+    expect(stats.p50).toBe(50);
+    expect(stats.p95).toBe(95);
+    expect(stats.p99).toBe(99);
+  });
+
+  it("only counts samples that carry latency", () => {
+    const w = new RollingWindow();
+    w.record({ surface: "s", outcome: "ok", at: iso(-1_000) });
+    w.record({ surface: "s", outcome: "ok", at: iso(-2_000), latencyMs: 42 });
+    const stats = w.latencyStats("s", 60 * 60_000, base);
+    expect(stats.count).toBe(1);
+    expect(stats.p50).toBe(42);
+  });
+
+  it("returns nulls for an unknown surface", () => {
+    expect(new RollingWindow().latencyStats("nope", 60_000, base)).toEqual({
+      p50: null,
+      p95: null,
+      p99: null,
+      count: 0,
+    });
+  });
+
+  it("excludes latency samples outside the window", () => {
+    const w = new RollingWindow();
+    w.record({ surface: "s", outcome: "ok", at: iso(-10 * 60_000), latencyMs: 999 });
+    w.record({ surface: "s", outcome: "ok", at: iso(-1_000), latencyMs: 50 });
+    const stats = w.latencyStats("s", 5 * 60_000, base);
+    expect(stats.count).toBe(1);
+    expect(stats.p99).toBe(50);
   });
 });
