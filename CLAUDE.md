@@ -17,8 +17,8 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8** landed: **59
-packages + 2 apps, 123 meta-schema tables, 6,274 tests**, all
+M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9** landed:
+**59 packages + 2 apps, 123 meta-schema tables, 6,281 tests**, all
 green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
@@ -90,7 +90,22 @@ BY document ->> 'field' …, record_id ASC`, `LIMIT limit+1 OFFSET`
 (the +1 detects a next page) — with field names identifier-
 validated (only values bound; a `name; DROP` field is dropped, not
 executed). **The whole P1 arc (compile → gaps → store → server →
-paginated lists) is complete.** M7.9.1 added
+paginated lists) is complete.** **P1.9 (ADR-0089) cashed in the
+P1.7 framework-neutral seam** with an edge / Workers fetch adapter
+in `apps/operate-server` (new `edge.ts`, no new package): over the
+same `OperateHttpServer.dispatch` core, `fetchToRaw(Request)` maps
+a Fetch API request → `RawHttpRequest`+body (client IP from
+`cf-connecting-ip`), `rawToFetchResponse` → a real `Response`,
+`createFetchHandler(server)` is the `(Request)→Promise<Response>`
+edge counterpart of the Node listener, `buildEdgeFetchHandler`
+composes one (store defaults to in-memory for socket-less
+runtimes, scheme `https`), and `asModuleWorker` yields the
+Cloudflare `{fetch}` default-export shape. Tests build genuine
+`new Request(...)` and read `Response.json()` (Node undici
+globals), proving identical behavior — per-caller `unit_cost`
+redaction, RBAC 401, `?limit` pagination — on a second real
+runtime from one `dispatch`. The serving stack now runs on Node
+**and** any Fetch/WinterCG runtime. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -510,7 +525,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0088 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0089 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -525,7 +540,8 @@ covers P1, ADR-0079 covers P1.5 (gateway body parsing + handler
 outcome mapping), ADR-0086 covers P1.6 (operate-runtime-pg —
 Postgres EntityStore under tenant RLS), ADR-0087 covers P1.7
 (apps/operate-server — the runnable serving binary), ADR-0088
-covers P1.8 (list pagination + filtering from the ListView)).
+covers P1.8 (list pagination + filtering from the ListView),
+ADR-0089 covers P1.9 (edge/Workers fetch adapter)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -731,8 +747,9 @@ re-exporting everything.
   unchanged. One new META table (operate_entity_records); the
   column-mapped per-entity store is the deeper follow-up behind the
   same contract.
-- **`apps/operate-server`** — Phase 3 P1.7: the runnable serving
-  binary (second app under `apps/`, after `architect-cli`). 6
+- **`apps/operate-server`** — Phase 3 P1.7 + P1.9: the runnable
+  serving binary (second app under `apps/`, after `architect-cli`)
+  + an edge/Workers fetch adapter. 7
   modules: http (RawHttpRequest/RawHttpResponse + parseMethod +
   splitTarget + rawToIncoming → a gateway IncomingRequest),
   principals (parseApiKeySpec key:role:tenant + buildPrincipalWiring
@@ -747,7 +764,12 @@ re-exporting everything.
   --scheme, repeatable --api-key, --help/--version), node (thin
   Node http binding: createNodeRequestListener reads the body +
   dispatches + writes, throw → 500 problem doc; serve() loads the
-  manifest, builds the store, listens, returns a close handle).
+  manifest, builds the store, listens, returns a close handle),
+  edge (P1.9: fetchToRaw(Request) → RawHttpRequest+body +
+  rawToFetchResponse → a real Response + createFetchHandler/
+  buildEdgeFetchHandler + asModuleWorker {fetch} shape — the
+  Fetch/Workers adapter over the same dispatch core, tested
+  against genuine new Request/Response undici globals).
   `operate-server` bin. A real loopback test boots it for a 200;
   all other logic is offline-tested.
 - **`workflow-runtime`** — in-process event-sourced workflow
@@ -1658,7 +1680,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0088 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0089 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1702,8 +1724,9 @@ ADR-0086 covers Phase 3 P1.6 (`operate-runtime-pg` — the Postgres
 `EntityStore` over `meta.operate_entity_records` under tenant RLS),
 ADR-0087 covers Phase 3 P1.7 (`apps/operate-server` — the runnable
 serving binary over `buildOperateGateway`), ADR-0088 covers Phase 3
-P1.8 (list pagination + filtering from the ListView; ADRs 0080-0085
-reserved for P3-P8).
+P1.8 (list pagination + filtering from the ListView), ADR-0089
+covers Phase 3 P1.9 (edge/Workers fetch adapter in `apps/operate-
+server`; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
