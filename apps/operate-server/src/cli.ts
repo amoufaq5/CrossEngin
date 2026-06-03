@@ -12,6 +12,7 @@ export interface ServeOptions {
   readonly jwksKeys: readonly string[];
   readonly jwksFile: string | null;
   readonly jwksUrl: string | null;
+  readonly jwksRefreshMs: number | null;
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
   readonly defaultScheme: "http" | "https";
@@ -50,6 +51,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
   let jwksUrl: string | null = null;
+  let jwksRefreshMs: number | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
   let help = false;
@@ -105,6 +107,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--jwks-url" || arg.startsWith("--jwks-url=")) {
       jwksUrl = takeValue(arg, next, "--jwks-url");
       i += consumed();
+    } else if (arg === "--jwks-refresh-ms" || arg.startsWith("--jwks-refresh-ms=")) {
+      const raw = takeValue(arg, next, "--jwks-refresh-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --jwks-refresh-ms: ${raw} (>= 1000)`);
+      jwksRefreshMs = n;
+      i += consumed();
     } else if (arg === "--jwt-issuer" || arg.startsWith("--jwt-issuer=")) {
       jwtIssuer = takeValue(arg, next, "--jwt-issuer");
       i += consumed();
@@ -142,6 +150,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwksKeys,
     jwksFile,
     jwksUrl,
+    jwksRefreshMs,
     jwtIssuer,
     jwtAudience,
     defaultScheme,
@@ -171,6 +180,7 @@ Options:
   --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
   --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
   --jwks-url <url>     Remote JWKS endpoint (cached, refetched on kid rotation)
+  --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
   --help, -h           Show this help

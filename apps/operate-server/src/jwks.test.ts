@@ -2,7 +2,14 @@ import { generateEd25519Keypair, signEd25519 } from "@crossengin/crypto";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
-import { base64UrlToBase64, parseJwksDocument, RemoteJwksProvider, type FetchLike } from "./jwks.js";
+import {
+  base64UrlToBase64,
+  JwksRefreshPoller,
+  parseJwksDocument,
+  RemoteJwksProvider,
+  type FetchLike,
+  type IntervalScheduler,
+} from "./jwks.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { buildOperateHttpServer } from "./server.js";
 
@@ -99,6 +106,62 @@ describe("RemoteJwksProvider — caching + rotation", () => {
     expect(await provider.getPublicKeyForKid("k1")).toBe(kp.publicKeyBase64);
     clock += 5000; // stale → refetch (which fails) → serve stale
     expect(await provider.getPublicKeyForKid("k1")).toBe(kp.publicKeyBase64);
+  });
+});
+
+describe("JwksRefreshPoller", () => {
+  function fakeScheduler(): { scheduler: IntervalScheduler; tick: () => void; cleared: () => boolean } {
+    let fn: (() => void) | null = null;
+    let handle: object | null = null;
+    return {
+      scheduler: {
+        setInterval(handler) {
+          fn = handler;
+          handle = {};
+          return handle;
+        },
+        clearInterval(h) {
+          if (h === handle) handle = null;
+        },
+      },
+      tick: () => fn?.(),
+      cleared: () => handle === null,
+    };
+  }
+
+  it("refreshes immediately on start and on each interval tick", async () => {
+    let count = 0;
+    const provider = { refresh: async () => void (count += 1) };
+    const f = fakeScheduler();
+    const poller = new JwksRefreshPoller({ provider, intervalMs: 60_000, scheduler: f.scheduler });
+    poller.start();
+    expect(count).toBe(1); // refreshOnStart
+    f.tick();
+    f.tick();
+    await Promise.resolve();
+    expect(count).toBe(3);
+  });
+
+  it("can skip the start refresh and stops cleanly", async () => {
+    let count = 0;
+    const provider = { refresh: async () => void (count += 1) };
+    const f = fakeScheduler();
+    const poller = new JwksRefreshPoller({ provider, intervalMs: 1000, refreshOnStart: false, scheduler: f.scheduler });
+    poller.start();
+    expect(count).toBe(0);
+    poller.stop();
+    expect(f.cleared()).toBe(true);
+  });
+
+  it("routes a refresh error to onError without throwing", async () => {
+    const errors: unknown[] = [];
+    const provider = { refresh: async () => { throw new Error("boom"); } };
+    const f = fakeScheduler();
+    const poller = new JwksRefreshPoller({ provider, intervalMs: 1000, scheduler: f.scheduler, onError: (e) => errors.push(e) });
+    poller.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(errors).toHaveLength(1);
   });
 });
 

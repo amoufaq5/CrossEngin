@@ -9,7 +9,7 @@ import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operat
 import type { ServeOptions } from "./cli.js";
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
-import { RemoteJwksProvider } from "./jwks.js";
+import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
   parseApiKeySpec,
@@ -90,7 +90,9 @@ export function createNodeRequestListener(
   };
 }
 
-async function resolveJwtConfig(options: ServeOptions): Promise<JwtVerifyConfig | null> {
+async function resolveJwtConfig(
+  options: ServeOptions,
+): Promise<{ config: JwtVerifyConfig | null; poller: JwksRefreshPoller | null }> {
   const specs: JwksKeySpec[] = options.jwksKeys.map(parseJwksKeySpec);
   if (options.jwksFile !== null) {
     const parsed = JSON.parse(await readFile(options.jwksFile, "utf8")) as unknown;
@@ -102,13 +104,22 @@ async function resolveJwtConfig(options: ServeOptions): Promise<JwtVerifyConfig 
       specs.push({ kid: k.kid, publicKeyBase64: k.publicKeyBase64 });
     }
   }
-  if (specs.length === 0 && options.jwksUrl === null) return null;
+  if (specs.length === 0 && options.jwksUrl === null) return { config: null, poller: null };
   if (options.jwtIssuer === null || options.jwtAudience === null) {
     throw new Error("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
-  const jwksProvider =
-    options.jwksUrl !== null ? new RemoteJwksProvider({ url: options.jwksUrl }) : buildJwksProvider(specs);
-  return { jwksProvider, issuer: options.jwtIssuer, audience: options.jwtAudience };
+  let poller: JwksRefreshPoller | null = null;
+  let jwksProvider;
+  if (options.jwksUrl !== null) {
+    const remote = new RemoteJwksProvider({ url: options.jwksUrl });
+    jwksProvider = remote;
+    if (options.jwksRefreshMs !== null) {
+      poller = new JwksRefreshPoller({ provider: remote, intervalMs: options.jwksRefreshMs });
+    }
+  } else {
+    jwksProvider = buildJwksProvider(specs);
+  }
+  return { config: { jwksProvider, issuer: options.jwtIssuer, audience: options.jwtAudience }, poller };
 }
 
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<EntityStore> {
@@ -140,7 +151,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : await loadBuiltinPack(options.pack ?? "");
   const store = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
-  const jwt = await resolveJwtConfig(options);
+  const { config: jwt, poller } = await resolveJwtConfig(options);
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -148,6 +159,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });
+  poller?.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -160,6 +172,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     server,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        poller?.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

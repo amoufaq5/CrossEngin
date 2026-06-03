@@ -75,6 +75,11 @@ export class RemoteJwksProvider implements JwksProvider {
     return this.keys.get(kid) ?? null;
   }
 
+  /** Number of cached keys (observability). */
+  keyCount(): number {
+    return this.keys.size;
+  }
+
   private isStale(): boolean {
     return this.now() - this.fetchedAt >= this.ttl;
   }
@@ -83,7 +88,8 @@ export class RemoteJwksProvider implements JwksProvider {
     return this.now() - this.fetchedAt >= this.minRefetch;
   }
 
-  private async refresh(): Promise<void> {
+  /** Fetches the JWKS and replaces the cache; a non-200 / error keeps the last good set. */
+  async refresh(): Promise<void> {
     try {
       const res = await this.fetchImpl(this.url);
       if (!res.ok) return; // keep the last good key set
@@ -93,5 +99,77 @@ export class RemoteJwksProvider implements JwksProvider {
     } catch {
       // network error: keep the last good key set; a miss falls back to 401
     }
+  }
+}
+
+/** Anything the poller can periodically refresh (a `RemoteJwksProvider` satisfies it). */
+export interface Refreshable {
+  refresh(): Promise<void>;
+}
+
+export type IntervalHandle = unknown;
+
+/** Injectable timer (defaults to the global one) so the poller is deterministic in tests. */
+export interface IntervalScheduler {
+  setInterval(handler: () => void, ms: number): IntervalHandle;
+  clearInterval(handle: IntervalHandle): void;
+}
+
+const DEFAULT_SCHEDULER: IntervalScheduler = {
+  setInterval(handler, ms) {
+    const h = setInterval(handler, ms);
+    (h as { unref?: () => void }).unref?.(); // don't keep the process alive
+    return h;
+  },
+  clearInterval(handle) {
+    clearInterval(handle as ReturnType<typeof setInterval>);
+  },
+};
+
+export interface JwksRefreshPollerOptions {
+  readonly provider: Refreshable;
+  readonly intervalMs: number;
+  /** Refresh once immediately on start (default true). */
+  readonly refreshOnStart?: boolean;
+  readonly onError?: (err: unknown) => void;
+  readonly scheduler?: IntervalScheduler;
+}
+
+/**
+ * Proactively refreshes a JWKS provider on an interval, so requests never pay
+ * the fetch latency and key rotation is picked up before a request needs it.
+ * Lazy refresh (the provider's TTL/miss logic) remains the fallback. The timer
+ * is `unref`'d so it doesn't keep the process alive; `stop()` clears it.
+ */
+export class JwksRefreshPoller {
+  private readonly opts: JwksRefreshPollerOptions;
+  private handle: IntervalHandle | null = null;
+
+  constructor(opts: JwksRefreshPollerOptions) {
+    this.opts = opts;
+  }
+
+  start(): void {
+    if (this.handle !== null) return;
+    if (this.opts.refreshOnStart !== false) void this.tick();
+    this.handle = this.scheduler().setInterval(() => void this.tick(), this.opts.intervalMs);
+  }
+
+  stop(): void {
+    if (this.handle === null) return;
+    this.scheduler().clearInterval(this.handle);
+    this.handle = null;
+  }
+
+  private async tick(): Promise<void> {
+    try {
+      await this.opts.provider.refresh();
+    } catch (err) {
+      this.opts.onError?.(err);
+    }
+  }
+
+  private scheduler(): IntervalScheduler {
+    return this.opts.scheduler ?? DEFAULT_SCHEDULER;
   }
 }

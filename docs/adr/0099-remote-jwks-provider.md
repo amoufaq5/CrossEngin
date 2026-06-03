@@ -63,9 +63,9 @@ the IdP's keys automatically.
     is pure. Both satisfy the same `JwksProvider` interface, so a consumer can
     inject either.
 - **Background refresh timer.**
-  - **Decision.** Lazy refresh-on-demand (stale/miss) is simpler, has no timer to
-    manage across the Node/edge runtimes, and rotation is picked up on the next
-    request after the floor. A background poller is an optional optimization.
+  - **Decision.** Lazy refresh-on-demand first; **a background poller is
+    delivered in ADR-0100 (P1.20)** (`--jwks-refresh-ms`), with lazy refresh as
+    the fallback.
 - **Support RSA/EC keys.**
   - **Decision.** Ed25519 (OKP) only — the gateway verifies EdDSA; other key
     types are parsed-but-skipped rather than erroring, so a mixed JWKS still

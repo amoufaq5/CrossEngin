@@ -151,3 +151,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 65 | 0097 | 4,000 | Drafted alongside production JWT/JWKS identity in `apps/operate-server` (Phase 3 P1.17) |
 | 66 | 0098 | 3,500 | Drafted alongside the JWT/tenant cross-check in `api-gateway-runtime` (Phase 3 P1.18) |
 | 67 | 0099 | 3,500 | Drafted alongside the remote JWKS provider (caching + rotation) in `apps/operate-server` (Phase 3 P1.19) |
+| 68 | 0100 | 3,000 | Drafted alongside the background JWKS refresh poller in `apps/operate-server` (Phase 3 P1.20) |
