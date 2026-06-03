@@ -9132,6 +9132,129 @@ export const META_ARCHITECT_PROPOSALS: TableDefinition = {
   },
 };
 
+export const META_SLO_EVALUATIONS: TableDefinition = {
+  schema: "meta",
+  name: "slo_evaluations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "evaluation_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "slo_evaluations_evaluation_id_key" },
+      check: "evaluation_id ~ '^sloe_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "slo_id", type: "TEXT", notNull: true },
+    { name: "surface", type: "TEXT", notNull: true },
+    { name: "breached", type: "BOOLEAN", notNull: true },
+    {
+      name: "worst_severity",
+      type: "TEXT",
+      check:
+        "worst_severity IS NULL OR worst_severity IN ('sev1', 'sev2', 'sev3', 'sev4', 'sev5')",
+    },
+    { name: "worst_threshold_id", type: "TEXT" },
+    {
+      name: "target",
+      type: "NUMERIC(8, 6)",
+      notNull: true,
+      check: "target > 0 AND target <= 1",
+    },
+    { name: "evaluations", type: "JSONB", notNull: true },
+    { name: "evaluated_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_slo_evaluations_tenant_at", columns: ["tenant_id", "evaluated_at"] },
+    { name: "idx_slo_evaluations_slo", columns: ["slo_id", "evaluated_at"] },
+    { name: "idx_slo_evaluations_breached", columns: ["breached"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "slo_evaluations_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
+  schema: "meta",
+  name: "slo_enforcement_actions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "action_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "slo_enforcement_actions_action_id_key" },
+      check: "action_id ~ '^sloa_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "slo_id", type: "TEXT", notNull: true },
+    { name: "surface", type: "TEXT", notNull: true },
+    {
+      name: "decision",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "decision IN ('breach_opened', 'breach_ongoing', 'recovered')",
+    },
+    {
+      name: "severity",
+      type: "TEXT",
+      check: "severity IS NULL OR severity IN ('sev1', 'sev2', 'sev3', 'sev4', 'sev5')",
+    },
+    {
+      name: "incident_id",
+      type: "TEXT",
+      notNull: true,
+      check: "incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    {
+      name: "kill_switch_id",
+      type: "TEXT",
+      check: "kill_switch_id IS NULL OR kill_switch_id ~ '^fks_[a-z0-9]{8,40}$'",
+    },
+    {
+      name: "flag_id",
+      type: "TEXT",
+      check: "flag_id IS NULL OR flag_id ~ '^ff_[a-z0-9]{8,32}$'",
+    },
+    { name: "paged", type: "BOOLEAN", notNull: true, default: "false" },
+    {
+      name: "page_channel_count",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "page_channel_count >= 0",
+    },
+    { name: "threshold_id", type: "TEXT" },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_slo_enforcement_tenant_at", columns: ["tenant_id", "occurred_at"] },
+    { name: "idx_slo_enforcement_incident", columns: ["incident_id"] },
+    { name: "idx_slo_enforcement_decision", columns: ["decision"] },
+    { name: "idx_slo_enforcement_slo", columns: ["slo_id", "occurred_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "slo_enforcement_actions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9252,4 +9375,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_MESSAGES,
   META_ARCHITECT_TOOL_INVOCATIONS,
   META_ARCHITECT_PROPOSALS,
+  META_SLO_EVALUATIONS,
+  META_SLO_ENFORCEMENT_ACTIONS,
 ];

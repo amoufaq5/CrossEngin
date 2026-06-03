@@ -15,9 +15,30 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
 M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 + M8 landed: **52 packages + 1 app, 119 meta-schema tables,
-5,859 tests**, all green, no type errors. **Phase 2's eight
-milestones (M1–M8) are now complete.** M8 added
+M7 + M8 + M8.5 landed: **53 packages + 1 app, 121 meta-schema
+tables, 5,897 tests**, all green, no type errors. **Phase 2's
+eight milestones (M1–M8) are complete.** M8.5 added
+`@crossengin/observability-runtime-pg` — the Postgres persistence
+sibling for the SLO enforcement loop. 5 modules: records
+(SloEvaluationRecord + SloEnforcementActionRecord schemas +
+sloe_/sloa_ id generators + pure projectors
+evaluationRecordFromVerdict / enforcementActionFromDecision),
+evaluation-store (PostgresSloEvaluationStore — INSERT … ON
+CONFLICT + countBreachesSince), enforcement-action-store
+(PostgresSloEnforcementActionStore — record + listForIncident +
+listRecent + countSince with a row→record mapper),
+persisting-engine (buildPersistentSloEnforcementEngine wraps a
+SloEnforcementEngine so every evaluate() writes an enforcement
+action per decision + an evaluation snapshot per breach_opened;
+tenant resolves from registration → resolveTenantId → kill
+switch), replayer (pure verifyEnforcementActionShape +
+verifyEnforcementHistory — ongoing/recovered-without-open,
+duplicate-open, paged-without-channels, kill-switch-without-flag
+— + summarizeEnforcement + SloEnforcementReplayer). Two new META_
+tables: meta.slo_evaluations + meta.slo_enforcement_actions
+(platform-or-tenant RLS, append-only). Latency-target
+enforcement re-scoped to M8.6 (pure, belongs in
+observability-runtime). M8 added
 `@crossengin/observability-runtime` — the SLO enforcement loop.
 7 modules: clock (Clock/FixedClock + parseDurationMs), window
 (RequestOutcome ingest + RollingWindow per-surface counts),
@@ -185,7 +206,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0060 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0061 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -199,7 +220,8 @@ persistence to META_ARCHITECT_*), ADR-0058 covers M7
 (`pack-erp-core` — first vertical pack), ADR-0059 covers M6.5
 (`ai-router` — provider router with retry / cost / latency),
 ADR-0060 covers M8 (`observability-runtime` — SLO enforcement
-loop).
+loop), ADR-0061 covers M8.5 (`observability-runtime-pg` — SLO
+enforcement persistence).
 
 ## Architecture in 90 seconds
 
@@ -442,6 +464,23 @@ re-exporting everything.
   ongoing breach; mints cross-linked incident + kill-switch ids).
   No new META_ tables — emits records typed by existing
   contracts.
+- **`observability-runtime-pg`** — Postgres persistence for the
+  SLO enforcement loop. 5 modules: records (SloEvaluationRecord +
+  SloEnforcementActionRecord zod schemas + sloe_/sloa_ id
+  generators + pure projectors from BurnRateVerdict /
+  EnforcementDecision), evaluation-store
+  (PostgresSloEvaluationStore: INSERT … ON CONFLICT DO NOTHING +
+  countBreachesSince), enforcement-action-store
+  (PostgresSloEnforcementActionStore: record + listForIncident +
+  listRecent + countSince + row→record mapper), persisting-engine
+  (buildPersistentSloEnforcementEngine wraps a
+  SloEnforcementEngine — every evaluate() writes an enforcement
+  action per decision + an evaluation snapshot per breach_opened),
+  replayer (pure verifyEnforcementActionShape +
+  verifyEnforcementHistory + summarizeEnforcement +
+  SloEnforcementReplayer). Two new META_ tables:
+  meta.slo_evaluations + meta.slo_enforcement_actions
+  (platform-or-tenant RLS, append-only, sloe_/sloa_ business ids).
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
 - **`rate-limiting`** — unified rate-limit + quota contracts. 6
@@ -603,7 +642,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 115 platform-level Postgres tables. Each new package
+catalog of 121 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
@@ -858,10 +897,24 @@ resolved from the `AlertPolicy`, and a `triggered_active`
 value. One incident per ongoing breach (dedup), with a
 `recovered` decision when the burn clears. `TraceCollector`
 stitches gateway→workflow→notifications spans into a tree. Pure
-in-process runtime (no new META_ tables); persistence +
-percentile-based latency enforcement are the future
-`observability-runtime-pg` (M8.5). **Phase 2's eight milestones
-(M1–M8) are complete.**
+in-process runtime (no new META_ tables); records persist via the
+M8.5 sibling. **Phase 2's eight milestones (M1–M8) are complete.**
+
+**No longer deferred (as of M8.5):** SLO enforcement persistence.
+`@crossengin/observability-runtime-pg` is the Postgres sibling
+for the enforcement loop. `buildPersistentSloEnforcementEngine`
+wraps a `SloEnforcementEngine` so every `evaluate()` writes an
+enforcement action per decision (→ `meta.slo_enforcement_actions`)
+and an evaluation snapshot per `breach_opened` (→
+`meta.slo_evaluations`). `PostgresSloEvaluationStore` /
+`PostgresSloEnforcementActionStore` are append-only (`INSERT … ON
+CONFLICT DO NOTHING`); `SloEnforcementReplayer` runs pure drift
+checks (ongoing/recovered-without-open, duplicate-open,
+paged-without-channels, kill-switch-without-flag). Two new
+platform-or-tenant-RLS tables join the burn → incident →
+kill-switch chain so "every SLO breach last week and what it did"
+is one query. Latency-target enforcement (pure compute) is
+re-scoped to M8.6 in `observability-runtime`.
 
 **No longer deferred (as of M5.7):** chat audit trail. The new
 `@crossengin/ai-architect-pg` package persists every chat
@@ -930,7 +983,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0060 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0061 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -946,7 +999,9 @@ M5.8 (architect-cli write tools), ADR-0057 covers Phase 2
 M5.7 (chat persistence to META_ARCHITECT_*), ADR-0058 covers
 Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`ai-router`), ADR-0060 covers Phase 2 M8
-(`observability-runtime` — SLO enforcement loop). When you ship
+(`observability-runtime` — SLO enforcement loop), ADR-0061
+covers Phase 2 M8.5 (`observability-runtime-pg` — SLO
+enforcement persistence). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
