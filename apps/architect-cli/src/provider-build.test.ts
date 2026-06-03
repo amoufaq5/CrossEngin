@@ -69,4 +69,18 @@ describe("buildChatProvider", () => {
     });
     expect("provider" in built && built.provider).toBeInstanceOf(OpenAiProvider);
   });
+
+  it("labels single-provider turns with provider/model", () => {
+    const anthropic = buildChatProvider(ctx({ ANTHROPIC_API_KEY: "sk-ant" }), opts);
+    expect("describeLastTurn" in anthropic && anthropic.describeLastTurn()).toBe(
+      "anthropic/claude-sonnet-4-6",
+    );
+    const openai = buildChatProvider(ctx({ OPENAI_API_KEY: "sk-oai" }), { ...opts, choice: "openai" });
+    expect("describeLastTurn" in openai && openai.describeLastTurn()).toBe("openai/gpt-4o");
+  });
+
+  it("labels the router as null until a turn resolves", () => {
+    const built = buildChatProvider(ctx({ ANTHROPIC_API_KEY: "sk-ant", OPENAI_API_KEY: "sk-oai" }), opts);
+    expect("describeLastTurn" in built && built.describeLastTurn()).toBeNull();
+  });
 });

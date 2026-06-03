@@ -16,9 +16,24 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
-+ M2.8.5 + M8 + M8.5 + M8.6 + M8.7 landed: **55 packages + 1 app,
-122 meta-schema tables, 6,108 tests**, all green, no type errors.
-**Phase 2's eight milestones (M1–M8) are complete.** M2.8.5 wired
++ M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 + M8.7 landed: **55 packages
++ 1 app, 122 meta-schema tables, 6,115 tests**, all green, no
+type errors. **Phase 2's eight milestones (M1–M8) are complete.**
+M2.8.6 added per-turn provider + cost attribution to chat:
+`@crossengin/ai-router`'s `DefaultLlmRouter` gained an opt-in
+`onResolved(resolution)` observer (`RouterResolution =
+{task, providerId, modelId, latencyMs, fallbackDepth}`) that fires
+once per successful `complete()` with the provider that actually
+served it (`fallbackDepth>0` ⇒ a fallback was used; it does not
+fire on `AllProvidersExhaustedError`). `architect-cli`'s
+`buildChatProvider` now returns a `describeLastTurn()` label
+(static `anthropic/<model>` for a single provider; router-observer
+-driven `providerId/model (fallback)` for the router), and
+`formatUsageLine(usage, label?)` appends `via <label>` — so the
+human chat footer reads `[tokens in=… out=… cost=$… via
+openai/gpt-4o (fallback)]`. No `CompletionChunk` contract change;
+JSON mode + the `providerOverride` test seam are untouched.
+M2.8.5 wired
 the M6.5 router + the M2.8 OpenAI provider into `architect-cli`'s
 `chat` command — previously it constructed a single
 `AnthropicProvider` directly. The chat engine's provider type was
@@ -380,7 +395,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0072 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0073 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -409,7 +424,9 @@ redaction by classification), ADR-0069 covers M7.7.6
 (manifest-derived redaction registry), ADR-0070 covers M7.8
 (at-rest encryption mechanism + pgcrypto coverage applier),
 ADR-0071 covers M7.8.5 (encrypt-on-write migration), ADR-0072
-covers M2.8.5 (multi-vendor router in architect-cli chat).
+covers M2.8.5 (multi-vendor router in architect-cli chat),
+ADR-0073 covers M2.8.6 (per-turn provider + cost attribution in
+chat).
 
 ## Architecture in 90 seconds
 
@@ -612,7 +629,10 @@ re-exporting everything.
   clean. Tracks per-provider p50/p95 latency for observability +
   future latency-based routing. Throws `CostCeilingExceededError`
   / `ProviderResolutionError` / `AllProvidersExhaustedError` —
-  all non-retryable, so the router doesn't loop on them.
+  all non-retryable, so the router doesn't loop on them. An opt-in
+  `onResolved(RouterResolution)` observer reports the provider that
+  actually served each `complete()` (with `fallbackDepth`), which
+  architect-cli's chat footer turns into a `via <provider>` label.
 - **`ai-providers-anthropic`** — real Anthropic Messages API
   client implementing `LlmProvider`. Zero runtime deps (pure
   `fetch` + `ReadableStream`). 5 modules: pricing (5 Claude 4.x
@@ -1414,7 +1434,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0072 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0073 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1444,7 +1464,9 @@ ADR-0069 covers Phase 2 M7.7.6 (manifest-derived redaction
 registry), ADR-0070 covers Phase 2 M7.8 (at-rest encryption
 mechanism + pgcrypto coverage applier), ADR-0071 covers Phase 2
 M7.8.5 (encrypt-on-write migration), ADR-0072 covers Phase 2
-M2.8.5 (multi-vendor router in architect-cli chat). When you ship
+M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
+covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
+chat). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.

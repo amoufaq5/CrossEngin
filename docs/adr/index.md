@@ -130,3 +130,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 44 | 0070 | 4,000 | Drafted alongside at-rest encryption (pgcrypto) coverage applier in `kernel-pg` (Phase 2 M7.8) |
 | 45 | 0071 | 4,000 | Drafted alongside encrypt-on-write migration in `kernel-pg` (Phase 2 M7.8.5) |
 | 46 | 0072 | 4,000 | Drafted alongside multi-vendor router in `architect-cli` chat (Phase 2 M2.8.5) |
+| 47 | 0073 | 4,000 | Drafted alongside per-turn provider+cost attribution in chat (Phase 2 M2.8.6) |

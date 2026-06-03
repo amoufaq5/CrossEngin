@@ -357,7 +357,7 @@ function forwardChunk(chunk: CompletionChunk, renderer: StreamRenderer): void {
   }
 }
 
-export function formatUsageLine(usage: Usage): string {
+export function formatUsageLine(usage: Usage, providerLabel?: string | null): string {
   const parts: string[] = [
     `tokens in=${usage.inputTokens.toString()}`,
     `out=${usage.outputTokens.toString()}`,
@@ -366,6 +366,9 @@ export function formatUsageLine(usage: Usage): string {
     parts.push(`cached=${usage.cachedInputTokens.toString()}`);
   }
   parts.push(`cost=$${usage.cost.toFixed(6)}`);
+  if (providerLabel !== undefined && providerLabel !== null && providerLabel.length > 0) {
+    parts.push(`via ${providerLabel}`);
+  }
   return parts.join(" ");
 }
 
@@ -399,6 +402,7 @@ export interface ChatReplOptions {
   readonly maxToolIterations?: number;
   readonly transcript?: Transcript;
   readonly autoApprove?: boolean;
+  readonly providerLabel?: () => string | null;
 }
 
 export function interactiveApprover(opts: {
@@ -456,6 +460,8 @@ export interface ChatExchangeOptions {
   readonly transcript?: Transcript;
   readonly turnIndex?: number;
   readonly autoApprove?: boolean;
+  /** Returns a label for the provider that served the turn (e.g. `openai/gpt-4o`), or null. */
+  readonly providerLabel?: () => string | null;
 }
 
 export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatExchangeResult> {
@@ -508,7 +514,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
   let lastCalls = initial.record.toolCalls;
   if (initial.record.usage !== null) accumulateUsage(accumulated, initial.record.usage);
   if (opts.format === "human" && initial.record.usage !== null) {
-    opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage)}]`);
+    opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage, opts.providerLabel?.())}]`);
   }
   let lastAssistantMessageId: string | null = null;
   if (transcript !== undefined) {
@@ -817,6 +823,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       transcript: opts.transcript,
       turnIndex: turns,
       autoApprove: opts.autoApprove,
+      providerLabel: opts.providerLabel,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
@@ -857,6 +864,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       transcript: opts.transcript,
       turnIndex: turns,
       autoApprove: opts.autoApprove,
+      providerLabel: opts.providerLabel,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);

@@ -15,7 +15,7 @@ import {
   isOpenAiChatModel,
   type OpenAiChatModel,
 } from "@crossengin/ai-providers-openai";
-import { DefaultLlmRouter } from "@crossengin/ai-router";
+import { DefaultLlmRouter, type RouterResolution } from "@crossengin/ai-router";
 import {
   computeManifestDiff,
   manifestHash,
@@ -258,7 +258,7 @@ export const DEFAULT_CHAT_OPENAI_MODEL: OpenAiChatModel = "gpt-4o";
 export const CHAT_PROVIDER_CHOICES: ReadonlySet<string> = new Set(["auto", "anthropic", "openai"]);
 
 type ProviderBuild =
-  | { readonly provider: CompletionProvider }
+  | { readonly provider: CompletionProvider; readonly describeLastTurn: () => string | null }
   | { readonly error: string; readonly code: number };
 
 function buildChatRouter(
@@ -266,6 +266,7 @@ function buildChatRouter(
   openai: OpenAiProvider,
   anthropicModel: AnthropicModel,
   openaiModel: OpenAiChatModel,
+  onResolved: (resolution: RouterResolution) => void,
 ): DefaultLlmRouter {
   const providers = new Map<string, LlmProvider>([
     ["anthropic", anthropic],
@@ -288,7 +289,14 @@ function buildChatRouter(
     providers,
     taskPolicies,
     getTenantResidency: async (): Promise<TenantResidency> => "unrestricted",
+    onResolved,
   });
+}
+
+function describeResolution(r: RouterResolution | null): string | null {
+  if (r === null) return null;
+  const model = r.modelId ?? "?";
+  return r.fallbackDepth > 0 ? `${r.providerId}/${model} (fallback)` : `${r.providerId}/${model}`;
 }
 
 /**
@@ -302,7 +310,9 @@ export function buildChatProvider(
   ctx: RunContext,
   opts: { model: AnthropicModel; openaiModel: OpenAiChatModel; choice: string },
 ): ProviderBuild {
-  if (ctx.providerOverride !== undefined) return { provider: ctx.providerOverride };
+  if (ctx.providerOverride !== undefined) {
+    return { provider: ctx.providerOverride, describeLastTurn: () => null };
+  }
 
   const anthropicKey = ctx.env["ANTHROPIC_API_KEY"];
   const openaiKey = ctx.env["OPENAI_API_KEY"];
@@ -315,17 +325,21 @@ export function buildChatProvider(
 
   if (opts.choice === "anthropic") {
     if (!hasAnthropic) return { error: "chat: --provider anthropic requires ANTHROPIC_API_KEY.", code: 1 };
-    return { provider: makeAnthropic() };
+    return { provider: makeAnthropic(), describeLastTurn: () => `anthropic/${opts.model}` };
   }
   if (opts.choice === "openai") {
     if (!hasOpenai) return { error: "chat: --provider openai requires OPENAI_API_KEY.", code: 1 };
-    return { provider: makeOpenai() };
+    return { provider: makeOpenai(), describeLastTurn: () => `openai/${opts.openaiModel}` };
   }
   if (hasAnthropic && hasOpenai) {
-    return { provider: buildChatRouter(makeAnthropic(), makeOpenai(), opts.model, opts.openaiModel) };
+    let lastResolution: RouterResolution | null = null;
+    const router = buildChatRouter(makeAnthropic(), makeOpenai(), opts.model, opts.openaiModel, (r) => {
+      lastResolution = r;
+    });
+    return { provider: router, describeLastTurn: () => describeResolution(lastResolution) };
   }
-  if (hasAnthropic) return { provider: makeAnthropic() };
-  if (hasOpenai) return { provider: makeOpenai() };
+  if (hasAnthropic) return { provider: makeAnthropic(), describeLastTurn: () => `anthropic/${opts.model}` };
+  if (hasOpenai) return { provider: makeOpenai(), describeLastTurn: () => `openai/${opts.openaiModel}` };
   return {
     error: "chat: set ANTHROPIC_API_KEY and/or OPENAI_API_KEY before running 'crossengin chat'.",
     code: 1,
@@ -459,6 +473,7 @@ export async function runChat(
       maxToolIterations,
       transcript,
       autoApprove,
+      providerLabel: built.describeLastTurn,
     });
     if (command.format === "json") {
       printJson(ctx.io, {

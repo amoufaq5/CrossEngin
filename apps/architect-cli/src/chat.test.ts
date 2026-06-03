@@ -285,6 +285,16 @@ describe("formatUsageLine", () => {
     });
     expect(line).not.toContain("cached=");
   });
+
+  it("appends the provider label when supplied", () => {
+    const line = formatUsageLine({ inputTokens: 10, outputTokens: 5, cost: 0.0001 }, "openai/gpt-4o");
+    expect(line).toContain("via openai/gpt-4o");
+  });
+
+  it("omits the provider label when null/empty", () => {
+    expect(formatUsageLine({ inputTokens: 1, outputTokens: 1, cost: 0 }, null)).not.toContain("via");
+    expect(formatUsageLine({ inputTokens: 1, outputTokens: 1, cost: 0 }, "")).not.toContain("via");
+  });
 });
 
 describe("runChatRepl — one-shot", () => {

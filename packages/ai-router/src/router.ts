@@ -34,12 +34,23 @@ export interface RouterPolicy {
   readonly costCeiling?: CostCeiling;
 }
 
+export interface RouterResolution {
+  readonly task: TaskKind;
+  readonly providerId: string;
+  readonly modelId: string | null;
+  readonly latencyMs: number;
+  /** 0 = the primary provider served the call; >0 = that many fallbacks were used. */
+  readonly fallbackDepth: number;
+}
+
 export interface DefaultLlmRouterOptions extends RouterConfig {
   readonly retry?: RetryPolicy;
   readonly costCeiling?: CostCeiling;
   readonly costTracker?: CostTracker;
   readonly latencyTracker?: LatencyTracker;
   readonly clock?: () => number;
+  /** Observer invoked once per `complete()` with the provider that actually served it. */
+  readonly onResolved?: (resolution: RouterResolution) => void;
 }
 
 export interface RouterAttempt {
@@ -82,6 +93,7 @@ export class DefaultLlmRouter implements LlmRouter {
   private readonly costTracker: CostTracker;
   private readonly latencyTracker: LatencyTracker;
   private readonly clock: () => number;
+  private readonly onResolved: ((resolution: RouterResolution) => void) | undefined;
 
   constructor(opts: DefaultLlmRouterOptions) {
     this.providers = opts.providers;
@@ -93,6 +105,7 @@ export class DefaultLlmRouter implements LlmRouter {
     this.costTracker = opts.costTracker ?? new InMemoryCostTracker();
     this.latencyTracker = opts.latencyTracker ?? new InMemoryLatencyTracker();
     this.clock = opts.clock ?? (() => Date.now());
+    this.onResolved = opts.onResolved;
   }
 
   async resolveProvider(task: TaskKind, tenantId: string): Promise<ResolvedProvider> {
@@ -118,7 +131,9 @@ export class DefaultLlmRouter implements LlmRouter {
     const choices = await this.chooseProviders(req.task, req.tenantId);
     await this.enforceCeilingPreflight(req.tenantId, this.estimatePreflightCost(req, choices[0]!));
     const attempts: RouterAttempt[] = [];
+    let fallbackDepth = -1;
     for (const choice of choices) {
+      fallbackDepth += 1;
       const startMs = this.clock();
       const chunks: CompletionChunk[] = [];
       let usageCost = 0;
@@ -172,6 +187,13 @@ export class DefaultLlmRouter implements LlmRouter {
       await this.costTracker.recordUsage({
         tenantId: req.tenantId,
         costUsd: usageCost,
+      });
+      this.onResolved?.({
+        task: req.task,
+        providerId: choice.providerId,
+        modelId: choice.modelId,
+        latencyMs,
+        fallbackDepth,
       });
       for (const chunk of chunks) yield chunk;
       return;
