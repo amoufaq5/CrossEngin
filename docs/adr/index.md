@@ -127,3 +127,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 41 | 0067 | 4,000 | Drafted alongside acting on data classification (auth redaction + DDL encryption hints) (Phase 2 M7.7) |
 | 42 | 0068 | 4,000 | Drafted alongside gateway response redaction in `api-gateway-runtime` (Phase 2 M7.7.5) |
 | 43 | 0069 | 4,000 | Drafted alongside manifest-derived redaction registry in `api-gateway-runtime` (Phase 2 M7.7.6) |
+| 44 | 0070 | 4,000 | Drafted alongside at-rest encryption (pgcrypto) coverage applier in `kernel-pg` (Phase 2 M7.8) |
