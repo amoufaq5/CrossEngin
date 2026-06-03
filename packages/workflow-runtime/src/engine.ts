@@ -62,6 +62,13 @@ export interface TickTimersResult {
   readonly affectedInstanceIds: readonly string[];
 }
 
+export interface FireTimerResult {
+  readonly fired: boolean;
+  readonly instanceId: string;
+  readonly timerId: string;
+  readonly timerName: string | null;
+}
+
 export class WorkflowEngine {
   private readonly eventLog: EventLog;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -262,44 +269,94 @@ export class WorkflowEngine {
       }
       for (const timer of scheduled.values()) {
         if (timer.fireAt > nowMs) continue;
-        const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
-        await this.appendEvent({
-          instanceId,
-          tenantId: state.tenantId,
-          sequenceNumber: nextSeq + 1,
-          kind: "timer_fired",
-          occurredAt: new Date(nowMs).toISOString(),
-          actorPrincipalId: null,
-          actorSystemId: this.systemActorId,
-          previousState: null,
-          newState: null,
-          activityId: null,
-          signalId: null,
-          timerId: timer.id,
-          childInstanceId: null,
-          variableName: null,
-          payload: { timerName: timer.name },
-          correlationId: null,
-          causationEventId: null,
-        });
+        await this.applyTimerFired(instanceId, state.tenantId, definition, timer.id, timer.name, nowMs);
         firedTimerIds.push(timer.id);
         affected.add(instanceId);
-        const liveState = await this.getInstanceState(instanceId);
-        if (liveState === null) continue;
-        const transition = evaluateNextTransition({
-          definition,
-          fromState: liveState.currentState,
-          trigger: { kind: "timer_fired", timerName: timer.name },
-          variables: liveState.variables,
-          evaluator: this.guardEvaluator,
-        });
-        if (transition !== null) {
-          await this.applyTransition(instanceId, definition, transition, liveState, null, timer.id);
-        }
-        await this.runStepLoop(instanceId, definition);
       }
     }
     return { firedTimerIds, affectedInstanceIds: [...affected] };
+  }
+
+  /**
+   * Fires one specific scheduled timer by id (the per-unit path a distributed
+   * worker uses after claiming a due timer). Idempotent + safe to race: a timer
+   * already fired/cancelled, not yet due, or on a terminal/non-waiting instance
+   * is a no-op (`fired: false`) — so two workers that both claim-and-fire the
+   * same timer can't double-fire it.
+   */
+  async fireTimer(input: {
+    instanceId: string;
+    timerId: string;
+    nowMs?: number;
+  }): Promise<FireTimerResult> {
+    const nowMs = input.nowMs ?? this.clock.now().getTime();
+    const miss: FireTimerResult = { fired: false, instanceId: input.instanceId, timerId: input.timerId, timerName: null };
+    const state = await this.getInstanceState(input.instanceId);
+    if (state === null) return miss;
+    if (state.status !== "waiting_for_timer" && state.status !== "running") return miss;
+    const definition = this.definitions.get(state.definitionId);
+    if (definition === undefined) return miss;
+    const events = await this.eventLog.listByInstance(input.instanceId);
+    let scheduled = false;
+    let name = "";
+    let fireAt = Number.MAX_SAFE_INTEGER;
+    for (const e of events) {
+      if (e.timerId !== input.timerId) continue;
+      if (e.kind === "timer_scheduled") {
+        scheduled = true;
+        name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
+        fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
+      } else if (e.kind === "timer_fired" || e.kind === "timer_cancelled") {
+        scheduled = false;
+      }
+    }
+    if (!scheduled || fireAt > nowMs) return { ...miss, timerName: scheduled ? name : null };
+    await this.applyTimerFired(input.instanceId, state.tenantId, definition, input.timerId, name, nowMs);
+    return { fired: true, instanceId: input.instanceId, timerId: input.timerId, timerName: name };
+  }
+
+  /** Appends a `timer_fired` event for one timer, then evaluates the resulting transition + steps. */
+  private async applyTimerFired(
+    instanceId: string,
+    tenantId: string,
+    definition: WorkflowDefinition,
+    timerId: string,
+    timerName: string,
+    nowMs: number,
+  ): Promise<void> {
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "timer_fired",
+      occurredAt: new Date(nowMs).toISOString(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId,
+      childInstanceId: null,
+      variableName: null,
+      payload: { timerName },
+      correlationId: null,
+      causationEventId: null,
+    });
+    const liveState = await this.getInstanceState(instanceId);
+    if (liveState === null) return;
+    const transition = evaluateNextTransition({
+      definition,
+      fromState: liveState.currentState,
+      trigger: { kind: "timer_fired", timerName },
+      variables: liveState.variables,
+      evaluator: this.guardEvaluator,
+    });
+    if (transition !== null) {
+      await this.applyTransition(instanceId, definition, transition, liveState, null, timerId);
+    }
+    await this.runStepLoop(instanceId, definition);
   }
 
   async cancelInstance(input: {

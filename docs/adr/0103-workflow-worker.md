@@ -97,6 +97,6 @@ existing advisory-lock primitive on `PgConnection`.
 - **Deployment shape.** `new WorkflowWorker({ conn, engine:
   buildPersistentEngine(...).engine }).start(intervalMs)` in a worker process;
   scale out by running more, all sharing the tick lock.
-- **The deeper P2 work is named** — per-unit `FOR UPDATE SKIP LOCKED` claiming,
-  a `fireTimer(id)` path, an async activity queue + retry executor — behind the
-  same worker seam.
+- **The deeper P2 work is named** — per-unit `FOR UPDATE SKIP LOCKED` claiming +
+  a `fireTimer(id)` path are **delivered in ADR-0104 (P2.1)**; an async activity
+  queue + retry executor remain the follow-up, behind the same worker seam.

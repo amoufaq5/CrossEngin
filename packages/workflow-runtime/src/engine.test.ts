@@ -347,6 +347,76 @@ describe("tickTimers", () => {
   });
 });
 
+describe("fireTimer (per-unit, for the distributed worker)", () => {
+  function timerDef(relativeSeconds: number): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "awaiting_approval",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds } }],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "approved", kind: "terminal_success", label: "A", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        { name: "rejected", kind: "terminal_failure", label: "R", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+    };
+  }
+
+  async function scheduledTimerId(engine: ReturnType<typeof makeEngine>["engine"], instanceId: string): Promise<string> {
+    const events = await engine.listEvents(instanceId);
+    const ev = events.find((e) => e.kind === "timer_scheduled" && e.timerId !== null);
+    return ev!.timerId!;
+  }
+
+  it("fires one specific due timer and runs the transition", async () => {
+    const def = timerDef(60);
+    const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: def, clock: fixed });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const timerId = await scheduledTimerId(engine, state.instanceId);
+    fixed.advance(120_000);
+
+    const result = await engine.fireTimer({ instanceId: state.instanceId, timerId, nowMs: fixed.now().getTime() });
+    expect(result).toMatchObject({ fired: true, timerId, timerName: "deadline" });
+    expect((await engine.getInstanceState(state.instanceId))?.currentState).toBe("rejected");
+  });
+
+  it("is idempotent: firing an already-fired timer is a no-op", async () => {
+    const def = timerDef(60);
+    const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: def, clock: fixed });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const timerId = await scheduledTimerId(engine, state.instanceId);
+    fixed.advance(120_000);
+    await engine.fireTimer({ instanceId: state.instanceId, timerId, nowMs: fixed.now().getTime() });
+    const second = await engine.fireTimer({ instanceId: state.instanceId, timerId, nowMs: fixed.now().getTime() });
+    expect(second.fired).toBe(false);
+  });
+
+  it("does not fire a timer that isn't due yet", async () => {
+    const def = timerDef(3_600);
+    const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: def, clock: fixed });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const timerId = await scheduledTimerId(engine, state.instanceId);
+    fixed.advance(60_000);
+    expect((await engine.fireTimer({ instanceId: state.instanceId, timerId, nowMs: fixed.now().getTime() })).fired).toBe(false);
+  });
+
+  it("is a no-op for an unknown timer / instance", async () => {
+    const def = timerDef(60);
+    const { engine } = makeEngine({ definition: def, clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect((await engine.fireTimer({ instanceId: state.instanceId, timerId: "wft_nope" })).fired).toBe(false);
+    expect((await engine.fireTimer({ instanceId: "wfi_nope", timerId: "wft_x" })).fired).toBe(false);
+  });
+});
+
 describe("schedule_activity action", () => {
   it("runs the registered handler and emits scheduled+started+completed", async () => {
     const def: WorkflowDefinition = {

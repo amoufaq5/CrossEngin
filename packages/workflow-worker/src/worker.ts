@@ -20,7 +20,7 @@ export interface IntervalScheduler {
   clearInterval(handle: IntervalHandle): void;
 }
 
-const DEFAULT_SCHEDULER: IntervalScheduler = {
+export const DEFAULT_SCHEDULER: IntervalScheduler = {
   setInterval(handler, ms) {
     const h = setInterval(handler, ms);
     (h as { unref?: () => void }).unref?.(); // don't keep the process alive

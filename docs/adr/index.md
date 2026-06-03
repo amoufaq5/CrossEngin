@@ -155,3 +155,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 69 | 0101 | 3,000 | Drafted alongside field selection (projection) on list + read in `operate-runtime` (Phase 3 P1.21) |
 | 70 | 0102 | 3,000 | Drafted alongside SQL-level projection pushdown in the column store (Phase 3 P1.22) |
 | 71 | 0103 | 4,000 | Drafted alongside `@crossengin/workflow-worker` — the distributed tick worker (Phase 3 P2) |
+| 72 | 0104 | 4,000 | Drafted alongside per-unit timer claim + `fireTimer` for parallel workers (Phase 3 P2.1) |
