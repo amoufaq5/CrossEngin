@@ -1,6 +1,6 @@
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 
-export type StoreKind = "memory" | "pg";
+export type StoreKind = "memory" | "pg" | "pg-columns";
 
 export interface ServeOptions {
   readonly port: number;
@@ -70,7 +70,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--store" || arg.startsWith("--store=")) {
       const raw = takeValue(arg, next, "--store");
-      if (raw !== "memory" && raw !== "pg") throw new CliUsageError(`invalid --store: ${raw} (memory|pg)`);
+      if (raw !== "memory" && raw !== "pg" && raw !== "pg-columns") {
+        throw new CliUsageError(`invalid --store: ${raw} (memory|pg|pg-columns)`);
+      }
       store = raw;
       i += consumed();
     } else if (arg === "--schema" || arg.startsWith("--schema=")) {
@@ -113,8 +115,10 @@ Manifest source (exactly one):
 
 Options:
   --port <n>           Port to listen on (default 8787)
-  --store <kind>       Entity store: memory | pg (default memory)
-  --schema <name>      Postgres schema for the entity store (default meta)
+  --store <kind>       Entity store: memory | pg (JSONB) | pg-columns (typed
+                       per-entity tables) (default memory)
+  --schema <name>      Postgres schema for the entity store (default meta;
+                       public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)
   --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable)
   --help, -h           Show this help

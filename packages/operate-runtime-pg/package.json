@@ -21,12 +21,16 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",
+    "@crossengin/types": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@crossengin/config": "workspace:*",
+    "@crossengin/pack-erp-core": "workspace:*",
+    "@crossengin/pack-erp-retail": "workspace:*",
     "@crossengin/testing": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",

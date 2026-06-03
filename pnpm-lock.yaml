@@ -1073,12 +1073,18 @@ importers:
 
   packages/operate-runtime-pg:
     dependencies:
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../kernel-pg
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../operate-runtime
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -1086,6 +1092,12 @@ importers:
       '@crossengin/config':
         specifier: workspace:*
         version: link:../config
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
+      '@crossengin/pack-erp-retail':
+        specifier: workspace:*
+        version: link:../pack-erp-retail
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing

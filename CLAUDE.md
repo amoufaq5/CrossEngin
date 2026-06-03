@@ -17,9 +17,9 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9** landed:
-**59 packages + 2 apps, 123 meta-schema tables, 6,281 tests**, all
-green, no type errors.
+M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10**
+landed: **59 packages + 2 apps, 123 meta-schema tables, 6,300
+tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -105,7 +105,26 @@ Cloudflare `{fetch}` default-export shape. Tests build genuine
 globals), proving identical behavior — per-caller `unit_cost`
 redaction, RBAC 401, `?limit` pagination — on a second real
 runtime from one `dispatch`. The serving stack now runs on Node
-**and** any Fetch/WinterCG runtime. M7.9.1 added
+**and** any Fetch/WinterCG runtime. **P1.10 (ADR-0090) delivered the deeper ADR-0086
+follow-up** — `ColumnMappedEntityStore`, the typed sibling of the
+JSONB store: real per-entity tables whose columns are derived from
+the manifest entity's fields (kernel `fieldTypeToPostgresType` +
+`columnNameForField`; reference → `<name>_id` UUID), with a
+`(tenant_id, TEXT id)` PK + RLS + idempotent DDL. `column-plan`
+derives the field→column plan (carrying classification +
+`encryptAtRest`); `entity-ddl` emits idempotent `CREATE TABLE IF
+NOT EXISTS` + RLS (`DROP POLICY IF EXISTS`→`CREATE POLICY`) +
+`crossengin.data_class=…[; crossengin.encrypt=at_rest]` column
+comments (the kernel-pg applier's convention); the store maps
+record↔column on every op, **sorts on the native column type** (a
+real `ORDER BY "col"`, not JSONB text) and filters by safe
+`"col"::text = $n`. `id` stays TEXT for cross-store record parity.
+`operate-server --store pg-columns` provisions the typed tables at
+boot (`ensureSchema`) and serves a pack from them — a demonstrated
+drop-in for the JSONB store. Transparent store-level encryption of
+PHI columns stays the follow-up (the at-rest comment is emitted so
+the existing `crossengin-pg encrypt` tooling covers them).
+M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -525,7 +544,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0089 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0090 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -541,7 +560,8 @@ outcome mapping), ADR-0086 covers P1.6 (operate-runtime-pg —
 Postgres EntityStore under tenant RLS), ADR-0087 covers P1.7
 (apps/operate-server — the runnable serving binary), ADR-0088
 covers P1.8 (list pagination + filtering from the ListView),
-ADR-0089 covers P1.9 (edge/Workers fetch adapter)).
+ADR-0089 covers P1.9 (edge/Workers fetch adapter), ADR-0090 covers
+P1.10 (column-mapped entity store — typed per-entity tables)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -726,8 +746,9 @@ re-exporting everything.
   GatewayRuntime). Serves the retail pack end-to-end with per-caller
   redaction + lifecycle + paginated lists, each request emitting a
   PipelineExecution.
-- **`operate-runtime-pg`** — Phase 3 P1.6: the Postgres `EntityStore`
-  binding for the serving runtime. 3 modules: records (EntityRecordRow
+- **`operate-runtime-pg`** — Phase 3 P1.6 + P1.10: Postgres
+  `EntityStore` bindings for the serving runtime (JSONB + column-
+  mapped). 6 modules: records (EntityRecordRow
   zod schema + DocumentRow read projection + generateRecordId
   (`rec_` shape, parity with the in-memory store) + resolveRecordId +
   pure mergeRecord + rowToRecord), tenant-context
@@ -744,9 +765,20 @@ re-exporting everything.
   +1 detects a next page), field names identifier-validated (only
   values bound); validated schema name is the only interpolated
   identifier). Drops into buildOperateGateway
-  unchanged. One new META table (operate_entity_records); the
-  column-mapped per-entity store is the deeper follow-up behind the
-  same contract.
+  unchanged. One new META table (operate_entity_records). P1.10 adds
+  the typed sibling — column-plan (columnPlanForEntity maps each
+  manifest field → a typed column via kernel fieldTypeToPostgresType
+  + columnNameForField, carrying classification + encryptAtRest),
+  entity-ddl (emitEntityTableDdl → idempotent CREATE TABLE IF NOT
+  EXISTS with (tenant_id, TEXT id) PK + RLS via DROP/CREATE POLICY +
+  crossengin.data_class=…[; encrypt=at_rest] comments), column-store
+  (ColumnMappedEntityStore implements EntityStore over real per-
+  entity tables: ensureSchema applies the DDL, CRUD maps record↔
+  column, listPage sorts on the native column type + filters by
+  `"col"::text = $n`; fields absent from the plan are dropped). TEXT
+  id keeps cross-store record parity; `operate-server --store
+  pg-columns` provisions + serves from the typed tables. Transparent
+  encrypt-on-write is the follow-up (the at-rest comment is emitted).
 - **`apps/operate-server`** — Phase 3 P1.7 + P1.9: the runnable
   serving binary (second app under `apps/`, after `architect-cli`)
   + an edge/Workers fetch adapter. 7
@@ -1680,7 +1712,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0089 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0090 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1726,7 +1758,9 @@ ADR-0087 covers Phase 3 P1.7 (`apps/operate-server` — the runnable
 serving binary over `buildOperateGateway`), ADR-0088 covers Phase 3
 P1.8 (list pagination + filtering from the ListView), ADR-0089
 covers Phase 3 P1.9 (edge/Workers fetch adapter in `apps/operate-
-server`; ADRs 0080-0085 reserved for P3-P8).
+server`), ADR-0090 covers Phase 3 P1.10 (column-mapped entity
+store — typed per-entity tables in `operate-runtime-pg`; ADRs
+0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

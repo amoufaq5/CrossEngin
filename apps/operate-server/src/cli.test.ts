@@ -28,6 +28,10 @@ describe("parseServeArgs", () => {
     expect(opts.schema).toBe("tenant_app");
   });
 
+  it("accepts the pg-columns store kind", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg-columns"]).store).toBe("pg-columns");
+  });
+
   it("parses --manifest as the source", () => {
     const opts = parseServeArgs(["--manifest", "./m.json"]);
     expect(opts.manifestPath).toBe("./m.json");

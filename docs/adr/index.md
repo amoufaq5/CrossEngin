@@ -141,3 +141,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 55 | 0087 | 4,500 | Drafted alongside `apps/operate-server` — the runnable serving binary (Phase 3 P1.7) |
 | 56 | 0088 | 4,000 | Drafted alongside list pagination + filtering from the ListView in `operate-runtime` (Phase 3 P1.8) |
 | 57 | 0089 | 4,000 | Drafted alongside the edge / Workers fetch adapter in `apps/operate-server` (Phase 3 P1.9) |
+| 58 | 0090 | 4,500 | Drafted alongside the column-mapped entity store — typed per-entity tables in `operate-runtime-pg` (Phase 3 P1.10) |

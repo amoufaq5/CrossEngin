@@ -84,12 +84,11 @@ document store keyed by `(tenant_id, entity, record_id)`.
 ## Alternatives considered
 
 - **Column-mapped per-entity tables (DDL emitted from the pack).**
-  - **Decision.** Deferred. Emitting a real table per manifest entity (typed
-    columns, FKs, per-field classification → encryption) via `kernel-pg` is the
-    richer production target, but it couples storage to the manifest-compile step
-    and the DDL applier. A single JSONB document table proves the RLS-scoped
-    serving path now; the column-mapped store can swap in behind the same
-    `EntityStore` contract later, table-by-table.
+  - **Decision.** Deferred here; **delivered in ADR-0090 (P1.10).** A single
+    JSONB document table proved the RLS-scoped serving path; the
+    `ColumnMappedEntityStore` (typed per-entity tables, native-type sort,
+    classification/encryption comments) now sits behind the same `EntityStore`
+    contract as the typed alternative.
 - **Rely on the `WHERE tenant_id = $1` clause alone (no RLS context).**
   - **Decision.** No — every other tenant-scoped table in the platform enforces
     RLS; the serving store must too, so a query bug can't cross tenants. Setting

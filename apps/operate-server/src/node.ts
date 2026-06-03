@@ -2,8 +2,9 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
-import { PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
 
 import type { ServeOptions } from "./cli.js";
 import type { RawHttpRequest } from "./http.js";
@@ -82,9 +83,14 @@ export function createNodeRequestListener(
   };
 }
 
-async function resolveStore(options: ServeOptions): Promise<EntityStore> {
+async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<EntityStore> {
   if (options.store === "memory") return new InMemoryEntityStore();
   const conn = createNodePgConnection(parsePgEnvConfig());
+  if (options.store === "pg-columns") {
+    const store = new ColumnMappedEntityStore(conn, manifest, options.schema !== null ? { schema: options.schema } : {});
+    await store.ensureSchema();
+    return store;
+  }
   return new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
 }
 
@@ -104,7 +110,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
-  const store = await resolveStore(options);
+  const store = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { httpServer } = buildOperateHttpServer({
     manifest,
