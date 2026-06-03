@@ -199,3 +199,78 @@ describe("PostgresEntityStore — configuration", () => {
     await expect(store.get("not-a-uuid!!", "Product", "x")).rejects.toThrow(/invalid tenantId/);
   });
 });
+
+/** A mock that captures the last data SQL + params and returns canned document rows. */
+function capturePg(rows: EntityRecord[]): {
+  conn: PgConnection;
+  last: { sql: string; params: readonly unknown[] };
+} {
+  const last = { sql: "", params: [] as readonly unknown[] };
+  const query = (async (sql: string, params?: readonly unknown[]) => {
+    if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
+    last.sql = sql;
+    last.params = params ?? [];
+    return { rows: rows.map((document) => ({ document })), rowCount: rows.length };
+  }) as PgConnection["query"];
+  const conn: PgConnection = {
+    query,
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+  return { conn, last };
+}
+
+describe("PostgresEntityStore.listPage — pushdown", () => {
+  it("pushes ORDER BY + LIMIT(+1) + OFFSET and sets nextCursor when more rows exist", async () => {
+    // limit 2 → query asks for 3; 3 returned ⇒ hasMore
+    const { conn, last } = capturePg([{ id: "a" }, { id: "b" }, { id: "c" }]);
+    const store = new PostgresEntityStore(conn);
+    const page = await store.listPage(TENANT, "Product", {
+      limit: 2,
+      cursor: null,
+      sort: [{ field: "name", direction: "desc" }],
+      filters: [],
+    });
+    expect(last.sql).toContain("ORDER BY document ->> 'name' DESC, record_id ASC");
+    expect(last.sql).toContain("LIMIT $3 OFFSET $4");
+    expect(last.params).toEqual([TENANT, "Product", 3, 0]);
+    expect(page.records.map((r) => r["id"])).toEqual(["a", "b"]);
+    expect(page.nextCursor).not.toBeNull();
+  });
+
+  it("returns nextCursor=null when the page is not full", async () => {
+    const { conn } = capturePg([{ id: "a" }]);
+    const store = new PostgresEntityStore(conn);
+    const page = await store.listPage(TENANT, "Product", { limit: 5, cursor: null, sort: [], filters: [] });
+    expect(page.records).toHaveLength(1);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it("pushes equality filters as document ->> 'field' = $n with bound params", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "status", value: "active" }],
+    });
+    expect(last.sql).toContain("document ->> 'status' = $3");
+    expect(last.params).toEqual([TENANT, "Product", "active", 11, 0]);
+  });
+
+  it("ignores a filter/sort field that isn't a safe identifier", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "name; DROP", direction: "asc" }],
+      filters: [{ field: "x'; DELETE", value: "v" }],
+    });
+    expect(last.sql).not.toContain("DROP");
+    expect(last.sql).not.toContain("DELETE");
+    expect(last.params).toEqual([TENANT, "Product", 11, 0]);
+  });
+});

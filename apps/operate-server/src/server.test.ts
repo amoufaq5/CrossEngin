@@ -108,4 +108,36 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
     const res = await server.dispatch(req("GET", "/v1/products?limit=10&cursor=abc", "key-manager"), null);
     expect(res.status).toBe(200);
   });
+
+  it("paginates over HTTP: ?limit drives the page + an opaque nextCursor (P1.8)", async () => {
+    const server = makeServer();
+    for (const p of [
+      { sku: "A", name: "Apple" },
+      { sku: "B", name: "Banana" },
+      { sku: "C", name: "Cherry" },
+    ]) {
+      const { raw, bytes } = jsonBody("POST", "/v1/products", "key-manager", {
+        ...p,
+        unit_price: 1,
+        status: "active",
+        category: "g",
+      });
+      await server.dispatch(raw, bytes);
+    }
+
+    const first = await server.dispatch(req("GET", "/v1/products?limit=2", "key-manager"), null);
+    const firstBody = parse(first.body);
+    expect((firstBody["data"] as unknown[]).length).toBe(2);
+    const page = firstBody["page"] as { nextCursor: string | null; limit: number };
+    expect(page.limit).toBe(2);
+    expect(page.nextCursor).not.toBeNull();
+
+    const second = await server.dispatch(
+      req("GET", `/v1/products?limit=2&cursor=${encodeURIComponent(page.nextCursor!)}`, "key-manager"),
+      null,
+    );
+    const secondBody = parse(second.body);
+    expect((secondBody["data"] as unknown[]).length).toBe(1);
+    expect((secondBody["page"] as { nextCursor: string | null }).nextCursor).toBeNull();
+  });
 });

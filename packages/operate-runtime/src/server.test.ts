@@ -61,12 +61,16 @@ function makeServer() {
   return { server, store };
 }
 
-function getReq(path: string, token: string): IncomingRequest {
+function getReq(target: string, token: string): IncomingRequest {
+  const url = new URL(target, "http://placeholder.invalid");
+  const query: Record<string, string> = {};
+  for (const [k, v] of url.searchParams.entries()) query[k] = v;
   return buildIncomingRequest({
     id: `req_${Math.random().toString(36).slice(2, 14)}`,
     receivedAt: "2026-06-03T12:00:00.000Z",
     method: "GET",
-    path,
+    path: url.pathname,
+    query,
     headers: { "x-api-key": token },
     host: "api.example.com",
     scheme: "https",
@@ -144,6 +148,43 @@ describe("operate-server — manifest served end-to-end through the gateway", ()
     expect(execution.finalOutcome).toBe("pass");
     expect(execution.tenantId).toBe(TENANT);
     expect(execution.stages.some((s) => s.stage === "transform_response")).toBe(true);
+  });
+});
+
+describe("operate-server — list pagination + filter from the ListView (P1.8)", () => {
+  async function seedThree(store: InMemoryEntityStore): Promise<void> {
+    await store.create(TENANT, "Product", { id: "p-c", sku: "C", name: "Cherry", unit_price: 3, status: "active", category: "g" });
+    await store.create(TENANT, "Product", { id: "p-a", sku: "A", name: "Apple", unit_price: 1, status: "active", category: "g" });
+    await store.create(TENANT, "Product", { id: "p-b", sku: "B", name: "Banana", unit_price: 2, status: "archived", category: "g" });
+  }
+
+  it("paginates with ?limit and follows the opaque cursor (sorted by the view's default)", async () => {
+    const { server, store } = makeServer();
+    await seedThree(store);
+
+    const first = await server.runtime.handleRequest(getReq("/v1/products?limit=2", "key-manager"));
+    const firstBody = bodyOf(first.response.bodyBytes);
+    const firstRows = firstBody["data"] as Array<Record<string, unknown>>;
+    expect(firstRows.map((r) => r["name"])).toEqual(["Apple", "Banana"]); // default sort name asc
+    const page = firstBody["page"] as { nextCursor: string | null; limit: number };
+    expect(page.limit).toBe(2);
+    expect(page.nextCursor).not.toBeNull();
+
+    const second = await server.runtime.handleRequest(
+      getReq(`/v1/products?limit=2&cursor=${encodeURIComponent(page.nextCursor!)}`, "key-manager"),
+    );
+    const secondRows = bodyOf(second.response.bodyBytes)["data"] as Array<Record<string, unknown>>;
+    expect(secondRows.map((r) => r["name"])).toEqual(["Cherry"]);
+    expect((bodyOf(second.response.bodyBytes)["page"] as { nextCursor: string | null }).nextCursor).toBeNull();
+  });
+
+  it("filters by an equality param on a filterable column", async () => {
+    const { server, store } = makeServer();
+    await seedThree(store);
+    const res = await server.runtime.handleRequest(getReq("/v1/products?status=active", "key-manager"));
+    const rows = bodyOf(res.response.bodyBytes)["data"] as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r["status"] === "active")).toBe(true);
   });
 });
 

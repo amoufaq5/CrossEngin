@@ -1,8 +1,17 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { EntityRecord, EntityStore } from "@crossengin/operate-runtime";
+import {
+  decodeCursor,
+  encodeCursor,
+  type EntityRecord,
+  type EntityStore,
+  type ListPage,
+  type ListQuery,
+} from "@crossengin/operate-runtime";
 
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
+
+const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface PostgresEntityStoreOptions {
   /** Schema holding `operate_entity_records` (default `meta`). */
@@ -44,6 +53,43 @@ export class PostgresEntityStore implements EntityStore {
         [tenantId, entity],
       );
       return res.rows.map((r) => r.document);
+    });
+  }
+
+  async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const params: unknown[] = [tenantId, entity];
+      const where: string[] = [`tenant_id = $1`, `entity = $2`];
+      for (const filter of query.filters) {
+        if (!FIELD_RE.test(filter.field)) continue;
+        params.push(filter.value);
+        where.push(`document ->> '${filter.field}' = $${params.length.toString()}`);
+      }
+      const orderParts: string[] = [];
+      for (const sort of query.sort) {
+        if (!FIELD_RE.test(sort.field)) continue;
+        orderParts.push(`document ->> '${sort.field}' ${sort.direction === "desc" ? "DESC" : "ASC"}`);
+      }
+      orderParts.push("record_id ASC");
+      const offset = decodeCursor(query.cursor);
+      // fetch one extra row to detect whether a next page exists
+      params.push(query.limit + 1);
+      const limitParam = `$${params.length.toString()}`;
+      params.push(offset);
+      const offsetParam = `$${params.length.toString()}`;
+      const res = await tx.query<DocumentRow>(
+        `SELECT document
+           FROM ${this.table}
+          WHERE ${where.join(" AND ")}
+          ORDER BY ${orderParts.join(", ")}
+          LIMIT ${limitParam} OFFSET ${offsetParam}`,
+        params,
+      );
+      const rows = res.rows.map((r) => r.document);
+      const hasMore = rows.length > query.limit;
+      const records = hasMore ? rows.slice(0, query.limit) : rows;
+      const nextCursor = hasMore ? encodeCursor(offset + records.length) : null;
+      return { records, nextCursor };
     });
   }
 

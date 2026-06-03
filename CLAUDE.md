@@ -17,9 +17,9 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7** landed: **59 packages +
-2 apps, 123 meta-schema tables, 6,254 tests**, all green, no type
-errors.
+M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8** landed: **59
+packages + 2 apps, 123 meta-schema tables, 6,274 tests**, all
+green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -73,9 +73,24 @@ auth (fail-closed: unknown token → 401), and listens. A real
 loopback test boots it and gets a 200; every other module is
 tested offline over `RawHttpRequest`/mock Node req-res. The HTTP
 edge preserves every P1 guarantee — per-caller `unit_cost`
-redaction, RBAC 403, lifecycle — now over raw HTTP. ADR-0078
-Q1+Q2+Q3+Q4 resolved; only Q5 (list pagination) remains.
-M7.9.1 added
+redaction, RBAC 403, lifecycle — now over raw HTTP. **P1.8
+(ADR-0088) resolved ADR-0078 Q5 — the last open P1 question.**
+The list endpoint is now paginated + filterable, driven by the
+entity's `ListView`: `store.listPage(tenant, entity, ListQuery)`
+returns a bounded `ListPage` with an opaque offset cursor;
+`listConfigForEntity` reads the view's `pageSize` / default `sort`
+/ sortable+filterable columns into a `ListConfig`, and
+`parseListQuery` turns `?limit` (clamped to 500) / `?cursor` /
+`?sort=field&order=asc|desc` (sortable fields only) / equality
+filters (filterable columns only; unknown params ignored — can't
+widen results) into a resolved query. The `list` handler returns
+`{data, page:{limit, nextCursor}}`. `PostgresEntityStore.listPage`
+pushes it into SQL — `document ->> 'field' = $n` filters, `ORDER
+BY document ->> 'field' …, record_id ASC`, `LIMIT limit+1 OFFSET`
+(the +1 detects a next page) — with field names identifier-
+validated (only values bound; a `name; DROP` field is dropped, not
+executed). **The whole P1 arc (compile → gaps → store → server →
+paginated lists) is complete.** M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -495,7 +510,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0087 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0088 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -509,7 +524,8 @@ marketplace install → P6 multi-region → P7 AI Architect in prod
 covers P1, ADR-0079 covers P1.5 (gateway body parsing + handler
 outcome mapping), ADR-0086 covers P1.6 (operate-runtime-pg —
 Postgres EntityStore under tenant RLS), ADR-0087 covers P1.7
-(apps/operate-server — the runnable serving binary)).
+(apps/operate-server — the runnable serving binary), ADR-0088
+covers P1.8 (list pagination + filtering from the ListView)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -674,18 +690,26 @@ re-exporting everything.
   URI) / 5xx→error and halts, so domain errors no longer trip the
   "pass cannot be 4xx" PipelineExecution invariant.
 - **`operate-runtime`** — Phase 3 P1 serving keystone: composes a
-  resolved manifest into a live multi-tenant API. 5 modules: slugs
+  resolved manifest into a live multi-tenant API. 6 modules: slugs
   (camelCase operationIds + kebab-plural paths + rt_ route ids),
-  store (EntityStore interface + InMemoryEntityStore; Postgres
-  RLS-backed binding is next), operations (manifestRouteSpecs →
+  store (EntityStore interface — list/listPage/get/create/update/
+  remove + InMemoryEntityStore; ListQuery/ListPage + opaque offset
+  encodeCursor/decodeCursor + pure applyListQuery filter→sort→slice),
+  list-query (P1.8: listConfigForEntity reads an entity's ListView →
+  ListConfig (pageSize/default sort/sortable+filterable columns);
+  parseListQuery → a resolved ListQuery, fail-safe — unknown/non-
+  filterable params ignored), operations (manifestRouteSpecs →
   a RouteSpec per entity op: 5 CRUD + one per entityLifecycle
-  transition; routeFromSpec → schema-valid RouteDefinition),
-  handlers (buildSpecHandler: rbacCheck-enforced CRUD + transition
-  over the store, returns the full record — redaction at the edge),
-  compile (compileOperateServer → routes + handlers +
+  transition; the list spec carries its ListConfig; routeFromSpec →
+  schema-valid RouteDefinition), handlers (buildSpecHandler:
+  rbacCheck-enforced CRUD + transition over the store, returns the
+  full record — redaction at the edge; list paginates via
+  listPage → {data, page:{limit, nextCursor}}), compile
+  (compileOperateServer → routes + handlers +
   redactionRegistryFromManifest; buildOperateGateway → a wired
   GatewayRuntime). Serves the retail pack end-to-end with per-caller
-  redaction + lifecycle, each request emitting a PipelineExecution.
+  redaction + lifecycle + paginated lists, each request emitting a
+  PipelineExecution.
 - **`operate-runtime-pg`** — Phase 3 P1.6: the Postgres `EntityStore`
   binding for the serving runtime. 3 modules: records (EntityRecordRow
   zod schema + DocumentRow read projection + generateRecordId
@@ -696,10 +720,14 @@ re-exporting everything.
   bound, never interpolated; rejects a malformed tenant id before
   opening the tx), entity-store (PostgresEntityStore implements
   EntityStore over `meta.operate_entity_records`, a tenant-scoped
-  JSONB document table under RLS: list/get/create/update
+  JSONB document table under RLS: list/listPage/get/create/update
   (SELECT … FOR UPDATE then merge)/remove each wrapped in
-  withTenantContext, plus an admin count; validated schema name is
-  the only interpolated identifier). Drops into buildOperateGateway
+  withTenantContext, plus an admin count; listPage (P1.8) pushes the
+  query into SQL — `document ->> 'field' = $n` filters, ORDER BY
+  `document ->> 'field' …, record_id ASC`, LIMIT limit+1 OFFSET (the
+  +1 detects a next page), field names identifier-validated (only
+  values bound); validated schema name is the only interpolated
+  identifier). Drops into buildOperateGateway
   unchanged. One new META table (operate_entity_records); the
   column-mapped per-entity store is the deeper follow-up behind the
   same contract.
@@ -1630,7 +1658,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0087 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0088 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1673,8 +1701,9 @@ handler-returned outcome mapping in `api-gateway-runtime`),
 ADR-0086 covers Phase 3 P1.6 (`operate-runtime-pg` — the Postgres
 `EntityStore` over `meta.operate_entity_records` under tenant RLS),
 ADR-0087 covers Phase 3 P1.7 (`apps/operate-server` — the runnable
-serving binary over `buildOperateGateway`; ADRs 0080-0085 reserved
-for P3-P8).
+serving binary over `buildOperateGateway`), ADR-0088 covers Phase 3
+P1.8 (list pagination + filtering from the ListView; ADRs 0080-0085
+reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

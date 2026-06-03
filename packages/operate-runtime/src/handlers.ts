@@ -8,8 +8,17 @@ import {
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseListQuery, type ListConfig } from "./list-query.js";
 import type { EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
+
+const FALLBACK_LIST_CONFIG: ListConfig = {
+  defaultLimit: DEFAULT_PAGE_SIZE,
+  maxLimit: MAX_PAGE_SIZE,
+  defaultSort: [],
+  sortableFields: [],
+  filterableFields: [],
+};
 
 export interface HandlerContext {
   readonly store: EntityStore;
@@ -45,7 +54,7 @@ function json(status: number, body: unknown): HandlerOutput {
  * `transform_response` stage, per-caller — handlers return everything.
  */
 export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler {
-  return async ({ principal, params, parsedBody }) => {
+  return async ({ request, principal, params, parsedBody }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) {
       return json(401, { error: "tenant_required", detail: "request principal has no tenant" });
@@ -64,8 +73,15 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
 
     const id = params["id"] ?? "";
     switch (spec.action) {
-      case "list":
-        return json(200, { data: await ctx.store.list(tenantId, spec.entity) });
+      case "list": {
+        const config = spec.listConfig ?? FALLBACK_LIST_CONFIG;
+        const query = parseListQuery(request.query, config);
+        const page = await ctx.store.listPage(tenantId, spec.entity, query);
+        return json(200, {
+          data: page.records,
+          page: { limit: query.limit, nextCursor: page.nextCursor },
+        });
+      }
       case "read": {
         const record = await ctx.store.get(tenantId, spec.entity, id);
         return record === null ? json(404, { error: "not_found" }) : json(200, record);

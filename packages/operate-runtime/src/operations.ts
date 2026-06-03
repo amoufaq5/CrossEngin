@@ -3,6 +3,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { PathSegment, RouteDefinition } from "@crossengin/api-gateway";
 import type { Entity } from "@crossengin/types/meta-schema";
 
+import { listConfigForEntity, type ListConfig } from "./list-query.js";
 import { operationId, resourceSlug, routeId } from "./slugs.js";
 
 export type RouteAction = "list" | "read" | "create" | "update" | "delete" | "transition";
@@ -22,6 +23,7 @@ export interface RouteSpec {
   readonly pathSegments: readonly PathSegment[];
   readonly authOperation: Operation;
   readonly transition?: TransitionSpec;
+  readonly listConfig?: ListConfig;
 }
 
 function lit(value: string): PathSegment {
@@ -52,12 +54,13 @@ function transitionsForEntity(
 export function entityRouteSpecs(
   entity: Entity,
   transitions: readonly TransitionSpec[],
+  listConfig?: ListConfig,
 ): readonly RouteSpec[] {
   const slug = resourceSlug(entity.name);
   const collection = [lit("v1"), lit(slug)];
   const item = [...collection, ID_PARAM];
   const specs: RouteSpec[] = [
-    { entity: entity.name, action: "list", operationId: operationId(entity.name, "list"), method: "GET", pathSegments: collection, authOperation: "list" },
+    { entity: entity.name, action: "list", operationId: operationId(entity.name, "list"), method: "GET", pathSegments: collection, authOperation: "list", ...(listConfig !== undefined ? { listConfig } : {}) },
     { entity: entity.name, action: "create", operationId: operationId(entity.name, "create"), method: "POST", pathSegments: collection, authOperation: "create" },
     { entity: entity.name, action: "read", operationId: operationId(entity.name, "read"), method: "GET", pathSegments: item, authOperation: "read" },
     { entity: entity.name, action: "update", operationId: operationId(entity.name, "update"), method: "PATCH", pathSegments: item, authOperation: "update" },
@@ -80,7 +83,13 @@ export function entityRouteSpecs(
 export function manifestRouteSpecs(manifest: Manifest): readonly RouteSpec[] {
   const specs: RouteSpec[] = [];
   for (const entity of manifest.entities ?? []) {
-    specs.push(...entityRouteSpecs(entity, transitionsForEntity(manifest, entity.name)));
+    specs.push(
+      ...entityRouteSpecs(
+        entity,
+        transitionsForEntity(manifest, entity.name),
+        listConfigForEntity(manifest, entity.name),
+      ),
+    );
   }
   return specs;
 }
