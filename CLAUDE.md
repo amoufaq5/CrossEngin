@@ -15,10 +15,24 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M8 +
-M8.5 + M8.6 + M8.7 landed: **55 packages + 1 app, 122 meta-schema
-tables, 6,091 tests**, all green, no type errors. **Phase 2's
-eight milestones (M1–M8) are complete.** M7.8 chose the at-rest
+M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
++ M8 + M8.5 + M8.6 + M8.7 landed: **55 packages + 1 app, 122
+meta-schema tables, 6,101 tests**, all green, no type errors.
+**Phase 2's eight milestones (M1–M8) are complete.** M7.8.5
+shipped the encrypt-on-write migration that makes M7.8's
+`plaintext_at_rest` go green: `kernel-pg`'s
+`encryption-migration.ts` converts a hinted plaintext column to a
+pgcrypto-encrypted `BYTEA` column in place — `emitEncryptColumnSql`
+emits the ordered ADD `<col>__enc BYTEA` / UPDATE
+`pgp_sym_encrypt(<col>::text, keyRef)` (NULLs preserved) / DROP /
+RENAME / re-COMMENT directive, `emitDecryptingViewSql` builds a
+`pgp_sym_decrypt` read view, and `EncryptionMigrator.migrateSchema(
+schema, keyRef)` plans (plaintext-only, so re-runs are no-ops) +
+runs each column in its own transaction. Key is always a SQL
+*reference*, never inlined (test-enforced). After migration the
+M7.8 verifier reports the column encrypted-at-rest. The
+transparent *write* path (INSTEAD OF triggers) + key rotation are
+the deferred follow-ups. M7.8 chose the at-rest
 encryption mechanism and shipped its `kernel-pg` applier: a
 `phi`/`regulated` column's `crossengin.encrypt=at_rest` hint
 (M7.7) is fulfilled by **pgcrypto** symmetric encryption
@@ -351,7 +365,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0070 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0071 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -378,7 +392,8 @@ classification in `types` + `kernel`), ADR-0067 covers M7.7
 encryption hints), ADR-0068 covers M7.7.5 (gateway response
 redaction by classification), ADR-0069 covers M7.7.6
 (manifest-derived redaction registry), ADR-0070 covers M7.8
-(at-rest encryption mechanism + pgcrypto coverage applier).
+(at-rest encryption mechanism + pgcrypto coverage applier),
+ADR-0071 covers M7.8.5 (encrypt-on-write migration).
 
 ## Architecture in 90 seconds
 
@@ -408,7 +423,7 @@ re-exporting everything.
 - **`kernel`** — meta-schema (113 tables), DDL emit, manifest
   validate/diff/patch/topology/hash, bootstrap SQL generator.
 - **`kernel-pg`** — Postgres-backed migration applier (first
-  impure package). 8 modules: connection (PgConnection interface
+  impure package). 9 modules: connection (PgConnection interface
   + `parsePgEnvConfig` + node-postgres binding), statement-hash
   (sha256 of normalized SQL), migration-log (`_meta_migrations`
   bookkeeping), preconditions (`pg_uuidv7` extension + PG ≥ 14 +
@@ -420,7 +435,12 @@ re-exporting everything.
   `introspectEncryptedColumns` via `col_description`,
   `ensurePgcryptoExtension`, `pgpSymEncrypt/DecryptExpr` builders,
   `summarizeEncryptionCoverage` → `plaintext_at_rest` /
-  `pgcrypto_missing` drift, `EncryptionApplier`). Ships
+  `pgcrypto_missing` drift, `EncryptionApplier`),
+  encryption-migration (the M7.8.5 encrypt-on-write path:
+  `emitEncryptColumnSql` rewrites a plaintext column to encrypted
+  `BYTEA` in place, `emitDecryptingViewSql` builds a
+  `pgp_sym_decrypt` read view, `EncryptionMigrator.migrateSchema`
+  plans plaintext-only + runs per-column transactions). Ships
   `crossengin-pg` CLI with `apply`, `apply --dry-run`, `drift`,
   `inspect`, `version` commands.
 - **`workflow-runtime-pg`** — Postgres-backed adapters for the
@@ -1227,10 +1247,27 @@ schema)` returns an `EncryptionCoverageReport` flagging
 `plaintext_at_rest` (a PHI column still stored as a plaintext
 type) + `pgcrypto_missing` drift — a HIPAA control can assert
 "zero plaintext PHI columns" against the live catalog. The
-column-rewrite-to-BYTEA + encrypt-on-write path (a view/trigger
-calling the builders, key via `current_setting`) is the explicit
-next milestone; M7.8 ships the decision, provisioning, builders,
-and coverage verifier.
+column-rewrite-to-BYTEA + encrypt-on-write path is M7.8.5 (below);
+M7.8 ships the decision, provisioning, builders, and coverage
+verifier.
+
+**No longer deferred (as of M7.8.5):** the encrypt-on-write path.
+`kernel-pg`'s `encryption-migration.ts` makes M7.8's
+`plaintext_at_rest` go green: `emitEncryptColumnSql` converts a
+hinted plaintext column to a pgcrypto-encrypted `BYTEA` column in
+place (ADD `<col>__enc BYTEA` → UPDATE
+`pgp_sym_encrypt(<col>::text, keyRef)` with NULLs preserved → DROP
+→ RENAME → re-COMMENT the directive), `emitDecryptingViewSql`
+builds a `pgp_sym_decrypt` read view for transparent reads, and
+`EncryptionMigrator.migrateSchema(schema, keyRef)` plans (plaintext
+columns only, so re-runs are no-ops) + runs each column in its own
+transaction. Key is always a SQL *reference*, never inlined
+(test-enforced). After migration the M7.8 verifier reports the
+column encrypted-at-rest — closing the data-classification arc
+(declare `phi` → comment + audit invariant → mask + encryption
+hint → edge redaction → at-rest coverage → actual encryption). The
+transparent *write* path (INSTEAD OF triggers) + key rotation are
+the deferred follow-ups.
 
 **No longer deferred (as of M8):** SLO enforcement.
 `@crossengin/observability-runtime` turns the inert SLO / alert /
@@ -1358,7 +1395,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0070 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0071 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1386,7 +1423,8 @@ ADR-0067 covers Phase 2 M7.7 (acting on data classification),
 ADR-0068 covers Phase 2 M7.7.5 (gateway response redaction),
 ADR-0069 covers Phase 2 M7.7.6 (manifest-derived redaction
 registry), ADR-0070 covers Phase 2 M7.8 (at-rest encryption
-mechanism + pgcrypto coverage applier). When you ship
+mechanism + pgcrypto coverage applier), ADR-0071 covers Phase 2
+M7.8.5 (encrypt-on-write migration). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
