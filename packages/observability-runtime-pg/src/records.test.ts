@@ -3,14 +3,18 @@ import type {
   BurnRateVerdict,
   EnforcementDecision,
   EnforcementPlan,
+  LatencyVerdict,
 } from "@crossengin/observability-runtime";
 import {
   SloEnforcementActionRecordSchema,
   SloEvaluationRecordSchema,
+  SloLatencyEvaluationRecordSchema,
   enforcementActionFromDecision,
   evaluationRecordFromVerdict,
   generateEnforcementActionId,
   generateEvaluationId,
+  generateLatencyEvaluationId,
+  latencyEvaluationRecordFromVerdict,
 } from "./records.js";
 
 const NOW = "2026-06-02T12:00:00.000Z";
@@ -113,13 +117,78 @@ function breachOpened(): EnforcementDecision {
   };
 }
 
+const latencyVerdict: LatencyVerdict = {
+  breached: true,
+  worstSeverity: "sev2",
+  worstThresholdId: "latency-page",
+  worstPercentile: "p95",
+  sampleCount: 30,
+  breaches: [
+    {
+      percentile: "p95",
+      observedMs: 700,
+      budgetMs: 300,
+      thresholdMs: 600,
+      multiplier: 2,
+      severity: "sev2",
+      thresholdId: "latency-page",
+    },
+  ],
+};
+
+function latencyBreachOpened(): EnforcementDecision {
+  const opened = breachOpened();
+  if (opened.kind !== "breach_opened") throw new Error("unreachable");
+  // structurally identical decision shape; reused to exercise the shared projector
+  return opened;
+}
+
 describe("id generators", () => {
   it("produce ids matching the table patterns", () => {
     expect(generateEvaluationId()).toMatch(/^sloe_[a-z0-9]{8,40}$/);
     expect(generateEnforcementActionId()).toMatch(/^sloa_[a-z0-9]{8,40}$/);
+    expect(generateLatencyEvaluationId()).toMatch(/^slle_[a-z0-9]{8,40}$/);
   });
   it("produce distinct ids", () => {
     expect(generateEvaluationId()).not.toBe(generateEvaluationId());
+  });
+});
+
+describe("latencyEvaluationRecordFromVerdict", () => {
+  it("builds a schema-valid latency evaluation record", () => {
+    const record = latencyEvaluationRecordFromVerdict({
+      sloId: "catalog-latency",
+      surface: "GET /v1/catalog",
+      tenantId: TENANT,
+      verdict: latencyVerdict,
+      evaluatedAt: NOW,
+    });
+    expect(SloLatencyEvaluationRecordSchema.safeParse(record).success).toBe(true);
+    expect(record.worstPercentile).toBe("p95");
+    expect(record.sampleCount).toBe(30);
+    expect(record.breaches).toHaveLength(1);
+  });
+});
+
+describe("enforcementActionFromDecision signal", () => {
+  it("defaults signal to availability", () => {
+    const action = enforcementActionFromDecision({
+      decision: breachOpened(),
+      tenantId: null,
+      occurredAt: NOW,
+    });
+    expect(action.signal).toBe("availability");
+  });
+
+  it("tags latency enforcement actions with the latency signal", () => {
+    const action = enforcementActionFromDecision({
+      decision: latencyBreachOpened(),
+      tenantId: null,
+      occurredAt: NOW,
+      signal: "latency",
+    });
+    expect(action.signal).toBe("latency");
+    expect(SloEnforcementActionRecordSchema.safeParse(action).success).toBe(true);
   });
 });
 

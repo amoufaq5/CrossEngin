@@ -15,9 +15,23 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
 M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 + M8 + M8.5 + M8.6 landed: **53 packages + 1 app, 121
-meta-schema tables, 5,930 tests**, all green, no type errors.
-**Phase 2's eight milestones (M1–M8) are complete.** M8.6 added
+M7 + M8 + M8.5 + M8.6 + M8.7 landed: **53 packages + 1 app, 122
+meta-schema tables, 5,943 tests**, all green, no type errors.
+**Phase 2's eight milestones (M1–M8) are complete.** M8.7 added
+latency enforcement persistence to
+`@crossengin/observability-runtime-pg`: a `signal`
+('availability' | 'latency', default 'availability') column on
+`meta.slo_enforcement_actions` so one audit table serves both
+engines, plus a new `meta.slo_latency_evaluations` table
+(`slle_` ids, worst_percentile p50/p95/p99, sample_count,
+breaches JSONB, platform-or-tenant RLS) for latency verdict
+snapshots. `buildPersistentLatencySloEngine` wraps a
+`LatencySloEngine` — every decision writes a latency-signal
+enforcement action, every breach_opened writes a latency
+evaluation snapshot. `enforcementActionFromDecision` now accepts
+`EnforcementDecision | LatencyEnforcementDecision` + a `signal`;
+the M8.5 `SloEnforcementReplayer` verifies latency actions
+unchanged (its checks are signal-agnostic). M8.6 added
 latency-target SLO enforcement to `@crossengin/
 observability-runtime` (pure compute, no new package/tables): a
 `LatencySloEngine` that rides the same `recordOutcome()` stream,
@@ -220,7 +234,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0062 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0063 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -236,7 +250,9 @@ persistence to META_ARCHITECT_*), ADR-0058 covers M7
 ADR-0060 covers M8 (`observability-runtime` — SLO enforcement
 loop), ADR-0061 covers M8.5 (`observability-runtime-pg` — SLO
 enforcement persistence), ADR-0062 covers M8.6 (latency-target
-SLO enforcement in `observability-runtime`).
+SLO enforcement in `observability-runtime`), ADR-0063 covers
+M8.7 (latency enforcement persistence in
+`observability-runtime-pg`).
 
 ## Architecture in 90 seconds
 
@@ -486,22 +502,29 @@ re-exporting everything.
   No new META_ tables — emits records typed by existing
   contracts.
 - **`observability-runtime-pg`** — Postgres persistence for the
-  SLO enforcement loop. 5 modules: records (SloEvaluationRecord +
-  SloEnforcementActionRecord zod schemas + sloe_/sloa_ id
-  generators + pure projectors from BurnRateVerdict /
-  EnforcementDecision), evaluation-store
-  (PostgresSloEvaluationStore: INSERT … ON CONFLICT DO NOTHING +
-  countBreachesSince), enforcement-action-store
+  SLO enforcement loop (availability + latency). 7 modules:
+  records (SloEvaluationRecord + SloEnforcementActionRecord +
+  SloLatencyEvaluationRecord zod schemas + sloe_/sloa_/slle_ id
+  generators + pure projectors evaluationRecordFromVerdict /
+  enforcementActionFromDecision (accepts EnforcementDecision |
+  LatencyEnforcementDecision + a signal) /
+  latencyEvaluationRecordFromVerdict), evaluation-store +
+  latency-evaluation-store (PostgresSloEvaluationStore /
+  PostgresSloLatencyEvaluationStore: INSERT … ON CONFLICT DO
+  NOTHING + countBreachesSince), enforcement-action-store
   (PostgresSloEnforcementActionStore: record + listForIncident +
-  listRecent + countSince + row→record mapper), persisting-engine
-  (buildPersistentSloEnforcementEngine wraps a
-  SloEnforcementEngine — every evaluate() writes an enforcement
-  action per decision + an evaluation snapshot per breach_opened),
-  replayer (pure verifyEnforcementActionShape +
+  listRecent + countSince + row→record mapper; signal-aware),
+  persisting-engine + latency-persisting-engine
+  (buildPersistentSloEnforcementEngine /
+  buildPersistentLatencySloEngine each wrap their engine — every
+  evaluate() writes an enforcement action per decision + an
+  evaluation snapshot per breach_opened; latency actions tagged
+  signal='latency'), replayer (pure verifyEnforcementActionShape +
   verifyEnforcementHistory + summarizeEnforcement +
-  SloEnforcementReplayer). Two new META_ tables:
-  meta.slo_evaluations + meta.slo_enforcement_actions
-  (platform-or-tenant RLS, append-only, sloe_/sloa_ business ids).
+  SloEnforcementReplayer — signal-agnostic, covers both). Three
+  META_ tables: meta.slo_evaluations + meta.slo_enforcement_actions
+  (+ signal column) + meta.slo_latency_evaluations
+  (platform-or-tenant RLS, append-only, sloe_/sloa_/slle_ ids).
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
 - **`rate-limiting`** — unified rate-limit + quota contracts. 6
@@ -663,7 +686,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 121 platform-level Postgres tables. Each new package
+catalog of 122 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
@@ -950,6 +973,20 @@ latency drops under budget. Pure compute, no new package/tables;
 availability + latency engines compose over one shared
 `RollingWindow`.
 
+**No longer deferred (as of M8.7):** latency enforcement
+persistence. `observability-runtime-pg` now persists latency
+decisions too. A `signal` column on `meta.slo_enforcement_actions`
+('availability' | 'latency', default 'availability') lets one
+audit table serve both engines, and a new
+`meta.slo_latency_evaluations` table holds latency verdict
+snapshots (`slle_` ids, worst_percentile, sample_count, breaches
+JSONB). `buildPersistentLatencySloEngine` wraps a
+`LatencySloEngine` exactly as the availability persisting engine
+does; the shared `enforcementActionFromDecision` accepts both
+decision unions, and the M8.5 `SloEnforcementReplayer` verifies
+latency actions unchanged. "Every SLO breach — availability and
+latency — and what it did" is now one query.
+
 **No longer deferred (as of M5.7):** chat audit trail. The new
 `@crossengin/ai-architect-pg` package persists every chat
 session, message, tool invocation, and write proposal to four
@@ -1036,7 +1073,8 @@ Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 (`observability-runtime` — SLO enforcement loop), ADR-0061
 covers Phase 2 M8.5 (`observability-runtime-pg` — SLO
 enforcement persistence), ADR-0062 covers Phase 2 M8.6
-(latency-target SLO enforcement). When you ship
+(latency-target SLO enforcement), ADR-0063 covers Phase 2 M8.7
+(latency enforcement persistence). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.

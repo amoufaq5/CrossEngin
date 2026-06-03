@@ -90,6 +90,7 @@ import {
   META_SDK_CLIENT_RELEASES,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_EVALUATIONS,
+  META_SLO_LATENCY_EVALUATIONS,
   META_SSO_LOGINS,
   META_SSO_PROVIDERS,
   META_SSO_SESSIONS,
@@ -119,8 +120,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 121 tables", () => {
-    expect(META_TABLES).toHaveLength(121);
+  it("contains 122 tables", () => {
+    expect(META_TABLES).toHaveLength(122);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -230,6 +231,7 @@ describe("META_TABLES", () => {
       "sdk_client_releases",
       "slo_enforcement_actions",
       "slo_evaluations",
+      "slo_latency_evaluations",
       "sso_logins",
       "sso_providers",
       "sso_sessions",
@@ -1008,6 +1010,25 @@ describe("table column shapes", () => {
     expect(ks?.check).toContain("fks_");
     const flag = META_SLO_ENFORCEMENT_ACTIONS.columns.find((c) => c.name === "flag_id");
     expect(flag?.check).toContain("ff_");
+  });
+
+  it("META_SLO_ENFORCEMENT_ACTIONS discriminates availability vs latency signal", () => {
+    const signal = META_SLO_ENFORCEMENT_ACTIONS.columns.find((c) => c.name === "signal");
+    expect(signal?.notNull).toBe(true);
+    expect(signal?.default).toBe("'availability'");
+    expect(signal?.check).toContain("'availability'");
+    expect(signal?.check).toContain("'latency'");
+  });
+
+  it("META_SLO_LATENCY_EVALUATIONS enforces slle_ id + percentile/severity enums", () => {
+    const eid = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "evaluation_id");
+    expect(eid?.unique?.constraintName).toBe("slo_latency_evaluations_evaluation_id_key");
+    expect(eid?.check).toContain("slle_");
+    const pct = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "worst_percentile");
+    expect(pct?.check).toContain("'p95'");
+    const sev = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "worst_severity");
+    expect(sev?.check).toContain("'sev2'");
+    expect(META_SLO_LATENCY_EVALUATIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
   });
 
   it("META_INCIDENT_POSTMORTEMS enforces PM-YYYY-NNNN pattern + four-status enum", () => {

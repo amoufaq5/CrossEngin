@@ -23,6 +23,7 @@ function action(
     tenantId: null,
     sloId: "orders-availability",
     surface: "POST /v1/orders",
+    signal: "availability",
     severity: overrides.decision === "breach_opened" ? "sev2" : null,
     killSwitchId: null,
     flagId: null,

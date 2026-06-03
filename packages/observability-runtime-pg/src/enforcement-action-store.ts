@@ -18,17 +18,18 @@ export class PostgresSloEnforcementActionStore {
     const valid = SloEnforcementActionRecordSchema.parse(record);
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (
-         action_id, tenant_id, slo_id, surface, decision, severity,
+         action_id, tenant_id, slo_id, surface, signal, decision, severity,
          incident_id, kill_switch_id, flag_id, paged, page_channel_count,
          threshold_id, occurred_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (action_id) DO NOTHING`,
       [
         valid.actionId,
         valid.tenantId,
         valid.sloId,
         valid.surface,
+        valid.signal,
         valid.decision,
         valid.severity,
         valid.incidentId,
@@ -46,7 +47,7 @@ export class PostgresSloEnforcementActionStore {
     incidentId: string,
   ): Promise<readonly SloEnforcementActionRecord[]> {
     const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT action_id, tenant_id, slo_id, surface, decision, severity,
+      `SELECT action_id, tenant_id, slo_id, surface, signal, decision, severity,
               incident_id, kill_switch_id, flag_id, paged, page_channel_count,
               threshold_id, occurred_at
        FROM ${SCHEMA}.${TABLE}
@@ -60,7 +61,7 @@ export class PostgresSloEnforcementActionStore {
   async listRecent(limit = 100): Promise<readonly SloEnforcementActionRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT action_id, tenant_id, slo_id, surface, decision, severity,
+      `SELECT action_id, tenant_id, slo_id, surface, signal, decision, severity,
               incident_id, kill_switch_id, flag_id, paged, page_channel_count,
               threshold_id, occurred_at
        FROM ${SCHEMA}.${TABLE}
@@ -97,6 +98,7 @@ function rowToRecord(row: Record<string, unknown>): SloEnforcementActionRecord {
     tenantId: asNullableString(row["tenant_id"]),
     sloId: asString(row["slo_id"]),
     surface: asString(row["surface"]),
+    signal: asString(row["signal"]),
     decision: asString(row["decision"]),
     severity: asNullableString(row["severity"]),
     incidentId: asString(row["incident_id"]),

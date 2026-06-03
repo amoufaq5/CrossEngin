@@ -4,6 +4,8 @@ import { SeveritySchema } from "@crossengin/incident-response";
 import type {
   BurnRateVerdict,
   EnforcementDecision,
+  LatencyEnforcementDecision,
+  LatencyVerdict,
 } from "@crossengin/observability-runtime";
 
 const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -35,6 +37,13 @@ export function generateEnforcementActionId(): string {
   return `sloa_${encodeBase32Lower(new Uint8Array(randomBytes(20)), 24)}`;
 }
 
+export function generateLatencyEvaluationId(): string {
+  return `slle_${encodeBase32Lower(new Uint8Array(randomBytes(20)), 24)}`;
+}
+
+export const SLO_SIGNALS = ["availability", "latency"] as const;
+export type SloSignal = (typeof SLO_SIGNALS)[number];
+
 const Iso8601 = z.string().datetime({ offset: true });
 
 export const SloEvaluationRecordSchema = z
@@ -65,6 +74,7 @@ export const SloEnforcementActionRecordSchema = z
     tenantId: z.string().uuid().nullable(),
     sloId: z.string().min(1),
     surface: z.string().min(1),
+    signal: z.enum(SLO_SIGNALS).default("availability"),
     decision: z.enum(SLO_ENFORCEMENT_DECISIONS),
     severity: SeveritySchema.nullable(),
     incidentId: z.string().regex(/^INC-\d{4}-\d{4,8}$/),
@@ -108,9 +118,10 @@ export function evaluationRecordFromVerdict(
 }
 
 export interface EnforcementActionInput {
-  readonly decision: EnforcementDecision;
+  readonly decision: EnforcementDecision | LatencyEnforcementDecision;
   readonly tenantId: string | null;
   readonly occurredAt: string;
+  readonly signal?: SloSignal;
   readonly thresholdId?: string | null;
   readonly actionId?: string;
 }
@@ -124,6 +135,7 @@ export function enforcementActionFromDecision(
     tenantId: input.tenantId,
     sloId: decision.sloId,
     surface: decision.surface,
+    signal: input.signal ?? "availability",
     decision: decision.kind,
     occurredAt: input.occurredAt,
     thresholdId: input.thresholdId ?? null,
@@ -166,5 +178,53 @@ export function enforcementActionFromDecision(
     flagId: null,
     paged: false,
     pageChannelCount: 0,
+  });
+}
+
+export const LATENCY_PERCENTILES = ["p50", "p95", "p99"] as const;
+
+export const SloLatencyEvaluationRecordSchema = z
+  .object({
+    evaluationId: z.string().regex(/^slle_[a-z0-9]{8,40}$/),
+    tenantId: z.string().uuid().nullable(),
+    sloId: z.string().min(1),
+    surface: z.string().min(1),
+    breached: z.boolean(),
+    worstSeverity: SeveritySchema.nullable(),
+    worstThresholdId: z.string().min(1).nullable(),
+    worstPercentile: z.enum(LATENCY_PERCENTILES).nullable(),
+    sampleCount: z.number().int().nonnegative(),
+    breaches: z.array(z.unknown()),
+    evaluatedAt: Iso8601,
+  })
+  .strict();
+export type SloLatencyEvaluationRecord = z.infer<
+  typeof SloLatencyEvaluationRecordSchema
+>;
+
+export interface LatencyEvaluationRecordInput {
+  readonly sloId: string;
+  readonly surface: string;
+  readonly tenantId: string | null;
+  readonly verdict: LatencyVerdict;
+  readonly evaluatedAt: string;
+  readonly evaluationId?: string;
+}
+
+export function latencyEvaluationRecordFromVerdict(
+  input: LatencyEvaluationRecordInput,
+): SloLatencyEvaluationRecord {
+  return SloLatencyEvaluationRecordSchema.parse({
+    evaluationId: input.evaluationId ?? generateLatencyEvaluationId(),
+    tenantId: input.tenantId,
+    sloId: input.sloId,
+    surface: input.surface,
+    breached: input.verdict.breached,
+    worstSeverity: input.verdict.worstSeverity,
+    worstThresholdId: input.verdict.worstThresholdId,
+    worstPercentile: input.verdict.worstPercentile,
+    sampleCount: input.verdict.sampleCount,
+    breaches: [...input.verdict.breaches],
+    evaluatedAt: input.evaluatedAt,
   });
 }

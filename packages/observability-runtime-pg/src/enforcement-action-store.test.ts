@@ -28,6 +28,7 @@ function fixture(
     tenantId: TENANT,
     sloId: "orders-availability",
     surface: "POST /v1/orders",
+    signal: "availability",
     decision: "breach_opened",
     severity: "sev2",
     incidentId: "INC-2026-0001",
@@ -46,6 +47,7 @@ const dbRow = {
   tenant_id: TENANT,
   slo_id: "orders-availability",
   surface: "POST /v1/orders",
+  signal: "availability",
   decision: "breach_opened",
   severity: "sev2",
   incident_id: "INC-2026-0001",
@@ -64,7 +66,8 @@ describe("PostgresSloEnforcementActionStore.record", () => {
     await store.record(fixture());
     expect(capture[0]?.sql).toContain("INSERT INTO meta.slo_enforcement_actions");
     expect(capture[0]?.sql).toContain("ON CONFLICT (action_id) DO NOTHING");
-    expect(capture[0]?.params?.[6]).toBe("INC-2026-0001");
+    expect(capture[0]?.params?.[4]).toBe("availability");
+    expect(capture[0]?.params?.[7]).toBe("INC-2026-0001");
   });
 
   it("validates the record before insert", async () => {

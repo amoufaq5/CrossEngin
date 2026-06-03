@@ -120,3 +120,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 34 | 0060 | 4,500 | Drafted alongside `@crossengin/observability-runtime` (Phase 2 M8) |
 | 35 | 0061 | 4,500 | Drafted alongside `@crossengin/observability-runtime-pg` (Phase 2 M8.5) |
 | 36 | 0062 | 4,500 | Drafted alongside latency-SLO enforcement in `observability-runtime` (Phase 2 M8.6) |
+| 37 | 0063 | 4,500 | Drafted alongside latency enforcement persistence in `observability-runtime-pg` (Phase 2 M8.7) |
