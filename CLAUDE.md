@@ -16,10 +16,27 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
-+ M7.8.6 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 + M8.7 landed: **55
-packages + 1 app, 122 meta-schema tables, 6,120 tests**, all
-green, no type errors. **Phase 2's eight milestones (M1–M8) are
-complete.** M7.8.6 surfaced the M7.8/M7.8.5 encryption applier +
++ M7.8.6 + M7.9 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 + M8.7
+landed: **56 packages + 1 app, 122 meta-schema tables, 6,150
+tests**, all green, no type errors. **Phase 2's eight milestones
+(M1–M8) are complete.** M7.9 added `@crossengin/pack-erp-retail`
+— the third vertical pack and the second `meta.extends` consumer,
+proving the pack-extension mechanism generalizes. It declares
+`meta.extends: ["operate-erp/core"]` and resolves to 8 entities
+(4 core + 4 retail: Product / Store / SalesOrder / OrderLine),
+8 relations (two cross-pack: Account→Stores, SalesOrder→Invoice),
+merged roles (retail_admin / store_manager / cashier /
+retail_analyst), a SalesOrder entityLifecycle (cart → placed →
+fulfilled → returned, cancel from cart/placed), 2 jobs, 2 views,
+`compliancePacks: ["pci"]`. Crucially it exercises the
+classification arc on a **non-PHI** domain: `Product.unit_cost` →
+`commercial_sensitive` (redacted from cashiers — explicit
+`fields.unit_cost.read` grant excludes them), `SalesOrder.
+customer_email` → `pii`; no `phi`/`regulated`, so the
+audit-required + encryption-hint invariants correctly don't fire.
+`buildErpRetailPack(opts?)` cross-validates only after
+`resolveManifest` merges core in. M7.8.6 surfaced the
+M7.8/M7.8.5 encryption applier +
 migrator as a `crossengin-pg encrypt` CLI command:
 `encrypt --verify` prints an `EncryptionCoverageReport`
 (`formatEncryptionCoverage`) and exits 1 on drift (plaintext PHI
@@ -408,7 +425,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0074 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0075 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -439,7 +456,8 @@ redaction by classification), ADR-0069 covers M7.7.6
 ADR-0071 covers M7.8.5 (encrypt-on-write migration), ADR-0072
 covers M2.8.5 (multi-vendor router in architect-cli chat),
 ADR-0073 covers M2.8.6 (per-turn provider + cost attribution in
-chat), ADR-0074 covers M7.8.6 (`crossengin-pg encrypt` CLI).
+chat), ADR-0074 covers M7.8.6 (`crossengin-pg encrypt` CLI), ADR-0075
+covers M7.9 (`pack-erp-retail` — third vertical pack).
 
 ## Architecture in 90 seconds
 
@@ -832,6 +850,21 @@ re-exporting everything.
   tests resolve it against a core `ManifestRegistry` and pass
   `tryValidateManifest`. Proves the kernel's pack-extension
   mechanism end-to-end.
+- **`pack-erp-retail`** — third vertical pack; second `meta.extends`
+  consumer. Declares `meta.extends: ["operate-erp/core"]`; resolves
+  to 8 entities (4 core + Product / Store / SalesOrder / OrderLine,
+  all auditable), 8 relations (cross-pack Account→Stores +
+  SalesOrder→Invoice), 4 roles (retail_admin / store_manager /
+  cashier / retail_analyst), a SalesOrder entityLifecycle (cart →
+  placed → fulfilled → returned), 2 jobs, 2 views,
+  `compliancePacks: ["pci"]`. Exercises the classification arc on a
+  **non-PHI** domain: `Product.unit_cost` → commercial_sensitive
+  (redacted from cashiers via the classification default + an
+  explicit `fields.unit_cost.read` grant), `SalesOrder.
+  customer_email` → pii; no phi/regulated, so the audit + encryption
+  invariants stay dormant. `buildErpRetailPack(opts?)` passes
+  `tryValidateManifest` once resolved against a core registry.
+  Template for `pack-erp-construction` / `-education`.
 
 ### Business operations
 - **`billing`** — plans, subscriptions, metered usage, invoices,
@@ -1447,7 +1480,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0074 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0075 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1479,7 +1512,8 @@ mechanism + pgcrypto coverage applier), ADR-0071 covers Phase 2
 M7.8.5 (encrypt-on-write migration), ADR-0072 covers Phase 2
 M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
 covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
-chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI).
+chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI),
+ADR-0075 covers Phase 2 M7.9 (pack-erp-retail).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

@@ -132,3 +132,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 46 | 0072 | 4,000 | Drafted alongside multi-vendor router in `architect-cli` chat (Phase 2 M2.8.5) |
 | 47 | 0073 | 4,000 | Drafted alongside per-turn provider+cost attribution in chat (Phase 2 M2.8.6) |
 | 48 | 0074 | 4,000 | Drafted alongside the `crossengin-pg encrypt` CLI command (Phase 2 M7.8.6) |
+| 49 | 0075 | 4,000 | Drafted alongside `@crossengin/pack-erp-retail` (Phase 2 M7.9) |
