@@ -63,6 +63,7 @@ export class ColumnMappedEntityStore implements EntityStore {
   private readonly keyRef: string;
   private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
   private readonly joinPlans: readonly JoinTablePlan[];
+  private readonly joinIndex: ReadonlyMap<string, JoinTablePlan>;
 
   constructor(
     conn: PgConnection,
@@ -74,6 +75,7 @@ export class ColumnMappedEntityStore implements EntityStore {
     this.plans = columnPlansForManifest(manifest, { schema });
     this.deletePolicies = relationDeleteIndex(manifest);
     this.joinPlans = joinTablePlansForManifest(manifest, { schema });
+    this.joinIndex = new Map(this.joinPlans.map((p) => [`${p.leftEntity}|${p.rightEntity}`, p]));
     const keyRef = opts.encryptionKeyRef ?? DEFAULT_ENCRYPTION_KEY_REF;
     if (keyRef.trim().length === 0) throw new Error("encryptionKeyRef must be a non-empty SQL reference");
     this.keyRef = keyRef;
@@ -263,6 +265,115 @@ export class ColumnMappedEntityStore implements EntityStore {
         [tenantId, id],
       );
       return res.rowCount > 0;
+    });
+  }
+
+  // ----- many_to_many association links -------------------------------------
+
+  private joinPlanFor(leftEntity: string, rightEntity: string): JoinTablePlan {
+    const plan = this.joinIndex.get(`${leftEntity}|${rightEntity}`);
+    if (plan === undefined) {
+      throw new Error(`no many_to_many join table for ${leftEntity} ↔ ${rightEntity}`);
+    }
+    return plan;
+  }
+
+  /**
+   * Links two rows across a `many_to_many` relation (idempotent — a repeated
+   * link is a no-op via `ON CONFLICT DO NOTHING`). The composite FK enforces
+   * that both ids exist *in the same tenant*; a dangling id raises.
+   */
+  async link(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    leftId: string,
+    rightId: string,
+  ): Promise<void> {
+    const plan = this.joinPlanFor(leftEntity, rightEntity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    await withTenantContext(this.conn, tenantId, async (tx) => {
+      await tx.query(
+        `INSERT INTO ${qualified} (${quoteIdent("tenant_id")}, ${quoteIdent(plan.leftColumn)}, ${quoteIdent(plan.rightColumn)})
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+        [tenantId, leftId, rightId],
+      );
+    });
+  }
+
+  /** Removes an association link; returns whether a link existed. */
+  async unlink(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    leftId: string,
+    rightId: string,
+  ): Promise<boolean> {
+    const plan = this.joinPlanFor(leftEntity, rightEntity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const res = await tx.query(
+        `DELETE FROM ${qualified}
+          WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent(plan.leftColumn)} = $2 AND ${quoteIdent(plan.rightColumn)} = $3`,
+        [tenantId, leftId, rightId],
+      );
+      return res.rowCount > 0;
+    });
+  }
+
+  /** Reports whether two rows are linked across the relation. */
+  async isLinked(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    leftId: string,
+    rightId: string,
+  ): Promise<boolean> {
+    const plan = this.joinPlanFor(leftEntity, rightEntity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const res = await tx.query(
+        `SELECT 1 FROM ${qualified}
+          WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent(plan.leftColumn)} = $2 AND ${quoteIdent(plan.rightColumn)} = $3
+          LIMIT 1`,
+        [tenantId, leftId, rightId],
+      );
+      return res.rowCount > 0;
+    });
+  }
+
+  /**
+   * Lists the association links for a relation, optionally narrowed to one side
+   * (`{ leftId }` → all rights for a left, `{ rightId }` → all lefts for a
+   * right). Returns `{ leftId, rightId }` pairs.
+   */
+  async listLinks(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    opts: { readonly leftId?: string; readonly rightId?: string } = {},
+  ): Promise<ReadonlyArray<{ leftId: string; rightId: string }>> {
+    const plan = this.joinPlanFor(leftEntity, rightEntity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const params: unknown[] = [tenantId];
+      const where = [`${quoteIdent("tenant_id")} = $1`];
+      if (opts.leftId !== undefined) {
+        params.push(opts.leftId);
+        where.push(`${quoteIdent(plan.leftColumn)} = $${params.length.toString()}`);
+      }
+      if (opts.rightId !== undefined) {
+        params.push(opts.rightId);
+        where.push(`${quoteIdent(plan.rightColumn)} = $${params.length.toString()}`);
+      }
+      const res = await tx.query<Record<string, unknown>>(
+        `SELECT ${quoteIdent(plan.leftColumn)} AS left_id, ${quoteIdent(plan.rightColumn)} AS right_id
+           FROM ${qualified}
+          WHERE ${where.join(" AND ")}
+          ORDER BY ${quoteIdent("created_at")}, left_id, right_id`,
+        params,
+      );
+      return res.rows.map((r) => ({ leftId: String(r["left_id"]), rightId: String(r["right_id"]) }));
     });
   }
 

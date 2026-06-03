@@ -232,6 +232,63 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
   });
 });
 
+describe("ColumnMappedEntityStore — many_to_many association links", () => {
+  const M2M = {
+    entities: [
+      { name: "Course", fields: [{ name: "title", type: { kind: "text" } }] },
+      { name: "Student", fields: [{ name: "name", type: { kind: "text" } }] },
+    ],
+    relations: [{ kind: "many_to_many", left: "Course", right: "Student" }],
+  } as unknown as Manifest;
+
+  function m2mStore(cap: Captured): ColumnMappedEntityStore {
+    return new ColumnMappedEntityStore(cap.conn, M2M, { schema: "tenant_app" });
+  }
+
+  it("link inserts idempotently into the join table", async () => {
+    const cap = capturePg();
+    await m2mStore(cap).link(TENANT, "Course", "Student", "c1", "s1");
+    const ins = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(ins.sql).toContain('"tenant_app"."course_student"');
+    expect(ins.sql).toContain('"course_id"');
+    expect(ins.sql).toContain('"student_id"');
+    expect(ins.sql).toContain("ON CONFLICT DO NOTHING");
+    expect(ins.params).toEqual([TENANT, "c1", "s1"]);
+  });
+
+  it("unlink deletes and reports whether a link existed", async () => {
+    const cap = capturePg();
+    expect(await m2mStore(cap).unlink(TENANT, "Course", "Student", "c1", "s1")).toBe(true);
+    const del = cap.calls.find((c) => c.sql.includes("DELETE"))!;
+    expect(del.params).toEqual([TENANT, "c1", "s1"]);
+  });
+
+  it("isLinked reflects whether a row exists", async () => {
+    expect(await m2mStore(capturePg([{ "?column?": 1 }])).isLinked(TENANT, "Course", "Student", "c1", "s1")).toBe(true);
+    expect(await m2mStore(capturePg([])).isLinked(TENANT, "Course", "Student", "c1", "s1")).toBe(false);
+  });
+
+  it("listLinks maps rows to {leftId, rightId} and narrows by one side", async () => {
+    const cap = capturePg([
+      { left_id: "c1", right_id: "s1" },
+      { left_id: "c1", right_id: "s2" },
+    ]);
+    const links = await m2mStore(cap).listLinks(TENANT, "Course", "Student", { leftId: "c1" });
+    expect(links).toEqual([
+      { leftId: "c1", rightId: "s1" },
+      { leftId: "c1", rightId: "s2" },
+    ]);
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('AS left_id');
+    expect(sel.sql).toContain('"course_id" = $2');
+    expect(sel.params).toEqual([TENANT, "c1"]);
+  });
+
+  it("throws for a relation with no join table", async () => {
+    await expect(m2mStore(capturePg()).link(TENANT, "Course", "Teacher", "c1", "t1")).rejects.toThrow(/no many_to_many join table/);
+  });
+});
+
 describe("ColumnMappedEntityStore — unknown entity", () => {
   it("throws for an entity with no column plan", async () => {
     const cap = capturePg();

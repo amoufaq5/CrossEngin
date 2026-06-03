@@ -95,5 +95,6 @@ association rows is a separate future API.)
   (P1.13) + join tables (P1.14) — a manifest's entities and relations become a
   genuine, tenant-scoped relational schema, all behind one `EntityStore` /
   `ensureSchema`.
-- **A link/unlink API over association rows remains the open follow-up**, behind
-  the existing plan/DDL seams.
+- **A link/unlink API over association rows** is **delivered in ADR-0095
+  (P1.15).** Manifest-derived association *routes* (HTTP) remain the open
+  follow-up, behind the store API.
