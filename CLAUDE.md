@@ -438,11 +438,17 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0076 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0077 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
-→ M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
+→ M8 SLO enforcement); **ADR-0077 is the Phase 3 plan** — the
+bridge from running pillars to a deployed multi-vertical product
+(P1 `operate-server` serving app → P2 distributed workers → P3
+`operate-web` renderer → P4 gov/edu/construction packs → P5
+marketplace install → P6 multi-region → P7 AI Architect in prod
+→ P8 production hardening + GA; ADRs 0078-0085 lock each).
+ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
 ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
@@ -1506,7 +1512,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0076 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0077 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
