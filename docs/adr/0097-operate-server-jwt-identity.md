@@ -72,7 +72,8 @@ uses.
     (`x-tenant-id`), and the resolver only sees `input.tenantId` — so the tenant
     comes from the request header (identity token + tenant-context header, a
     common pattern). Cross-checking a JWT `tenant_id` claim against the header is
-    a hardening follow-up (the gateway would need to thread the claim).
+    **delivered in ADR-0098 (P1.18)** — the credential tenant is now
+    authoritative and a contradicting header is a `tenant_mismatch` 401.
 - **Remote JWKS URL fetch (with rotation).**
   - **Decision.** Deferred — `--jwks-key`/`--jwks-file` cover the operator
     supplying the IdP's current keys; a caching remote-JWKS `JwksProvider`

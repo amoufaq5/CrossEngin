@@ -153,3 +153,35 @@ describe("operate-server — Bearer JWT auth (EdDSA via JWKS)", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("operate-server — JWT tenant_id ↔ x-tenant-id cross-check (P1.18)", () => {
+  it("authenticates when the JWT tenant_id claim matches the x-tenant-id header", async () => {
+    const server = makeServer();
+    const jwt = buildJwt(validClaims({ tenant_id: TENANT }));
+    const res = await server.dispatch(jwtReq("GET", "/v1/products", jwt), null);
+    expect(res.status).toBe(200);
+  });
+
+  it("401s when the JWT tenant_id claim contradicts the x-tenant-id header", async () => {
+    const server = makeServer();
+    const jwt = buildJwt(validClaims({ tenant_id: "22222222-2222-4222-8222-222222222222" }));
+    // jwtReq sets x-tenant-id: TENANT, which disagrees with the claim
+    const res = await server.dispatch(jwtReq("GET", "/v1/products", jwt), null);
+    expect(res.status).toBe(401);
+  });
+
+  it("uses the JWT tenant_id claim when no x-tenant-id header is sent", async () => {
+    const server = makeServer();
+    const jwt = buildJwt(validClaims({ tenant_id: TENANT }));
+    const res = await server.dispatch(
+      {
+        method: "GET",
+        url: "/v1/products",
+        headers: { authorization: `Bearer ${jwt}`, host: "api.example.com" },
+        remoteAddress: "203.0.113.1",
+      },
+      null,
+    );
+    expect(res.status).toBe(200);
+  });
+});

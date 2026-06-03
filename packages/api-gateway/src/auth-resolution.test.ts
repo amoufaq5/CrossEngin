@@ -38,8 +38,9 @@ describe("constants", () => {
   it("has 8 auth schemes", () => {
     expect(AUTH_SCHEMES).toHaveLength(8);
   });
-  it("has 15 auth outcomes", () => {
-    expect(AUTH_OUTCOMES).toHaveLength(15);
+  it("has 16 auth outcomes", () => {
+    expect(AUTH_OUTCOMES).toHaveLength(16);
+    expect(AUTH_OUTCOMES).toContain("tenant_mismatch");
   });
   it("STRONG_AUTH_SCHEMES includes bearer_jwt + mtls + hmac_signature", () => {
     expect(STRONG_AUTH_SCHEMES.size).toBe(3);

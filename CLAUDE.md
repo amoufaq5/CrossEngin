@@ -18,9 +18,9 @@ M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
-P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17** landed:
-**59 packages + 2 apps, 123 meta-schema tables, 6,358 tests**, all
-green, no type errors.
+P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18**
+landed: **59 packages + 2 apps, 123 meta-schema tables, 6,363
+tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -198,7 +198,16 @@ the registered map (unchanged). `--jwks-key kid:base64` /
 a real Ed25519-signed JWT (generateEd25519Keypair + signEd25519) —
 valid → 200/201 (scope drives RBAC), unknown-key/wrong-issuer/
 expired → 401, fail-closed. Dev (`--api-key`) + prod (JWT) auth
-coexist. M7.9.1 added
+coexist. **P1.18 (ADR-0098) closed the JWT/tenant cross-check gap**
+in the gateway: the request tenant came from the *spoofable*
+`x-tenant-id` header, while a JWT also carries an authoritative
+`tenant_id` claim. `resolvePrincipalForCredential` now takes the
+credential's `authenticatedTenantId` (`ctx.tenantId`, set from the
+JWT claim / api-key lookup) — if it and the header hint differ it
+denies with a new `tenant_mismatch` outcome (401), else the
+**credential** tenant is authoritative (header only a fallback).
+A spoofed `x-tenant-id` can no longer override a JWT's tenant;
+fix is gateway-wide (every consumer benefits). M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -618,7 +627,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0097 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0098 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -644,7 +653,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -788,7 +797,10 @@ re-exporting everything.
   + in-memory implementations), auth (EdDSA JWT verify with iss/
   aud/exp/nbf checks via @crossengin/crypto, opaque token matcher
   with constant-time compare, parseAuthHeader for Bearer/Basic/
-  x-api-key), problems (RFC 9457 envelope builders for the 14
+  x-api-key; P1.18 resolvePrincipalForCredential takes the
+  credential's authenticatedTenantId — authoritative over the
+  spoofable x-tenant-id header, a contradiction → tenant_mismatch
+  401), problems (RFC 9457 envelope builders for the 14
   declared problem types — authenticationRequired with WWW-
   Authenticate, tooManyRequests with Retry-After, sunsetEndpoint
   with Sunset header), dispatcher (HandlerRegistry mapping
@@ -1826,7 +1838,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0097 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0098 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1883,8 +1895,9 @@ column store), ADR-0095 covers Phase 3 P1.15 (association
 link/unlink API over the join tables), ADR-0096 covers Phase 3
 P1.16 (keyset pagination + typed filter operators in the entity
 stores), ADR-0097 covers Phase 3 P1.17 (production JWT/JWKS
-identity in `apps/operate-server`; ADRs 0080-0085 reserved for
-P3-P8).
+identity in `apps/operate-server`), ADR-0098 covers Phase 3 P1.18
+(JWT/tenant cross-check in `api-gateway-runtime`; ADRs 0080-0085
+reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

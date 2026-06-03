@@ -435,6 +435,7 @@ export class GatewayRuntime {
       scopes: ctx.authScopes ?? [],
       resolver: this.principalResolver,
       nowIso: this.now().toISOString(),
+      authenticatedTenantId: ctx.tenantId,
     });
     if (result.outcome !== "authenticated" || result.principal === null) {
       ctx.authOutcome = result.outcome;
