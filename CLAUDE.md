@@ -15,10 +15,27 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M8 + M8.5 + M8.6 + M8.7
-landed: **55 packages + 1 app, 122 meta-schema tables, 6,069
-tests**, all green, no type errors. **Phase 2's eight milestones
-(M1–M8) are complete.** M7.7.5 wired the M7.7 classification
+M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M8 + M8.5 +
+M8.6 + M8.7 landed: **55 packages + 1 app, 122 meta-schema
+tables, 6,077 tests**, all green, no type errors. **Phase 2's
+eight milestones (M1–M8) are complete.** M7.7.6 closed the
+classification pipeline to zero-config:
+`api-gateway-runtime`'s `redactionRegistryFromManifest(manifest,
+{rolesForPrincipal, policyForEntity?, operationsForEntity?})`
+builds a `RedactionRegistry` straight from a manifest — every
+entity that declares a classified field (`entityClassifiedFields`)
+contributes a `ResponseRedactionSpec` registered under its read
+operationIds (default `<entitylower>.read|list|get`). Input is a
+structural `RedactionManifestInput` (`{entities, permissions,
+roles}`), so the runtime stays off `@crossengin/kernel` while a
+full `Manifest` is still assignable. The deployment supplies only
+what the schema can't know — the scope→role bridge and the
+`SensitiveFieldPolicy` (privilegedRoles); without a policy,
+sensitive fields are redacted for everyone lacking an explicit
+grant (fail-closed). Declaring `classification: "phi"` on a field
+now drives the whole chain — catalog comment, audit invariant,
+encryption hint, default mask, edge redaction — with no
+hand-written spec. M7.7.5 wired the M7.7 classification
 redaction into the API gateway: `api-gateway-runtime`'s
 `transform_response` stage (previously a no-op) now strips
 classified fields from JSON responses per-caller. A new
@@ -318,7 +335,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0068 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0069 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -343,7 +360,8 @@ covers M7.5 (`pack-erp-healthcare` — second vertical pack via
 classification in `types` + `kernel`), ADR-0067 covers M7.7
 (acting on the classification — auth default redaction + DDL
 encryption hints), ADR-0068 covers M7.7.5 (gateway response
-redaction by classification).
+redaction by classification), ADR-0069 covers M7.7.6
+(manifest-derived redaction registry).
 
 ## Architecture in 90 seconds
 
@@ -432,12 +450,14 @@ re-exporting everything.
   bulkVerify paginate over META_GATEWAY_PIPELINE_EXECUTIONS;
   summarize computes pass/deny/error counts + p50/p95 latency).
 - **`api-gateway-runtime`** — HTTP gateway middleware
-  (fourth impure package). 8 modules: redaction
+  (fourth impure package). 9 modules: redaction
   (ResponseRedactionSpec + RedactionRegistry/MapRedactionRegistry
   + computeRedactedFields fail-closed scope→role bridge +
   redactJsonValue tree-walk; `transform_response` strips
   classified fields per-caller when a redactionRegistry is set);
-  adapters (RequestAdapter +
+  manifest-redaction (redactionRegistryFromManifest builds the
+  registry from a manifest's classified fields + permissions +
+  roles, no kernel dep); adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
   buildIncomingRequest helper), stores (PrincipalResolver +
   IdempotencyStore + RateLimitChecker + RouteRegistry interfaces
@@ -1150,8 +1170,27 @@ no-op. The stage records `redacted_N_fields` in the
 `outgoingResponseFromJson` so `content-length` stays correct. A
 front-desk principal reading `GET /v1/patients` gets
 `mrn`/demographics dropped; a clinician gets them — same handler.
-A manifest-derived registry (`redactionRegistryFromManifest`) is
-the deferred M7.7.6.
+A manifest-derived registry is M7.7.6 (below).
+
+**No longer deferred (as of M7.7.6):** zero-config redaction.
+`api-gateway-runtime`'s `redactionRegistryFromManifest(manifest,
+{rolesForPrincipal, policyForEntity?, operationsForEntity?})`
+builds the whole `RedactionRegistry` from a manifest: every
+entity with a classified field contributes a spec
+(`redactionSpecForEntity` via `entityClassifiedFields`),
+registered under its read operationIds (default
+`<entitylower>.read|list|get`, overridable). The input is a
+structural `RedactionManifestInput` (`{entities, permissions,
+roles}`) so the runtime never imports `@crossengin/kernel`; a
+full `Manifest` is assignable. The deployment supplies only the
+scope→role bridge and the per-entity `SensitiveFieldPolicy`;
+without a policy, sensitive fields are redacted for everyone
+lacking an explicit grant (fail-closed). `classification: "phi"`
+on a field now drives the entire chain — catalog comment, audit
+invariant, encryption hint, default mask, edge redaction —
+with no hand-written spec. Inferring `privilegedRoles` from the
+entity's write grants + a write-side classification mask are the
+deferred follow-ups.
 
 **No longer deferred (as of M8):** SLO enforcement.
 `@crossengin/observability-runtime` turns the inert SLO / alert /
@@ -1279,7 +1318,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0068 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0069 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1304,8 +1343,9 @@ enforcement persistence), ADR-0062 covers Phase 2 M8.6
 Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack),
 ADR-0066 covers Phase 2 M7.6 (field-level data classification),
 ADR-0067 covers Phase 2 M7.7 (acting on data classification),
-ADR-0068 covers Phase 2 M7.7.5 (gateway response redaction).
-When you ship
+ADR-0068 covers Phase 2 M7.7.5 (gateway response redaction),
+ADR-0069 covers Phase 2 M7.7.6 (manifest-derived redaction
+registry). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
