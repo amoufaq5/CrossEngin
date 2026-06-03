@@ -98,5 +98,5 @@ existing `ListQuery` contract.
 - **The serving list endpoint scales correctly.** A client pages with a stable
   cursor and filters with `?price[gte]=…&status[in]=a,b` — pushed into SQL by
   both PG stores, derived from the manifest's `ListView`.
-- **Field selection (projection) remains the open list refinement**, behind the
-  same `ListQuery`/`ListConfig` seams.
+- **Field selection (projection)** is **delivered in ADR-0101 (P1.21)** —
+  `?fields=a,b,c` on list + read, composing safely with edge redaction.

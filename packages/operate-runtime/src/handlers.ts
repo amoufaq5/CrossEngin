@@ -8,8 +8,8 @@ import {
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseListQuery, type ListConfig } from "./list-query.js";
-import type { EntityStore } from "./store.js";
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseFields, parseListQuery, type ListConfig } from "./list-query.js";
+import { projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -77,14 +77,18 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const config = spec.listConfig ?? FALLBACK_LIST_CONFIG;
         const query = parseListQuery(request.query, config);
         const page = await ctx.store.listPage(tenantId, spec.entity, query);
+        const fields = parseFields(request.query);
+        const data = fields === null ? page.records : page.records.map((r) => projectRecord(r, fields));
         return json(200, {
-          data: page.records,
+          data,
           page: { limit: query.limit, nextCursor: page.nextCursor },
         });
       }
       case "read": {
         const record = await ctx.store.get(tenantId, spec.entity, id);
-        return record === null ? json(404, { error: "not_found" }) : json(200, record);
+        if (record === null) return json(404, { error: "not_found" });
+        const fields = parseFields(request.query);
+        return json(200, fields === null ? record : projectRecord(record, fields));
       }
       case "create":
         return json(201, await ctx.store.create(tenantId, spec.entity, parsedBody ?? {}));

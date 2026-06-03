@@ -6,6 +6,7 @@ import {
   decodeKeyset,
   encodeKeyset,
   matchesFilter,
+  projectRecord,
   type ListQuery,
 } from "./store.js";
 
@@ -22,6 +23,16 @@ describe("keyset cursor encoding", () => {
   it("reads a malformed or null cursor as null", () => {
     expect(decodeKeyset(null)).toBeNull();
     expect(decodeKeyset("!!!not-base64!!!")).toBeNull();
+  });
+});
+
+describe("projectRecord", () => {
+  const r = { id: "x", sku: "S1", name: "Milk", unit_cost: 1.1 };
+  it("keeps id + requested fields, omits the rest", () => {
+    expect(projectRecord(r, ["sku", "name"])).toEqual({ id: "x", sku: "S1", name: "Milk" });
+  });
+  it("always keeps id even if not requested, and ignores unknown fields", () => {
+    expect(projectRecord(r, ["sku", "ghost"])).toEqual({ id: "x", sku: "S1" });
   });
 });
 

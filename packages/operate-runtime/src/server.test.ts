@@ -186,6 +186,29 @@ describe("operate-server — list pagination + filter from the ListView (P1.8)",
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r["status"] === "active")).toBe(true);
   });
+
+  it("projects ?fields and still redacts a classified field at the edge", async () => {
+    const { server, store } = makeServer();
+    await store.create(TENANT, "Product", PRODUCT);
+
+    // manager: projection keeps id + sku + unit_cost (not redacted for a manager)
+    const mgr = await server.runtime.handleRequest(getReq("/v1/products?fields=sku,unit_cost", "key-manager"));
+    const mgrRow = (bodyOf(mgr.response.bodyBytes)["data"] as Array<Record<string, unknown>>)[0]!;
+    expect(Object.keys(mgrRow).sort()).toEqual(["id", "sku", "unit_cost"]);
+
+    // cashier: same projection, but unit_cost is dropped by redaction → only id + sku
+    const cashier = await server.runtime.handleRequest(getReq("/v1/products?fields=sku,unit_cost", "key-cashier"));
+    const cashierRow = (bodyOf(cashier.response.bodyBytes)["data"] as Array<Record<string, unknown>>)[0]!;
+    expect(Object.keys(cashierRow).sort()).toEqual(["id", "sku"]);
+  });
+
+  it("projects ?fields on a single record read", async () => {
+    const { server, store } = makeServer();
+    await store.create(TENANT, "Product", PRODUCT);
+    const read = await server.runtime.handleRequest(getReq("/v1/products/prod-1?fields=name", "key-manager"));
+    const record = bodyOf(read.response.bodyBytes);
+    expect(Object.keys(record).sort()).toEqual(["id", "name"]);
+  });
 });
 
 describe("operate-server — write path through the gateway (P1.5)", () => {

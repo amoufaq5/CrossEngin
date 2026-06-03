@@ -14,7 +14,21 @@ export interface ListConfig {
   readonly filterableFields: readonly string[];
 }
 
-const RESERVED_PARAMS = new Set(["limit", "cursor", "sort", "order"]);
+const RESERVED_PARAMS = new Set(["limit", "cursor", "sort", "order", "fields"]);
+
+/**
+ * Parses a `?fields=a,b,c` projection into a field list, or null when absent
+ * (no projection → full records). Values are comma-split, trimmed, and deduped.
+ */
+export function parseFields(
+  query: Readonly<Record<string, string | readonly string[]>>,
+): readonly string[] | null {
+  const raw = query["fields"];
+  if (raw === undefined) return null;
+  const joined = Array.isArray(raw) ? raw.join(",") : (raw as string);
+  const fields = [...new Set(joined.split(",").map((s) => s.trim()).filter((s) => s.length > 0))];
+  return fields.length > 0 ? fields : null;
+}
 
 interface ListViewLike {
   readonly kind: string;

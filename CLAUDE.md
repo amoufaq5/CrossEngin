@@ -19,8 +19,8 @@ M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
 P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
-P1.19 + P1.20** landed: **59 packages + 2 apps, 123 meta-schema
-tables, 6,374 tests**, all green, no type errors.
+P1.19 + P1.20 + P1.21** landed: **59 packages + 2 apps, 123
+meta-schema tables, 6,381 tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -223,7 +223,14 @@ remote provider immediately then every `--jwks-refresh-ms` (timer
 injectable + `unref`'d so it never holds the process open;
 `onError` routes a failed refresh), `stop()` clears it (wired into
 `serve()`'s close handle). Requests never pay the JWKS fetch
-latency; lazy refresh stays the fallback. M7.9.1 added
+latency; lazy refresh stays the fallback. **P1.21 (ADR-0101) added
+field selection (projection)** — `?fields=a,b,c` on list + read
+(`parseFields` + pure `projectRecord`, `fields` reserved so it's
+never a filter). Projection only *narrows*: a manager
+`?fields=sku,unit_cost` gets both, a cashier with the same query
+gets `unit_cost` dropped by classification redaction at the edge —
+projection can't bypass redaction. `id` is always kept; SQL-level
+pushdown is the open efficiency follow-up. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -643,7 +650,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0100 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0101 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -669,7 +676,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -848,7 +855,8 @@ re-exporting everything.
   ListConfig (pageSize/default sort/sortable+filterable columns);
   parseListQuery → a resolved ListQuery, fail-safe — unknown/non-
   filterable params ignored; P1.16 parses ?field[op]=v + ?field[in]
-  =a,b,c), operations (manifestRouteSpecs →
+  =a,b,c; P1.21 parseFields → ?fields projection + projectRecord),
+  operations (manifestRouteSpecs →
   a RouteSpec per entity op: 5 CRUD + one per entityLifecycle
   transition; the list spec carries its ListConfig; routeFromSpec →
   schema-valid RouteDefinition), handlers (buildSpecHandler:
@@ -1859,7 +1867,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0100 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0101 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1920,8 +1928,9 @@ identity in `apps/operate-server`), ADR-0098 covers Phase 3 P1.18
 (JWT/tenant cross-check in `api-gateway-runtime`), ADR-0099 covers
 Phase 3 P1.19 (remote JWKS provider with caching + rotation in
 `apps/operate-server`), ADR-0100 covers Phase 3 P1.20 (background
-JWKS refresh poller in `apps/operate-server`; ADRs 0080-0085
-reserved for P3-P8).
+JWKS refresh poller in `apps/operate-server`), ADR-0101 covers
+Phase 3 P1.21 (field selection / projection on list + read in
+`operate-runtime`; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

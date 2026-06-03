@@ -5,6 +5,7 @@ import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
   listConfigForEntity,
+  parseFields,
   parseListQuery,
   type ListConfig,
 } from "./list-query.js";
@@ -99,5 +100,20 @@ describe("parseListQuery", () => {
   it("ignores an operator on a non-filterable field", () => {
     const q = parseListQuery({ "secret[gt]": "1" }, config);
     expect(q.filters).toEqual([]);
+  });
+
+  it("does not treat reserved params (incl. fields) as filters", () => {
+    const q = parseListQuery({ fields: "a,b", limit: "5", sort: "name" }, config);
+    expect(q.filters).toEqual([]);
+  });
+});
+
+describe("parseFields", () => {
+  it("splits + dedupes a comma-separated projection", () => {
+    expect(parseFields({ fields: "sku, name ,sku" })).toEqual(["sku", "name"]);
+  });
+  it("returns null when absent or empty", () => {
+    expect(parseFields({})).toBeNull();
+    expect(parseFields({ fields: " , " })).toBeNull();
   });
 });
