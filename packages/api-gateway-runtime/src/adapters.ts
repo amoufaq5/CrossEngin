@@ -1,6 +1,16 @@
 import { sha256 } from "@crossengin/crypto";
 import type { IncomingRequest } from "@crossengin/api-gateway";
 
+/**
+ * A gateway `IncomingRequest` plus the raw request body bytes, retained by the
+ * runtime so `parse_request` can decode them into `parsedBody`. The contract
+ * `IncomingRequest` only carries the body's size + hash; `rawBody` is the
+ * runtime-side payload (never persisted in the `PipelineExecution`).
+ */
+export interface RuntimeIncomingRequest extends IncomingRequest {
+  readonly rawBody: Uint8Array | null;
+}
+
 export interface OutgoingResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
@@ -68,7 +78,7 @@ export interface BuildIncomingRequestInput {
   readonly edgeRegion?: IncomingRequest["edgeRegion"];
 }
 
-export function buildIncomingRequest(input: BuildIncomingRequestInput): IncomingRequest {
+export function buildIncomingRequest(input: BuildIncomingRequestInput): RuntimeIncomingRequest {
   const headers = normalizeHeaders(input.headers);
   const forwardedFor =
     typeof headers["x-forwarded-for"] === "string"
@@ -113,6 +123,7 @@ export function buildIncomingRequest(input: BuildIncomingRequestInput): Incoming
     scheme: input.scheme,
     bodyBytes: input.bodyBytes?.byteLength ?? 0,
     bodySha256: bodyHashFromBytes(input.bodyBytes),
+    rawBody: input.bodyBytes ?? null,
     clientIp: input.clientIp,
     forwardedFor,
     forwardedProto,

@@ -291,4 +291,39 @@ describe("resolvePrincipalForCredential", () => {
     expect(result.principal?.principalId).toBe(USER);
     expect(result.principal?.resolvedAt).toBe("2026-05-16T12:00:00.000Z");
   });
+
+  it("denies tenant_mismatch when the credential tenant differs from the x-tenant-id header", async () => {
+    const resolver = new InMemoryPrincipalResolver();
+    const result = await resolvePrincipalForCredential({
+      request: fixtureRequest({ tenantHint: "11111111-1111-4111-8111-111111111111" }),
+      scheme: "bearer_jwt",
+      principalRef: "u1",
+      scopes: [],
+      resolver,
+      nowIso: "2026-05-16T12:00:00.000Z",
+      authenticatedTenantId: TENANT, // credential asserts a different tenant
+    });
+    expect(result.outcome).toBe("tenant_mismatch");
+    expect(result.principal).toBeNull();
+  });
+
+  it("passes the authenticated tenant (not the header) to the resolver", async () => {
+    let seenTenant: string | null = "unset";
+    const resolver = {
+      async resolve(input: { tenantId: string | null }) {
+        seenTenant = input.tenantId;
+        return null;
+      },
+    };
+    await resolvePrincipalForCredential({
+      request: fixtureRequest({ tenantHint: TENANT }),
+      scheme: "bearer_jwt",
+      principalRef: "u1",
+      scopes: [],
+      resolver: resolver as never,
+      nowIso: "2026-05-16T12:00:00.000Z",
+      authenticatedTenantId: TENANT, // matches header → resolver sees the credential tenant
+    });
+    expect(seenTenant).toBe(TENANT);
+  });
 });

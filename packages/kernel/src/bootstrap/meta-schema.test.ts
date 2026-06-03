@@ -88,6 +88,7 @@ import {
   META_SCIM_PROVISIONING,
   META_SDK_CLIENT_INSTALLATIONS,
   META_SDK_CLIENT_RELEASES,
+  META_OPERATE_ENTITY_RECORDS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_EVALUATIONS,
   META_SLO_LATENCY_EVALUATIONS,
@@ -120,8 +121,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 122 tables", () => {
-    expect(META_TABLES).toHaveLength(122);
+  it("contains 123 tables", () => {
+    expect(META_TABLES).toHaveLength(123);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -212,6 +213,7 @@ describe("META_TABLES", () => {
       "notification_suppressions",
       "notification_templates",
       "onboarding_runs",
+      "operate_entity_records",
       "pack_installations",
       "pack_reviews",
       "pack_versions",
@@ -1029,6 +1031,23 @@ describe("table column shapes", () => {
     const sev = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "worst_severity");
     expect(sev?.check).toContain("'sev2'");
     expect(META_SLO_LATENCY_EVALUATIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+  });
+
+  it("META_OPERATE_ENTITY_RECORDS keys documents by (tenant, entity, record) with tenant RLS", () => {
+    const tenant = META_OPERATE_ENTITY_RECORDS.columns.find((c) => c.name === "tenant_id");
+    expect(tenant?.notNull).toBe(true);
+    const entity = META_OPERATE_ENTITY_RECORDS.columns.find((c) => c.name === "entity");
+    expect(entity?.check).toContain("A-Za-z");
+    const doc = META_OPERATE_ENTITY_RECORDS.columns.find((c) => c.name === "document");
+    expect(doc?.type).toBe("JSONB");
+    expect(META_OPERATE_ENTITY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "entity",
+      "record_id",
+    ]);
+    expect(META_OPERATE_ENTITY_RECORDS.rls?.policies?.[0]?.using).toBe(
+      "tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+    );
   });
 
   it("META_INCIDENT_POSTMORTEMS enforces PM-YYYY-NNNN pattern + four-status enum", () => {

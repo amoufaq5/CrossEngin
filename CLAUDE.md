@@ -17,8 +17,225 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 landed: **57 packages + 1 app, 122 meta-schema tables, 6,170
-tests**, all green, no type errors. M7.9.1 added
+M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
+P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
+P1.19 + P1.20 + P1.21 + P1.22** landed: **59 packages + 2 apps,
+123 meta-schema tables, 6,383 tests**, all green, no type errors.
+**Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
+`@crossengin/operate-runtime` — the serving keystone that
+composes a resolved manifest into a live multi-tenant API. A
+`manifest → routes → handlers` compiler derives a `RouteSpec` per
+entity operation (5 CRUD + one per `entityLifecycle` transition,
+camelCase operationIds + kebab-plural paths), `buildSpecHandler`
+returns an RBAC-enforcing (`rbacCheck`) gateway `Handler` over an
+injectable `EntityStore` (`InMemoryEntityStore` now; Postgres
+RLS-backed next), and `compileOperateServer` / `buildOperateGateway`
+wire routes + handlers + `redactionRegistryFromManifest` into a
+`GatewayRuntime`. End-to-end through the real gateway: a cashier
+`GET /v1/products` gets `unit_cost` redacted, a manager gets it,
+each request emits a `PipelineExecution`. **P1.5 (ADR-0079)
+closed the two gateway gaps P1 surfaced** so the *write* path runs
+end-to-end too: `api-gateway-runtime`'s `parse_request` now decodes
+a JSON body (by `content-type`) into `ctx.parsedBody` — the raw
+bytes ride on a new `RuntimeIncomingRequest extends IncomingRequest`
+(`rawBody: Uint8Array | null`, never persisted in the
+`PipelineExecution`) — and `dispatch_handler` maps a handler status
+`>= 400` to a `deny` (4xx, `handler-error` problem-type URI) / `error`
+(5xx) stage outcome and halts, instead of recording `pass` and
+tripping the "pass cannot be 4xx" invariant. operate-runtime now
+serves `POST /v1/products` (body → store), RBAC 403, and a 409
+lifecycle re-fire all through the real gateway; the handler's own
+JSON body is preserved on the error envelope. **P1.6 (ADR-0086)
+resolved ADR-0078 Q3** — `@crossengin/operate-runtime-pg` ships
+`PostgresEntityStore`, a Postgres `EntityStore` over a new
+`meta.operate_entity_records` table (tenant-scoped JSONB document
+store, keyed by `(tenant_id, entity, record_id)`, table #123).
+Every op runs inside `withTenantContext` —
+`SELECT set_config('app.current_tenant_id', $1, true)` in a
+transaction — so the **RLS policy** (not just `WHERE tenant_id =
+$1`) confines reads/writes to the caller's tenant; the tenant id
+rides as a bound parameter, never interpolated, and a malformed
+tenant/schema throws before reaching SQL. It satisfies the exact
+`EntityStore` contract P1 defined, so `buildOperateGateway(manifest,
+{store: new PostgresEntityStore(conn), …})` serves the retail pack
+from Postgres with no other change. Column-mapped per-entity tables
+(DDL from the pack) stay the deeper follow-up behind the same
+contract. **P1.7 (ADR-0087) resolved ADR-0078 Q4** — `apps/operate-
+server` is the runnable serving binary, the second app under
+`apps/`. A thin Node `http` shell over `buildOperateGateway`:
+`OperateHttpServer.dispatch(raw, body)` maps a framework-neutral
+`RawHttpRequest` → the 17-stage pipeline → a `RawHttpResponse`
+(unknown method → 405 problem doc); `serve(--pack erp-retail|… |
+--manifest f.json --store memory|pg --api-key key:role:tenant)`
+loads + **resolves** the manifest at boot (retail → core, grocery
+→ retail → core merge), builds the store (`InMemoryEntityStore` or
+a `PostgresEntityStore` over `parsePgEnvConfig()`), wires API-key
+auth (fail-closed: unknown token → 401), and listens. A real
+loopback test boots it and gets a 200; every other module is
+tested offline over `RawHttpRequest`/mock Node req-res. The HTTP
+edge preserves every P1 guarantee — per-caller `unit_cost`
+redaction, RBAC 403, lifecycle — now over raw HTTP. **P1.8
+(ADR-0088) resolved ADR-0078 Q5 — the last open P1 question.**
+The list endpoint is now paginated + filterable, driven by the
+entity's `ListView`: `store.listPage(tenant, entity, ListQuery)`
+returns a bounded `ListPage` with an opaque offset cursor;
+`listConfigForEntity` reads the view's `pageSize` / default `sort`
+/ sortable+filterable columns into a `ListConfig`, and
+`parseListQuery` turns `?limit` (clamped to 500) / `?cursor` /
+`?sort=field&order=asc|desc` (sortable fields only) / equality
+filters (filterable columns only; unknown params ignored — can't
+widen results) into a resolved query. The `list` handler returns
+`{data, page:{limit, nextCursor}}`. `PostgresEntityStore.listPage`
+pushes it into SQL — `document ->> 'field' = $n` filters, `ORDER
+BY document ->> 'field' …, record_id ASC`, `LIMIT limit+1 OFFSET`
+(the +1 detects a next page) — with field names identifier-
+validated (only values bound; a `name; DROP` field is dropped, not
+executed). **The whole P1 arc (compile → gaps → store → server →
+paginated lists) is complete.** **P1.9 (ADR-0089) cashed in the
+P1.7 framework-neutral seam** with an edge / Workers fetch adapter
+in `apps/operate-server` (new `edge.ts`, no new package): over the
+same `OperateHttpServer.dispatch` core, `fetchToRaw(Request)` maps
+a Fetch API request → `RawHttpRequest`+body (client IP from
+`cf-connecting-ip`), `rawToFetchResponse` → a real `Response`,
+`createFetchHandler(server)` is the `(Request)→Promise<Response>`
+edge counterpart of the Node listener, `buildEdgeFetchHandler`
+composes one (store defaults to in-memory for socket-less
+runtimes, scheme `https`), and `asModuleWorker` yields the
+Cloudflare `{fetch}` default-export shape. Tests build genuine
+`new Request(...)` and read `Response.json()` (Node undici
+globals), proving identical behavior — per-caller `unit_cost`
+redaction, RBAC 401, `?limit` pagination — on a second real
+runtime from one `dispatch`. The serving stack now runs on Node
+**and** any Fetch/WinterCG runtime. **P1.10 (ADR-0090) delivered the deeper ADR-0086
+follow-up** — `ColumnMappedEntityStore`, the typed sibling of the
+JSONB store: real per-entity tables whose columns are derived from
+the manifest entity's fields (kernel `fieldTypeToPostgresType` +
+`columnNameForField`; reference → `<name>_id` UUID), with a
+`(tenant_id, TEXT id)` PK + RLS + idempotent DDL. `column-plan`
+derives the field→column plan (carrying classification +
+`encryptAtRest`); `entity-ddl` emits idempotent `CREATE TABLE IF
+NOT EXISTS` + RLS (`DROP POLICY IF EXISTS`→`CREATE POLICY`) +
+`crossengin.data_class=…[; crossengin.encrypt=at_rest]` column
+comments (the kernel-pg applier's convention); the store maps
+record↔column on every op, **sorts on the native column type** (a
+real `ORDER BY "col"`, not JSONB text) and filters by safe
+`"col"::text = $n`. `id` stays TEXT for cross-store record parity.
+`operate-server --store pg-columns` provisions the typed tables at
+boot (`ensureSchema`) and serves a pack from them — a demonstrated
+drop-in for the JSONB store. **P1.11 (ADR-0091) closed the last
+ADR-0090 follow-up — transparent at-rest encryption** in the
+column store: a `phi`/`regulated` column is emitted as `BYTEA` and
+the store wires pgcrypto in — `pgp_sym_encrypt($n::text, keyRef)`
+on write, `pgp_sym_decrypt("col", keyRef) AS "col"` on read (key
+by SQL *reference*, default `current_setting('app.column_
+encryption_key')`, never inlined), `ensureSchema` runs `CREATE
+EXTENSION IF NOT EXISTS pgcrypto`, and encrypted columns are
+excluded from sort/filter (can't order ciphertext). PHI is
+ciphertext at rest and plaintext to authorized callers,
+transparently — closing the classification arc end-to-end through
+the serving store (declare `phi` → comment → redaction → BYTEA →
+encrypt-on-write/decrypt-on-read). Searchable encryption + key
+rotation stay the deferred crypto follow-ups. **P1.12 (ADR-0092)
+delivered the ADR-0090 FK follow-up** — the column store now
+enforces referential integrity: a reference field's column is TEXT
+(matching the TEXT `id`) carrying its `referenceTarget`, and
+`ensureSchema` adds a **composite, tenant-scoped** FK
+(`(tenant_id, <ref>_id) → target (tenant_id, id)` ON DELETE
+RESTRICT) so a reference can only resolve within the same tenant.
+DDL applies **two-phase**: all tables are created in
+`topologicalEntityOrder` (referenced before referencer, Kahn's
+algorithm), then all FKs are added once every target exists —
+cycle-safe (`DROP CONSTRAINT IF EXISTS`→`ADD CONSTRAINT`, idempotent).
+**P1.13 (ADR-0093) drove the FK `ON DELETE` behavior from the
+manifest** — `relationDeleteIndex` reads each `many_to_one`
+relation's `onDelete` (`restrict|cascade|set_null`) by
+`"<from>.<field>"`, and `emitForeignKeyDdl` applies it per
+reference (default RESTRICT); `set_null` uses the column-list form
+`ON DELETE SET NULL ("<ref>_id")` so `tenant_id` is never nulled
+(PG≥15). **P1.14 (ADR-0094) added `many_to_many` join tables** —
+`joinTablePlansForManifest` derives a `<left>_<right>` link table
+per m2m relation (`<left>_id`/`<right>_id` columns; self-relations
+disambiguate to `_left_id`/`_right_id`), and `emitJoinTableDdl`
+provisions it tenant-scoped: `(tenant_id, <left>_id, <right>_id)`
+composite PK + RLS + a composite `ON DELETE CASCADE` FK from each
+side to its entity's `(tenant_id, id)` (same-tenant links, cascade-
+cleaned). `ensureSchema` adds them in a third phase after the
+entity tables. The column store now models the manifest's full
+relational intent — 1:N references *and* M:N associations. **P1.15
+(ADR-0095) added the association link API** over those join tables:
+`ColumnMappedEntityStore.link` (`INSERT … ON CONFLICT DO NOTHING`,
+idempotent) / `unlink` / `isLinked` / `listLinks({leftId?, rightId?})`
+— keyed by the relation's `(left, right)` entities, each
+`withTenantContext`-wrapped, the composite FK confining a link to
+the caller's tenant. Manifest-derived association *routes* (HTTP)
+are the open follow-up. **P1.16 (ADR-0096) upgraded list
+pagination + filtering** across all three stores (in-memory, JSONB,
+column): offset cursors → **keyset** (`encodeKeyset`/`decodeKeyset`
+over `{k: sortValues, id}`, stable under concurrent inserts/deletes,
+no `OFFSET` scan), and equality-only filters → **typed operators**
+(`eq|ne|gt|gte|lt|lte|in`). A shared `list-sql.ts` query builder
+(via a `ListSqlAdapter`) serves both PG stores: filters →
+`<expr> <op> $n<cast>` / `in` → `<expr>::text = ANY($n::text[])`,
+keyset seek → the OR-of-AND expansion handling mixed sort
+directions, order → sort + `id` tiebreaker, `LIMIT n+1`. The column
+store casts the bound value to the column's native type
+(`$n::NUMERIC(…)` — correct typed compare); the JSONB store
+text-compares. `parseListQuery` reads `?field[op]=value` +
+`?field[in]=a,b,c`, still gated to filterable columns. Field
+selection (projection) is the open list refinement. **P1.17
+(ADR-0097) added a production JWT/JWKS identity source** to
+`apps/operate-server`, behind the existing `PrincipalWiring` seam:
+`OperateGatewayOptions` gains `jwksProvider`/`jwtIssuer`/
+`jwtAudience` (the gateway already does the EdDSA verify), and
+`buildPrincipalWiring`'s resolver is now scheme-aware — a verified
+`bearer_jwt` resolves *statelessly* from its claims
+(`principalFromJwtClaims`: `sub` → a UUID via `subjectToUuid`,
+scopes → grantedScopes/role, tenant from the `x-tenant-id`
+`tenantHint`), while opaque `api_key_header` tokens resolve from
+the registered map (unchanged). `--jwks-key kid:base64` /
+`--jwks-file` + `--jwt-issuer` / `--jwt-audience` wire an
+`InMemoryJwksProvider`; threads through Node *and* edge. Tests mint
+a real Ed25519-signed JWT (generateEd25519Keypair + signEd25519) —
+valid → 200/201 (scope drives RBAC), unknown-key/wrong-issuer/
+expired → 401, fail-closed. Dev (`--api-key`) + prod (JWT) auth
+coexist. **P1.18 (ADR-0098) closed the JWT/tenant cross-check gap**
+in the gateway: the request tenant came from the *spoofable*
+`x-tenant-id` header, while a JWT also carries an authoritative
+`tenant_id` claim. `resolvePrincipalForCredential` now takes the
+credential's `authenticatedTenantId` (`ctx.tenantId`, set from the
+JWT claim / api-key lookup) — if it and the header hint differ it
+denies with a new `tenant_mismatch` outcome (401), else the
+**credential** tenant is authoritative (header only a fallback).
+A spoofed `x-tenant-id` can no longer override a JWT's tenant;
+fix is gateway-wide (every consumer benefits). **P1.19 (ADR-0099)
+added a caching remote-JWKS provider** to `apps/operate-server`
+(`jwks.ts`): `RemoteJwksProvider` fetches an IdP's JWKS endpoint
+(`--jwks-url`), caches the `kid → base64 Ed25519` map for a TTL
+(`parseJwksDocument` keeps OKP/Ed25519 keys, `base64UrlToBase64`
+converts the JWK `x`), refetches a **stale** cache or an **unknown
+kid** (rotation pickup, rate-limited by a min-refetch floor), and
+keeps the last good key set on a failed fetch (resilient,
+fail-closed). `fetch` is injectable for offline tests; a real
+Ed25519-signed JWT verifies against keys fetched from a stubbed
+JWKS endpoint end-to-end. **P1.20 (ADR-0100) added a background
+JWKS refresh poller** — `JwksRefreshPoller.start()` refreshes the
+remote provider immediately then every `--jwks-refresh-ms` (timer
+injectable + `unref`'d so it never holds the process open;
+`onError` routes a failed refresh), `stop()` clears it (wired into
+`serve()`'s close handle). Requests never pay the JWKS fetch
+latency; lazy refresh stays the fallback. **P1.21 (ADR-0101) added
+field selection (projection)** — `?fields=a,b,c` on list + read
+(`parseFields` + pure `projectRecord`, `fields` reserved so it's
+never a filter). Projection only *narrows*: a manager
+`?fields=sku,unit_cost` gets both, a cashier with the same query
+gets `unit_cost` dropped by classification redaction at the edge —
+projection can't bypass redaction. `id` is always kept. **P1.22
+(ADR-0102) pushed the projection into SQL** for the column store:
+`listPage` SELECTs only `id` + the requested columns + the sort
+columns (needed for the keyset cursor), so unselected large/
+encrypted columns are never read/decrypted; the handler still
+re-projects to the exact set, and in-memory/JSONB ignore the hint
+(handler-level projection, still correct). M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -438,11 +655,34 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0076 are fully drafted in `docs/adr/` — no reserved
-gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
+ADRs 0001-0079 + 0086-0102 are drafted in `docs/adr/`; ADRs 0080-0085
+are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
+Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
-→ M8 SLO enforcement); ADR-0047 covers M1, ADR-0048 covers M2,
+→ M8 SLO enforcement); **ADR-0077 is the Phase 3 plan** — the
+bridge from running pillars to a deployed multi-vertical product
+(P1 `operate-server` serving app → P2 distributed workers → P3
+`operate-web` renderer → P4 gov/edu/construction packs → P5
+marketplace install → P6 multi-region → P7 AI Architect in prod
+→ P8 production hardening + GA; ADRs 0080-0085 lock P3-P8; ADR-0078
+covers P1, ADR-0079 covers P1.5 (gateway body parsing + handler
+outcome mapping), ADR-0086 covers P1.6 (operate-runtime-pg —
+Postgres EntityStore under tenant RLS), ADR-0087 covers P1.7
+(apps/operate-server — the runnable serving binary), ADR-0088
+covers P1.8 (list pagination + filtering from the ListView),
+ADR-0089 covers P1.9 (edge/Workers fetch adapter), ADR-0090 covers
+P1.10 (column-mapped entity store — typed per-entity tables),
+ADR-0091 covers P1.11 (transparent at-rest encryption in the
+column-mapped store), ADR-0092 covers P1.12 (foreign keys +
+topological apply order in the column store), ADR-0093 covers P1.13
+(per-relation delete semantics in the column store), ADR-0094
+covers P1.14 (many_to_many join tables in the column store),
+ADR-0095 covers P1.15 (association link/unlink API over join
+tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
+operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store)).
+ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
 ADR-0054 covers M5.5 (architect-cli chat mode), ADR-0055 covers
@@ -579,12 +819,16 @@ re-exporting everything.
   registry from a manifest's classified fields + permissions +
   roles, no kernel dep); adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
-  buildIncomingRequest helper), stores (PrincipalResolver +
+  buildIncomingRequest helper → a RuntimeIncomingRequest carrying
+  rawBody for parse_request to decode), stores (PrincipalResolver +
   IdempotencyStore + RateLimitChecker + RouteRegistry interfaces
   + in-memory implementations), auth (EdDSA JWT verify with iss/
   aud/exp/nbf checks via @crossengin/crypto, opaque token matcher
   with constant-time compare, parseAuthHeader for Bearer/Basic/
-  x-api-key), problems (RFC 9457 envelope builders for the 14
+  x-api-key; P1.18 resolvePrincipalForCredential takes the
+  credential's authenticatedTenantId — authoritative over the
+  spoofable x-tenant-id header, a contradiction → tenant_mismatch
+  401), problems (RFC 9457 envelope builders for the 14
   declared problem types — authenticationRequired with WWW-
   Authenticate, tooManyRequests with Retry-After, sunsetEndpoint
   with Sunset header), dispatcher (HandlerRegistry mapping
@@ -598,7 +842,131 @@ re-exporting everything.
   check_rate_limit → validate_signature → validate_schema →
   dispatch_handler → transform_response → apply_security_headers
   → emit_audit; halts on terminating outcomes; merges
-  DEFAULT_SECURITY_HEADERS on pass).
+  DEFAULT_SECURITY_HEADERS on pass). P1.5 (ADR-0079): parse_request
+  decodes a JSON body by content-type into ctx.parsedBody (raw bytes
+  from the RuntimeIncomingRequest, never persisted), and
+  dispatch_handler maps a handler 4xx→deny (handler-error problem
+  URI) / 5xx→error and halts, so domain errors no longer trip the
+  "pass cannot be 4xx" PipelineExecution invariant.
+- **`operate-runtime`** — Phase 3 P1 serving keystone: composes a
+  resolved manifest into a live multi-tenant API. 6 modules: slugs
+  (camelCase operationIds + kebab-plural paths + rt_ route ids),
+  store (EntityStore interface — list/listPage/get/create/update/
+  remove + InMemoryEntityStore; ListQuery/ListPage; P1.16: typed
+  ListFilter (op eq|ne|gt|gte|lt|lte|in) + keyset encodeKeyset/
+  decodeKeyset over {k: sortValues, id} + matchesFilter + pure
+  applyListQuery filter→sort→keyset-seek),
+  list-query (P1.8: listConfigForEntity reads an entity's ListView →
+  ListConfig (pageSize/default sort/sortable+filterable columns);
+  parseListQuery → a resolved ListQuery, fail-safe — unknown/non-
+  filterable params ignored; P1.16 parses ?field[op]=v + ?field[in]
+  =a,b,c; P1.21 parseFields → ?fields projection + projectRecord;
+  P1.21 ListQuery.fields hint + P1.22 column-store SQL pushdown),
+  operations (manifestRouteSpecs →
+  a RouteSpec per entity op: 5 CRUD + one per entityLifecycle
+  transition; the list spec carries its ListConfig; routeFromSpec →
+  schema-valid RouteDefinition), handlers (buildSpecHandler:
+  rbacCheck-enforced CRUD + transition over the store, returns the
+  full record — redaction at the edge; list paginates via
+  listPage → {data, page:{limit, nextCursor}}), compile
+  (compileOperateServer → routes + handlers +
+  redactionRegistryFromManifest; buildOperateGateway → a wired
+  GatewayRuntime). Serves the retail pack end-to-end with per-caller
+  redaction + lifecycle + paginated lists, each request emitting a
+  PipelineExecution.
+- **`operate-runtime-pg`** — Phase 3 P1.6 + P1.10: Postgres
+  `EntityStore` bindings for the serving runtime (JSONB + column-
+  mapped). 6 modules: records (EntityRecordRow
+  zod schema + DocumentRow read projection + generateRecordId
+  (`rec_` shape, parity with the in-memory store) + resolveRecordId +
+  pure mergeRecord + rowToRecord), tenant-context
+  (withTenantContext runs fn inside a transaction after
+  `SELECT set_config('app.current_tenant_id', $1, true)` — tenant id
+  bound, never interpolated; rejects a malformed tenant id before
+  opening the tx), entity-store (PostgresEntityStore implements
+  EntityStore over `meta.operate_entity_records`, a tenant-scoped
+  JSONB document table under RLS: list/listPage/get/create/update
+  (SELECT … FOR UPDATE then merge)/remove each wrapped in
+  withTenantContext, plus an admin count; listPage pushes the query
+  into SQL via the shared list-sql builder (P1.16) — `document ->>
+  'field'` filters/sort (text compares), keyset seek, LIMIT limit+1;
+  field names identifier-validated (only values bound); validated
+  schema name is the only interpolated identifier). list-sql
+  (P1.16: buildListSql over a ListSqlAdapter — one filter + keyset-
+  seek + order builder for both PG stores; typed operators, in →
+  ANY($n::text[]), OR-of-AND seek for mixed sort directions). Drops
+  into buildOperateGateway
+  unchanged. One new META table (operate_entity_records). P1.10 adds
+  the typed sibling — column-plan (columnPlanForEntity maps each
+  manifest field → a typed column via kernel fieldTypeToPostgresType
+  + columnNameForField, carrying classification + encryptAtRest +
+  referenceTarget; P1.12 adds topologicalEntityOrder +
+  referencedEntities over the reference graph), entity-ddl
+  (emitEntityTableDdl → idempotent
+  CREATE TABLE IF NOT EXISTS with (tenant_id, TEXT id) PK + RLS via
+  DROP/CREATE POLICY + crossengin.data_class=…[; encrypt=at_rest]
+  comments; a phi/regulated column is emitted as BYTEA; P1.12
+  emitForeignKeyDdl → composite (tenant_id, <ref>_id) → target
+  (tenant_id, id) FK, idempotent; P1.13 onDeleteClause +
+  relationDeleteIndex drive ON DELETE restrict|cascade|set_null per
+  many_to_one relation, set_null via the column-list form so
+  tenant_id is never nulled; P1.14 emitJoinTableDdl provisions a
+  many_to_many link table — (tenant_id, <left>_id, <right>_id) PK +
+  RLS + composite ON DELETE CASCADE FKs to both sides), column-store
+  (ColumnMappedEntityStore implements EntityStore over real per-
+  entity tables: ensureSchema applies the DDL in phases (all tables
+  in topological order, then all FKs — cycle-safe, then m2m join
+  tables) (+ CREATE EXTENSION pgcrypto when encrypted columns
+  exist), CRUD maps record↔
+  column, listPage (via list-sql) sorts on the native column type +
+  filters with typed comparisons (`"col" <op> $n::sqlType`, `in` →
+  `"col"::text = ANY($n::text[])`) + keyset seek; fields absent from
+  the plan are dropped; P1.22 pushes ?fields into the SELECT (only
+  id + requested + sort columns, so unselected/encrypted columns
+  aren't fetched)).
+  P1.11: transparent at-rest encryption — a phi/regulated column is
+  pgp_sym_encrypt($n::text, keyRef) on write + pgp_sym_decrypt("col",
+  keyRef) AS "col" on read (key by SQL reference, default
+  current_setting('app.column_encryption_key'), never inlined);
+  encrypted columns excluded from sort/filter. P1.15: link/unlink/
+  isLinked/listLinks manage m2m association rows over the join
+  tables (INSERT … ON CONFLICT DO NOTHING idempotent; keyed by
+  (left, right) entities; withTenantContext). TEXT id keeps cross-
+  store record parity; `operate-server --store pg-columns` provisions
+  + serves from the typed tables (PHI ciphertext at rest, plaintext
+  to authorized callers).
+- **`apps/operate-server`** — Phase 3 P1.7 + P1.9: the runnable
+  serving binary (second app under `apps/`, after `architect-cli`)
+  + an edge/Workers fetch adapter. 7
+  modules: http (RawHttpRequest/RawHttpResponse + parseMethod +
+  splitTarget + rawToIncoming → a gateway IncomingRequest),
+  principals (parseApiKeySpec key:role:tenant + buildPrincipalWiring
+  → OpaqueTokenLookup + scheme-aware PrincipalResolver + scope→role
+  bridge, fail-closed; P1.17: principalFromJwtClaims + subjectToUuid
+  + buildJwksProvider resolve a verified Bearer JWT statelessly from
+  its claims), jwks (P1.19: RemoteJwksProvider — caches an IdP's
+  JWKS endpoint, refetches on stale/unknown-kid rotation, resilient
+  on fetch failure; parseJwksDocument + base64UrlToBase64; P1.20:
+  JwksRefreshPoller proactively refreshes on an interval, injectable
+  unref'd timer, stop() on shutdown), manifest-source
+  (loadBuiltinPack resolves a
+  vertical pack's meta.extends lineage against a registry of all
+  packs; loadManifestFromJson parses+validates a pre-resolved doc),
+  server (OperateHttpServer.dispatch maps raw → handleRequest →
+  RawHttpResponse, unknown method → 405; buildOperateHttpServer
+  composes manifest+store+keys), cli (parseServeArgs: --pack/
+  --manifest exactly one, --port, --store memory|pg, --schema,
+  --scheme, repeatable --api-key, --help/--version), node (thin
+  Node http binding: createNodeRequestListener reads the body +
+  dispatches + writes, throw → 500 problem doc; serve() loads the
+  manifest, builds the store, listens, returns a close handle),
+  edge (P1.9: fetchToRaw(Request) → RawHttpRequest+body +
+  rawToFetchResponse → a real Response + createFetchHandler/
+  buildEdgeFetchHandler + asModuleWorker {fetch} shape — the
+  Fetch/Workers adapter over the same dispatch core, tested
+  against genuine new Request/Response undici globals).
+  `operate-server` bin. A real loopback test boots it for a 200;
+  all other logic is offline-tested.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -994,7 +1362,7 @@ Recurring patterns enforced by zod `superRefine`:
 ## Meta-schema
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central
-catalog of 122 platform-level Postgres tables. Each new package
+catalog of 123 platform-level Postgres tables. Each new package
 adds tables there + updates `meta-schema.test.ts` (table count,
 expected names list sorted alphabetically, column-check
 assertions).
@@ -1089,8 +1457,9 @@ following are intentionally out of scope until contracts settle:
   (Anthropic ships its real client in M2.7 — see below.)
 - Real cryptography. Signature fields are typed as strings; the
   actual HMAC/ed25519 computation is not in this codebase.
-- Customer-facing apps under `apps/` other than `architect-cli`.
-  UI lives in `views` as type definitions only.
+- Customer-facing *UI* apps under `apps/`. UI lives in `views` as
+  type definitions only. (Two server-side apps exist:
+  `architect-cli` and, as of P1.7, `operate-server`.)
 
 **No longer deferred (as of M1):** kernel DDL execution. The
 `kernel-pg` package executes meta-schema DDL against a real
@@ -1506,7 +1875,8 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0076 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0079 + 0086-0102 exist as markdown in `docs/adr/` (0080-0085
+reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1540,7 +1910,37 @@ M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
 covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
 chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI),
 ADR-0075 covers Phase 2 M7.9 (pack-erp-retail), ADR-0076 covers
-Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage).
+Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage), ADR-0077
+is the Phase 3 plan, ADR-0078 covers Phase 3 P1
+(`operate-runtime` — serving a manifest as a multi-tenant API),
+ADR-0079 covers Phase 3 P1.5 (gateway request-body parsing +
+handler-returned outcome mapping in `api-gateway-runtime`),
+ADR-0086 covers Phase 3 P1.6 (`operate-runtime-pg` — the Postgres
+`EntityStore` over `meta.operate_entity_records` under tenant RLS),
+ADR-0087 covers Phase 3 P1.7 (`apps/operate-server` — the runnable
+serving binary over `buildOperateGateway`), ADR-0088 covers Phase 3
+P1.8 (list pagination + filtering from the ListView), ADR-0089
+covers Phase 3 P1.9 (edge/Workers fetch adapter in `apps/operate-
+server`), ADR-0090 covers Phase 3 P1.10 (column-mapped entity
+store — typed per-entity tables in `operate-runtime-pg`), ADR-0091
+covers Phase 3 P1.11 (transparent at-rest encryption in the column-
+mapped store), ADR-0092 covers Phase 3 P1.12 (foreign keys +
+topological apply order in the column store), ADR-0093 covers
+Phase 3 P1.13 (per-relation delete semantics in the column store),
+ADR-0094 covers Phase 3 P1.14 (many_to_many join tables in the
+column store), ADR-0095 covers Phase 3 P1.15 (association
+link/unlink API over the join tables), ADR-0096 covers Phase 3
+P1.16 (keyset pagination + typed filter operators in the entity
+stores), ADR-0097 covers Phase 3 P1.17 (production JWT/JWKS
+identity in `apps/operate-server`), ADR-0098 covers Phase 3 P1.18
+(JWT/tenant cross-check in `api-gateway-runtime`), ADR-0099 covers
+Phase 3 P1.19 (remote JWKS provider with caching + rotation in
+`apps/operate-server`), ADR-0100 covers Phase 3 P1.20 (background
+JWKS refresh poller in `apps/operate-server`), ADR-0101 covers
+Phase 3 P1.21 (field selection / projection on list + read in
+`operate-runtime`), ADR-0102 covers Phase 3 P1.22 (SQL-level
+projection pushdown in the column store; ADRs 0080-0085 reserved
+for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

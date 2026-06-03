@@ -134,3 +134,23 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 48 | 0074 | 4,000 | Drafted alongside the `crossengin-pg encrypt` CLI command (Phase 2 M7.8.6) |
 | 49 | 0075 | 4,000 | Drafted alongside `@crossengin/pack-erp-retail` (Phase 2 M7.9) |
 | 50 | 0076 | 4,000 | Drafted alongside `@crossengin/pack-erp-grocery` — transitive pack lineage (Phase 2 M7.9.1) |
+| 51 | 0077 | 5,500 | Phase 3 implementation plan — bridge from running pillars to deployed multi-vertical product (P1–P8) |
+| 52 | 0078 | 4,500 | Drafted alongside `@crossengin/operate-runtime` — serving a manifest as a multi-tenant API (Phase 3 P1) |
+| 53 | 0079 | 4,000 | Drafted alongside gateway request-body parsing + handler-outcome mapping in `api-gateway-runtime` (Phase 3 P1.5) |
+| 54 | 0086 | 4,000 | Drafted alongside `@crossengin/operate-runtime-pg` — the Postgres EntityStore under tenant RLS (Phase 3 P1.6); ADRs 0080–0085 reserved for P3–P8 |
+| 55 | 0087 | 4,500 | Drafted alongside `apps/operate-server` — the runnable serving binary (Phase 3 P1.7) |
+| 56 | 0088 | 4,000 | Drafted alongside list pagination + filtering from the ListView in `operate-runtime` (Phase 3 P1.8) |
+| 57 | 0089 | 4,000 | Drafted alongside the edge / Workers fetch adapter in `apps/operate-server` (Phase 3 P1.9) |
+| 58 | 0090 | 4,500 | Drafted alongside the column-mapped entity store — typed per-entity tables in `operate-runtime-pg` (Phase 3 P1.10) |
+| 59 | 0091 | 4,000 | Drafted alongside transparent at-rest encryption in the column-mapped store (Phase 3 P1.11) |
+| 60 | 0092 | 4,000 | Drafted alongside foreign keys + topological apply order in the column store (Phase 3 P1.12) |
+| 61 | 0093 | 3,500 | Drafted alongside per-relation delete semantics in the column store (Phase 3 P1.13) |
+| 62 | 0094 | 3,500 | Drafted alongside many_to_many join tables in the column store (Phase 3 P1.14) |
+| 63 | 0095 | 3,500 | Drafted alongside the association link/unlink API over join tables (Phase 3 P1.15) |
+| 64 | 0096 | 4,000 | Drafted alongside keyset pagination + typed filter operators in the entity stores (Phase 3 P1.16) |
+| 65 | 0097 | 4,000 | Drafted alongside production JWT/JWKS identity in `apps/operate-server` (Phase 3 P1.17) |
+| 66 | 0098 | 3,500 | Drafted alongside the JWT/tenant cross-check in `api-gateway-runtime` (Phase 3 P1.18) |
+| 67 | 0099 | 3,500 | Drafted alongside the remote JWKS provider (caching + rotation) in `apps/operate-server` (Phase 3 P1.19) |
+| 68 | 0100 | 3,000 | Drafted alongside the background JWKS refresh poller in `apps/operate-server` (Phase 3 P1.20) |
+| 69 | 0101 | 3,000 | Drafted alongside field selection (projection) on list + read in `operate-runtime` (Phase 3 P1.21) |
+| 70 | 0102 | 3,000 | Drafted alongside SQL-level projection pushdown in the column store (Phase 3 P1.22) |

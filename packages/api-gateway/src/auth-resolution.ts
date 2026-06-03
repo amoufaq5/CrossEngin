@@ -37,6 +37,7 @@ export const AUTH_OUTCOMES = [
   "not_yet_valid_token",
   "audience_mismatch",
   "issuer_mismatch",
+  "tenant_mismatch",
   "principal_not_found",
   "principal_disabled",
   "principal_locked",

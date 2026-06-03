@@ -188,13 +188,25 @@ export interface ResolvePrincipalInput {
   readonly scopes: readonly string[];
   readonly resolver: PrincipalResolver;
   readonly nowIso: string;
+  /**
+   * The tenant asserted by the *credential* (a JWT `tenant_id` claim or an
+   * api-key binding). When present it is authoritative; the `x-tenant-id`
+   * request header (`tenantHint`) is only a hint and must not contradict it.
+   */
+  readonly authenticatedTenantId?: string | null;
 }
 
 export async function resolvePrincipalForCredential(
   input: ResolvePrincipalInput,
 ): Promise<{ readonly principal: ResolvedPrincipal | null; readonly outcome: AuthOutcome }> {
+  const headerTenant = input.request.tenantHint ?? null;
+  const authTenant = input.authenticatedTenantId ?? null;
+  // A spoofable header must not claim a different tenant than the credential.
+  if (authTenant !== null && headerTenant !== null && authTenant !== headerTenant) {
+    return { principal: null, outcome: "tenant_mismatch" };
+  }
   const resolved = await input.resolver.resolve({
-    tenantId: input.request.tenantHint ?? null,
+    tenantId: authTenant ?? headerTenant,
     principalRef: input.principalRef,
     scopes: input.scopes,
     authScheme: input.scheme,

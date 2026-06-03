@@ -80,6 +80,7 @@ export interface HandleResult {
   readonly execution: PipelineExecution;
 }
 
+const HANDLER_ERROR_PROBLEM_TYPE = "https://crossengin.io/problems/handler-error";
 const HEADER_API_VERSION = "x-api-version";
 const HEADER_IDEMPOTENCY_KEY = "idempotency-key";
 
@@ -210,12 +211,26 @@ export class GatewayRuntime {
 
   private async stageParseRequest(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
+    let reason = ctx.request.bodySha256 === null ? "no_body" : "body_hashed";
+    const raw = (ctx.request as { rawBody?: Uint8Array | null }).rawBody ?? null;
+    const contentType = ctx.request.headers["content-type"] ?? "";
+    if (raw !== null && raw.byteLength > 0 && contentType.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(raw)) as unknown;
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          ctx.parsedBody = parsed as Record<string, unknown>;
+          reason = "body_parsed_json";
+        }
+      } catch {
+        reason = "body_unparseable_json";
+      }
+    }
     rec.record({
       stage: "parse_request",
       outcome: "pass",
       startedAt,
       completedAt: this.now(),
-      reason: ctx.request.bodySha256 === null ? "no_body" : "body_hashed",
+      reason,
     });
     return null;
   }
@@ -420,6 +435,7 @@ export class GatewayRuntime {
       scopes: ctx.authScopes ?? [],
       resolver: this.principalResolver,
       nowIso: this.now().toISOString(),
+      authenticatedTenantId: ctx.tenantId,
     });
     if (result.outcome !== "authenticated" || result.principal === null) {
       ctx.authOutcome = result.outcome;
@@ -816,6 +832,32 @@ export class GatewayRuntime {
     ctx.finalResponse = handlerOutputToResponse(output);
     if (ctx.idempotencyKey !== null && ctx.tenantId !== null) {
       await this.persistIdempotency(ctx, output.status);
+    }
+    // A handler that returns a 4xx/5xx is a terminal outcome, not a "pass":
+    // record it as deny (4xx) / error (5xx) and halt the pipeline so the
+    // PipelineExecution's "pass cannot be 4xx" invariant holds. The handler's
+    // own response body is preserved (returned via the envelope's response).
+    if (output.status >= 400) {
+      const isServerError = output.status >= 500;
+      rec.record({
+        stage: "dispatch_handler",
+        outcome: isServerError ? "error" : "deny",
+        startedAt,
+        completedAt: this.now(),
+        reason: `handler_returned_${output.status.toString()}`,
+        ...(isServerError ? {} : { problemTypeUri: HANDLER_ERROR_PROBLEM_TYPE }),
+        responseStatus: output.status,
+      });
+      return {
+        response: ctx.finalResponse,
+        body: {
+          type: HANDLER_ERROR_PROBLEM_TYPE,
+          title: "Handler error",
+          status: output.status as ProblemEnvelope["body"]["status"],
+          detail: `handler returned status ${output.status.toString()}`,
+          extensions: {},
+        },
+      };
     }
     rec.record({
       stage: "dispatch_handler",
