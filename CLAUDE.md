@@ -13,11 +13,31 @@ healthcare verticals ride on top.
 
 ## Where we are
 
-Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 + M3.6 + M3.7 +
-M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 + M6.5 +
-M7 + M8 + M8.5 + M8.6 + M8.7 landed: **53 packages + 1 app, 122
-meta-schema tables, 5,943 tests**, all green, no type errors.
-**Phase 2's eight milestones (M1–M8) are complete.** M8.7 added
+Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
+M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
+M6.5 + M7 + M8 + M8.5 + M8.6 + M8.7 landed: **54 packages + 1
+app, 122 meta-schema tables, 5,992 tests**, all green, no type
+errors. **Phase 2's eight milestones (M1–M8) are complete.**
+M2.8 added `@crossengin/ai-providers-openai` — the second real
+`LlmProvider`, binding OpenAI's Chat Completions + Embeddings
+APIs to the same contract as the Anthropic client (zero runtime
+deps, pure fetch + ReadableStream). 5 modules: pricing (gpt-4.1
+/ gpt-4.1-mini / gpt-4o / gpt-4o-mini / o4-mini + the two
+text-embedding-3 models; computeUsageCost subtracts cached from
+the total prompt_tokens before charging), chat-api (system
+messages stay first-class; assistant toolUses → tool_calls with
+stringified arguments; tool → role:tool + tool_call_id; jsonMode
+→ response_format; stream → stream_options.include_usage),
+streaming (data:/[DONE] SSE parser; assembles tool_calls by
+index; tool_call_end on finish_reason; shared StreamState across
+read boundaries), errors (OpenAiError + isRetryable +
+classifyHttpStatus; 503→service_unavailable), provider
+(OpenAiProvider implements LlmProvider — complete() streaming +
+real embed() via /v1/embeddings + completeNonStreaming;
+capabilities jsonMode + embedding true; Bearer auth + optional
+org/project; FetchLike injection). First provider with working
+embeddings; the ai-router fallback chain is now genuinely
+multi-vendor. M8.7 added
 latency enforcement persistence to
 `@crossengin/observability-runtime-pg`: a `signal`
 ('availability' | 'latency', default 'availability') column on
@@ -234,7 +254,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0063 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0064 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -252,7 +272,8 @@ loop), ADR-0061 covers M8.5 (`observability-runtime-pg` — SLO
 enforcement persistence), ADR-0062 covers M8.6 (latency-target
 SLO enforcement in `observability-runtime`), ADR-0063 covers
 M8.7 (latency enforcement persistence in
-`observability-runtime-pg`).
+`observability-runtime-pg`), ADR-0064 covers M2.8
+(`ai-providers-openai` — second real LlmProvider).
 
 ## Architecture in 90 seconds
 
@@ -451,6 +472,26 @@ re-exporting everything.
   Streaming()` + `embed()` throws invalid_request_error;
   `anthropic-beta` header for prompt caching / tool streaming
   / computer use; `FetchLike` injection for tests).
+- **`ai-providers-openai`** — second real `LlmProvider`, binding
+  OpenAI's Chat Completions + Embeddings APIs. Zero runtime deps.
+  5 modules: pricing (gpt-4.1 / -mini / gpt-4o / -mini / o4-mini
+  + text-embedding-3-small/-large; computeUsageCost subtracts
+  cached_tokens from the total prompt_tokens before charging),
+  chat-api (system messages stay first-class; assistant toolUses
+  → tool_calls with stringified arguments; tool → role:tool +
+  tool_call_id; jsonMode → response_format; stream →
+  stream_options.include_usage; max_completion_tokens),
+  streaming (data:/[DONE] SSE; assembles tool_calls by index;
+  tool_call_end on finish_reason; shared StreamState across read
+  boundaries), errors (OpenAiError + isRetryable +
+  classifyHttpStatus; 503→service_unavailable; retryable =
+  rate_limit/server/service_unavailable/network/timeout),
+  provider (OpenAiProvider implements LlmProvider — complete()
+  streaming + real embed() via /v1/embeddings +
+  completeNonStreaming; capabilities jsonMode + embedding true;
+  Bearer auth + optional org/project; FetchLike injection). The
+  first provider with working embeddings; makes the ai-router
+  fallback chain genuinely multi-vendor.
 - **`ai-architect`** — AI Architect session contract, safety
   policy (refusals, gates, refusal copy, tenant settings, cost
   ceilings, eval gate, incidents, redteam). Plus session-record
@@ -833,6 +874,25 @@ The provider is the first concrete `LlmProvider` implementation
 — the Architect agent (M5.5 chat command) can now run against
 a real backend with real cost accounting.
 
+**No longer deferred (as of M2.8):** a second LLM provider.
+`@crossengin/ai-providers-openai` binds OpenAI's Chat
+Completions (`/v1/chat/completions`) + Embeddings
+(`/v1/embeddings`) to the same `LlmProvider` contract, zero
+runtime deps. `OpenAiProvider.complete()` streams the same
+`CompletionChunk` union (parsing `data:`/`[DONE]` SSE,
+assembling `tool_calls` by index, emitting `tool_call_end` on
+`finish_reason`); `embed()` returns real vectors with cost
+(the first provider where `embed()` works — `capabilities.
+embedding = true`). Usage cost subtracts `cached_tokens` from
+OpenAI's total `prompt_tokens` before charging the uncached
+rate. Errors normalize to `OpenAiError` with the same
+`isRetryable()` structural contract the router consumes, so a
+`TaskPolicy` fallback chain (`anthropic/… → openai/…`) now
+fails over across vendors for real. Two independent
+implementations of one wire-format-neutral contract prove the
+`LlmProvider` abstraction; Bedrock / Vertex / Mistral follow the
+same five-module template.
+
 **No longer deferred (as of M3):** workflow execution. The
 `workflow-runtime` package consumes `WorkflowDefinition` shapes
 and actually runs them: starts instances, threads variables,
@@ -1074,7 +1134,8 @@ Phase 2 M7 (`pack-erp-core`), ADR-0059 covers Phase 2 M6.5
 covers Phase 2 M8.5 (`observability-runtime-pg` — SLO
 enforcement persistence), ADR-0062 covers Phase 2 M8.6
 (latency-target SLO enforcement), ADR-0063 covers Phase 2 M8.7
-(latency enforcement persistence). When you ship
+(latency enforcement persistence), ADR-0064 covers Phase 2 M2.8
+(`ai-providers-openai` — second LlmProvider). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
