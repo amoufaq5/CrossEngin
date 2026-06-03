@@ -16,9 +16,24 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
-+ M8 + M8.5 + M8.6 + M8.7 landed: **55 packages + 1 app, 122
-meta-schema tables, 6,101 tests**, all green, no type errors.
-**Phase 2's eight milestones (M1–M8) are complete.** M7.8.5
++ M2.8.5 + M8 + M8.5 + M8.6 + M8.7 landed: **55 packages + 1 app,
+122 meta-schema tables, 6,108 tests**, all green, no type errors.
+**Phase 2's eight milestones (M1–M8) are complete.** M2.8.5 wired
+the M6.5 router + the M2.8 OpenAI provider into `architect-cli`'s
+`chat` command — previously it constructed a single
+`AnthropicProvider` directly. The chat engine's provider type was
+narrowed from `LlmProvider` to a structural `CompletionProvider`
+(`{complete()}`), which both a concrete provider and a
+`DefaultLlmRouter` satisfy — no adapter. `buildChatProvider`
+picks the source: `providerOverride` (tests) wins; `--provider
+anthropic|openai` forces a single vendor; `--provider auto`
+(default) builds a `DefaultLlmRouter` (Anthropic primary →
+OpenAI fallback) when **both** `ANTHROPIC_API_KEY` +
+`OPENAI_API_KEY` are set, else the single available provider,
+else an error. `--openai-model` (default gpt-4o) sets the OpenAI
+model. Chat is now multi-vendor with real cross-vendor failover;
+the test seam (`providerOverride`) is untouched, so CI still runs
+offline. M7.8.5
 shipped the encrypt-on-write migration that makes M7.8's
 `plaintext_at_rest` go green: `kernel-pg`'s
 `encryption-migration.ts` converts a hinted plaintext column to a
@@ -365,7 +380,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0071 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0072 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -393,7 +408,8 @@ encryption hints), ADR-0068 covers M7.7.5 (gateway response
 redaction by classification), ADR-0069 covers M7.7.6
 (manifest-derived redaction registry), ADR-0070 covers M7.8
 (at-rest encryption mechanism + pgcrypto coverage applier),
-ADR-0071 covers M7.8.5 (encrypt-on-write migration).
+ADR-0071 covers M7.8.5 (encrypt-on-write migration), ADR-0072
+covers M2.8.5 (multi-vendor router in architect-cli chat).
 
 ## Architecture in 90 seconds
 
@@ -1391,11 +1407,14 @@ one-shot (`--prompt "..."`) and REPL (stdin lines until `/exit`
 / EOF) modes, aggregating per-turn usage into a session total
 with USD cost. Tests inject a stub `LlmProvider` via
 `RunContext.providerOverride`, so CI runs offline without an
-Anthropic key.
+Anthropic key. (M2.8.5: chat now builds a multi-vendor
+`DefaultLlmRouter` via `buildChatProvider` — Anthropic primary →
+OpenAI fallback when both keys are set — through the structural
+`CompletionProvider` type; `--provider auto|anthropic|openai`.)
 
 ## ADRs
 
-ADRs 0001-0071 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0072 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1424,7 +1443,8 @@ ADR-0068 covers Phase 2 M7.7.5 (gateway response redaction),
 ADR-0069 covers Phase 2 M7.7.6 (manifest-derived redaction
 registry), ADR-0070 covers Phase 2 M7.8 (at-rest encryption
 mechanism + pgcrypto coverage applier), ADR-0071 covers Phase 2
-M7.8.5 (encrypt-on-write migration). When you ship
+M7.8.5 (encrypt-on-write migration), ADR-0072 covers Phase 2
+M2.8.5 (multi-vendor router in architect-cli chat). When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.

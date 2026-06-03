@@ -1,11 +1,21 @@
 import { readFile } from "node:fs/promises";
 
-import type { LlmProvider } from "@crossengin/ai-providers";
+import type {
+  LlmProvider,
+  TaskPolicyMap,
+  TenantResidency,
+} from "@crossengin/ai-providers";
 import {
   AnthropicProvider,
   isAnthropicModel,
   type AnthropicModel,
 } from "@crossengin/ai-providers-anthropic";
+import {
+  OpenAiProvider,
+  isOpenAiChatModel,
+  type OpenAiChatModel,
+} from "@crossengin/ai-providers-openai";
+import { DefaultLlmRouter } from "@crossengin/ai-router";
 import {
   computeManifestDiff,
   manifestHash,
@@ -28,6 +38,7 @@ import {
   lineReaderFromIterable,
   linesFromReadable,
   runChatRepl,
+  type CompletionProvider,
   type LineReader,
 } from "./chat.js";
 import {
@@ -243,6 +254,84 @@ export async function runPatch(
   return 0;
 }
 
+export const DEFAULT_CHAT_OPENAI_MODEL: OpenAiChatModel = "gpt-4o";
+export const CHAT_PROVIDER_CHOICES: ReadonlySet<string> = new Set(["auto", "anthropic", "openai"]);
+
+type ProviderBuild =
+  | { readonly provider: CompletionProvider }
+  | { readonly error: string; readonly code: number };
+
+function buildChatRouter(
+  anthropic: AnthropicProvider,
+  openai: OpenAiProvider,
+  anthropicModel: AnthropicModel,
+  openaiModel: OpenAiChatModel,
+): DefaultLlmRouter {
+  const providers = new Map<string, LlmProvider>([
+    ["anthropic", anthropic],
+    ["openai", openai],
+  ]);
+  const textChain = {
+    primary: `anthropic/${anthropicModel}`,
+    fallback: [`openai/${openaiModel}`],
+  };
+  const taskPolicies: TaskPolicyMap = {
+    planner: textChain,
+    executor: textChain,
+    summarizer: textChain,
+    "diff-narrator": textChain,
+    classifier: textChain,
+    rerank: textChain,
+    embedding: { primary: "openai/text-embedding-3-small", fallback: [] },
+  };
+  return new DefaultLlmRouter({
+    providers,
+    taskPolicies,
+    getTenantResidency: async (): Promise<TenantResidency> => "unrestricted",
+  });
+}
+
+/**
+ * Builds the chat completion source. An explicit `providerOverride` (tests)
+ * wins. Otherwise: `--provider anthropic|openai` forces a single vendor;
+ * `auto` (default) builds a multi-vendor `DefaultLlmRouter` (Anthropic
+ * primary, OpenAI fallback) when both API keys are present, else the single
+ * available provider.
+ */
+export function buildChatProvider(
+  ctx: RunContext,
+  opts: { model: AnthropicModel; openaiModel: OpenAiChatModel; choice: string },
+): ProviderBuild {
+  if (ctx.providerOverride !== undefined) return { provider: ctx.providerOverride };
+
+  const anthropicKey = ctx.env["ANTHROPIC_API_KEY"];
+  const openaiKey = ctx.env["OPENAI_API_KEY"];
+  const hasAnthropic = anthropicKey !== undefined && anthropicKey.length > 0;
+  const hasOpenai = openaiKey !== undefined && openaiKey.length > 0;
+  const makeAnthropic = (): AnthropicProvider =>
+    new AnthropicProvider({ apiKey: anthropicKey as string, defaultModel: opts.model });
+  const makeOpenai = (): OpenAiProvider =>
+    new OpenAiProvider({ apiKey: openaiKey as string, defaultModel: opts.openaiModel });
+
+  if (opts.choice === "anthropic") {
+    if (!hasAnthropic) return { error: "chat: --provider anthropic requires ANTHROPIC_API_KEY.", code: 1 };
+    return { provider: makeAnthropic() };
+  }
+  if (opts.choice === "openai") {
+    if (!hasOpenai) return { error: "chat: --provider openai requires OPENAI_API_KEY.", code: 1 };
+    return { provider: makeOpenai() };
+  }
+  if (hasAnthropic && hasOpenai) {
+    return { provider: buildChatRouter(makeAnthropic(), makeOpenai(), opts.model, opts.openaiModel) };
+  }
+  if (hasAnthropic) return { provider: makeAnthropic() };
+  if (hasOpenai) return { provider: makeOpenai() };
+  return {
+    error: "chat: set ANTHROPIC_API_KEY and/or OPENAI_API_KEY before running 'crossengin chat'.",
+    code: 1,
+  };
+}
+
 export async function runChat(
   command: ParsedCommand,
   ctx: RunContext,
@@ -318,20 +407,23 @@ export async function runChat(
     });
   }
 
-  let provider: LlmProvider;
-  if (ctx.providerOverride !== undefined) {
-    provider = ctx.providerOverride;
-  } else {
-    const apiKey = ctx.env["ANTHROPIC_API_KEY"];
-    if (apiKey === undefined || apiKey.length === 0) {
-      printError(
-        ctx.io,
-        "chat: ANTHROPIC_API_KEY is not set. Export it before running 'crossengin chat'.",
-      );
-      return 1;
-    }
-    provider = new AnthropicProvider({ apiKey, defaultModel: model });
+  const providerChoice = getStringFlag(command, "provider") ?? "auto";
+  if (!CHAT_PROVIDER_CHOICES.has(providerChoice)) {
+    printError(ctx.io, `chat: invalid --provider '${providerChoice}' (expected auto, anthropic, or openai).`);
+    return 2;
   }
+  const openaiModelFlag = getStringFlag(command, "openai-model") ?? DEFAULT_CHAT_OPENAI_MODEL;
+  if (!isOpenAiChatModel(openaiModelFlag)) {
+    printError(ctx.io, `chat: unsupported --openai-model: ${openaiModelFlag}`);
+    return 2;
+  }
+
+  const built = buildChatProvider(ctx, { model, openaiModel: openaiModelFlag, choice: providerChoice });
+  if ("error" in built) {
+    printError(ctx.io, built.error);
+    return built.code;
+  }
+  const provider: CompletionProvider = built.provider;
 
   const persistFlag = getBooleanFlag(command, "persist");
   let transcript: Transcript | undefined = ctx.transcriptOverride;

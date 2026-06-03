@@ -29,6 +29,12 @@ importers:
       '@crossengin/ai-providers-anthropic':
         specifier: workspace:*
         version: link:../../packages/ai-providers-anthropic
+      '@crossengin/ai-providers-openai':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-openai
+      '@crossengin/ai-router':
+        specifier: workspace:*
+        version: link:../../packages/ai-router
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

@@ -5,7 +5,6 @@ import type {
   CompletionChunk,
   CompletionRequest,
   LlmMessage,
-  LlmProvider,
   LlmTool,
   Usage,
 } from "@crossengin/ai-providers";
@@ -18,6 +17,16 @@ import {
   type WriteApprovalRequest,
   type WriteApprover,
 } from "./tools.js";
+
+/**
+ * The slice of an `LlmProvider` / `LlmRouter` the chat engine needs — just
+ * `complete()`. Both an `AnthropicProvider` / `OpenAiProvider` and a
+ * `DefaultLlmRouter` satisfy this, so the chat substrate is provider- or
+ * router-agnostic.
+ */
+export interface CompletionProvider {
+  complete(req: CompletionRequest): AsyncIterable<CompletionChunk>;
+}
 
 export type { Transcript } from "@crossengin/ai-architect-pg";
 
@@ -252,7 +261,7 @@ export function jsonChunkRenderer(io: IoStreams): StreamRenderer {
 }
 
 export async function runChatTurn(
-  provider: LlmProvider,
+  provider: CompletionProvider,
   input: ChatTurnInput,
   renderer: StreamRenderer,
 ): Promise<ChatTurnResult> {
@@ -278,7 +287,7 @@ export async function runChatTurn(
 }
 
 async function streamCompletion(
-  provider: LlmProvider,
+  provider: CompletionProvider,
   request: CompletionRequest,
   renderer: StreamRenderer,
 ): Promise<{
@@ -375,7 +384,7 @@ export function lineReaderFromIterable(iter: AsyncIterable<string>): LineReader 
 }
 
 export interface ChatReplOptions {
-  readonly provider: LlmProvider;
+  readonly provider: CompletionProvider;
   readonly io: IoStreams;
   readonly lines: LineReader;
   readonly systemPrompt: string;
@@ -431,7 +440,7 @@ export interface ChatExchangeResult {
 }
 
 export interface ChatExchangeOptions {
-  readonly provider: LlmProvider;
+  readonly provider: CompletionProvider;
   readonly renderer: StreamRenderer;
   readonly io: IoStreams;
   readonly format: "human" | "json";
@@ -689,7 +698,7 @@ function decideProposal(
 }
 
 async function streamContinuation(input: {
-  provider: LlmProvider;
+  provider: CompletionProvider;
   renderer: StreamRenderer;
   history: readonly LlmMessage[];
   systemPrompt: string;
