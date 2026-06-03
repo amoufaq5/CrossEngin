@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { EntitySchema } from "./entity.js";
+import { EntitySchema, entityClassifiedFields } from "./entity.js";
+
+describe("entityClassifiedFields", () => {
+  it("lists only the classified fields with their data class", () => {
+    const entity = EntitySchema.parse({
+      name: "Patient",
+      fields: [
+        { name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" },
+        { name: "given_name", type: { kind: "text", maxLength: 100 }, classification: "pii" },
+        { name: "status", type: { kind: "text", maxLength: 20 } },
+      ],
+    });
+    expect(entityClassifiedFields(entity)).toEqual([
+      { field: "mrn", classification: "phi" },
+      { field: "given_name", classification: "pii" },
+    ]);
+  });
+
+  it("returns empty when nothing is classified", () => {
+    const entity = EntitySchema.parse({
+      name: "Widget",
+      fields: [{ name: "label", type: { kind: "text", maxLength: 20 } }],
+    });
+    expect(entityClassifiedFields(entity)).toEqual([]);
+  });
+});
 
 describe("EntitySchema", () => {
   it("parses a minimal entity", () => {

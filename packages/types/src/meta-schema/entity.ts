@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FieldSchema } from "./field.js";
+import { FieldSchema, type DataClassification } from "./field.js";
 import { IndexDefinitionSchema } from "./index-def.js";
 
 const ENTITY_NAME_REGEX = /^[A-Z][A-Za-z0-9]*$/;
@@ -32,3 +32,18 @@ export const EntitySchema = z
   );
 
 export type Entity = z.infer<typeof EntitySchema>;
+
+export interface ClassifiedField {
+  readonly field: string;
+  readonly classification: DataClassification;
+}
+
+export function entityClassifiedFields(entity: Entity): readonly ClassifiedField[] {
+  const out: ClassifiedField[] = [];
+  for (const f of entity.fields) {
+    if (f.classification !== undefined) {
+      out.push({ field: f.name, classification: f.classification });
+    }
+  }
+  return out;
+}

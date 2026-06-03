@@ -47,6 +47,38 @@ export const DefaultValueSchema = z.discriminatedUnion("kind", [
 
 export type DefaultValue = z.infer<typeof DefaultValueSchema>;
 
+export const DATA_CLASSIFICATIONS = [
+  "public",
+  "internal",
+  "commercial_sensitive",
+  "pii",
+  "phi",
+  "regulated",
+] as const;
+export type DataClassification = (typeof DATA_CLASSIFICATIONS)[number];
+
+export const DataClassificationSchema = z.enum(DATA_CLASSIFICATIONS);
+
+export const SENSITIVE_DATA_CLASSIFICATIONS: ReadonlySet<DataClassification> = new Set([
+  "commercial_sensitive",
+  "pii",
+  "phi",
+  "regulated",
+]);
+
+export const AUDIT_REQUIRED_DATA_CLASSIFICATIONS: ReadonlySet<DataClassification> = new Set([
+  "phi",
+  "regulated",
+]);
+
+export function isSensitiveDataClass(c: DataClassification): boolean {
+  return SENSITIVE_DATA_CLASSIFICATIONS.has(c);
+}
+
+export function requiresAuditTrail(c: DataClassification): boolean {
+  return AUDIT_REQUIRED_DATA_CLASSIFICATIONS.has(c);
+}
+
 const FIELD_NAME_REGEX = /^[a-z][a-z0-9_]*$/;
 
 export const FieldSchema = z.object({
@@ -59,6 +91,15 @@ export const FieldSchema = z.object({
   indexed: IndexHintSchema.optional(),
   unique: UniqueHintSchema.optional(),
   validations: z.array(ValidationRuleSchema).optional(),
+  classification: DataClassificationSchema.optional(),
 });
 
 export type Field = z.infer<typeof FieldSchema>;
+
+export function fieldClassification(field: Field): DataClassification | undefined {
+  return field.classification;
+}
+
+export function isFieldSensitive(field: Field): boolean {
+  return field.classification !== undefined && isSensitiveDataClass(field.classification);
+}

@@ -1,7 +1,76 @@
 import { describe, expect, it } from "vitest";
 import type { Manifest } from "./types.js";
 import { ManifestValidationError } from "./errors.js";
-import { validateManifest } from "./validate.js";
+import { manifestClassifiedFields, validateManifest } from "./validate.js";
+
+const baseMetaC = { name: "Test", slug: "test", version: "1.0.0" } as const;
+
+describe("validateManifest — data classification", () => {
+  it("accepts a phi field on an auditable entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      entities: [
+        {
+          name: "Observation",
+          traits: ["auditable"],
+          fields: [{ name: "value_text", type: { kind: "long_text" }, classification: "phi" }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects a phi field on a non-auditable entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      entities: [
+        {
+          name: "Observation",
+          fields: [{ name: "value_text", type: { kind: "long_text" }, classification: "phi" }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).toThrow(/auditable/);
+  });
+
+  it("allows a pii field on a non-auditable entity (no audit requirement)", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      entities: [
+        {
+          name: "Lead",
+          fields: [{ name: "email", type: { kind: "email" }, classification: "pii" }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("inventories every classified field via manifestClassifiedFields", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      entities: [
+        {
+          name: "Patient",
+          traits: ["auditable"],
+          fields: [
+            { name: "mrn", type: { kind: "text" }, classification: "phi" },
+            { name: "given_name", type: { kind: "text" }, classification: "pii" },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
+      ],
+    };
+    expect(manifestClassifiedFields(m)).toEqual([
+      { entity: "Patient", field: "mrn", classification: "phi" },
+      { entity: "Patient", field: "given_name", classification: "pii" },
+    ]);
+  });
+});
 
 const baseMeta = { name: "Test", slug: "test", version: "1.0.0" } as const;
 

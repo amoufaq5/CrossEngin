@@ -15,10 +15,26 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 + M7.5 + M8 + M8.5 + M8.6 + M8.7 landed: **55 packages
-+ 1 app, 122 meta-schema tables, 6,027 tests**, all green, no
-type errors. **Phase 2's eight milestones (M1–M8) are complete.**
-M7.5 added `@crossengin/pack-erp-healthcare` — the second
+M6.5 + M7 + M7.5 + M7.6 + M8 + M8.5 + M8.6 + M8.7 landed: **55
+packages + 1 app, 122 meta-schema tables, 6,046 tests**, all
+green, no type errors. **Phase 2's eight milestones (M1–M8) are
+complete.** M7.6 added field-level data classification (kernel +
+types enhancement, no new package): the manifest `FieldSchema`
+gained an optional `classification` (`public | internal |
+commercial_sensitive | pii | phi | regulated`, mirroring jobs'
+`DATA_CLASSES`), the DDL emitter writes `COMMENT ON COLUMN …
+'crossengin.data_class=<class>'` for each classified field (so
+the class lands in `pg_catalog`), and `validateManifest` now
+enforces that any `phi`/`regulated` field lives on an
+`auditable` entity. `manifestClassifiedFields(manifest)` returns
+the full `{entity, field, classification}` inventory;
+`entityClassifiedFields` / `isFieldSensitive` /
+`requiresAuditTrail` are the field-level helpers. `pack-erp-
+healthcare` now classifies its PHI/PII fields (Patient.mrn →
+phi, demographics → pii, Observation.value_* → phi) and still
+cross-validates. Foundation for default field-redaction +
+at-rest encryption hints (M7.7). M7.5 added
+`@crossengin/pack-erp-healthcare` — the second
 vertical pack and the first to use `meta.extends` lineage. It
 declares `meta.extends: ["operate-erp/core"]` and references core
 entities (Account, Invoice) by name, so it does NOT cross-validate
@@ -271,7 +287,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0065 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0066 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -292,7 +308,8 @@ M8.7 (latency enforcement persistence in
 `observability-runtime-pg`), ADR-0064 covers M2.8
 (`ai-providers-openai` — second real LlmProvider), ADR-0065
 covers M7.5 (`pack-erp-healthcare` — second vertical pack via
-`meta.extends`).
+`meta.extends`), ADR-0066 covers M7.6 (field-level data
+classification in `types` + `kernel`).
 
 ## Architecture in 90 seconds
 
@@ -1040,6 +1057,20 @@ mechanism now has a real consumer with a passing cross-validation
 test — the "verticals extend a base" story is demonstrated, not
 just designed.
 
+**No longer deferred (as of M7.6):** field-level data
+classification. The manifest `FieldSchema` carries an optional
+`classification` (`public | internal | commercial_sensitive |
+pii | phi | regulated`). The kernel DDL emitter writes a
+`COMMENT ON COLUMN … 'crossengin.data_class=<class>'` per
+classified field so the class is queryable in `pg_catalog`, and
+`validateManifest` enforces that `phi`/`regulated` fields live on
+an `auditable` entity. `manifestClassifiedFields(manifest)` is
+the compliance inventory; `isFieldSensitive` / `requiresAuditTrail`
+the helpers. `pack-erp-healthcare` classifies its PHI/PII fields
+end-to-end. Acting on the class — default field-redaction in
+`@crossengin/auth`, at-rest encryption hints in DDL — is the
+deferred M7.7.
+
 **No longer deferred (as of M8):** SLO enforcement.
 `@crossengin/observability-runtime` turns the inert SLO / alert /
 synthetic / trace definitions from `@crossengin/observability`
@@ -1166,7 +1197,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0065 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0066 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1188,7 +1219,8 @@ enforcement persistence), ADR-0062 covers Phase 2 M8.6
 (latency-target SLO enforcement), ADR-0063 covers Phase 2 M8.7
 (latency enforcement persistence), ADR-0064 covers Phase 2 M2.8
 (`ai-providers-openai` — second LlmProvider), ADR-0065 covers
-Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack).
+Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack),
+ADR-0066 covers Phase 2 M7.6 (field-level data classification).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

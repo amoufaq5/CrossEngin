@@ -1,9 +1,48 @@
 import { describe, expect, it } from "vitest";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
-import { emitCreateTable, emitEntity, emitIndexes } from "./emit.js";
+import { emitColumnComments, emitCreateTable, emitEntity, emitIndexes } from "./emit.js";
 import { FieldNameCollisionError, ReservedFieldNameError, UnknownTraitError } from "./errors.js";
 
 const schema = "t_acme";
+
+describe("emitColumnComments — data classification", () => {
+  const entity: Entity = {
+    name: "Patient",
+    fields: [
+      { name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" },
+      { name: "account_id", type: { kind: "reference", target: "Account" }, classification: "pii" },
+      { name: "status", type: { kind: "text", maxLength: 20 } },
+    ],
+  };
+
+  it("emits a COMMENT ON COLUMN for each classified field only", () => {
+    const comments = emitColumnComments(entity, { schema });
+    expect(comments).toHaveLength(2);
+    expect(comments[0]).toBe(
+      `COMMENT ON COLUMN "t_acme"."patient"."mrn" IS 'crossengin.data_class=phi';`,
+    );
+  });
+
+  it("uses the reference column name for reference fields", () => {
+    const comments = emitColumnComments(entity, { schema });
+    expect(comments.some((c) => c.includes(`"account_id"`) && c.includes("pii"))).toBe(true);
+  });
+
+  it("appends comments after the CREATE TABLE + indexes in emitEntity", () => {
+    const statements = emitEntity(entity, { schema });
+    expect(statements[0]).toMatch(/^CREATE TABLE/);
+    const comments = statements.filter((s) => s.startsWith("COMMENT ON COLUMN"));
+    expect(comments).toHaveLength(2);
+  });
+
+  it("emits no comments when nothing is classified", () => {
+    const plain: Entity = {
+      name: "Widget",
+      fields: [{ name: "label", type: { kind: "text", maxLength: 20 } }],
+    };
+    expect(emitColumnComments(plain, { schema })).toEqual([]);
+  });
+});
 
 describe("emitCreateTable — basics", () => {
   it("emits a minimal table with implicit id PK", () => {

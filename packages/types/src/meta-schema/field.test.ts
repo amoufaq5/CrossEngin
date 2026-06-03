@@ -1,5 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { FieldSchema } from "./field.js";
+import {
+  DATA_CLASSIFICATIONS,
+  FieldSchema,
+  fieldClassification,
+  isFieldSensitive,
+  isSensitiveDataClass,
+  requiresAuditTrail,
+} from "./field.js";
+
+describe("field data classification", () => {
+  it("accepts every declared classification on a field", () => {
+    for (const c of DATA_CLASSIFICATIONS) {
+      const parsed = FieldSchema.parse({
+        name: "x",
+        type: { kind: "text", maxLength: 10 },
+        classification: c,
+      });
+      expect(parsed.classification).toBe(c);
+    }
+  });
+
+  it("rejects an unknown classification", () => {
+    const res = FieldSchema.safeParse({
+      name: "x",
+      type: { kind: "text", maxLength: 10 },
+      classification: "top_secret",
+    });
+    expect(res.success).toBe(false);
+  });
+
+  it("treats pii/phi/regulated/commercial_sensitive as sensitive", () => {
+    expect(isSensitiveDataClass("phi")).toBe(true);
+    expect(isSensitiveDataClass("pii")).toBe(true);
+    expect(isSensitiveDataClass("regulated")).toBe(true);
+    expect(isSensitiveDataClass("commercial_sensitive")).toBe(true);
+    expect(isSensitiveDataClass("internal")).toBe(false);
+    expect(isSensitiveDataClass("public")).toBe(false);
+  });
+
+  it("requires an audit trail only for phi + regulated", () => {
+    expect(requiresAuditTrail("phi")).toBe(true);
+    expect(requiresAuditTrail("regulated")).toBe(true);
+    expect(requiresAuditTrail("pii")).toBe(false);
+    expect(requiresAuditTrail("commercial_sensitive")).toBe(false);
+  });
+
+  it("exposes per-field helpers", () => {
+    const phi = FieldSchema.parse({ name: "v", type: { kind: "long_text" }, classification: "phi" });
+    const plain = FieldSchema.parse({ name: "v", type: { kind: "long_text" } });
+    expect(fieldClassification(phi)).toBe("phi");
+    expect(fieldClassification(plain)).toBeUndefined();
+    expect(isFieldSensitive(phi)).toBe(true);
+    expect(isFieldSensitive(plain)).toBe(false);
+  });
+});
 
 describe("FieldSchema", () => {
   it("parses a minimal field", () => {

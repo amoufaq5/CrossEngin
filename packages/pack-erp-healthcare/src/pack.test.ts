@@ -1,5 +1,6 @@
 import {
   ManifestSchema,
+  manifestClassifiedFields,
   manifestHash,
   resolveManifest,
   tryValidateManifest,
@@ -135,6 +136,22 @@ describe("buildErpHealthcarePack — resolved against core", () => {
       registry: coreRegistry(),
     });
     expect(resolved.meta.extends).toBeUndefined();
+  });
+
+  it("carries PHI/PII field classifications through resolution", async () => {
+    const resolved = await resolveManifest(buildErpHealthcarePack(), {
+      registry: coreRegistry(),
+    });
+    const classified = manifestClassifiedFields(resolved);
+    expect(classified).toContainEqual({ entity: "Patient", field: "mrn", classification: "phi" });
+    expect(classified).toContainEqual({
+      entity: "Observation",
+      field: "value_text",
+      classification: "phi",
+    });
+    // all PHI fields land on auditable entities, so validation still passes
+    const result = tryValidateManifest(resolved);
+    expect(result.ok).toBe(true);
   });
 
   it("throws when the parent pack is missing from the registry", async () => {

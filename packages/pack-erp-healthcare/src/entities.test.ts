@@ -50,4 +50,22 @@ describe("healthcare entities", () => {
       values: ["scheduled", "in_progress", "completed", "cancelled", "no_show"],
     });
   });
+
+  it("classifies the MRN as PHI and demographics as PII", () => {
+    expect(PATIENT_ENTITY.fields.find((f) => f.name === "mrn")?.classification).toBe("phi");
+    expect(PATIENT_ENTITY.fields.find((f) => f.name === "date_of_birth")?.classification).toBe("pii");
+    expect(PATIENT_ENTITY.fields.find((f) => f.name === "email")?.classification).toBe("pii");
+  });
+
+  it("classifies Observation clinical values as PHI", () => {
+    expect(OBSERVATION_ENTITY.fields.find((f) => f.name === "value_quantity")?.classification).toBe("phi");
+    expect(OBSERVATION_ENTITY.fields.find((f) => f.name === "value_text")?.classification).toBe("phi");
+  });
+
+  it("keeps every PHI-bearing entity on the auditable trait", () => {
+    for (const e of ERP_HEALTHCARE_ENTITIES) {
+      const hasPhi = e.fields.some((f) => f.classification === "phi");
+      if (hasPhi) expect(e.traits).toContain("auditable");
+    }
+  });
 });
