@@ -111,6 +111,20 @@ export function planColumnEncryption(
   };
 }
 
+export function formatEncryptionPlan(plans: readonly ColumnMigrationPlan[]): string {
+  if (plans.length === 0) {
+    return "All hinted columns are already encrypted at rest — nothing to migrate.";
+  }
+  const lines: string[] = [
+    `Encryption migration plan: ${plans.length.toString()} column(s) to encrypt in place`,
+  ];
+  for (const plan of plans) {
+    lines.push(`-- ${plan.table}.${plan.column} (${plan.dataClass ?? "?"})`);
+    for (const statement of plan.statements) lines.push(statement);
+  }
+  return lines.join("\n");
+}
+
 export class EncryptionMigrator {
   private readonly conn: PgConnection;
 

@@ -4,6 +4,7 @@ import {
   EncryptionApplier,
   ENCRYPTED_COLUMN_QUERY,
   ensurePgcryptoExtension,
+  formatEncryptionCoverage,
   introspectEncryptedColumns,
   parseColumnDirectives,
   pgcryptoInstalled,
@@ -143,6 +144,31 @@ describe("summarizeEncryptionCoverage", () => {
   it("has no pgcrypto_missing issue when there are no encrypted columns", () => {
     const report = summarizeEncryptionCoverage("t", [], false);
     expect(report.issues).toEqual([]);
+  });
+});
+
+describe("formatEncryptionCoverage", () => {
+  const columns: EncryptedColumn[] = [
+    { schema: "t", table: "patient", column: "mrn", dataType: "text", dataClass: "phi", encryptedStorage: false },
+  ];
+
+  it("renders coverage counts + drift issues", () => {
+    const out = formatEncryptionCoverage(summarizeEncryptionCoverage("t", columns, false));
+    expect(out).toContain('Encryption coverage for schema "t": 1 column(s)');
+    expect(out).toContain("pgcrypto installed: no");
+    expect(out).toContain("[plaintext_at_rest]");
+    expect(out).toContain("[pgcrypto_missing]");
+  });
+
+  it("renders an OK line when fully covered", () => {
+    const encrypted = columns.map((c) => ({ ...c, dataType: "bytea", encryptedStorage: true }));
+    const out = formatEncryptionCoverage(summarizeEncryptionCoverage("t", encrypted, true));
+    expect(out).toContain("OK — every hinted column is encrypted at rest.");
+  });
+
+  it("notes when no columns are hinted", () => {
+    const out = formatEncryptionCoverage(summarizeEncryptionCoverage("t", [], true));
+    expect(out).toContain("no columns hinted for at-rest encryption.");
   });
 });
 

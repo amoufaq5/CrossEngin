@@ -5,6 +5,7 @@ import {
   EncryptionMigrator,
   emitDecryptingViewSql,
   emitEncryptColumnSql,
+  formatEncryptionPlan,
   planColumnEncryption,
 } from "./encryption-migration.js";
 
@@ -78,6 +79,23 @@ describe("planColumnEncryption", () => {
     );
     expect(plan).toMatchObject({ schema: "s", table: "t", column: "c", dataClass: "phi" });
     expect(plan.statements).toHaveLength(5);
+  });
+});
+
+describe("formatEncryptionPlan", () => {
+  it("renders a no-op message when nothing needs migrating", () => {
+    expect(formatEncryptionPlan([])).toContain("nothing to migrate");
+  });
+
+  it("lists each column header + its statements", () => {
+    const plan = planColumnEncryption(
+      { schema: "t", table: "patient", column: "mrn", dataType: "text", dataClass: "phi", encryptedStorage: false },
+      KEY_REF,
+    );
+    const out = formatEncryptionPlan([plan]);
+    expect(out).toContain("1 column(s) to encrypt in place");
+    expect(out).toContain("-- patient.mrn (phi)");
+    expect(out).toContain("ALTER TABLE");
   });
 });
 

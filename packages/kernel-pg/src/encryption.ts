@@ -189,6 +189,29 @@ export function summarizeEncryptionCoverage(
   };
 }
 
+export function formatEncryptionCoverage(report: EncryptionCoverageReport): string {
+  const lines: string[] = [];
+  lines.push(
+    `Encryption coverage for schema "${report.schema}": ${report.total.toString()} column(s) hinted encrypt=at_rest`,
+  );
+  lines.push(`  pgcrypto installed: ${report.pgcryptoInstalled ? "yes" : "no"}`);
+  if (report.total === 0) {
+    lines.push("  no columns hinted for at-rest encryption.");
+    return lines.join("\n");
+  }
+  lines.push(
+    `  ciphertext: ${report.ciphertextStored.toString()}   plaintext: ${report.plaintext.toString()}`,
+  );
+  if (report.issues.length === 0) {
+    lines.push("  OK — every hinted column is encrypted at rest.");
+  } else {
+    for (const issue of report.issues) {
+      lines.push(`  [${issue.kind}] ${issue.detail}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export class EncryptionApplier {
   private readonly conn: PgConnection;
 

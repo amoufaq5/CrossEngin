@@ -16,9 +16,22 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
-+ M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 + M8.7 landed: **55 packages
-+ 1 app, 122 meta-schema tables, 6,115 tests**, all green, no
-type errors. **Phase 2's eight milestones (M1–M8) are complete.**
++ M7.8.6 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 + M8.7 landed: **55
+packages + 1 app, 122 meta-schema tables, 6,120 tests**, all
+green, no type errors. **Phase 2's eight milestones (M1–M8) are
+complete.** M7.8.6 surfaced the M7.8/M7.8.5 encryption applier +
+migrator as a `crossengin-pg encrypt` CLI command:
+`encrypt --verify` prints an `EncryptionCoverageReport`
+(`formatEncryptionCoverage`) and exits 1 on drift (plaintext PHI
+/ missing pgcrypto) so CI can gate "zero plaintext PHI columns";
+`encrypt --plan` (default) prints the encrypt-on-write SQL dry-run
+(`formatEncryptionPlan`); `encrypt --apply [--provision]
+[--confirm]` runs the migration (production-guarded). Flags:
+`--schema=<name>` (default meta), `--key-ref=<sql>` (default
+`current_setting('app.column_encryption_key')` — a reference,
+never a raw key). The bin's flag parser was extended to read
+`--k=v` values; the decision/SQL logic stays in tested `src`
+modules so the bin is a thin dispatcher.
 M2.8.6 added per-turn provider + cost attribution to chat:
 `@crossengin/ai-router`'s `DefaultLlmRouter` gained an opt-in
 `onResolved(resolution)` observer (`RouterResolution =
@@ -395,7 +408,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0073 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0074 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -426,7 +439,7 @@ redaction by classification), ADR-0069 covers M7.7.6
 ADR-0071 covers M7.8.5 (encrypt-on-write migration), ADR-0072
 covers M2.8.5 (multi-vendor router in architect-cli chat),
 ADR-0073 covers M2.8.6 (per-turn provider + cost attribution in
-chat).
+chat), ADR-0074 covers M7.8.6 (`crossengin-pg encrypt` CLI).
 
 ## Architecture in 90 seconds
 
@@ -475,7 +488,7 @@ re-exporting everything.
   `pgp_sym_decrypt` read view, `EncryptionMigrator.migrateSchema`
   plans plaintext-only + runs per-column transactions). Ships
   `crossengin-pg` CLI with `apply`, `apply --dry-run`, `drift`,
-  `inspect`, `version` commands.
+  `inspect`, `encrypt --verify|--plan|--apply`, `version` commands.
 - **`workflow-runtime-pg`** — Postgres-backed adapters for the
   workflow runtime. 9 modules: id-mapping
   (WorkflowInstanceIdResolver + WorkflowDefinitionIdResolver,
@@ -1434,7 +1447,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0073 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0074 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1466,7 +1479,8 @@ mechanism + pgcrypto coverage applier), ADR-0071 covers Phase 2
 M7.8.5 (encrypt-on-write migration), ADR-0072 covers Phase 2
 M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
 covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
-chat). When you ship
+chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI).
+When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
