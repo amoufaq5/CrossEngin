@@ -16,9 +16,22 @@ healthcare verticals ride on top.
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
-+ M7.8.6 + M7.9 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 + M8.7
-landed: **56 packages + 1 app, 122 meta-schema tables, 6,150
-tests**, all green, no type errors. **Phase 2's eight milestones
++ M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
+M8.7 landed: **57 packages + 1 app, 122 meta-schema tables, 6,170
+tests**, all green, no type errors. M7.9.1 added
+`@crossengin/pack-erp-grocery` — the fourth vertical pack,
+proving **transitive (three-level) `meta.extends` lineage**:
+grocery extends `operate-erp/retail`, which itself extends core,
+so `resolveManifest` recurses grocery → retail → core and merges
+all three (10 entities, 9 roles, 3 workflows, 11 relations). 2
+entities (Supplier → core Account; PerishableLot → retail Product
++ own Supplier; both auditable) with cross-level references that
+resolve only when the whole chain is present — a test asserts
+resolution *throws* when retail is available but core is not.
+`Supplier.contact_email` → pii, `PerishableLot.cost_per_unit` →
+commercial_sensitive; classifications survive the deeper merge
+(retail's `Product.unit_cost` also propagates).
+`compliancePacks: ["haccp"]`. **Phase 2's eight milestones
 (M1–M8) are complete.** M7.9 added `@crossengin/pack-erp-retail`
 — the third vertical pack and the second `meta.extends` consumer,
 proving the pack-extension mechanism generalizes. It declares
@@ -425,7 +438,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0075 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0076 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -457,7 +470,8 @@ ADR-0071 covers M7.8.5 (encrypt-on-write migration), ADR-0072
 covers M2.8.5 (multi-vendor router in architect-cli chat),
 ADR-0073 covers M2.8.6 (per-turn provider + cost attribution in
 chat), ADR-0074 covers M7.8.6 (`crossengin-pg encrypt` CLI), ADR-0075
-covers M7.9 (`pack-erp-retail` — third vertical pack).
+covers M7.9 (`pack-erp-retail` — third vertical pack), ADR-0076
+covers M7.9.1 (`pack-erp-grocery` — transitive pack lineage).
 
 ## Architecture in 90 seconds
 
@@ -865,6 +879,18 @@ re-exporting everything.
   invariants stay dormant. `buildErpRetailPack(opts?)` passes
   `tryValidateManifest` once resolved against a core registry.
   Template for `pack-erp-construction` / `-education`.
+- **`pack-erp-grocery`** — fourth vertical pack; proves transitive
+  (three-level) `meta.extends`. Declares `meta.extends:
+  ["operate-erp/retail"]`, so resolving it recurses grocery →
+  retail → core and merges all three (10 entities, 9 roles, 3
+  workflows, 11 relations). 2 entities (Supplier → core Account;
+  PerishableLot → retail Product + own Supplier, 4-state
+  lifecycle), with cross-level references that resolve only when
+  the full chain is present — `resolveManifest` throws if retail
+  is in the registry but core is not. `Supplier.contact_email` →
+  pii, `PerishableLot.cost_per_unit` → commercial_sensitive;
+  classifications propagate through both merge levels (retail's
+  `Product.unit_cost` survives too). `compliancePacks: ["haccp"]`.
 
 ### Business operations
 - **`billing`** — plans, subscriptions, metered usage, invoices,
@@ -1480,7 +1506,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0075 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0076 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1513,7 +1539,8 @@ M7.8.5 (encrypt-on-write migration), ADR-0072 covers Phase 2
 M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
 covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
 chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI),
-ADR-0075 covers Phase 2 M7.9 (pack-erp-retail).
+ADR-0075 covers Phase 2 M7.9 (pack-erp-retail), ADR-0076 covers
+Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
