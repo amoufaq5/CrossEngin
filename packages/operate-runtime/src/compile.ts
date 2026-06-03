@@ -11,6 +11,7 @@ import {
   MapRedactionRegistry,
   redactionRegistryFromManifest,
   type IdempotencyStore,
+  type JwksProvider,
   type OpaqueTokenLookup,
   type PrincipalResolver,
   type PrincipalRoles,
@@ -77,6 +78,10 @@ export interface OperateGatewayOptions extends OperateRuntimeOptions {
   readonly idempotencyStore?: IdempotencyStore;
   readonly rateLimitChecker?: RateLimitChecker;
   readonly clock?: { now(): Date };
+  /** Production identity: a JWKS provider + expected issuer/audience for Bearer-JWT auth. */
+  readonly jwksProvider?: JwksProvider;
+  readonly jwtIssuer?: string;
+  readonly jwtAudience?: string;
 }
 
 export interface OperateServer extends CompiledOperateServer {
@@ -101,6 +106,9 @@ export function buildOperateGateway(
     rateLimitChecker: options.rateLimitChecker ?? new InMemoryRateLimitChecker({ limit: 10_000 }),
     redactionRegistry: compiled.redactionRegistry,
     ...(options.opaqueTokenLookup !== undefined ? { opaqueTokenLookup: options.opaqueTokenLookup } : {}),
+    ...(options.jwksProvider !== undefined ? { jwksProvider: options.jwksProvider } : {}),
+    ...(options.jwtIssuer !== undefined ? { jwtIssuer: options.jwtIssuer } : {}),
+    ...(options.jwtAudience !== undefined ? { jwtAudience: options.jwtAudience } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   });
   return { ...compiled, runtime };

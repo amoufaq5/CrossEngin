@@ -3,7 +3,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import { buildOperateGateway, type EntityStore, type OperateServer } from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, type RawHttpRequest, type RawHttpResponse } from "./http.js";
-import { buildPrincipalWiring, type ApiKeySpec } from "./principals.js";
+import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 
 let requestCounter = 0;
 function defaultRequestId(): string {
@@ -79,6 +79,8 @@ export interface BuildOperateHttpServerOptions {
   readonly manifest: Manifest;
   readonly store: EntityStore;
   readonly apiKeys: readonly ApiKeySpec[];
+  /** Optional production identity: verify Bearer JWTs against a JWKS. */
+  readonly jwt?: JwtVerifyConfig;
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -101,6 +103,13 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     principalRoles: wiring.principalRoles,
     principalResolver: wiring.principalResolver,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
+    ...(options.jwt !== undefined
+      ? {
+          jwksProvider: options.jwt.jwksProvider,
+          jwtIssuer: options.jwt.issuer,
+          jwtAudience: options.jwt.audience,
+        }
+      : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

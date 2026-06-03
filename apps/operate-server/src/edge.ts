@@ -2,7 +2,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore, type OperateServer } from "@crossengin/operate-runtime";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
-import type { ApiKeySpec } from "./principals.js";
+import type { ApiKeySpec, JwtVerifyConfig } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 
 /**
@@ -58,6 +58,8 @@ export interface BuildEdgeFetchHandlerOptions {
   /** Defaults to an `InMemoryEntityStore` (edge runtimes can't open a node-postgres socket). */
   readonly store?: EntityStore;
   readonly apiKeys: readonly ApiKeySpec[];
+  /** Optional production identity: verify Bearer JWTs against a JWKS. */
+  readonly jwt?: JwtVerifyConfig;
   readonly now?: () => Date;
 }
 
@@ -78,6 +80,7 @@ export function buildEdgeFetchHandler(options: BuildEdgeFetchHandlerOptions): Ed
     store: options.store ?? new InMemoryEntityStore(),
     apiKeys: options.apiKeys,
     defaultScheme: "https",
+    ...(options.jwt !== undefined ? { jwt: options.jwt } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
   });
   return { fetch: createFetchHandler(httpServer), gateway };

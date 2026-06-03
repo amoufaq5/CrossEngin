@@ -58,4 +58,24 @@ describe("parseServeArgs", () => {
   it("requires a value for a value-flag", () => {
     expect(() => parseServeArgs(["--pack"])).toThrow(/requires a value/);
   });
+
+  it("parses JWKS + JWT flags", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--jwks-key",
+      "key-1:AAAbase64",
+      "--jwt-issuer",
+      "https://idp/",
+      "--jwt-audience",
+      "https://api/",
+    ]);
+    expect(opts.jwksKeys).toEqual(["key-1:AAAbase64"]);
+    expect(opts.jwtIssuer).toBe("https://idp/");
+    expect(opts.jwtAudience).toBe("https://api/");
+  });
+
+  it("requires issuer + audience when a JWKS is configured", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-key", "k:v"])).toThrow(/issuer.*audience/);
+  });
 });

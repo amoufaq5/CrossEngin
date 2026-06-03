@@ -18,8 +18,8 @@ M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
-P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16** landed: **59
-packages + 2 apps, 123 meta-schema tables, 6,344 tests**, all
+P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17** landed:
+**59 packages + 2 apps, 123 meta-schema tables, 6,358 tests**, all
 green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
@@ -182,7 +182,23 @@ store casts the bound value to the column's native type
 (`$n::NUMERIC(…)` — correct typed compare); the JSONB store
 text-compares. `parseListQuery` reads `?field[op]=value` +
 `?field[in]=a,b,c`, still gated to filterable columns. Field
-selection (projection) is the open list refinement. M7.9.1 added
+selection (projection) is the open list refinement. **P1.17
+(ADR-0097) added a production JWT/JWKS identity source** to
+`apps/operate-server`, behind the existing `PrincipalWiring` seam:
+`OperateGatewayOptions` gains `jwksProvider`/`jwtIssuer`/
+`jwtAudience` (the gateway already does the EdDSA verify), and
+`buildPrincipalWiring`'s resolver is now scheme-aware — a verified
+`bearer_jwt` resolves *statelessly* from its claims
+(`principalFromJwtClaims`: `sub` → a UUID via `subjectToUuid`,
+scopes → grantedScopes/role, tenant from the `x-tenant-id`
+`tenantHint`), while opaque `api_key_header` tokens resolve from
+the registered map (unchanged). `--jwks-key kid:base64` /
+`--jwks-file` + `--jwt-issuer` / `--jwt-audience` wire an
+`InMemoryJwksProvider`; threads through Node *and* edge. Tests mint
+a real Ed25519-signed JWT (generateEd25519Keypair + signEd25519) —
+valid → 200/201 (scope drives RBAC), unknown-key/wrong-issuer/
+expired → 401, fail-closed. Dev (`--api-key`) + prod (JWT) auth
+coexist. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -602,7 +618,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0096 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0097 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -627,7 +643,8 @@ topological apply order in the column store), ADR-0093 covers P1.13
 covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
-operators)).
+operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
+operate-server)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -880,8 +897,10 @@ re-exporting everything.
   modules: http (RawHttpRequest/RawHttpResponse + parseMethod +
   splitTarget + rawToIncoming → a gateway IncomingRequest),
   principals (parseApiKeySpec key:role:tenant + buildPrincipalWiring
-  → OpaqueTokenLookup + InMemoryPrincipalResolver + scope→role
-  bridge, fail-closed), manifest-source (loadBuiltinPack resolves a
+  → OpaqueTokenLookup + scheme-aware PrincipalResolver + scope→role
+  bridge, fail-closed; P1.17: principalFromJwtClaims + subjectToUuid
+  + buildJwksProvider resolve a verified Bearer JWT statelessly from
+  its claims), manifest-source (loadBuiltinPack resolves a
   vertical pack's meta.extends lineage against a registry of all
   packs; loadManifestFromJson parses+validates a pre-resolved doc),
   server (OperateHttpServer.dispatch maps raw → handleRequest →
@@ -1807,7 +1826,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0096 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0097 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1863,7 +1882,9 @@ ADR-0094 covers Phase 3 P1.14 (many_to_many join tables in the
 column store), ADR-0095 covers Phase 3 P1.15 (association
 link/unlink API over the join tables), ADR-0096 covers Phase 3
 P1.16 (keyset pagination + typed filter operators in the entity
-stores; ADRs 0080-0085 reserved for P3-P8).
+stores), ADR-0097 covers Phase 3 P1.17 (production JWT/JWKS
+identity in `apps/operate-server`; ADRs 0080-0085 reserved for
+P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

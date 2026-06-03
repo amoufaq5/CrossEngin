@@ -9,7 +9,13 @@ import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operat
 import type { ServeOptions } from "./cli.js";
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
-import { parseApiKeySpec } from "./principals.js";
+import {
+  buildJwksProvider,
+  parseApiKeySpec,
+  parseJwksKeySpec,
+  type JwksKeySpec,
+  type JwtVerifyConfig,
+} from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 
 /** The slice of Node's `IncomingMessage` the adapter reads. */
@@ -83,6 +89,25 @@ export function createNodeRequestListener(
   };
 }
 
+async function resolveJwtConfig(options: ServeOptions): Promise<JwtVerifyConfig | null> {
+  const specs: JwksKeySpec[] = options.jwksKeys.map(parseJwksKeySpec);
+  if (options.jwksFile !== null) {
+    const parsed = JSON.parse(await readFile(options.jwksFile, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) throw new Error(`--jwks-file must be a JSON array of {kid, publicKeyBase64}`);
+    for (const k of parsed as JwksKeySpec[]) {
+      if (typeof k.kid !== "string" || typeof k.publicKeyBase64 !== "string") {
+        throw new Error(`--jwks-file entries must be {kid, publicKeyBase64}`);
+      }
+      specs.push({ kid: k.kid, publicKeyBase64: k.publicKeyBase64 });
+    }
+  }
+  if (specs.length === 0) return null;
+  if (options.jwtIssuer === null || options.jwtAudience === null) {
+    throw new Error("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
+  }
+  return { jwksProvider: buildJwksProvider(specs), issuer: options.jwtIssuer, audience: options.jwtAudience };
+}
+
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<EntityStore> {
   if (options.store === "memory") return new InMemoryEntityStore();
   const conn = createNodePgConnection(parsePgEnvConfig());
@@ -112,11 +137,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : await loadBuiltinPack(options.pack ?? "");
   const store = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
+  const jwt = await resolveJwtConfig(options);
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
     apiKeys,
     defaultScheme: options.defaultScheme,
+    ...(jwt !== null ? { jwt } : {}),
   });
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {

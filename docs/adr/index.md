@@ -148,3 +148,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 62 | 0094 | 3,500 | Drafted alongside many_to_many join tables in the column store (Phase 3 P1.14) |
 | 63 | 0095 | 3,500 | Drafted alongside the association link/unlink API over join tables (Phase 3 P1.15) |
 | 64 | 0096 | 4,000 | Drafted alongside keyset pagination + typed filter operators in the entity stores (Phase 3 P1.16) |
+| 65 | 0097 | 4,000 | Drafted alongside production JWT/JWKS identity in `apps/operate-server` (Phase 3 P1.17) |

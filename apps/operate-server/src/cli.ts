@@ -9,6 +9,10 @@ export interface ServeOptions {
   readonly store: StoreKind;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
+  readonly jwksKeys: readonly string[];
+  readonly jwksFile: string | null;
+  readonly jwtIssuer: string | null;
+  readonly jwtAudience: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -42,6 +46,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
+  const jwksKeys: string[] = [];
+  let jwksFile: string | null = null;
+  let jwtIssuer: string | null = null;
+  let jwtAudience: string | null = null;
   let help = false;
   let version = false;
 
@@ -86,9 +94,25 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--api-key" || arg.startsWith("--api-key=")) {
       apiKeys.push(takeValue(arg, next, "--api-key"));
       i += consumed();
+    } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
+      jwksKeys.push(takeValue(arg, next, "--jwks-key"));
+      i += consumed();
+    } else if (arg === "--jwks-file" || arg.startsWith("--jwks-file=")) {
+      jwksFile = takeValue(arg, next, "--jwks-file");
+      i += consumed();
+    } else if (arg === "--jwt-issuer" || arg.startsWith("--jwt-issuer=")) {
+      jwtIssuer = takeValue(arg, next, "--jwt-issuer");
+      i += consumed();
+    } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
+      jwtAudience = takeValue(arg, next, "--jwt-audience");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
+  }
+
+  if ((jwksKeys.length > 0 || jwksFile !== null) && (jwtIssuer === null || jwtAudience === null)) {
+    throw new CliUsageError("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
 
   if (!help && !version) {
@@ -100,7 +124,21 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     }
   }
 
-  return { port, pack, manifestPath, store, schema, apiKeys, defaultScheme, help, version };
+  return {
+    port,
+    pack,
+    manifestPath,
+    store,
+    schema,
+    apiKeys,
+    jwksKeys,
+    jwksFile,
+    jwtIssuer,
+    jwtAudience,
+    defaultScheme,
+    help,
+    version,
+  };
 }
 
 export const helpText = `operate-server — serve a resolved CrossEngin manifest as a live multi-tenant API
@@ -121,8 +159,14 @@ Options:
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)
   --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable)
+  --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
+  --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
+  --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
+  --jwt-audience <aud> Expected JWT audience (required with a JWKS)
   --help, -h           Show this help
   --version, -v        Print version
 
-Postgres (when --store pg): standard PG* env vars (PGHOST, PGDATABASE, ...).
+Auth: --api-key for dev opaque tokens; --jwks-* + --jwt-* to verify Bearer JWTs
+(EdDSA) against an IdP's public keys — the verified claims (sub/scope/tenant_id)
+become the principal. Postgres (--store pg): standard PG* env vars.
 `;
