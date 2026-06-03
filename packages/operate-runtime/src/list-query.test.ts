@@ -81,7 +81,23 @@ describe("parseListQuery", () => {
 
   it("builds equality filters only for filterable params", () => {
     const q = parseListQuery({ status: "active", bogus: "x", cursor: "c1" }, config);
-    expect(q.filters).toEqual([{ field: "status", value: "active" }]);
+    expect(q.filters).toEqual([{ field: "status", op: "eq", value: "active" }]);
     expect(q.cursor).toBe("c1");
+  });
+
+  it("parses typed operators via field[op] syntax", () => {
+    const q = parseListQuery({ "name[gte]": "M", "status[ne]": "archived" }, config);
+    expect(q.filters).toContainEqual({ field: "name", op: "gte", value: "M" });
+    expect(q.filters).toContainEqual({ field: "status", op: "ne", value: "archived" });
+  });
+
+  it("parses an in filter from a comma-separated value", () => {
+    const q = parseListQuery({ "status[in]": "active, archived ,draft" }, config);
+    expect(q.filters).toEqual([{ field: "status", op: "in", value: ["active", "archived", "draft"] }]);
+  });
+
+  it("ignores an operator on a non-filterable field", () => {
+    const q = parseListQuery({ "secret[gt]": "1" }, config);
+    expect(q.filters).toEqual([]);
   });
 });

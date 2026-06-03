@@ -222,7 +222,7 @@ function capturePg(rows: EntityRecord[]): {
 }
 
 describe("PostgresEntityStore.listPage — pushdown", () => {
-  it("pushes ORDER BY + LIMIT(+1) + OFFSET and sets nextCursor when more rows exist", async () => {
+  it("pushes ORDER BY + keyset LIMIT(+1) and sets nextCursor when more rows exist", async () => {
     // limit 2 → query asks for 3; 3 returned ⇒ hasMore
     const { conn, last } = capturePg([{ id: "a" }, { id: "b" }, { id: "c" }]);
     const store = new PostgresEntityStore(conn);
@@ -233,8 +233,9 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
       filters: [],
     });
     expect(last.sql).toContain("ORDER BY document ->> 'name' DESC, record_id ASC");
-    expect(last.sql).toContain("LIMIT $3 OFFSET $4");
-    expect(last.params).toEqual([TENANT, "Product", 3, 0]);
+    expect(last.sql).toContain("LIMIT $3");
+    expect(last.sql).not.toContain("OFFSET");
+    expect(last.params).toEqual([TENANT, "Product", 3]);
     expect(page.records.map((r) => r["id"])).toEqual(["a", "b"]);
     expect(page.nextCursor).not.toBeNull();
   });
@@ -257,7 +258,7 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
       filters: [{ field: "status", value: "active" }],
     });
     expect(last.sql).toContain("document ->> 'status' = $3");
-    expect(last.params).toEqual([TENANT, "Product", "active", 11, 0]);
+    expect(last.params).toEqual([TENANT, "Product", "active", 11]);
   });
 
   it("ignores a filter/sort field that isn't a safe identifier", async () => {
@@ -271,6 +272,6 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
     });
     expect(last.sql).not.toContain("DROP");
     expect(last.sql).not.toContain("DELETE");
-    expect(last.params).toEqual([TENANT, "Product", 11, 0]);
+    expect(last.params).toEqual([TENANT, "Product", 11]);
   });
 });

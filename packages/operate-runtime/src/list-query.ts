@@ -1,6 +1,6 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 
-import type { ListFilter, ListQuery, ListSort } from "./store.js";
+import type { FilterOp, ListFilter, ListQuery, ListSort } from "./store.js";
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 500;
@@ -93,10 +93,34 @@ export function parseListQuery(
   const filters: ListFilter[] = [];
   for (const [key, value] of Object.entries(query)) {
     if (RESERVED_PARAMS.has(key)) continue;
-    if (!config.filterableFields.includes(key)) continue;
+    const parsed = parseFilterKey(key);
+    if (parsed === null || !config.filterableFields.includes(parsed.field)) continue;
+    if (parsed.op === "in") {
+      const values = inValues(value);
+      if (values.length > 0) filters.push({ field: parsed.field, op: "in", value: values });
+      continue;
+    }
     const v = firstValue(value);
-    if (v !== undefined) filters.push({ field: key, value: v });
+    if (v !== undefined) filters.push({ field: parsed.field, op: parsed.op, value: v });
   }
 
   return { limit, cursor, sort, filters };
+}
+
+const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[(eq|ne|gt|gte|lt|lte|in)\])?$/;
+
+/** Parses a filter param key: `field` → eq, `field[op]` → that operator. */
+function parseFilterKey(key: string): { field: string; op: FilterOp } | null {
+  const m = FILTER_KEY_RE.exec(key);
+  if (m === null) return null;
+  return { field: m[1]!, op: (m[2] as FilterOp | undefined) ?? "eq" };
+}
+
+/** Splits an `in` filter value into a list (repeated param or comma-separated). */
+function inValues(value: string | readonly string[]): string[] {
+  if (Array.isArray(value)) return [...value];
+  return (value as string)
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }

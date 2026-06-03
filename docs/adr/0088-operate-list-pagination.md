@@ -79,14 +79,13 @@ A `ListQuery` → `ListPage` over the `EntityStore`, derived from the `ListView`
 ## Alternatives considered
 
 - **Keyset (seek) pagination instead of offset.**
-  - **Decision.** Offset now (uniform across the in-memory + JSONB stores, exact
-    `nextCursor`-on-more). Keyset is the scale refinement — it slots behind the
-    same opaque-cursor contract (the token is already opaque, so the encoding can
-    change without an API break).
+  - **Decision.** Offset first; **keyset delivered in ADR-0096 (P1.16)** behind
+    the same opaque-cursor contract (the token was already opaque, so the
+    encoding changed without an API break).
 - **Typed/operator filters (`gte`, `in`, ranges).**
-  - **Decision.** Equality-only first cut (covers status/category/owner
-    lookups). Richer operators ride the same `ListFilter` shape later; the
-    `ListView` column flags already gate which fields are filterable.
+  - **Decision.** Equality-only first cut; **typed operators delivered in
+    ADR-0096 (P1.16)** on the same `ListFilter` shape (`op?`), gated by the same
+    `ListView` filterable-column flags.
 - **Sort/order via the SQL JSONB text cast vs typed columns.**
   - **Decision.** `document ->> 'field'` (text ordering) for the JSONB store —
     correct for strings, lexicographic for numbers. The column-mapped store

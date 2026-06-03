@@ -1,13 +1,14 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
-  decodeCursor,
-  encodeCursor,
+  encodeKeyset,
+  keysetOf,
   type EntityRecord,
   type EntityStore,
   type ListPage,
   type ListQuery,
 } from "@crossengin/operate-runtime";
 
+import { buildListSql, type ListSqlAdapter } from "./list-sql.js";
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -59,36 +60,28 @@ export class PostgresEntityStore implements EntityStore {
   async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const params: unknown[] = [tenantId, entity];
-      const where: string[] = [`tenant_id = $1`, `entity = $2`];
-      for (const filter of query.filters) {
-        if (!FIELD_RE.test(filter.field)) continue;
-        params.push(filter.value);
-        where.push(`document ->> '${filter.field}' = $${params.length.toString()}`);
-      }
-      const orderParts: string[] = [];
-      for (const sort of query.sort) {
-        if (!FIELD_RE.test(sort.field)) continue;
-        orderParts.push(`document ->> '${sort.field}' ${sort.direction === "desc" ? "DESC" : "ASC"}`);
-      }
-      orderParts.push("record_id ASC");
-      const offset = decodeCursor(query.cursor);
-      // fetch one extra row to detect whether a next page exists
-      params.push(query.limit + 1);
-      const limitParam = `$${params.length.toString()}`;
-      params.push(offset);
-      const offsetParam = `$${params.length.toString()}`;
+      // JSONB document fields read + compare as text; identifier-validated so
+      // only the value is ever bound (a non-identifier field is dropped).
+      const adapter: ListSqlAdapter = {
+        columnExpr: (field) => (FIELD_RE.test(field) ? `document ->> '${field}'` : null),
+        castSuffix: () => "",
+        idExpr: "record_id",
+      };
+      const { where, orderBy } = buildListSql(query, adapter, [`tenant_id = $1`, `entity = $2`], params);
+      const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
       const res = await tx.query<DocumentRow>(
         `SELECT document
            FROM ${this.table}
-          WHERE ${where.join(" AND ")}
-          ORDER BY ${orderParts.join(", ")}
-          LIMIT ${limitParam} OFFSET ${offsetParam}`,
+          WHERE ${where}
+          ORDER BY ${orderBy}
+          LIMIT ${limitParam}`,
         params,
       );
       const rows = res.rows.map((r) => r.document);
       const hasMore = rows.length > query.limit;
       const records = hasMore ? rows.slice(0, query.limit) : rows;
-      const nextCursor = hasMore ? encodeCursor(offset + records.length) : null;
+      const last = records[records.length - 1];
+      const nextCursor = hasMore && last !== undefined ? encodeKeyset(keysetOf(last, query.sort)) : null;
       return { records, nextCursor };
     });
   }

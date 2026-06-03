@@ -7,8 +7,8 @@ import {
   type PgConnection,
 } from "@crossengin/kernel-pg";
 import {
-  decodeCursor,
-  encodeCursor,
+  encodeKeyset,
+  keysetOf,
   type EntityRecord,
   type EntityStore,
   type ListPage,
@@ -17,6 +17,7 @@ import {
 
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
+import { buildListSql, type ListSqlAdapter } from "./list-sql.js";
 import {
   columnIndex,
   columnPlansForManifest,
@@ -153,37 +154,35 @@ export class ColumnMappedEntityStore implements EntityStore {
     const qualified = qualifyTable(plan.schema, plan.table);
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const params: unknown[] = [tenantId];
-      const where = [`${quoteIdent("tenant_id")} = $1`];
-      for (const filter of query.filters) {
-        const mapping = idx.get(filter.field);
-        if (mapping === undefined || mapping.encryptAtRest) continue;
-        params.push(filter.value);
-        where.push(`${quoteIdent(mapping.column)}::text = $${params.length.toString()}`);
-      }
-      const order: string[] = [];
-      for (const sort of query.sort) {
-        const mapping = idx.get(sort.field);
-        if (mapping === undefined || mapping.encryptAtRest) continue;
-        order.push(`${quoteIdent(mapping.column)} ${sort.direction === "desc" ? "DESC" : "ASC"}`);
-      }
-      order.push(`${quoteIdent("id")} ASC`);
-      const offset = decodeCursor(query.cursor);
-      params.push(query.limit + 1);
-      const limitParam = `$${params.length.toString()}`;
-      params.push(offset);
-      const offsetParam = `$${params.length.toString()}`;
+      // Compare on the native column type (typed cast); an unknown or encrypted
+      // column is dropped from filter/sort (can't order ciphertext).
+      const adapter: ListSqlAdapter = {
+        columnExpr: (field) => {
+          const m = idx.get(field);
+          return m === undefined || m.encryptAtRest ? null : quoteIdent(m.column);
+        },
+        castSuffix: (field) => {
+          const m = idx.get(field);
+          return m === undefined ? "" : `::${m.sqlType}`;
+        },
+        idExpr: quoteIdent("id"),
+      };
+      const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
+      const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
       const res = await tx.query<Record<string, unknown>>(
         `SELECT ${this.selectList(plan)}
            FROM ${qualified}
-          WHERE ${where.join(" AND ")}
-          ORDER BY ${order.join(", ")}
-          LIMIT ${limitParam} OFFSET ${offsetParam}`,
+          WHERE ${where}
+          ORDER BY ${orderBy}
+          LIMIT ${limitParam}`,
         params,
       );
       const rows = res.rows.map((r) => rowToRecord(plan, r));
       const hasMore = rows.length > query.limit;
       const records = hasMore ? rows.slice(0, query.limit) : rows;
-      return { records, nextCursor: hasMore ? encodeCursor(offset + records.length) : null };
+      const last = records[records.length - 1];
+      const nextCursor = hasMore && last !== undefined ? encodeKeyset(keysetOf(last, query.sort)) : null;
+      return { records, nextCursor };
     });
   }
 

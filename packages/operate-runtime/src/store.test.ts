@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   InMemoryEntityStore,
   applyListQuery,
-  decodeCursor,
-  encodeCursor,
+  decodeKeyset,
+  encodeKeyset,
+  matchesFilter,
   type ListQuery,
 } from "./store.js";
 
@@ -14,21 +15,42 @@ function query(overrides: Partial<ListQuery> = {}): ListQuery {
   return { limit: 2, cursor: null, sort: [], filters: [], ...overrides };
 }
 
-describe("cursor encoding", () => {
-  it("round-trips a non-negative offset", () => {
-    expect(decodeCursor(encodeCursor(40))).toBe(40);
+describe("keyset cursor encoding", () => {
+  it("round-trips a keyset position", () => {
+    expect(decodeKeyset(encodeKeyset({ k: ["Apple"], id: "b" }))).toEqual({ k: ["Apple"], id: "b" });
   });
-  it("reads a malformed or null cursor as 0", () => {
-    expect(decodeCursor(null)).toBe(0);
-    expect(decodeCursor("!!!not-base64!!!")).toBe(0);
+  it("reads a malformed or null cursor as null", () => {
+    expect(decodeKeyset(null)).toBeNull();
+    expect(decodeKeyset("!!!not-base64!!!")).toBeNull();
+  });
+});
+
+describe("matchesFilter — typed operators", () => {
+  const r = { id: "x", price: 10, status: "active" };
+  it("eq / ne", () => {
+    expect(matchesFilter(r, { field: "status", op: "eq", value: "active" })).toBe(true);
+    expect(matchesFilter(r, { field: "status", op: "ne", value: "active" })).toBe(false);
+  });
+  it("numeric gt / gte / lt / lte (coerced)", () => {
+    expect(matchesFilter(r, { field: "price", op: "gt", value: "5" })).toBe(true);
+    expect(matchesFilter(r, { field: "price", op: "gte", value: "10" })).toBe(true);
+    expect(matchesFilter(r, { field: "price", op: "lt", value: "10" })).toBe(false);
+    expect(matchesFilter(r, { field: "price", op: "lte", value: "10" })).toBe(true);
+  });
+  it("in membership", () => {
+    expect(matchesFilter(r, { field: "status", op: "in", value: ["active", "draft"] })).toBe(true);
+    expect(matchesFilter(r, { field: "status", op: "in", value: ["draft"] })).toBe(false);
+  });
+  it("defaults to eq when op is omitted", () => {
+    expect(matchesFilter(r, { field: "status", value: "active" })).toBe(true);
   });
 });
 
 describe("applyListQuery", () => {
   const rows = [
-    { id: "a", name: "Cherry", status: "active" },
-    { id: "b", name: "Apple", status: "active" },
-    { id: "c", name: "Banana", status: "archived" },
+    { id: "a", name: "Cherry", status: "active", price: 30 },
+    { id: "b", name: "Apple", status: "active", price: 10 },
+    { id: "c", name: "Banana", status: "archived", price: 20 },
   ];
 
   it("sorts ascending and descending", () => {
@@ -38,20 +60,33 @@ describe("applyListQuery", () => {
     expect(desc.records.map((r) => r["name"])).toEqual(["Cherry", "Banana", "Apple"]);
   });
 
-  it("filters by equality", () => {
-    const page = applyListQuery(rows, query({ limit: 10, filters: [{ field: "status", value: "active" }] }));
-    expect(page.records).toHaveLength(2);
-    expect(page.records.every((r) => r["status"] === "active")).toBe(true);
+  it("filters by equality and by a typed operator", () => {
+    const eq = applyListQuery(rows, query({ limit: 10, filters: [{ field: "status", value: "active" }] }));
+    expect(eq.records).toHaveLength(2);
+    const gt = applyListQuery(rows, query({ limit: 10, filters: [{ field: "price", op: "gt", value: "15" }] }));
+    expect(gt.records.map((r) => r["id"]).sort()).toEqual(["a", "c"]);
   });
 
-  it("paginates with an opaque next cursor", () => {
-    const first = applyListQuery(rows, query({ limit: 2, sort: [{ field: "id", direction: "asc" }] }));
-    expect(first.records.map((r) => r["id"])).toEqual(["a", "b"]);
+  it("keyset-paginates with a stable cursor (sorted by name)", () => {
+    const sort = [{ field: "name" as const, direction: "asc" as const }];
+    const first = applyListQuery(rows, query({ limit: 2, sort }));
+    expect(first.records.map((r) => r["name"])).toEqual(["Apple", "Banana"]);
     expect(first.nextCursor).not.toBeNull();
 
-    const second = applyListQuery(rows, query({ limit: 2, cursor: first.nextCursor, sort: [{ field: "id", direction: "asc" }] }));
-    expect(second.records.map((r) => r["id"])).toEqual(["c"]);
+    const second = applyListQuery(rows, query({ limit: 2, cursor: first.nextCursor, sort }));
+    expect(second.records.map((r) => r["name"])).toEqual(["Cherry"]);
     expect(second.nextCursor).toBeNull();
+  });
+
+  it("keyset is stable when an earlier row is inserted between pages", () => {
+    const sort = [{ field: "id" as const, direction: "asc" as const }];
+    const first = applyListQuery(rows, query({ limit: 1, sort }));
+    expect(first.records[0]!["id"]).toBe("a");
+    // a new row "0" sorts before the cursor ("a"); keyset (unlike offset) skips
+    // it and doesn't repeat "b" on the next page
+    const withInserted = [...rows, { id: "0", name: "Z", status: "active", price: 1 }];
+    const second = applyListQuery(withInserted, query({ limit: 1, cursor: first.nextCursor, sort }));
+    expect(second.records[0]!["id"]).toBe("b");
   });
 });
 

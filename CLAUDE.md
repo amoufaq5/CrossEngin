@@ -18,9 +18,9 @@ M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
-P1.11 + P1.12 + P1.13 + P1.14 + P1.15** landed: **59 packages + 2
-apps, 123 meta-schema tables, 6,333 tests**, all green, no type
-errors.
+P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16** landed: **59
+packages + 2 apps, 123 meta-schema tables, 6,344 tests**, all
+green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -168,7 +168,21 @@ idempotent) / `unlink` / `isLinked` / `listLinks({leftId?, rightId?})`
 — keyed by the relation's `(left, right)` entities, each
 `withTenantContext`-wrapped, the composite FK confining a link to
 the caller's tenant. Manifest-derived association *routes* (HTTP)
-are the open follow-up. M7.9.1 added
+are the open follow-up. **P1.16 (ADR-0096) upgraded list
+pagination + filtering** across all three stores (in-memory, JSONB,
+column): offset cursors → **keyset** (`encodeKeyset`/`decodeKeyset`
+over `{k: sortValues, id}`, stable under concurrent inserts/deletes,
+no `OFFSET` scan), and equality-only filters → **typed operators**
+(`eq|ne|gt|gte|lt|lte|in`). A shared `list-sql.ts` query builder
+(via a `ListSqlAdapter`) serves both PG stores: filters →
+`<expr> <op> $n<cast>` / `in` → `<expr>::text = ANY($n::text[])`,
+keyset seek → the OR-of-AND expansion handling mixed sort
+directions, order → sort + `id` tiebreaker, `LIMIT n+1`. The column
+store casts the bound value to the column's native type
+(`$n::NUMERIC(…)` — correct typed compare); the JSONB store
+text-compares. `parseListQuery` reads `?field[op]=value` +
+`?field[in]=a,b,c`, still gated to filterable columns. Field
+selection (projection) is the open list refinement. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -588,7 +602,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0079 + 0086-0095 are drafted in `docs/adr/`; ADRs 0080-0085
+ADRs 0001-0079 + 0086-0096 are drafted in `docs/adr/`; ADRs 0080-0085
 are reserved for Phase 3 P3-P8 (per ADR-0077). ADR-0046 is the
 Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
@@ -612,7 +626,8 @@ topological apply order in the column store), ADR-0093 covers P1.13
 (per-relation delete semantics in the column store), ADR-0094
 covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
-tables)).
+tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
+operators)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -780,12 +795,15 @@ re-exporting everything.
   resolved manifest into a live multi-tenant API. 6 modules: slugs
   (camelCase operationIds + kebab-plural paths + rt_ route ids),
   store (EntityStore interface — list/listPage/get/create/update/
-  remove + InMemoryEntityStore; ListQuery/ListPage + opaque offset
-  encodeCursor/decodeCursor + pure applyListQuery filter→sort→slice),
+  remove + InMemoryEntityStore; ListQuery/ListPage; P1.16: typed
+  ListFilter (op eq|ne|gt|gte|lt|lte|in) + keyset encodeKeyset/
+  decodeKeyset over {k: sortValues, id} + matchesFilter + pure
+  applyListQuery filter→sort→keyset-seek),
   list-query (P1.8: listConfigForEntity reads an entity's ListView →
   ListConfig (pageSize/default sort/sortable+filterable columns);
   parseListQuery → a resolved ListQuery, fail-safe — unknown/non-
-  filterable params ignored), operations (manifestRouteSpecs →
+  filterable params ignored; P1.16 parses ?field[op]=v + ?field[in]
+  =a,b,c), operations (manifestRouteSpecs →
   a RouteSpec per entity op: 5 CRUD + one per entityLifecycle
   transition; the list spec carries its ListConfig; routeFromSpec →
   schema-valid RouteDefinition), handlers (buildSpecHandler:
@@ -810,12 +828,15 @@ re-exporting everything.
   EntityStore over `meta.operate_entity_records`, a tenant-scoped
   JSONB document table under RLS: list/listPage/get/create/update
   (SELECT … FOR UPDATE then merge)/remove each wrapped in
-  withTenantContext, plus an admin count; listPage (P1.8) pushes the
-  query into SQL — `document ->> 'field' = $n` filters, ORDER BY
-  `document ->> 'field' …, record_id ASC`, LIMIT limit+1 OFFSET (the
-  +1 detects a next page), field names identifier-validated (only
-  values bound); validated schema name is the only interpolated
-  identifier). Drops into buildOperateGateway
+  withTenantContext, plus an admin count; listPage pushes the query
+  into SQL via the shared list-sql builder (P1.16) — `document ->>
+  'field'` filters/sort (text compares), keyset seek, LIMIT limit+1;
+  field names identifier-validated (only values bound); validated
+  schema name is the only interpolated identifier). list-sql
+  (P1.16: buildListSql over a ListSqlAdapter — one filter + keyset-
+  seek + order builder for both PG stores; typed operators, in →
+  ANY($n::text[]), OR-of-AND seek for mixed sort directions). Drops
+  into buildOperateGateway
   unchanged. One new META table (operate_entity_records). P1.10 adds
   the typed sibling — column-plan (columnPlanForEntity maps each
   manifest field → a typed column via kernel fieldTypeToPostgresType
@@ -838,8 +859,10 @@ re-exporting everything.
   in topological order, then all FKs — cycle-safe, then m2m join
   tables) (+ CREATE EXTENSION pgcrypto when encrypted columns
   exist), CRUD maps record↔
-  column, listPage sorts on the native column type + filters by
-  `"col"::text = $n`; fields absent from the plan are dropped).
+  column, listPage (via list-sql) sorts on the native column type +
+  filters with typed comparisons (`"col" <op> $n::sqlType`, `in` →
+  `"col"::text = ANY($n::text[])`) + keyset seek; fields absent from
+  the plan are dropped).
   P1.11: transparent at-rest encryption — a phi/regulated column is
   pgp_sym_encrypt($n::text, keyRef) on write + pgp_sym_decrypt("col",
   keyRef) AS "col" on read (key by SQL reference, default
@@ -1784,7 +1807,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0079 + 0086-0095 exist as markdown in `docs/adr/` (0080-0085
+ADRs 0001-0079 + 0086-0096 exist as markdown in `docs/adr/` (0080-0085
 reserved for Phase 3 P3-P8). Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
@@ -1838,8 +1861,9 @@ topological apply order in the column store), ADR-0093 covers
 Phase 3 P1.13 (per-relation delete semantics in the column store),
 ADR-0094 covers Phase 3 P1.14 (many_to_many join tables in the
 column store), ADR-0095 covers Phase 3 P1.15 (association
-link/unlink API over the join tables; ADRs 0080-0085 reserved for
-P3-P8).
+link/unlink API over the join tables), ADR-0096 covers Phase 3
+P1.16 (keyset pagination + typed filter operators in the entity
+stores; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

@@ -1,5 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
+import { encodeKeyset } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
@@ -156,9 +157,10 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
     });
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).toContain('ORDER BY "price" DESC, "id" ASC');
-    expect(sel.sql).toContain('"status"::text = $2');
-    expect(sel.sql).toContain("LIMIT $3 OFFSET $4");
-    expect(sel.params).toEqual([TENANT, "active", 3, 0]);
+    expect(sel.sql).toContain('"status" = $2::TEXT'); // value cast to the column type
+    expect(sel.sql).toContain("LIMIT $3");
+    expect(sel.sql).not.toContain("OFFSET");
+    expect(sel.params).toEqual([TENANT, "active", 3]);
     expect(page.records.map((r) => r["id"])).toEqual(["a", "b"]);
     expect(page.nextCursor).not.toBeNull();
   });
@@ -173,7 +175,49 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
     });
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).toContain('ORDER BY "id" ASC');
-    expect(sel.params).toEqual([TENANT, 6, 0]);
+    expect(sel.params).toEqual([TENANT, 6]);
+  });
+
+  it("pushes a typed comparison operator with a value cast to the column type", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "price", op: "gte", value: "15" }],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"price" >= $2::NUMERIC(12, 2)');
+    expect(sel.params).toEqual([TENANT, "15", 6]);
+  });
+
+  it("pushes an in filter as text-cast = ANY($n::text[])", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "status", op: "in", value: ["active", "archived"] }],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"status"::text = ANY($2::text[])');
+    expect(sel.params).toEqual([TENANT, ["active", "archived"], 6]);
+  });
+
+  it("builds a keyset seek predicate from the cursor (sort desc + id tiebreaker)", async () => {
+    const cap = capturePg([]);
+    const cursor = encodeKeyset({ k: ["20"], id: "b" });
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor,
+      sort: [{ field: "price", direction: "desc" }],
+      filters: [],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    // (price < $2) OR (price = $3 AND id > $4)
+    expect(sel.sql).toContain('"price" < $2::NUMERIC(12, 2)');
+    expect(sel.sql).toContain('"id" > $4');
+    expect(sel.params).toEqual([TENANT, "20", "20", "b", 6]);
   });
 });
 
@@ -220,7 +264,7 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).not.toContain('"mrn" DESC');
     expect(sel.sql).toContain('ORDER BY "id" ASC');
-    expect(sel.params).toEqual([TENANT, 6, 0]); // no filter bound for mrn
+    expect(sel.params).toEqual([TENANT, 6]); // no filter bound for mrn
   });
 
   it("honors a custom encryptionKeyRef", async () => {
