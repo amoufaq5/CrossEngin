@@ -17,8 +17,8 @@ Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
 M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
-M8.7 + **Phase 3 P1** landed: **58 packages + 1 app, 122
-meta-schema tables, 6,189 tests**, all green, no type errors.
+M8.7 + **Phase 3 P1 + P1.5** landed: **58 packages + 1 app, 122
+meta-schema tables, 6,192 tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
@@ -31,11 +31,21 @@ RLS-backed next), and `compileOperateServer` / `buildOperateGateway`
 wire routes + handlers + `redactionRegistryFromManifest` into a
 `GatewayRuntime`. End-to-end through the real gateway: a cashier
 `GET /v1/products` gets `unit_cost` redacted, a manager gets it,
-each request emits a `PipelineExecution`. Two gateway gaps the
-serving app surfaced are the P1.5 follow-up: `parse_request`
-doesn't populate `parsedBody` (write path is handler-tested), and
-a handler 4xx is recorded "pass" (tripping the pass-not-4xx
-invariant). M7.9.1 added
+each request emits a `PipelineExecution`. **P1.5 (ADR-0079)
+closed the two gateway gaps P1 surfaced** so the *write* path runs
+end-to-end too: `api-gateway-runtime`'s `parse_request` now decodes
+a JSON body (by `content-type`) into `ctx.parsedBody` — the raw
+bytes ride on a new `RuntimeIncomingRequest extends IncomingRequest`
+(`rawBody: Uint8Array | null`, never persisted in the
+`PipelineExecution`) — and `dispatch_handler` maps a handler status
+`>= 400` to a `deny` (4xx, `handler-error` problem-type URI) / `error`
+(5xx) stage outcome and halts, instead of recording `pass` and
+tripping the "pass cannot be 4xx" invariant. operate-runtime now
+serves `POST /v1/products` (body → store), RBAC 403, and a 409
+lifecycle re-fire all through the real gateway; the handler's own
+JSON body is preserved on the error envelope. ADR-0078 Q1+Q2
+resolved; Q3 (Postgres `EntityStore`), Q4 (`apps/operate-server`),
+Q5 (list pagination) remain. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,
@@ -455,7 +465,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0078 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0079 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -464,7 +474,9 @@ bridge from running pillars to a deployed multi-vertical product
 (P1 `operate-server` serving app → P2 distributed workers → P3
 `operate-web` renderer → P4 gov/edu/construction packs → P5
 marketplace install → P6 multi-region → P7 AI Architect in prod
-→ P8 production hardening + GA; ADRs 0078-0085 lock each; ADR-0078 covers P1).
+→ P8 production hardening + GA; ADRs 0078-0085 lock each; ADR-0078
+covers P1, ADR-0079 covers P1.5 (gateway body parsing + handler
+outcome mapping)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -602,7 +614,8 @@ re-exporting everything.
   registry from a manifest's classified fields + permissions +
   roles, no kernel dep); adapters (RequestAdapter +
   ResponseAdapter for Node HTTP + edge runtimes,
-  buildIncomingRequest helper), stores (PrincipalResolver +
+  buildIncomingRequest helper → a RuntimeIncomingRequest carrying
+  rawBody for parse_request to decode), stores (PrincipalResolver +
   IdempotencyStore + RateLimitChecker + RouteRegistry interfaces
   + in-memory implementations), auth (EdDSA JWT verify with iss/
   aud/exp/nbf checks via @crossengin/crypto, opaque token matcher
@@ -621,7 +634,12 @@ re-exporting everything.
   check_rate_limit → validate_signature → validate_schema →
   dispatch_handler → transform_response → apply_security_headers
   → emit_audit; halts on terminating outcomes; merges
-  DEFAULT_SECURITY_HEADERS on pass).
+  DEFAULT_SECURITY_HEADERS on pass). P1.5 (ADR-0079): parse_request
+  decodes a JSON body by content-type into ctx.parsedBody (raw bytes
+  from the RuntimeIncomingRequest, never persisted), and
+  dispatch_handler maps a handler 4xx→deny (handler-error problem
+  URI) / 5xx→error and halts, so domain errors no longer trip the
+  "pass cannot be 4xx" PipelineExecution invariant.
 - **`operate-runtime`** — Phase 3 P1 serving keystone: composes a
   resolved manifest into a live multi-tenant API. 5 modules: slugs
   (camelCase operationIds + kebab-plural paths + rt_ route ids),
@@ -1542,7 +1560,7 @@ OpenAI fallback when both keys are set — through the structural
 
 ## ADRs
 
-ADRs 0001-0078 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0079 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1576,7 +1594,11 @@ M2.8.5 (multi-vendor router in architect-cli chat), ADR-0073
 covers Phase 2 M2.8.6 (per-turn provider + cost attribution in
 chat), ADR-0074 covers Phase 2 M7.8.6 (crossengin-pg encrypt CLI),
 ADR-0075 covers Phase 2 M7.9 (pack-erp-retail), ADR-0076 covers
-Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage).
+Phase 2 M7.9.1 (pack-erp-grocery — transitive lineage), ADR-0077
+is the Phase 3 plan, ADR-0078 covers Phase 3 P1
+(`operate-runtime` — serving a manifest as a multi-tenant API),
+ADR-0079 covers Phase 3 P1.5 (gateway request-body parsing +
+handler-returned outcome mapping in `api-gateway-runtime`).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

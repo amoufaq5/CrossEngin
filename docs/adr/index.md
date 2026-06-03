@@ -136,3 +136,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 50 | 0076 | 4,000 | Drafted alongside `@crossengin/pack-erp-grocery` — transitive pack lineage (Phase 2 M7.9.1) |
 | 51 | 0077 | 5,500 | Phase 3 implementation plan — bridge from running pillars to deployed multi-vertical product (P1–P8) |
 | 52 | 0078 | 4,500 | Drafted alongside `@crossengin/operate-runtime` — serving a manifest as a multi-tenant API (Phase 3 P1) |
+| 53 | 0079 | 4,000 | Drafted alongside gateway request-body parsing + handler-outcome mapping in `api-gateway-runtime` (Phase 3 P1.5) |
