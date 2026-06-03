@@ -15,10 +15,27 @@ healthcare verticals ride on top.
 
 Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M2.8 + M3 + M3.5 + M3.6 +
 M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 + M5.8 + M6 +
-M6.5 + M7 + M8 + M8.5 + M8.6 + M8.7 landed: **54 packages + 1
-app, 122 meta-schema tables, 5,992 tests**, all green, no type
-errors. **Phase 2's eight milestones (M1–M8) are complete.**
-M2.8 added `@crossengin/ai-providers-openai` — the second real
+M6.5 + M7 + M7.5 + M8 + M8.5 + M8.6 + M8.7 landed: **55 packages
++ 1 app, 122 meta-schema tables, 6,027 tests**, all green, no
+type errors. **Phase 2's eight milestones (M1–M8) are complete.**
+M7.5 added `@crossengin/pack-erp-healthcare` — the second
+vertical pack and the first to use `meta.extends` lineage. It
+declares `meta.extends: ["operate-erp/core"]` and references core
+entities (Account, Invoice) by name, so it does NOT cross-validate
+standalone — only once `resolveManifest` merges the core pack in
+(via a `ManifestRegistry`) does `tryValidateManifest` pass (7
+entities = 4 core + 3 healthcare, 7 relations, merged roles, both
+lifecycle workflows). 3 entities (Patient → core Account,
+Encounter → Patient + optional core Invoice, Observation →
+Encounter — all auditable, PHI), 4 relations (two cross-pack:
+Account→Patients + Encounter→Invoice), 4 roles (clinical_admin /
+clinician / front_desk / hipaa_auditor), an Encounter
+entityLifecycle (scheduled → in_progress → completed|cancelled|
+no_show), 2 PHI-tagged jobs (appointment reminder + lab-result
+handler), 2 views, `compliancePacks: ["hipaa"]`. Proves the
+kernel's pack-extension mechanism end-to-end; template for
+pack-erp-retail / -construction / -education. M2.8 added
+`@crossengin/ai-providers-openai` — the second real
 `LlmProvider`, binding OpenAI's Chat Completions + Embeddings
 APIs to the same contract as the Anthropic client (zero runtime
 deps, pure fetch + ReadableStream). 5 modules: pricing (gpt-4.1
@@ -254,7 +271,7 @@ activity handlers, signal correlation, timer firing, automatic
 transitions, on-entry actions (set_variable / schedule_activity /
 schedule_timer), and saga compensation planning.
 
-ADRs 0001-0064 are fully drafted in `docs/adr/` — no reserved
+ADRs 0001-0065 are fully drafted in `docs/adr/` — no reserved
 gaps. ADR-0046 is the Phase 2 implementation plan (M1 DDL → M2
 crypto → M3 workflow runtime → M4 gateway runtime → M5 architect-
 cli → M6 notifications + workflow bridge → M7 first vertical pack
@@ -273,7 +290,9 @@ enforcement persistence), ADR-0062 covers M8.6 (latency-target
 SLO enforcement in `observability-runtime`), ADR-0063 covers
 M8.7 (latency enforcement persistence in
 `observability-runtime-pg`), ADR-0064 covers M2.8
-(`ai-providers-openai` — second real LlmProvider).
+(`ai-providers-openai` — second real LlmProvider), ADR-0065
+covers M7.5 (`pack-erp-healthcare` — second vertical pack via
+`meta.extends`).
 
 ## Architecture in 90 seconds
 
@@ -624,6 +643,23 @@ re-exporting everything.
   `tryValidateManifest` end-to-end. Pattern for future
   `pack-erp-healthcare` / `pack-erp-retail` / etc. that extend
   via `meta.extends: ["operate-erp/core"]`.
+- **`pack-erp-healthcare`** — second vertical pack; the first to
+  use `meta.extends`. Declares `meta.extends: ["operate-erp/
+  core"]` and references core entities by name, so it cross-
+  validates only after `resolveManifest(pack, {registry})` merges
+  core in. 3 entities (Patient → core Account; Encounter →
+  Patient + optional core Invoice; Observation → Encounter; all
+  auditable, PHI), 4 relations (two cross-pack: Account→Patients,
+  Encounter→Invoice), 4 roles (clinical_admin / clinician /
+  front_desk / hipaa_auditor) with PHI-restricted Observation
+  writes, an Encounter entityLifecycle (scheduled → in_progress →
+  completed|cancelled|no_show; same-day SLA), 2 PHI jobs
+  (appointment-reminder cron + lab_result_received handler), 2
+  views, `compliancePacks: ["hipaa"]`. `buildErpHealthcarePack
+  (opts?)` returns the standalone (extends-bearing) Manifest;
+  tests resolve it against a core `ManifestRegistry` and pass
+  `tryValidateManifest`. Proves the kernel's pack-extension
+  mechanism end-to-end.
 
 ### Business operations
 - **`billing`** — plans, subscriptions, metered usage, invoices,
@@ -988,6 +1024,22 @@ hash + apply via the existing CLI flow. Pattern set for future
 verticals (healthcare, retail, construction): same module shape,
 same cross-validators, optional `meta.extends` lineage.
 
+**No longer deferred (as of M7.5):** pack extension lineage.
+`@crossengin/pack-erp-healthcare` is the first pack to use
+`meta.extends`. It declares `meta.extends: ["operate-erp/core"]`
+and references core entities (Account, Invoice) by name, so it
+does NOT cross-validate standalone — `tryValidateManifest` only
+passes after `resolveManifest(pack, {registry})` merges the core
+pack in (4 + 3 = 7 entities, 3 + 4 relations, merged roles, both
+lifecycle workflows), with the core pack's slug/version/hash
+recorded in `meta.manifestResolution.parents`. Three PHI clinical
+entities (Patient / Encounter / Observation), two cross-pack
+relations (Account→Patients, Encounter→Invoice), HIPAA compliance
+posture, PHI-tagged jobs. The kernel's dormant pack-composition
+mechanism now has a real consumer with a passing cross-validation
+test — the "verticals extend a base" story is demonstrated, not
+just designed.
+
 **No longer deferred (as of M8):** SLO enforcement.
 `@crossengin/observability-runtime` turns the inert SLO / alert /
 synthetic / trace definitions from `@crossengin/observability`
@@ -1114,7 +1166,7 @@ Anthropic key.
 
 ## ADRs
 
-ADRs 0001-0061 exist as markdown in `docs/adr/`. Every shipped
+ADRs 0001-0065 exist as markdown in `docs/adr/`. Every shipped
 package has a corresponding ADR; no reserved gaps. ADR-0046 is
 the bridge from Phase 1 contracts to Phase 2 runtime (8
 milestones). ADR-0047 covers Phase 2 M1 (`kernel-pg`), ADR-0048
@@ -1135,7 +1187,9 @@ covers Phase 2 M8.5 (`observability-runtime-pg` — SLO
 enforcement persistence), ADR-0062 covers Phase 2 M8.6
 (latency-target SLO enforcement), ADR-0063 covers Phase 2 M8.7
 (latency enforcement persistence), ADR-0064 covers Phase 2 M2.8
-(`ai-providers-openai` — second LlmProvider). When you ship
+(`ai-providers-openai` — second LlmProvider), ADR-0065 covers
+Phase 2 M7.5 (`pack-erp-healthcare` — second vertical pack).
+When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing
 0026-0037 batch.
