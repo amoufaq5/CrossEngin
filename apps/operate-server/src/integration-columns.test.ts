@@ -4,6 +4,7 @@ import {
   createNodePgConnection,
   parsePgEnvConfig,
   type PgConnection,
+  type PgConfig,
 } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { ColumnMappedEntityStore } from "@crossengin/operate-runtime-pg";
@@ -158,5 +159,80 @@ suite("ColumnMappedEntityStore integration (real Postgres)", () => {
 
     // RESTRICT: the referenced account can't be deleted while an order references it
     await expect(store.remove(tenant, "Account", account.id as string)).rejects.toThrow();
+  });
+
+  it("nulls a many_to_one reference on ON DELETE SET NULL (keeping tenant_id)", async () => {
+    const manifest = {
+      entities: [
+        { name: "Vendor", fields: [{ name: "name", type: { kind: "text" } }] },
+        // the reference is nullable (not required), so SET NULL is valid
+        { name: "Bill", fields: [{ name: "vendor", type: { kind: "reference", target: "Vendor" } }] },
+      ],
+      relations: [{ kind: "many_to_one", from: "Bill", field: "vendor", to: "Vendor", onDelete: "set_null" }],
+    } as unknown as Manifest;
+    const store = new ColumnMappedEntityStore(conn, manifest, { schema: "lk" });
+    await store.ensureSchema();
+
+    const tenant = randomUUID();
+    const vendor = await store.create(tenant, "Vendor", { name: "Globex" });
+    const bill = await store.create(tenant, "Bill", { vendor: vendor.id });
+
+    // SET NULL: removing the vendor succeeds and nulls the bill's ref (bill survives)
+    expect(await store.remove(tenant, "Vendor", vendor.id as string)).toBe(true);
+    const got = await store.get(tenant, "Bill", bill.id as string);
+    expect(got).not.toBeNull();
+    expect(got?.["vendor"] ?? null).toBeNull();
+    // the row + its tenant_id are intact (SET NULL only nulled vendor_id)
+    const raw = await conn.query<{ tenant_id: string; vendor_id: string | null }>(
+      `SELECT tenant_id::text, vendor_id FROM lk.bill WHERE id = $1`, [bill.id],
+    );
+    expect(raw.rows[0]?.tenant_id).toBe(tenant);
+    expect(raw.rows[0]?.vendor_id).toBeNull();
+  });
+
+  it("enforces the RLS policy itself for a non-bypassing role (not just WHERE tenant_id)", async () => {
+    // a fresh single-entity table, rows seeded for two tenants by the owner (RLS-bypassed)
+    const manifest = { entities: [{ name: "Doc", fields: [{ name: "title", type: { kind: "text" } }] }] } as unknown as Manifest;
+    const owner = new ColumnMappedEntityStore(conn, manifest, { schema: "lk" });
+    await owner.ensureSchema();
+    const tenantA = randomUUID();
+    const tenantB = randomUUID();
+    await owner.create(tenantA, "Doc", { title: "A-only" });
+    await owner.create(tenantB, "Doc", { title: "B-only" });
+
+    // a non-owner, NOBYPASSRLS role to which the RLS policy actually applies
+    const exists = await conn.query(`SELECT 1 FROM pg_roles WHERE rolname = 'crossengin_rls'`);
+    if (exists.rows.length === 0) {
+      await conn.query("CREATE ROLE crossengin_rls LOGIN PASSWORD 'rls' NOSUPERUSER NOBYPASSRLS");
+    }
+    await conn.query("GRANT USAGE ON SCHEMA lk TO crossengin_rls");
+    await conn.query("GRANT SELECT ON lk.doc TO crossengin_rls");
+
+    const base = parsePgEnvConfig();
+    const rlsConfig: PgConfig = { ...base, user: "crossengin_rls", password: "rls" };
+    const rls = createNodePgConnection(rlsConfig);
+    try {
+      // with the policy enforced, a raw SELECT (no WHERE tenant_id) sees only the
+      // tenant set by app.current_tenant_id — proving the RLS policy, not the store
+      const countFor = (tenant: string) =>
+        rls.transaction(async (tx) => {
+          await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenant]);
+          const r = await tx.query<{ n: string }>("SELECT count(*)::text AS n FROM lk.doc");
+          return Number(r.rows[0]!.n);
+        });
+      // only this run's two tenants are asserted (the table may hold other runs' rows)
+      const seenA = await rls.transaction(async (tx) => {
+        await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantA]);
+        const r = await tx.query<{ title: string }>("SELECT title FROM lk.doc");
+        return r.rows.map((x) => x.title);
+      });
+      expect(seenA).toContain("A-only");
+      expect(seenA).not.toContain("B-only");
+      // tenant A sees exactly one row of this run's pair (its own)
+      expect(await countFor(tenantA)).toBe(1);
+      expect(await countFor(tenantB)).toBe(1);
+    } finally {
+      await rls.close();
+    }
   });
 });
