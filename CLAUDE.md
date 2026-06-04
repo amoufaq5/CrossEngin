@@ -19,8 +19,8 @@ M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
 P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
-P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2** landed: **60
-packages + 2 apps, 123 meta-schema tables, 6,416 tests**, all
+P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3** landed:
+**60 packages + 3 apps, 123 meta-schema tables, 6,437 tests**, all
 green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
@@ -63,7 +63,33 @@ backoff-elapsed activities via `FOR UPDATE SKIP LOCKED`; and
 `retryActivity`, releasing the lease after each attempt (in a
 `finally`). N retry workers drain retries in parallel. A full async
 activity *queue* (decouple schedule from execute) + backoff
-`next_retry_at` population stay the deeper follow-up. P1 added
+`next_retry_at` population stay the deeper follow-up. **P2.3
+(ADR-0106) shipped `apps/workflow-worker`** — the runnable
+`workflow-worker` binary, the **third app** under `apps/` (after
+`architect-cli` + `operate-server`). 4 src modules + a bin:
+`cli.ts` (`parseWorkerArgs`: `--mode tick|claim|retry|all`
+[default `all` = the parallel claim + retry combo], random
+`--worker-id`, `--schema`, per-loop `--tick/claim/retry-interval-ms`,
+`--batch-size`, `--lease-ms`, `--definitions <file>`), `runner.ts`
+(`buildWorkerSet` — the framework-neutral core wiring the worker(s)
+for the mode over one `PgConnection` + one structural `WorkerEngine`
+= `TimerTickEngine & FireTimerEngine & RetryActivityEngine`:
+`tick`→`WorkflowWorker`, `claim`→`ClaimingTimerWorker` over
+`PostgresTimerClaimStore`, `retry`→`RetryExecutorWorker` over
+`PostgresActivityRetryClaimStore`, `all`→claim+retry; each polls its
+own interval, scheduler+`onError` injectable so the wiring is
+fake-tested with no DB), `node.ts` (`run` opens
+`createNodePgConnection(parsePgEnvConfig())`, loads the
+`--definitions` JSON via the pure `parseDefinitionsJson`
+[`WorkflowDefinitionSchema`-validated, keyed by id], builds the
+persistent engine so every fire/retry projects through the event
+log, starts the set, returns a `close()`), and
+`bin/workflow-worker.ts` (parse→run→print labels; holds the loop
+open with a referenced keep-alive cleared on SIGINT/SIGTERM, since
+the poll timers are `unref`'d). The worker connects with a BYPASSRLS
+role (drains every tenant). P2's distributed-worker library now has
+a deployable artifact; the async activity queue + backoff population
++ timeout sweeping remain the deeper P2 follow-up. P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
 `manifest → routes → handlers` compiler derives a `RouteSpec` per
@@ -723,7 +749,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -1037,6 +1063,31 @@ re-exporting everything.
   against genuine new Request/Response undici globals).
   `operate-server` bin. A real loopback test boots it for a 200;
   all other logic is offline-tested.
+- **`apps/workflow-worker`** — Phase 3 P2.3: the runnable
+  distributed-worker binary (third app under `apps/`, after
+  `architect-cli` + `operate-server`). 4 src modules + a bin: cli
+  (parseWorkerArgs: --mode tick|claim|retry|all [default all = the
+  parallel claim + retry combo], random --worker-id, --schema,
+  per-loop --tick/claim/retry-interval-ms, --batch-size, --lease-ms,
+  --definitions <file>; space + inline forms; CliUsageError on
+  misuse), runner (buildWorkerSet — the framework-neutral core: for
+  the selected mode it constructs the worker(s) over one PgConnection
+  + one structural WorkerEngine [TimerTickEngine & FireTimerEngine &
+  RetryActivityEngine, all satisfied by buildPersistentEngine's
+  engine] — tick→WorkflowWorker, claim→ClaimingTimerWorker over
+  PostgresTimerClaimStore, retry→RetryExecutorWorker over
+  PostgresActivityRetryClaimStore, all→claim+retry; each polls its
+  own interval; scheduler + onError injectable so the wiring is
+  fake-tested with no DB), node (run opens
+  createNodePgConnection(parsePgEnvConfig()), loads the --definitions
+  JSON via the pure parseDefinitionsJson [WorkflowDefinitionSchema-
+  validated, keyed by id], builds the persistent engine so every
+  fire/retry projects through the event log, starts the set, returns
+  a close() that stops the workers + closes the conn), bin (parse →
+  run → print the running labels; holds the loop open with a
+  referenced keep-alive cleared on SIGINT/SIGTERM, since the poll
+  timers are unref'd). The worker connects with a BYPASSRLS role
+  (one worker drains every tenant). All logic offline-tested.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -1528,8 +1579,9 @@ following are intentionally out of scope until contracts settle:
 - Real cryptography. Signature fields are typed as strings; the
   actual HMAC/ed25519 computation is not in this codebase.
 - Customer-facing *UI* apps under `apps/`. UI lives in `views` as
-  type definitions only. (Two server-side apps exist:
-  `architect-cli` and, as of P1.7, `operate-server`.)
+  type definitions only. (Three server-side apps exist:
+  `architect-cli`, `operate-server` (P1.7), and `workflow-worker`
+  (P2.3).)
 
 **No longer deferred (as of M1):** kernel DDL execution. The
 `kernel-pg` package executes meta-schema DDL against a real
@@ -2011,7 +2063,7 @@ Phase 3 P1.21 (field selection / projection on list + read in
 `operate-runtime`), ADR-0102 covers Phase 3 P1.22 (SQL-level
 projection pushdown in the column store), ADR-0103 covers Phase 3
 P2 (`workflow-worker` — the distributed tick worker over the PG
-event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker; ADRs 0080-0085 reserved for P3-P8).
+event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

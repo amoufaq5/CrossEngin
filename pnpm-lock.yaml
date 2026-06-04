@@ -116,6 +116,40 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
+  apps/workflow-worker:
+    dependencies:
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../../packages/kernel-pg
+      '@crossengin/workflow-engine':
+        specifier: workspace:*
+        version: link:../../packages/workflow-engine
+      '@crossengin/workflow-runtime':
+        specifier: workspace:*
+        version: link:../../packages/workflow-runtime
+      '@crossengin/workflow-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/workflow-runtime-pg
+      '@crossengin/workflow-worker':
+        specifier: workspace:*
+        version: link:../../packages/workflow-worker
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
   packages/access-reviews:
     dependencies:
       '@crossengin/crypto':
