@@ -12,11 +12,14 @@ import {
 import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
 import {
   ClaimingTimerWorker,
+  HeartbeatReporter,
   PostgresActivityRetryClaimStore,
   PostgresInstanceTimeoutClaimStore,
   PostgresTimerClaimStore,
+  PostgresWorkerHeartbeatStore,
   RetryExecutorWorker,
   TimeoutSweeperWorker,
+  WorkerHeartbeat,
 } from "@crossengin/workflow-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -241,6 +244,33 @@ suite("workflow-worker integration (real Postgres)", () => {
     );
     expect(after.rows[0]!.status).toBe("failed");
     expect(after.rows[0]!.failure_code).toBe("INSTANCE_TIMEOUT");
+  });
+
+  it("HeartbeatReporter persists a worker heartbeat row upserted on worker_id", async () => {
+    const workerId = `wh-${Math.random().toString(36).slice(2, 10)}`;
+    const heartbeat = new WorkerHeartbeat({ workerId, mode: "all", hostname: "it-host" });
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const reporter = new HeartbeatReporter({ heartbeat, store });
+    reporter.onRun({ claimed: 4, processed: 3 });
+    reporter.onRun({ claimed: 1, processed: 1 });
+    reporter.onError(new Error("transient"));
+    await reporter.flush();
+
+    const row = await conn.query<{ status: string; poll_count: string; claimed_total: string; processed_total: string; error_count: string; hostname: string }>(
+      `SELECT status, poll_count, claimed_total, processed_total, error_count, hostname
+         FROM meta.worker_heartbeats WHERE worker_id = $1`,
+      [workerId],
+    );
+    expect(row.rows[0]).toMatchObject({ status: "starting", hostname: "it-host" });
+    expect(Number(row.rows[0]!.poll_count)).toBe(2);
+    expect(Number(row.rows[0]!.claimed_total)).toBe(5);
+    expect(Number(row.rows[0]!.processed_total)).toBe(4);
+    expect(Number(row.rows[0]!.error_count)).toBe(1);
+
+    // a second flush upserts the same row (no duplicate)
+    await reporter.stop();
+    const count = await conn.query<{ c: string }>(`SELECT count(*)::text AS c FROM meta.worker_heartbeats WHERE worker_id = $1`, [workerId]);
+    expect(Number(count.rows[0]!.c)).toBe(1);
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {

@@ -15,6 +15,8 @@ describe("parseWorkerArgs", () => {
       timeoutIntervalMs: 10000,
       batchSize: 50,
       leaseMs: 30000,
+      heartbeatIntervalMs: 15000,
+      heartbeatEnabled: true,
       definitionsPath: null,
       help: false,
       version: false,
@@ -36,6 +38,7 @@ describe("parseWorkerArgs", () => {
       "--timeout-interval-ms", "12000",
       "--batch-size", "25",
       "--lease-ms", "45000",
+      "--heartbeat-interval-ms", "30000",
       "--definitions", "/defs.json",
     ]);
     expect(opts).toEqual({
@@ -48,10 +51,16 @@ describe("parseWorkerArgs", () => {
       timeoutIntervalMs: 12000,
       batchSize: 25,
       leaseMs: 45000,
+      heartbeatIntervalMs: 30000,
+      heartbeatEnabled: true,
       definitionsPath: "/defs.json",
       help: false,
       version: false,
     });
+  });
+
+  it("--no-heartbeat disables the heartbeat", () => {
+    expect(parseWorkerArgs(["--no-heartbeat"]).heartbeatEnabled).toBe(false);
   });
 
   it("parses inline --flag=value form", () => {

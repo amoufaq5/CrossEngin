@@ -89,6 +89,7 @@ import {
   META_SDK_CLIENT_INSTALLATIONS,
   META_SDK_CLIENT_RELEASES,
   META_OPERATE_ENTITY_RECORDS,
+  META_WORKER_HEARTBEATS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_EVALUATIONS,
   META_SLO_LATENCY_EVALUATIONS,
@@ -121,8 +122,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 123 tables", () => {
-    expect(META_TABLES).toHaveLength(123);
+  it("contains 124 tables", () => {
+    expect(META_TABLES).toHaveLength(124);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -253,6 +254,7 @@ describe("META_TABLES", () => {
       "users",
       "webhook_deliveries",
       "webhook_endpoints",
+      "worker_heartbeats",
       "workflow_activities",
       "workflow_definitions",
       "workflow_events",
@@ -1501,6 +1503,17 @@ describe("table column shapes", () => {
     expect(kind?.check).toContain("'relative_after'");
     expect(kind?.check).toContain("'cron_schedule'");
     expect(kind?.check).toContain("'business_hours'");
+  });
+
+  it("META_WORKER_HEARTBEATS is a platform-wide (no-RLS) table keyed by worker_id", () => {
+    const cols = META_WORKER_HEARTBEATS.columns.map((c) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining(["worker_id", "mode", "status", "last_heartbeat_at", "poll_count", "claimed_total", "processed_total", "error_count"]),
+    );
+    expect(META_WORKER_HEARTBEATS.rls).toBeUndefined();
+    expect(META_WORKER_HEARTBEATS.uniqueConstraints?.[0]?.columns).toEqual(["worker_id"]);
+    const mode = META_WORKER_HEARTBEATS.columns.find((c) => c.name === "mode");
+    expect(mode?.check).toContain("'all'");
   });
 
   it("META_WORKFLOW_INSTANCES carries timeout-sweep lease columns + index", () => {

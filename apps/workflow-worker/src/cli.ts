@@ -12,6 +12,8 @@ export interface WorkerCliOptions {
   readonly timeoutIntervalMs: number;
   readonly batchSize: number;
   readonly leaseMs: number;
+  readonly heartbeatIntervalMs: number;
+  readonly heartbeatEnabled: boolean;
   readonly definitionsPath: string | null;
   readonly help: boolean;
   readonly version: boolean;
@@ -43,6 +45,7 @@ const DEFAULTS = {
   timeoutIntervalMs: 10_000,
   batchSize: 50,
   leaseMs: 30_000,
+  heartbeatIntervalMs: 15_000,
 };
 
 /**
@@ -61,6 +64,8 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
   let timeoutIntervalMs = DEFAULTS.timeoutIntervalMs;
   let batchSize = DEFAULTS.batchSize;
   let leaseMs = DEFAULTS.leaseMs;
+  let heartbeatIntervalMs = DEFAULTS.heartbeatIntervalMs;
+  let heartbeatEnabled = true;
   let definitionsPath: string | null = null;
   let help = false;
   let version = false;
@@ -103,6 +108,11 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     } else if (arg === "--lease-ms" || arg.startsWith("--lease-ms=")) {
       leaseMs = intFlag(takeValue(arg, next, "--lease-ms"), "--lease-ms", 1000);
       i += consumed();
+    } else if (arg === "--heartbeat-interval-ms" || arg.startsWith("--heartbeat-interval-ms=")) {
+      heartbeatIntervalMs = intFlag(takeValue(arg, next, "--heartbeat-interval-ms"), "--heartbeat-interval-ms", 1000);
+      i += consumed();
+    } else if (arg === "--no-heartbeat") {
+      heartbeatEnabled = false;
     } else if (arg === "--definitions" || arg.startsWith("--definitions=")) {
       definitionsPath = takeValue(arg, next, "--definitions");
       i += consumed();
@@ -121,6 +131,8 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     timeoutIntervalMs,
     batchSize,
     leaseMs,
+    heartbeatIntervalMs,
+    heartbeatEnabled,
     definitionsPath,
     help,
     version,
@@ -145,6 +157,8 @@ Options:
   --timeout-interval-ms <n>  Instance-timeout poll interval (default 10000)
   --batch-size <n>         Claim batch size (default 50)
   --lease-ms <n>           Claim lease duration (default 30000)
+  --heartbeat-interval-ms <n>  Heartbeat flush interval (default 15000)
+  --no-heartbeat           Disable the meta.worker_heartbeats heartbeat
   --definitions <file>     JSON array of WorkflowDefinitions to run (default none)
   --help, -h               Show this help
   --version, -v            Print version

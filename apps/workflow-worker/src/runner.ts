@@ -10,6 +10,7 @@ import {
   type FireTimerEngine,
   type IntervalScheduler,
   type RetryActivityEngine,
+  type RunOutcome,
   type TimeoutInstanceEngine,
   type TimerTickEngine,
 } from "@crossengin/workflow-worker";
@@ -37,6 +38,7 @@ export interface BuildWorkerSetInput {
   readonly leaseMs: number;
   readonly scheduler?: IntervalScheduler;
   readonly onError?: (err: unknown) => void;
+  readonly onRun?: (outcome: RunOutcome) => void;
 }
 
 interface PollWorker {
@@ -74,6 +76,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
   const schemaOpts = input.schema !== null ? { schema: input.schema } : {};
   const sched = input.scheduler !== undefined ? { scheduler: input.scheduler } : {};
   const onErr = input.onError !== undefined ? { onError: input.onError } : {};
+  const onRun = input.onRun !== undefined ? { onRun: input.onRun } : {};
   const entries: WorkerEntry[] = [];
 
   const wantTick = input.mode === "tick";
@@ -82,7 +85,11 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
   const wantTimeout = input.mode === "timeout" || input.mode === "all";
 
   if (wantTick) {
-    const worker = new WorkflowWorker({ conn: input.conn, engine: input.engine, ...sched, ...onErr });
+    const tickOnRun =
+      input.onRun !== undefined
+        ? { onTick: (r: { firedTimerIds: readonly string[] }) => input.onRun?.({ claimed: r.firedTimerIds.length, processed: r.firedTimerIds.length }) }
+        : {};
+    const worker = new WorkflowWorker({ conn: input.conn, engine: input.engine, ...sched, ...onErr, ...tickOnRun });
     entries.push({ worker, intervalMs: input.tickIntervalMs, label: "tick" });
   }
   if (wantClaim) {
@@ -95,6 +102,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
       leaseMs: input.leaseMs,
       ...sched,
       ...onErr,
+      ...onRun,
     });
     entries.push({ worker, intervalMs: input.claimIntervalMs, label: "claim" });
   }
@@ -108,6 +116,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
       leaseMs: input.leaseMs,
       ...sched,
       ...onErr,
+      ...onRun,
     });
     entries.push({ worker, intervalMs: input.retryIntervalMs, label: "retry" });
   }
@@ -121,6 +130,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
       leaseMs: input.leaseMs,
       ...sched,
       ...onErr,
+      ...onRun,
     });
     entries.push({ worker, intervalMs: input.timeoutIntervalMs, label: "timeout" });
   }

@@ -1,7 +1,7 @@
 import type { RetryActivityResult } from "@crossengin/workflow-runtime";
 
 import type { ActivityRetryClaimStore } from "./activity-claim-store.js";
-import type { Clock, IntervalHandle, IntervalScheduler } from "./worker.js";
+import type { Clock, IntervalHandle, IntervalScheduler, RunOutcome } from "./worker.js";
 import { DEFAULT_SCHEDULER } from "./worker.js";
 
 /** The slice of `WorkflowEngine` the retry executor drives (per-activity re-run). */
@@ -17,6 +17,7 @@ export interface RetryExecutorWorkerOptions {
   readonly leaseMs?: number;
   readonly clock?: Clock;
   readonly onError?: (err: unknown) => void;
+  readonly onRun?: (outcome: RunOutcome) => void;
   readonly scheduler?: IntervalScheduler;
 }
 
@@ -42,6 +43,7 @@ export class RetryExecutorWorker {
   private readonly leaseMs: number;
   private readonly clock: Clock;
   private readonly onError?: (err: unknown) => void;
+  private readonly onRun?: (outcome: RunOutcome) => void;
   private readonly scheduler: IntervalScheduler;
   private handle: IntervalHandle | null = null;
 
@@ -53,6 +55,7 @@ export class RetryExecutorWorker {
     this.leaseMs = opts.leaseMs ?? 60_000;
     this.clock = opts.clock ?? { now: () => new Date() };
     if (opts.onError !== undefined) this.onError = opts.onError;
+    if (opts.onRun !== undefined) this.onRun = opts.onRun;
     this.scheduler = opts.scheduler ?? DEFAULT_SCHEDULER;
   }
 
@@ -94,7 +97,8 @@ export class RetryExecutorWorker {
 
   private async safeRun(): Promise<void> {
     try {
-      await this.runOnce();
+      const result = await this.runOnce();
+      this.onRun?.({ claimed: result.claimed, processed: result.retried });
     } catch (err) {
       this.onError?.(err);
     }

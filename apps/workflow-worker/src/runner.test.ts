@@ -125,4 +125,14 @@ describe("buildWorkerSet", () => {
       buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "claim", schema: "bad; DROP" }),
     ).toThrow(/invalid schema/);
   });
+
+  it("threads onRun into the workers (invoked per poll with a normalized outcome)", async () => {
+    const { scheduler, registered } = recordingScheduler();
+    const outcomes: Array<{ claimed: number; processed: number }> = [];
+    const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "claim", scheduler, onRun: (o) => outcomes.push(o) });
+    set.start();
+    registered[0]?.handler(); // simulate a poll tick
+    await new Promise((r) => setTimeout(r, 0));
+    expect(outcomes).toEqual([{ claimed: 0, processed: 0 }]); // fakeConn returns no rows
+  });
 });

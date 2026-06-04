@@ -9367,6 +9367,44 @@ export const META_OPERATE_ENTITY_RECORDS: TableDefinition = {
   },
 };
 
+export const META_WORKER_HEARTBEATS: TableDefinition = {
+  schema: "meta",
+  name: "worker_heartbeats",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "worker_id", type: "TEXT", notNull: true, check: "char_length(worker_id) BETWEEN 1 AND 200" },
+    {
+      name: "mode",
+      type: "TEXT",
+      notNull: true,
+      check: "mode IN ('tick', 'claim', 'retry', 'timeout', 'all')",
+    },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('starting', 'running', 'stopped')",
+    },
+    { name: "hostname", type: "TEXT" },
+    { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_heartbeat_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_run_at", type: "TIMESTAMPTZ" },
+    { name: "poll_count", type: "BIGINT", notNull: true, default: "0", check: "poll_count >= 0" },
+    { name: "claimed_total", type: "BIGINT", notNull: true, default: "0", check: "claimed_total >= 0" },
+    { name: "processed_total", type: "BIGINT", notNull: true, default: "0", check: "processed_total >= 0" },
+    { name: "error_count", type: "BIGINT", notNull: true, default: "0", check: "error_count >= 0" },
+    { name: "last_error", type: "TEXT" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "worker_heartbeats_worker_id_key", columns: ["worker_id"] },
+  ],
+  indexes: [
+    { name: "idx_worker_heartbeats_heartbeat", columns: ["last_heartbeat_at"] },
+    { name: "idx_worker_heartbeats_mode_status", columns: ["mode", "status"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9491,4 +9529,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,
   META_OPERATE_ENTITY_RECORDS,
+  META_WORKER_HEARTBEATS,
 ];

@@ -1,8 +1,14 @@
+import { hostname } from "node:os";
 import { readFile } from "node:fs/promises";
 
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import { WorkflowDefinitionSchema, type WorkflowDefinition } from "@crossengin/workflow-engine";
 import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
+import {
+  HeartbeatReporter,
+  PostgresWorkerHeartbeatStore,
+  WorkerHeartbeat,
+} from "@crossengin/workflow-worker";
 
 import type { WorkerCliOptions } from "./cli.js";
 import { buildWorkerSet, type WorkerSet } from "./runner.js";
@@ -48,6 +54,18 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
   const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
   const definitions = await loadDefinitions(options.definitionsPath);
   const { engine } = buildPersistentEngine({ conn, definitions });
+
+  const logError = (err: unknown): void => {
+    process.stderr.write(`[workflow-worker] poll error: ${err instanceof Error ? err.message : String(err)}\n`);
+  };
+
+  let reporter: HeartbeatReporter | null = null;
+  if (options.heartbeatEnabled) {
+    const heartbeat = new WorkerHeartbeat({ workerId: options.workerId, mode: options.mode, hostname: hostname() });
+    const store = new PostgresWorkerHeartbeatStore(conn, options.schema !== null ? { schema: options.schema } : {});
+    reporter = new HeartbeatReporter({ heartbeat, store, onError: logError });
+  }
+
   const workers: WorkerSet = buildWorkerSet({
     conn,
     engine,
@@ -61,15 +79,19 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
     batchSize: options.batchSize,
     leaseMs: options.leaseMs,
     onError: (err) => {
-      process.stderr.write(`[workflow-worker] poll error: ${err instanceof Error ? err.message : String(err)}\n`);
+      reporter?.onError(err);
+      logError(err);
     },
+    ...(reporter !== null ? { onRun: reporter.onRun } : {}),
   });
   workers.start();
+  reporter?.start(options.heartbeatIntervalMs);
   return {
     labels: workers.labels,
     workerId: options.workerId,
     close: async () => {
       workers.stop();
+      if (reporter !== null) await reporter.stop();
       await conn.close();
     },
   };

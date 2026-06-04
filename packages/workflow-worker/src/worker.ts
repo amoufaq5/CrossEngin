@@ -12,6 +12,14 @@ export interface Clock {
   now(): Date;
 }
 
+/** A normalized per-run summary every worker emits via `onRun` (for heartbeat/observability). */
+export interface RunOutcome {
+  /** Rows the worker claimed this run. */
+  readonly claimed: number;
+  /** Units the worker actually advanced (fired / retried / timed-out). */
+  readonly processed: number;
+}
+
 export type IntervalHandle = unknown;
 
 /** Injectable timer (defaults to the global one) so the poll loop is deterministic in tests. */
