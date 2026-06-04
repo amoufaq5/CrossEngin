@@ -99,6 +99,8 @@ suite("ColumnMappedEntityStore integration (real Postgres)", () => {
     const got = await store.get(tenant, "Patient", patient.id as string);
     expect(got?.["mrn"]).toBe("MRN-998877");
     expect(got?.["given_name"]).toBe("Jamie");
+    // DATE round-trips as a YYYY-MM-DD string, not a Date object (P1.27/F fix)
+    expect(got?.["date_of_birth"]).toBe("1990-01-01");
 
     // the column is stored as BYTEA ciphertext, not plaintext
     const raw = await conn.query<{ t: string; mrn: Buffer }>(

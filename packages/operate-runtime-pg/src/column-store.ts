@@ -447,16 +447,32 @@ function rowToRecord(plan: EntityTablePlan, row: Record<string, unknown>): Entit
 }
 
 /**
- * Restores a column value to its JS type. node-postgres returns `NUMERIC` as a
- * string (to avoid float precision loss); a manifest `decimal` field is a
- * number, so we coerce finite numeric strings back — matching what the in-memory
- * and JSONB stores round-trip. (`INTEGER`/`BOOLEAN`/`TIMESTAMPTZ` are already
- * parsed by the driver; an out-of-range / non-finite string is left untouched.)
+ * Restores a column value to the JS type the in-memory and JSONB stores
+ * round-trip, so a record read through any of the three bindings has the same
+ * shape:
+ *   - `NUMERIC` → number (node-postgres returns it as a string to avoid float
+ *     precision loss; a manifest `decimal` field is a number).
+ *   - `TIMESTAMPTZ`/`TIMESTAMP` → ISO 8601 string (the driver returns a `Date`;
+ *     `datetime` fields are written + stored as ISO strings).
+ *   - `DATE` → `YYYY-MM-DD` string (the driver returns a `Date` at local
+ *     midnight — built from the wire's local components — so the local getters
+ *     reproduce the original date regardless of process timezone).
+ * `INTEGER`/`BOOLEAN` are already parsed; `TIME` is already a string; an
+ * out-of-range / non-finite numeric string is left untouched.
  */
 function coerceColumnValue(mapping: ColumnMapping, value: unknown): unknown {
   if (typeof value === "string" && mapping.sqlType.startsWith("NUMERIC")) {
     const n = Number(value);
     return Number.isFinite(n) ? n : value;
+  }
+  if (value instanceof Date) {
+    if (mapping.sqlType === "DATE") {
+      const y = value.getFullYear().toString().padStart(4, "0");
+      const m = (value.getMonth() + 1).toString().padStart(2, "0");
+      const d = value.getDate().toString().padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+    return value.toISOString();
   }
   return value;
 }

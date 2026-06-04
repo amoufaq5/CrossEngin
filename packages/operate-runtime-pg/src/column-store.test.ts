@@ -137,6 +137,21 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     expect(typeof record?.["price"]).toBe("number");
   });
 
+  it("coerces DATE / TIMESTAMPTZ columns (returned as Date by pg) back to strings", async () => {
+    const dated: Entity = {
+      name: "Dated",
+      fields: [
+        { name: "dob", type: { kind: "date" } },
+        { name: "seen_at", type: { kind: "datetime" } },
+      ],
+    };
+    const cap = capturePg([{ id: "d1", dob: new Date(1990, 0, 1), seen_at: new Date("2026-06-04T12:00:00.000Z") }]);
+    const s = new ColumnMappedEntityStore(cap.conn, { entities: [dated] } as unknown as Manifest, { schema: "tenant_app" });
+    const record = await s.get(TENANT, "Dated", "d1");
+    expect(record?.["dob"]).toBe("1990-01-01"); // DATE → YYYY-MM-DD
+    expect(record?.["seen_at"]).toBe("2026-06-04T12:00:00.000Z"); // TIMESTAMPTZ → ISO
+  });
+
   it("update SETs only patched columns + updated_at and returns the merged row", async () => {
     const cap = capturePg([{ id: "w1", sku: "S1", price: 12, owner_id: null }]);
     const updated = await store(cap).update(TENANT, "Widget", "w1", { price: 12 });
