@@ -1,140 +1,180 @@
 # CrossEngin
 
-> **Status:** Phase 2 M1 + M2 + M2.5 + M2.6 + M2.7 + M3 + M3.5 +
-> M3.6 + M3.7 + M4 + M4.5 + M4.6 + M5 + M5.5 + M5.6 + M5.7 +
-> M5.8 + M6 + M6.5 + M7 landed. The four runtime pillars (DDL + crypto
-> + workflows + gateway) are in place; both impure runtimes
-> have Postgres-backed adapters; the first binary `crossengin`
-> ships with init / validate / diff / patch / hash / apply /
-> chat / version / help; `crossengin chat` talks to Claude
-> end-to-end (streaming tokens, USD cost, REPL or one-shot),
-> can dispatch read tools mid-turn (validate / hash / diff /
-> summarize / optional read_file), propose manifest writes with
-> human-in-the-loop approval (`--allow-file-write`), AND
-> persist the full session / messages / tool invocations /
-> proposals to Postgres with `--persist` for full audit; M6
-> closed the HTTP-webhook → workflow-signal chain via the signal
-> bridge; M7 shipped the first vertical pack
-> (`@crossengin/pack-erp-core`) proving the substrate holds up
-> under a real schema.
-> **51 packages + 1 app, 119 meta-schema tables, 5,768 tests**,
-> all green, zero type errors. ADRs 0001–0059 fully drafted. M1
-> added `kernel-pg` (Postgres-backed migration applier). M2 added
-> `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 / Ed25519 +
-> per-tenant key store). M2.5 + M2.6 wired crypto into six
-> downstream packages — marketplace pack signing, sdk webhook
-> HMAC, forensics evidence sealing + hash chain, tenant-lifecycle
-> tombstones, access-reviews digital signature attestations +
-> campaign evidence sealing, data-lineage Article 15 GDPR
-> evidence packs. M2.7 added `ai-providers-anthropic` — the
-> first concrete `LlmProvider` implementation, zero runtime deps,
-> pure `fetch` + SSE parsing, with per-token + cache-aware cost
-> in USD. M3 added `workflow-runtime` — an in-process
-> event-sourced executor that turns `WorkflowDefinition` shapes
-> into actually-running instances. Real provider clients for
-> Stripe / Salesforce / ServiceNow remain deferred.
+> **Status — Phase 3 in progress.** 61 packages + 3 apps, 124
+> meta-schema tables, **6,528 offline tests + 24 gated real-Postgres
+> integration tests**, all green, zero type errors. Phase 2 (the four
+> runtime pillars) is complete; Phase 3 has shipped the serving keystone
+> (`operate-runtime` + `apps/operate-server`) and the distributed
+> workflow worker (`workflow-worker` + `apps/workflow-worker`), both
+> proven end-to-end against real Postgres. ADRs 0001–0126 are drafted in
+> `docs/adr/`. Resuming work? Read **[CLAUDE.md](CLAUDE.md)** — the
+> concise state snapshot.
 
-This repository is the home of **CrossEngin** — an AI-native
-application platform. Three layers: a multi-tenant **kernel**,
-declarative **manifests** that tell the kernel what application to
-be, and an **AI Architect** agent that authors manifests through
-conversation.
+This repository is the home of **CrossEngin** — an AI-native application
+platform. **Three layers:** a multi-tenant **kernel**, declarative
+**manifests** that tell the kernel what application to be, and an **AI
+Architect** agent that authors manifests through conversation.
 
-ERP (under the **CrossEngin Operate** sub-brand) is the first
-family of applications built on CrossEngin. The platform also
-targets public-sector digitalization (**Govern**), national-scale
-healthcare digitalization (**Heal**), education (**Educate**), NGOs
-(**Serve**), bespoke self-service apps (**Build**), and a
-white-label channel for system integrators (**Partner**).
+ERP (under the **CrossEngin Operate** sub-brand) is the first family of
+applications built on CrossEngin. The platform also targets public-sector
+digitalization (**Govern**), national-scale healthcare (**Heal**),
+education (**Educate**), NGOs (**Serve**), bespoke self-service apps
+(**Build**), and a white-label channel for integrators (**Partner**).
 
-## Current state
+## Architecture in three layers
 
-Forty-eight packages cover the Phase 1 surface (zod schemas +
-deterministic helpers) plus Phase 2 M1-M6 + M2.7 (`kernel-pg`:
-real Postgres execution; `crypto`: real signatures + hashes;
-`workflow-runtime` + `workflow-runtime-pg`: event-sourced
-in-process executor with Postgres projection;
-`api-gateway-runtime` + `api-gateway-pg`: 17-stage HTTP pipeline
-with Postgres-backed stores; `workflow-signal-bridge`: webhook
-→ workflow signal routing; `ai-providers-anthropic`: real
-Anthropic Messages API client). The first binary,
-`architect-cli`, ships under `apps/`. Detailed orientation is
-in **[CLAUDE.md](CLAUDE.md)**.
+1. **Kernel** (`packages/kernel`). The substrate: a **meta-schema** of 124
+   platform-level Postgres tables, deterministic DDL emission, and
+   manifest validate / diff / patch / topology / hash. `kernel-pg`
+   executes that DDL against a real Postgres (advisory-lock-gated,
+   idempotent, drift-detecting).
 
-Quick map by concern:
+2. **Manifests.** A declarative `Manifest` — entities, relations, roles,
+   permissions, `entityLifecycle` workflows, jobs, views — is the source
+   of truth for an application. Vertical **packs** (`pack-erp-core`,
+   `-retail`, `-healthcare`, `-grocery`) ship real manifests and compose
+   via `meta.extends` lineage.
 
-- **Substrate.** `kernel` (meta-schema + DDL emit + manifest
-  validate/diff), `kernel-pg` (Postgres-backed migration applier
-  + drift detector), `crypto` (Ed25519 + HMAC-SHA256 + SHA-256 +
-  BLAKE2b-512 + per-tenant key store), `types`, `config`,
+3. **AI Architect** (`ai-architect` + `architect-cli`). An agent that
+   authors + edits manifests through conversation, with read tools
+   (validate / hash / diff / summarize) and a human-in-the-loop write
+   tool, persisting the full session to Postgres.
+
+The platform runs on **four runtime pillars**, each a pure contract +
+deterministic helpers, each with a Postgres-backed adapter:
+
+- **DDL execution** — `kernel-pg` (apply the meta-schema, detect drift).
+- **Cryptography** — `crypto` (real SHA-256 / BLAKE2b-512 / HMAC-SHA256 /
+  Ed25519 + per-tenant key store), wired into pack signing, webhook HMAC,
+  evidence sealing, tombstones, e-signatures.
+- **Workflow execution** — `workflow-engine` (contracts) +
+  `workflow-runtime` (event-sourced in-process executor) +
+  `workflow-runtime-pg` (projection + replay) + `workflow-worker` (the
+  distributed worker: parallel timer / retry / timeout / async-activity
+  draining over the PG event log, with heartbeats + stale-worker
+  incidents).
+- **HTTP gateway** — `api-gateway` (contracts) + `api-gateway-runtime`
+  (17-stage pipeline: auth → RBAC → idempotency → rate-limit →
+  classification redaction → audit) + `api-gateway-pg` (stores). The
+  **serving keystone** `operate-runtime` compiles a manifest into a live
+  multi-tenant API over this gateway + a pluggable `EntityStore`.
+
+Cross-cutting discipline (enforced by zod `superRefine` + the meta-schema
+test suite): **tenant isolation by RLS** (every `tenant_id`-bearing table
+has a row-level-security policy), **four-eyes** on privileged actions,
+**state machines** with `canTransition*` helpers, **cryptographic
+anchoring** (sha256 content addressing everywhere), and regulatory
+**deadlines** (GDPR 72h breach, Art. 12(3) deletion).
+
+## Package map by concern
+
+`packages/<name>`, each `src/index.ts` re-exporting its modules. zod
+schemas are the source of truth; types derive via `z.infer`.
+
+- **Substrate.** `kernel`, `kernel-pg`, `crypto`, `types`, `config`,
   `testing`.
-- **Identity, security, data.** `auth`, `sso`, `security`,
-  `compliance`, `residency`, `files`.
+- **Identity, security, data.** `auth`, `sso`, `security`, `compliance`,
+  `residency`, `files`.
 - **AI surface.** `ai-providers`, `ai-providers-anthropic`,
-  `ai-router`, `ai-architect`, `ai-architect-pg`.
-- **Runtime + admission control.** `jobs`, `observability`,
-  `integrations`, `rate-limiting`, `api-gateway`,
-  `api-gateway-runtime`, `api-gateway-pg`, `feature-flags`,
-  `workflow-engine`, `workflow-runtime`, `workflow-runtime-pg`.
+  `ai-providers-openai`, `ai-router`, `ai-architect`, `ai-architect-pg`.
+- **Runtime + operations.** `jobs`, `observability`,
+  `observability-runtime`, `observability-runtime-pg`, `integrations`,
+  `rate-limiting`, `api-gateway`, `api-gateway-runtime`, `api-gateway-pg`,
+  `feature-flags`, `workflow-engine`, `workflow-runtime`,
+  `workflow-runtime-pg`, `workflow-worker`, `operate-runtime`,
+  `operate-runtime-pg`.
 - **Reporting / search / UI / messaging.** `reporting`, `search`,
   `views`, `i18n`, `notifications`.
 - **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
-- **Delivery infrastructure.** `deploy`, `dr`, `edge`,
-  `active-active`, `pwa`.
+- **Delivery infrastructure.** `deploy`, `dr`, `edge`, `active-active`,
+  `pwa`.
 - **Developer / partner.** `sdk`, `sdk-clients`, `marketplace`,
   `migration`, `ml-training`.
 - **Audit + compliance ops.** `incident-response`, `forensics`,
   `access-reviews`, `data-lineage`.
-- **Vertical packs.** `pack-erp-core`.
+- **Vertical packs.** `pack-erp-core`, `pack-erp-retail`,
+  `pack-erp-healthcare`, `pack-erp-grocery`.
 
-Three compliance triangles closed at the contract layer:
-- **Privacy.** `tenant-lifecycle` (GDPR Art. 17 deletion) +
-  `data-lineage` (Art. 15 access) + `forensics` (legal hold).
-- **Access control.** `auth` (RBAC/ABAC) + `sso` (federation) +
-  `access-reviews` (SOC 2 CC6.3 periodic attestation).
-- **Runtime safety.** `feature-flags` (kill switches +
-  gradual rollout) + `rate-limiting` (admission control) +
-  `incident-response` (declared incidents) +
-  `workflow-engine` (saga compensation).
+## Apps
+
+Three runnable binaries under `apps/` (each `src/*` + a `bin/`):
+
+| app | binary | role |
+|---|---|---|
+| **`architect-cli`** | `crossengin` | author manifests — `init` / `validate` / `diff` / `patch` / `hash` / `apply` / `chat` (talks to Claude, tool dispatch, write proposals, `--persist` audit) |
+| **`operate-server`** | `operate-server` | serve a manifest as a multi-tenant HTTP API (Node + edge/Workers), three `EntityStore`s (memory / pg JSONB / pg-columns typed+encrypted), API-key + JWT/JWKS auth — see [its README](apps/operate-server/README.md) |
+| **`workflow-worker`** | `workflow-worker` | advance deferred workflow progression (8 modes: tick · claim · retry · timeout · execute · reap · resync · all) over the PG event log, with heartbeats + stale-worker incidents — see [its README](apps/workflow-worker/README.md) |
+
+## Meta-schema — the integration point
+
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of
+124 platform-level Postgres tables. Every package that persists records
+wires its `META_*` table definitions there; the kernel emits DDL
+deterministically. The test suite enforces two invariants: every
+`tenant_id`-bearing table has RLS enabled, and every FK resolves to a
+table declared earlier. Adding tables means appending to the array +
+updating `meta-schema.test.ts` (count, sorted names, column checks).
 
 ## Repository layout
 
 ```
 CrossEngin/
-├── docs/             architecture decisions + vision  (CC BY 4.0)
+├── docs/             vision + ADRs 0001-0126  (CC BY 4.0)
 │   ├── vision.md
-│   └── adr/          ADRs 0001-0059
-├── apps/             1 workspace app  (architect-cli)
-├── packages/         51 workspace packages
-├── apps/             user-facing applications          [pending]
-├── manifests/        declarative app packs             [pending]
-├── infra/            terraform + helm + docker         [pending]
-├── tools/            CLI tooling, codemods, eval suite [pending]
+│   └── adr/          docs/adr/index.md is the running index
+├── apps/             3 runnable binaries  (architect-cli, operate-server, workflow-worker)
+├── packages/         61 workspace packages
+├── scripts/          emit-bootstrap.mjs, setup-integration-db.sh
+├── .github/workflows/  ci.yml  (build/typecheck/offline + Postgres integration)
 ├── CLAUDE.md         project state snapshot for AI assistants
 └── (root config)     pnpm-workspace.yaml, turbo.json, package.json
 ```
 
-The full target layout is in
-**[ADR-0024](docs/adr/0024-repository-and-migration-strategy.md)**.
-The Phase 2 implementation plan is in
-**[ADR-0046](docs/adr/0046-phase-2-implementation-plan.md)**.
-
 ## How to read this repository
 
-If you're a human contributor, start with
-**[`docs/vision.md`](docs/vision.md)** — the north-star concept
-document. Then **[`docs/adr/index.md`](docs/adr/index.md)** — the
-running index of 59 architecture decisions.
+- **Human contributor?** Start with **[`docs/vision.md`](docs/vision.md)**
+  (the north star), then **[`docs/adr/index.md`](docs/adr/index.md)** (the
+  index of 126 architecture decisions). Individual ADRs live at
+  `docs/adr/NNNN-<slug>.md`, following
+  **[`0000-template.md`](docs/adr/0000-template.md)**.
+- **AI assistant resuming work?** Start with **[CLAUDE.md](CLAUDE.md)** —
+  the package map, cross-cutting invariants, meta-schema discipline,
+  build/test commands, and the `go [letter]` workflow used to extend the
+  codebase.
 
-Individual decisions live at `docs/adr/NNNN-<slug>.md`. They follow
-the template at
-**[`docs/adr/0000-template.md`](docs/adr/0000-template.md)**.
+## Tooling + commands
 
-If you're an AI assistant resuming work on the codebase, start
-with **[CLAUDE.md](CLAUDE.md)** — concise state snapshot covering
-the package map, cross-cutting invariants, meta-schema discipline,
-build/test commands, and the workflow pattern used to extend the
-codebase.
+pnpm workspaces + Turborepo, TypeScript strict, Vitest, Node ≥ 20, pnpm
+≥ 9.
+
+```bash
+pnpm install                                # install workspace
+pnpm -r build                               # build all packages (fast)
+pnpm -r test                                # offline tests (~30s)
+pnpm -r typecheck                           # type-check all packages
+pnpm --filter @crossengin/<name> test       # one package
+```
+
+There is **no top-level lint script** yet (ESLint v9 flat-config
+migration pending).
+
+### Real-Postgres integration tests (gated)
+
+The 24 integration tests in `apps/workflow-worker` + `apps/operate-server`
+are skipped unless `CROSSENGIN_PG_TEST=1` (so the offline suite stays
+hermetic). Provision a throwaway database + run them:
+
+```bash
+pnpm -r build
+PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres PGDATABASE=crossengin_test \
+  bash scripts/setup-integration-db.sh
+CROSSENGIN_PG_TEST=1 PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres \
+  PGDATABASE=crossengin_test PGSSLMODE=disable \
+  pnpm --filter @crossengin/workflow-worker-app test   # and --filter @crossengin/operate-server
+```
+
+`.github/workflows/ci.yml` runs both — an offline job and a `postgres:16`
+integration job — automatically.
 
 ## Sub-brand map
 
@@ -149,80 +189,30 @@ codebase.
 | **CrossEngin Build** | Self-service app builder for customers and partners. |
 | **CrossEngin Partner** | White-label and OEM channel for system integrators and consultancies. |
 
-## Target families
-
-Thirteen families of business and organizational types, ~150
-specific sub-types. See [`docs/vision.md`](docs/vision.md) for the
-full map.
-
-| # | Family | Brand |
-|---|---|---|
-| 1 | Healthcare + Pharma + Life Sciences | Operate |
-| 2 | Retail + F&B + Hospitality + POS | Operate |
-| 3 | Construction + Real Estate + Facilities Management | Operate |
-| 4 | Professional Services + Staffing + Field Service | Operate |
-| 5 | Government + Public Sector | Govern |
-| 6 | Healthcare digitalization (national / multi-org) | Heal |
-| 7 | Education | Educate |
-| 8 | NGO / Non-profit / Faith | Serve |
-| 9 | Financial services adjacent | Operate or Build |
-| 10 | Logistics + Mobility | Operate |
-| 11 | Agriculture + Mining + Energy | Operate |
-| 12 | General Manufacturing | Operate |
-| 13 | Media + Entertainment + Membership | Operate or Build |
-
 ## ADR statuses
 
 | Status | Meaning |
 |---|---|
 | **Proposed** | Drafted. Under review. Not yet binding. |
 | **Accepted** | Reviewed and adopted. Implementable. Constrains future architecture. |
-| **Superseded by ADR-XXXX** | A later decision replaces this one. Both ADRs cross-reference each other. |
+| **Superseded by ADR-XXXX** | A later decision replaces this one. Both cross-reference each other. |
 | **Deprecated** | No longer applies, no replacement. |
 
-Accepted ADRs are not rewritten. If a decision changes, a new ADR
-supersedes the old one.
-
-## Tooling
-
-The monorepo uses:
-
-- **pnpm** workspaces (`pnpm-workspace.yaml`)
-- **Turborepo** as the build orchestrator (`turbo.json`)
-- **TypeScript** strict mode across all packages
-- **Vitest** for unit tests, **Playwright** for E2E, **MSW** for HTTP mocks
-- **Node** ≥ 20, **pnpm** ≥ 9
-
-Common commands:
-
-```bash
-pnpm install                                # install workspace
-pnpm -r build                               # build all packages
-pnpm -r test                                # test all packages (~45s)
-pnpm -r typecheck                           # type-check all packages
-pnpm --filter @crossengin/<name> test       # one package
-```
+Accepted ADRs are not rewritten — a new ADR supersedes the old one.
 
 ## Contributing
 
-See **[CONTRIBUTING.md](CONTRIBUTING.md)** for ADR contribution
-guidance. Code contribution guidelines for new packages: scaffold
-follows the existing layout (`package.json`, `tsconfig.json`,
-`vitest.config.ts`, `src/index.ts` re-exporting modules, matching
-`src/*.test.ts` files); add any `META_*` tables to
-`packages/kernel/src/bootstrap/meta-schema.ts`; aim for 15–30
-tests per module covering schema accept/reject + helpers + state
-transitions. [CLAUDE.md](CLAUDE.md) §Workflow has the full
-11-step shape.
+See **[CONTRIBUTING.md](CONTRIBUTING.md)**. New packages follow the
+existing layout (`package.json`, `tsconfig.json`, `vitest.config.ts`,
+`src/index.ts` re-exporting modules, matching `src/*.test.ts`); add any
+`META_*` tables to `packages/kernel/src/bootstrap/meta-schema.ts`; aim for
+15–30 tests per module. [CLAUDE.md](CLAUDE.md) §Workflow has the full
+shape.
 
 ## License
 
-This repository is **dual-licensed**:
+Dual-licensed:
 
-- **`docs/`** subtree (vision, ADRs) — Creative Commons Attribution
-  4.0 International (CC BY 4.0). See
-  **[`docs/LICENSE`](docs/LICENSE)**.
-- **All other paths** (apps, packages, manifests, infra, tools,
-  root config) — proprietary. See **[`LICENSE`](LICENSE)**.
-
-Final proprietary license wording is pending per ADR-0024.
+- **`docs/`** (vision, ADRs) — Creative Commons Attribution 4.0
+  International (CC BY 4.0). See **[`docs/LICENSE`](docs/LICENSE)**.
+- **All other paths** — proprietary. See **[`LICENSE`](LICENSE)**.

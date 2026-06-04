@@ -22,9 +22,12 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28** landed: **60 packages + 3 apps, 124 meta-schema
+P1.27 + P1.28** landed: **61 packages + 3 apps, 124 meta-schema
 tables, 6,528 offline tests + 24 gated real-Postgres integration tests
-(13 worker + 11 operate-server)**, all green, no type errors.
+(13 worker + 11 operate-server)**, all green, no type errors. (Earlier
+per-increment lines below say "60 packages" — an off-by-one that
+predates `workflow-worker` being added as a package in P2.3; the live
+count is 61.)
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
 `@crossengin/workflow-worker` runs the workflow runtime as a worker
