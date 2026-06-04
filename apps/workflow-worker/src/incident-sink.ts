@@ -1,4 +1,4 @@
-import type { IncidentRecord } from "@crossengin/incident-response";
+import type { IncidentRecord, Severity } from "@crossengin/incident-response";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -55,6 +55,20 @@ export class PostgresIncidentSink {
           SET status = 'resolved', resolved_at = now()
         WHERE incident_id = $1 AND status <> 'resolved'`,
       [incidentId],
+    );
+  }
+
+  /**
+   * Raises an open incident's severity (when more workers go stale mid-incident).
+   * A no-op for a resolved incident; the monitor only ever escalates (raises),
+   * never lowers.
+   */
+  async escalate(incidentId: string, severity: Severity): Promise<void> {
+    await this.conn.query(
+      `UPDATE ${this.table}
+          SET severity = $2
+        WHERE incident_id = $1 AND status <> 'resolved'`,
+      [incidentId, severity],
     );
   }
 }

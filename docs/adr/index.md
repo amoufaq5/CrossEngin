@@ -178,3 +178,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 92 | 0124 | 3,000 | Drafted alongside the worker incident lifecycle — open/resolve dedup (Phase 3 P2.17) |
 | 93 | 0125 | 2,500 | Drafted alongside the column-store NUMERIC read fidelity fix (Phase 3 P1.27) |
 | 94 | 0126 | 2,500 | Drafted alongside the column-store DATE / TIMESTAMPTZ read fidelity fix (Phase 3 P1.28) |
+| 95 | 0127 | 2,500 | Drafted alongside the stale-worker incident severity escalation (Phase 3 P2.18) |

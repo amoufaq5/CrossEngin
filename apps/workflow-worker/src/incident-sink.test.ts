@@ -58,4 +58,13 @@ describe("PostgresIncidentSink.record", () => {
     expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status <> 'resolved'");
     expect(cap.last.params).toEqual(["INC-2026-0001"]);
   });
+
+  it("escalate raises the severity of an open (non-resolved) incident", async () => {
+    const cap = capture();
+    await new PostgresIncidentSink(cap.conn).escalate("INC-2026-0001", "sev2");
+    expect(cap.last.sql).toContain("UPDATE meta.incidents");
+    expect(cap.last.sql).toContain("SET severity = $2");
+    expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status <> 'resolved'");
+    expect(cap.last.params).toEqual(["INC-2026-0001", "sev2"]);
+  });
 });

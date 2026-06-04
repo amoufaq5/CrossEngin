@@ -1,4 +1,4 @@
-import type { IncidentRecord, Severity } from "@crossengin/incident-response";
+import { SEVERITIES, type IncidentRecord, type Severity } from "@crossengin/incident-response";
 import type { AlertPolicy } from "@crossengin/observability";
 import {
   planIncidentDeclaration,
@@ -23,6 +23,11 @@ import {
 export function staleWorkerSeverity(staleCount: number): Severity | null {
   if (staleCount <= 0) return null;
   return staleCount >= 3 ? "sev2" : "sev3";
+}
+
+/** True when `a` is strictly more severe than `b` (`sev1` is the most severe). */
+export function isMoreSevere(a: Severity, b: Severity): boolean {
+  return SEVERITIES.indexOf(a) < SEVERITIES.indexOf(b);
 }
 
 export interface StaleWorkerEnforcement {
@@ -80,6 +85,8 @@ export interface StaleWorkerMonitorOptions {
   readonly onIncident: (plan: StaleWorkerEnforcement) => void | Promise<void>;
   /** Fired when the open stale-worker incident clears (all workers recovered). */
   readonly onResolve?: (incidentId: string) => void | Promise<void>;
+  /** Fired when more workers go stale and the open incident's severity should rise. */
+  readonly onEscalate?: (incidentId: string, severity: Severity) => void | Promise<void>;
   readonly staleAfterMs?: number;
   readonly surface?: string;
   readonly policy?: AlertPolicy;
@@ -113,6 +120,7 @@ export class StaleWorkerMonitor {
   private readonly scheduler: IntervalScheduler;
   private handle: IntervalHandle | null = null;
   private openIncidentId: string | null = null;
+  private openSeverity: Severity | null = null;
 
   constructor(opts: StaleWorkerMonitorOptions) {
     this.opts = opts;
@@ -144,13 +152,23 @@ export class StaleWorkerMonitor {
         });
         if (plan !== null) {
           this.openIncidentId = plan.incident.id;
+          this.openSeverity = plan.severity;
           await this.opts.onIncident(plan);
         }
+      } else {
+        // ongoing — escalate (raise) the open incident's severity if more
+        // workers have gone stale; never de-escalate, never re-declare
+        const current = staleWorkerSeverity(report.stale);
+        if (current !== null && this.openSeverity !== null && isMoreSevere(current, this.openSeverity)) {
+          const id = this.openIncidentId;
+          this.openSeverity = current;
+          await this.opts.onEscalate?.(id, current);
+        }
       }
-      // else: ongoing — the incident stays open, no re-declare
     } else if (this.openIncidentId !== null) {
       const resolved = this.openIncidentId;
       this.openIncidentId = null;
+      this.openSeverity = null;
       await this.opts.onResolve?.(resolved);
     }
     return report;

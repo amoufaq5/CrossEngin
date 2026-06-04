@@ -520,6 +520,39 @@ suite("workflow-worker integration (real Postgres)", () => {
     expect(row.rows[0]?.resolved_at).not.toBeNull();
   });
 
+  it("escalates a persisted incident's severity when more workers go stale", async () => {
+    const declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [declaredBy, "monitor@crossengin.test"]);
+    // isolate: only this test's workers are running (others → stopped)
+    await conn.query("UPDATE meta.worker_heartbeats SET status = 'stopped' WHERE status = 'running'");
+
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const stale = "2026-06-04T11:55:00.000Z";
+    const beat = (id: string) =>
+      store.upsert({ workerId: id, mode: "all", status: "running", hostname: "h", startedAt: "2026-06-04T11:00:00.000Z", lastHeartbeatAt: stale, lastRunAt: null, pollCount: 1, claimedTotal: 0, processedTotal: 0, errorCount: 0, lastError: null });
+    const pfx = `wh-esc-${Math.random().toString(36).slice(2, 8)}`;
+    await beat(`${pfx}-1`); // 1 stale → sev3
+
+    const sink = new PostgresIncidentSink(conn);
+    const incidentId = `INC-2026-${Math.floor(1000 + Math.random() * 8999).toString()}`;
+    const monitor = new StaleWorkerMonitor({
+      source: store, declaredBy, staleAfterMs: 60_000,
+      clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
+      nextIncidentId: () => incidentId,
+      onIncident: async (plan) => { await sink.record(plan.incident); },
+      onEscalate: async (id, severity) => { await sink.escalate(id, severity); },
+    });
+    await monitor.checkOnce(); // declares sev3
+    const declared = await conn.query<{ severity: string }>(`SELECT severity FROM meta.incidents WHERE incident_id = $1`, [incidentId]);
+    expect(declared.rows[0]?.severity).toBe("sev3");
+
+    await beat(`${pfx}-2`);
+    await beat(`${pfx}-3`); // now 3 stale → sev2
+    await monitor.checkOnce(); // escalate
+    const escalated = await conn.query<{ severity: string }>(`SELECT severity FROM meta.incidents WHERE incident_id = $1`, [incidentId]);
+    expect(escalated.rows[0]?.severity).toBe("sev2");
+  });
+
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {
     const def = timerDef(defId());
     await seedDefinition(def);

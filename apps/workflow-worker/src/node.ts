@@ -113,6 +113,10 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
         process.stdout.write(`[workflow-worker] STALE WORKERS RESOLVED — ${incidentId}\n`);
         if (incidentSink !== null) await incidentSink.resolve(incidentId);
       },
+      onEscalate: async (incidentId, severity) => {
+        process.stdout.write(`[workflow-worker] STALE WORKERS ESCALATED — ${incidentId} → ${severity}\n`);
+        if (incidentSink !== null) await incidentSink.escalate(incidentId, severity);
+      },
       onError: logError,
     });
   }

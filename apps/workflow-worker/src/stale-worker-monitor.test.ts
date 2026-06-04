@@ -132,6 +132,29 @@ describe("StaleWorkerMonitor", () => {
     expect(incidents).toEqual(["INC-2026-0001", "INC-2026-0002"]);
   });
 
+  it("escalates the open incident's severity (sev3 → sev2) when more workers go stale, once", async () => {
+    let rows: HeartbeatSnapshot[] = [snap("d1", 120_000)]; // 1 stale → sev3
+    const source: HeartbeatSource = { async listAll() { return rows; } };
+    const incidents: Array<{ id: string; severity: string }> = [];
+    const escalations: Array<{ id: string; severity: string }> = [];
+    const monitor = new StaleWorkerMonitor({
+      source, declaredBy: "00000000-0000-4000-8000-000000000001",
+      nextIncidentId: () => "INC-2026-0001",
+      onIncident: (plan) => { incidents.push({ id: plan.incident.id, severity: plan.severity }); },
+      onEscalate: (id, severity) => { escalations.push({ id, severity }); },
+      clock,
+    });
+
+    await monitor.checkOnce(); // open at sev3
+    expect(incidents).toEqual([{ id: "INC-2026-0001", severity: "sev3" }]);
+
+    rows = [snap("d1", 120_000), snap("d2", 120_000), snap("d3", 120_000)]; // 3 stale → sev2
+    await monitor.checkOnce(); // escalate
+    await monitor.checkOnce(); // still 3 stale — no second escalation
+    expect(escalations).toEqual([{ id: "INC-2026-0001", severity: "sev2" }]);
+    expect(incidents).toHaveLength(1); // never re-declared
+  });
+
   it("checkOnce emits nothing when all workers are healthy", async () => {
     const source: HeartbeatSource = { async listAll() { return [snap("ok", 1_000)]; } };
     const incidents: string[] = [];
