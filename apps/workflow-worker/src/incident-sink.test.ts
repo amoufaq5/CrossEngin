@@ -49,4 +49,13 @@ describe("PostgresIncidentSink.record", () => {
     expect(cap.last.sql).toContain("ops.incidents");
     expect(() => new PostgresIncidentSink(cap.conn, { schema: "x; DROP" })).toThrow(/invalid schema/);
   });
+
+  it("resolve transitions an open incident to resolved (idempotent)", async () => {
+    const cap = capture();
+    await new PostgresIncidentSink(cap.conn).resolve("INC-2026-0001");
+    expect(cap.last.sql).toContain("UPDATE meta.incidents");
+    expect(cap.last.sql).toContain("SET status = 'resolved', resolved_at = now()");
+    expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status <> 'resolved'");
+    expect(cap.last.params).toEqual(["INC-2026-0001"]);
+  });
 });

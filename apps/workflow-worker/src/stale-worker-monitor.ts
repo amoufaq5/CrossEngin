@@ -78,6 +78,8 @@ export interface StaleWorkerMonitorOptions {
   /** Mints a unique incident id per detection (e.g. `formatIncidentId(year, seq++)`). */
   readonly nextIncidentId: () => string;
   readonly onIncident: (plan: StaleWorkerEnforcement) => void | Promise<void>;
+  /** Fired when the open stale-worker incident clears (all workers recovered). */
+  readonly onResolve?: (incidentId: string) => void | Promise<void>;
   readonly staleAfterMs?: number;
   readonly surface?: string;
   readonly policy?: AlertPolicy;
@@ -98,16 +100,19 @@ const DEFAULT_SCHEDULER_LOCAL: IntervalScheduler = {
 };
 
 /**
- * Periodically reads every worker heartbeat, summarizes health, and — when any
- * worker is stale — plans an incident (+ pages) and hands it to `onIncident`.
- * The consumer-side bridge that turns P2.11 detection into a real page, keeping
- * `@crossengin/workflow-worker` itself off the incident packages.
+ * Periodically reads every worker heartbeat, summarizes health, and tracks an
+ * **ongoing** stale-worker incident: it `onIncident`-declares one when staleness
+ * opens (0 → >0), holds it while stale workers persist (no re-declare), and
+ * `onResolve`s it when staleness clears (>0 → 0). One incident per stale period
+ * — no storm. The consumer-side bridge that turns P2.11 detection into a real
+ * page + resolve, keeping `@crossengin/workflow-worker` off the incident packages.
  */
 export class StaleWorkerMonitor {
   private readonly opts: StaleWorkerMonitorOptions;
   private readonly clock: Clock;
   private readonly scheduler: IntervalScheduler;
   private handle: IntervalHandle | null = null;
+  private openIncidentId: string | null = null;
 
   constructor(opts: StaleWorkerMonitorOptions) {
     this.opts = opts;
@@ -115,7 +120,11 @@ export class StaleWorkerMonitor {
     this.scheduler = opts.scheduler ?? DEFAULT_SCHEDULER_LOCAL;
   }
 
-  /** Reads heartbeats, and if any worker is stale plans + emits an incident. Returns the health report. */
+  /**
+   * Reads heartbeats; opens an incident when staleness begins, resolves the open
+   * one when it clears, and is a no-op while staleness is ongoing or absent.
+   * Returns the health report.
+   */
   async checkOnce(): Promise<WorkerHealthReport> {
     const now = this.clock.now();
     const snapshots = await this.opts.source.listAll();
@@ -124,15 +133,25 @@ export class StaleWorkerMonitor {
       ...(this.opts.staleAfterMs !== undefined ? { staleAfterMs: this.opts.staleAfterMs } : {}),
     });
     if (report.stale > 0) {
-      const plan = planStaleWorkerEnforcement({
-        report,
-        now,
-        incidentId: this.opts.nextIncidentId(),
-        declaredBy: this.opts.declaredBy,
-        ...(this.opts.surface !== undefined ? { surface: this.opts.surface } : {}),
-        ...(this.opts.policy !== undefined ? { policy: this.opts.policy } : {}),
-      });
-      if (plan !== null) await this.opts.onIncident(plan);
+      if (this.openIncidentId === null) {
+        const plan = planStaleWorkerEnforcement({
+          report,
+          now,
+          incidentId: this.opts.nextIncidentId(),
+          declaredBy: this.opts.declaredBy,
+          ...(this.opts.surface !== undefined ? { surface: this.opts.surface } : {}),
+          ...(this.opts.policy !== undefined ? { policy: this.opts.policy } : {}),
+        });
+        if (plan !== null) {
+          this.openIncidentId = plan.incident.id;
+          await this.opts.onIncident(plan);
+        }
+      }
+      // else: ongoing — the incident stays open, no re-declare
+    } else if (this.openIncidentId !== null) {
+      const resolved = this.openIncidentId;
+      this.openIncidentId = null;
+      await this.opts.onResolve?.(resolved);
     }
     return report;
   }

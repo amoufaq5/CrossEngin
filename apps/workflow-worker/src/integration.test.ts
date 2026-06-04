@@ -483,6 +483,43 @@ suite("workflow-worker integration (real Postgres)", () => {
     expect(["sev2", "sev3"]).toContain(row.rows[0]!.severity);
   });
 
+  it("resolves a persisted stale-worker incident when the worker recovers", async () => {
+    const declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [declaredBy, "monitor@crossengin.test"]);
+
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const worker = `wh-life-${Math.random().toString(36).slice(2, 8)}`;
+    const beat = (lastHeartbeatAt: string) =>
+      store.upsert({ workerId: worker, mode: "all", status: "running", hostname: "h", startedAt: "2026-06-04T11:00:00.000Z", lastHeartbeatAt, lastRunAt: null, pollCount: 1, claimedTotal: 0, processedTotal: 0, errorCount: 0, lastError: null });
+    await beat("2026-06-04T11:55:00.000Z"); // stale (5 min old at the check time)
+
+    const sink = new PostgresIncidentSink(conn);
+    const incidentId = `INC-2026-${Math.floor(1000 + Math.random() * 8999).toString()}`;
+    const monitor = new StaleWorkerMonitor({
+      source: store,
+      declaredBy,
+      staleAfterMs: 60_000,
+      clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
+      nextIncidentId: () => incidentId,
+      onIncident: async (plan) => { await sink.record(plan.incident); },
+      onResolve: async (id) => { await sink.resolve(id); },
+    });
+
+    // this run only owns its `worker`, but other rows may be stale → assert on our incident id
+    await monitor.checkOnce(); // declares + persists (if our worker is the trigger; ensure it is by checking the row)
+    // make our worker fresh, then ensure no other stale rows would keep it open:
+    await conn.query(`UPDATE meta.worker_heartbeats SET status = 'stopped' WHERE worker_id <> $1 AND status = 'running' AND last_heartbeat_at < $2`, [worker, "2026-06-04T11:59:00.000Z"]);
+    await beat("2026-06-04T11:59:30.000Z"); // recovered (30s old)
+    await monitor.checkOnce(); // resolves
+
+    const row = await conn.query<{ status: string; resolved_at: string | null }>(
+      `SELECT status, resolved_at FROM meta.incidents WHERE incident_id = $1`, [incidentId],
+    );
+    // the incident was declared then resolved
+    expect(row.rows[0]?.status).toBe("resolved");
+    expect(row.rows[0]?.resolved_at).not.toBeNull();
+  });
+
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {
     const def = timerDef(defId());
     await seedDefinition(def);

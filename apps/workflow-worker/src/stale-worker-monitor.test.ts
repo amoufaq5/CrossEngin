@@ -103,6 +103,35 @@ describe("StaleWorkerMonitor", () => {
     expect(incidents).toEqual(["INC-2026-0001"]);
   });
 
+  it("opens one incident for an ongoing stale period and resolves it on recovery", async () => {
+    let rows: HeartbeatSnapshot[] = [snap("dead", 120_000)];
+    const source: HeartbeatSource = { async listAll() { return rows; } };
+    const incidents: string[] = [];
+    const resolved: string[] = [];
+    let seq = 0;
+    const monitor = new StaleWorkerMonitor({
+      source, declaredBy: "00000000-0000-4000-8000-000000000001",
+      nextIncidentId: () => `INC-2026-${String((seq += 1)).padStart(4, "0")}`,
+      onIncident: (plan) => { incidents.push(plan.incident.id); },
+      onResolve: (id) => { resolved.push(id); },
+      clock,
+    });
+
+    await monitor.checkOnce(); // open
+    await monitor.checkOnce(); // ongoing — no new incident
+    expect(incidents).toEqual(["INC-2026-0001"]);
+    expect(resolved).toEqual([]);
+
+    rows = [snap("dead", 1_000)]; // the worker recovered (fresh heartbeat)
+    await monitor.checkOnce(); // resolve
+    expect(resolved).toEqual(["INC-2026-0001"]);
+
+    // a fresh staleness opens a NEW incident
+    rows = [snap("dead", 120_000)];
+    await monitor.checkOnce();
+    expect(incidents).toEqual(["INC-2026-0001", "INC-2026-0002"]);
+  });
+
   it("checkOnce emits nothing when all workers are healthy", async () => {
     const source: HeartbeatSource = { async listAll() { return [snap("ok", 1_000)]; } };
     const incidents: string[] = [];

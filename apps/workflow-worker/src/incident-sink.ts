@@ -42,4 +42,19 @@ export class PostgresIncidentSink {
       ],
     );
   }
+
+  /**
+   * Transitions an open incident to `resolved` (stamping `resolved_at`) — the
+   * recovery side of the loop, called when the workers that triggered it start
+   * beating again. Idempotent: a no-op if the incident is absent or already
+   * resolved.
+   */
+  async resolve(incidentId: string): Promise<void> {
+    await this.conn.query(
+      `UPDATE ${this.table}
+          SET status = 'resolved', resolved_at = now()
+        WHERE incident_id = $1 AND status <> 'resolved'`,
+      [incidentId],
+    );
+  }
 }

@@ -109,6 +109,10 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
         );
         if (incidentSink !== null) await incidentSink.record(plan.incident);
       },
+      onResolve: async (incidentId) => {
+        process.stdout.write(`[workflow-worker] STALE WORKERS RESOLVED — ${incidentId}\n`);
+        if (incidentSink !== null) await incidentSink.resolve(incidentId);
+      },
       onError: logError,
     });
   }
