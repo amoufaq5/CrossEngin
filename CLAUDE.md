@@ -1762,6 +1762,30 @@ pnpm -r typecheck
 There is **no top-level lint script**. ESLint config has not
 been migrated to v9 flat config yet; ignore lint until asked.
 
+### Real-Postgres integration tests (gated)
+
+The 24 gated integration tests in `apps/workflow-worker` +
+`apps/operate-server` are skipped unless `CROSSENGIN_PG_TEST=1` is set
+(so the offline suite stays hermetic). To run them, provision a
+throwaway database + run the gated suites:
+
+```bash
+pnpm -r build
+PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres PGDATABASE=crossengin_test \
+  bash scripts/setup-integration-db.sh          # creates db + pgcrypto + uuid shim + applies the 124-table schema
+CROSSENGIN_PG_TEST=1 PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres \
+  PGDATABASE=crossengin_test PGSSLMODE=disable \
+  pnpm --filter @crossengin/workflow-worker-app test
+# … and --filter @crossengin/operate-server test
+```
+
+`.github/workflows/ci.yml` runs this automatically: a `build-test`
+job (build + typecheck + offline tests) and an `integration` job (a
+`postgres:16` service + `scripts/setup-integration-db.sh` + the gated
+suites under `CROSSENGIN_PG_TEST=1`). `scripts/emit-bootstrap.mjs`
+emits the meta-schema DDL the setup script applies. (Production uses
+the `pg_uuidv7` extension; the test shim is `gen_random_uuid()`.)
+
 ## Conventions
 
 - **Module structure.** Each package: `package.json`,
