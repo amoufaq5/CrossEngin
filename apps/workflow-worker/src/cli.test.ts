@@ -12,6 +12,7 @@ describe("parseWorkerArgs", () => {
       tickIntervalMs: 5000,
       claimIntervalMs: 1000,
       retryIntervalMs: 5000,
+      timeoutIntervalMs: 10000,
       batchSize: 50,
       leaseMs: 30000,
       definitionsPath: null,
@@ -32,6 +33,7 @@ describe("parseWorkerArgs", () => {
       "--tick-interval-ms", "2000",
       "--claim-interval-ms", "500",
       "--retry-interval-ms", "8000",
+      "--timeout-interval-ms", "12000",
       "--batch-size", "25",
       "--lease-ms", "45000",
       "--definitions", "/defs.json",
@@ -43,6 +45,7 @@ describe("parseWorkerArgs", () => {
       tickIntervalMs: 2000,
       claimIntervalMs: 500,
       retryIntervalMs: 8000,
+      timeoutIntervalMs: 12000,
       batchSize: 25,
       leaseMs: 45000,
       definitionsPath: "/defs.json",
@@ -58,8 +61,8 @@ describe("parseWorkerArgs", () => {
     expect(opts.batchSize).toBe(10);
   });
 
-  it("accepts all four modes", () => {
-    for (const mode of ["tick", "claim", "retry", "all"] as const) {
+  it("accepts all five modes", () => {
+    for (const mode of ["tick", "claim", "retry", "timeout", "all"] as const) {
       expect(parseWorkerArgs(["--mode", mode]).mode).toBe(mode);
     }
   });

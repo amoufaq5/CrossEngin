@@ -6373,12 +6373,18 @@ export const META_WORKFLOW_INSTANCES: TableDefinition = {
     { name: "awaiting_activity_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "awaiting_signal_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "awaiting_timer_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "claimed_by", type: "TEXT" },
+    { name: "lease_expires_at", type: "TIMESTAMPTZ" },
   ],
   primaryKey: ["id"],
   indexes: [
     {
       name: "idx_workflow_instances_tenant_status",
       columns: ["tenant_id", "status"],
+    },
+    {
+      name: "idx_workflow_instances_timeout_claim",
+      columns: ["status", "timeout_at", "lease_expires_at"],
     },
     {
       name: "idx_workflow_instances_definition",

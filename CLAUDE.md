@@ -19,9 +19,9 @@ M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 + M7.8.6 + M7.9 + M7.9.1 + M2.8.5 + M2.8.6 + M8 + M8.5 + M8.6 +
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
 P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
-P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4**
-landed: **60 packages + 3 apps, 123 meta-schema tables, 6,447
-tests**, all green, no type errors.
+P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
+P2.5** landed: **60 packages + 3 apps, 123 meta-schema tables,
+6,459 tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
 `@crossengin/workflow-worker` runs the workflow runtime as a worker
@@ -103,10 +103,25 @@ fallback. `projectActivities` carries `maxAttempts`/`retryPolicy`/
 attempt starts), and `PostgresActivityStore` persists them all — so
 the `workflow_activities` INSERT finally satisfies every NOT NULL
 column and `PostgresActivityRetryClaimStore` (ADR-0105, unchanged)
-sees real due times instead of always-eligible NULLs. A real-PG
-integration test of the claim→fire/retry loop + a timeout sweeper
-(`timeout_at` is now populated, ready for it) + the full async
-activity queue remain the deeper P2 follow-up. P1 added
+sees real due times instead of always-eligible NULLs. **P2.5
+(ADR-0108) added the instance timeout sweeper** — completing the
+time-based-progression trio (timers fire · activities retry ·
+instances time out). `WorkflowEngine.timeoutInstance({instanceId})`
+fails a non-terminal instance past its overall `timeoutAt` deadline
+(emits `instance_failed` with `errorCode: INSTANCE_TIMEOUT`;
+idempotent + race-safe: terminal/unknown/not-yet-due → no-op),
+`meta.workflow_instances` gained the same `claimed_by`/
+`lease_expires_at` lease columns + `idx_workflow_instances_timeout_
+claim`, `PostgresInstanceTimeoutClaimStore.claimTimedOutInstances`
+claims non-terminal, past-deadline, unleased instances via `FOR
+UPDATE SKIP LOCKED`, and `TimeoutSweeperWorker.runOnce` claims a
+batch + fails each via `timeoutInstance` (lease released in a
+`finally`). `apps/workflow-worker` gained `--mode timeout` +
+`--timeout-interval-ms`, and the default `--mode all` now runs
+**claim + retry + timeout** (the full parallel production set). A
+real-PG integration test of the claim→execute loops + worker
+observability + the full async activity queue remain the deeper P2
+follow-up. P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
 `manifest → routes → handlers` compiler derives a `RouteSpec` per
@@ -766,7 +781,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers P2.4 (activity retry backoff — next_retry_at population)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers P2.5 (instance timeout sweeper — timeoutInstance + claim)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -875,8 +890,8 @@ re-exporting everything.
   expected projection vs stored rows; bulkResync iterates with
   pagination + maxInstances cap for periodic CI / observability
   guards).
-- **`workflow-worker`** — Phase 3 P2 + P2.1 + P2.2: the distributed
-  worker. 6 modules: lock-key (advisoryLockKey(namespace) → a stable signed
+- **`workflow-worker`** — Phase 3 P2 + P2.1 + P2.2 + P2.5: the
+  distributed worker. 8 modules: lock-key (advisoryLockKey(namespace) → a stable signed
   64-bit pg advisory-lock key from sha256), worker (WorkflowWorker.
   tickOnce runs engine.tickTimers(now) inside conn.withAdvisoryLock
   so N worker processes serialize on one lock — only one ticks at a
@@ -897,16 +912,25 @@ re-exporting everything.
   failed/timed-out, not-exhausted, backoff-elapsed activities via FOR
   UPDATE SKIP LOCKED + lease), retry-worker (RetryExecutorWorker.
   runOnce claims a batch + re-runs each via engine.retryActivity,
-  releasing the lease in a finally). The engine's per-unit primitives
-  WorkflowEngine.fireTimer + retryActivity (both idempotent, replaying
-  the original activity input) live in workflow-runtime. No new META
-  tables (lease columns + indexes on workflow_timers + workflow_
-  activities). P2.4 populated the retry backoff (ADR-0107): the engine
+  releasing the lease in a finally), instance-timeout-claim-store
+  (P2.5: PostgresInstanceTimeoutClaimStore.claimTimedOutInstances
+  claims non-terminal, past-deadline (timeout_at <= now), unleased
+  instances via FOR UPDATE SKIP LOCKED + lease — over the new
+  workflow_instances lease columns), timeout-worker
+  (TimeoutSweeperWorker.runOnce claims a batch + fails each via
+  engine.timeoutInstance, releasing the lease in a finally). The
+  engine's per-unit primitives WorkflowEngine.fireTimer +
+  retryActivity + timeoutInstance (all idempotent / settled-guarded)
+  live in workflow-runtime. No new META tables (lease columns +
+  indexes on workflow_timers + workflow_activities + workflow_
+  instances). P2.4 populated the retry backoff (ADR-0107): the engine
   stamps next_retry_at on each activity failure (via the shared
-  workflow-engine computeNextRetryAt / retryDelaySeconds), so this
-  claim store's next_retry_at gate sees real due times. A full async
-  activity queue + a timeout sweeper (timeout_at is now populated) are
-  the deeper follow-up.
+  workflow-engine computeNextRetryAt / retryDelaySeconds), so the
+  retry claim store's next_retry_at gate sees real due times. P2.5
+  (ADR-0108) added the instance timeout sweeper, completing the
+  time-based-progression trio (timers · retries · timeouts). A full
+  async activity queue + worker observability remain the deeper
+  follow-up.
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces + a replayer. 5 modules:
   idempotency-store (INSERT … ON CONFLICT DO UPDATE on tenant+
@@ -1090,16 +1114,18 @@ re-exporting everything.
   (parseWorkerArgs: --mode tick|claim|retry|all [default all = the
   parallel claim + retry combo], random --worker-id, --schema,
   per-loop --tick/claim/retry-interval-ms, --batch-size, --lease-ms,
-  --definitions <file>; space + inline forms; CliUsageError on
-  misuse), runner (buildWorkerSet — the framework-neutral core: for
-  the selected mode it constructs the worker(s) over one PgConnection
-  + one structural WorkerEngine [TimerTickEngine & FireTimerEngine &
-  RetryActivityEngine, all satisfied by buildPersistentEngine's
+  --definitions <file>; --timeout-interval-ms; space + inline forms;
+  CliUsageError on misuse), runner (buildWorkerSet — the
+  framework-neutral core: for the selected mode it constructs the
+  worker(s) over one PgConnection + one structural WorkerEngine
+  [TimerTickEngine & FireTimerEngine & RetryActivityEngine &
+  TimeoutInstanceEngine, all satisfied by buildPersistentEngine's
   engine] — tick→WorkflowWorker, claim→ClaimingTimerWorker over
   PostgresTimerClaimStore, retry→RetryExecutorWorker over
-  PostgresActivityRetryClaimStore, all→claim+retry; each polls its
-  own interval; scheduler + onError injectable so the wiring is
-  fake-tested with no DB), node (run opens
+  PostgresActivityRetryClaimStore, timeout→TimeoutSweeperWorker over
+  PostgresInstanceTimeoutClaimStore, all→claim+retry+timeout; each
+  polls its own interval; scheduler + onError injectable so the wiring
+  is fake-tested with no DB), node (run opens
   createNodePgConnection(parsePgEnvConfig()), loads the --definitions
   JSON via the pure parseDefinitionsJson [WorkflowDefinitionSchema-
   validated, keyed by id], builds the persistent engine so every
@@ -2084,7 +2110,7 @@ Phase 3 P1.21 (field selection / projection on list + read in
 `operate-runtime`), ADR-0102 covers Phase 3 P1.22 (SQL-level
 projection pushdown in the column store), ADR-0103 covers Phase 3
 P2 (`workflow-worker` — the distributed tick worker over the PG
-event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers Phase 3 P2.4 (activity retry backoff — next_retry_at population; ADRs 0080-0085 reserved for P3-P8).
+event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers Phase 3 P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers Phase 3 P2.5 (instance timeout sweeper — timeoutInstance + claim; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

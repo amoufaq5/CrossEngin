@@ -57,6 +57,7 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
     tickIntervalMs: options.tickIntervalMs,
     claimIntervalMs: options.claimIntervalMs,
     retryIntervalMs: options.retryIntervalMs,
+    timeoutIntervalMs: options.timeoutIntervalMs,
     batchSize: options.batchSize,
     leaseMs: options.leaseMs,
     onError: (err) => {

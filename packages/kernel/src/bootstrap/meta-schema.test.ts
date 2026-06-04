@@ -1503,6 +1503,13 @@ describe("table column shapes", () => {
     expect(kind?.check).toContain("'business_hours'");
   });
 
+  it("META_WORKFLOW_INSTANCES carries timeout-sweep lease columns + index", () => {
+    const cols = META_WORKFLOW_INSTANCES.columns.map((c) => c.name);
+    expect(cols).toContain("claimed_by");
+    expect(cols).toContain("lease_expires_at");
+    expect(META_WORKFLOW_INSTANCES.indexes?.some((i) => i.name === "idx_workflow_instances_timeout_claim")).toBe(true);
+  });
+
   it("META_WORKFLOW_TIMERS carries worker lease columns (claimed_by + lease_expires_at)", () => {
     const cols = META_WORKFLOW_TIMERS.columns.map((c) => c.name);
     expect(cols).toContain("claimed_by");

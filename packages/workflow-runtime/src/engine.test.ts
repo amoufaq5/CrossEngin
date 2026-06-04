@@ -490,6 +490,47 @@ describe("retryActivity (per-unit, for the activity retry executor)", () => {
   });
 });
 
+describe("timeoutInstance (per-unit, for the timeout sweeper)", () => {
+  const FAR_FUTURE = new Date("2026-06-01T00:00:00.000Z").getTime();
+
+  it("fails a non-terminal instance past its deadline with INSTANCE_TIMEOUT", async () => {
+    const { engine } = makeEngine();
+    const def = definitionFixture();
+    const start = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    // parked waiting for the approve/reject signal
+    expect((await engine.getInstanceState(start.instanceId))?.status).toBe("waiting_for_signal");
+
+    const result = await engine.timeoutInstance({ instanceId: start.instanceId, nowMs: FAR_FUTURE });
+    expect(result).toMatchObject({ timedOut: true, previousStatus: "waiting_for_signal" });
+    const state = await engine.getInstanceState(start.instanceId);
+    expect(state?.status).toBe("failed");
+    expect(state?.failureCode).toBe("INSTANCE_TIMEOUT");
+  });
+
+  it("is a no-op when the deadline has not passed (race-safe)", async () => {
+    const { engine } = makeEngine();
+    const def = definitionFixture();
+    const start = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.timeoutInstance({ instanceId: start.instanceId, nowMs: Date.parse("2026-05-16T12:00:01.000Z") });
+    expect(result.timedOut).toBe(false);
+    expect((await engine.getInstanceState(start.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("is idempotent — a second sweep of a timed-out instance is a no-op", async () => {
+    const { engine } = makeEngine();
+    const def = definitionFixture();
+    const start = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.timeoutInstance({ instanceId: start.instanceId, nowMs: FAR_FUTURE });
+    const again = await engine.timeoutInstance({ instanceId: start.instanceId, nowMs: FAR_FUTURE });
+    expect(again).toMatchObject({ timedOut: false, previousStatus: "failed" });
+  });
+
+  it("is a no-op for an unknown instance", async () => {
+    const { engine } = makeEngine();
+    expect((await engine.timeoutInstance({ instanceId: "wfi_nope", nowMs: FAR_FUTURE })).timedOut).toBe(false);
+  });
+});
+
 describe("schedule_activity action", () => {
   it("runs the registered handler and emits scheduled+started+completed", async () => {
     const def: WorkflowDefinition = {

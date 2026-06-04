@@ -87,6 +87,12 @@ export interface RetryActivityResult {
   readonly status: "succeeded" | "failed" | "timed_out" | null;
 }
 
+export interface TimeoutInstanceResult {
+  readonly timedOut: boolean;
+  readonly instanceId: string;
+  readonly previousStatus: string | null;
+}
+
 export class WorkflowEngine {
   private readonly eventLog: EventLog;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -407,6 +413,59 @@ export class WorkflowEngine {
       correlationId: null,
       causationEventId: null,
     });
+  }
+
+  /**
+   * Fails a non-terminal instance that has passed its overall `timeoutAt`
+   * deadline — the per-unit primitive a distributed timeout sweeper drives after
+   * claiming a due instance. **Idempotent + race-safe**: a terminal instance, an
+   * unknown instance, or one whose deadline has *not* actually passed (claimed a
+   * touch early, or the deadline was extended) is a no-op (`timedOut: false`), so
+   * two sweepers can't double-fail it. Emits `instance_failed` with
+   * `INSTANCE_TIMEOUT`.
+   */
+  async timeoutInstance(input: {
+    instanceId: string;
+    nowMs?: number;
+  }): Promise<TimeoutInstanceResult> {
+    const state = await this.getInstanceState(input.instanceId);
+    if (state === null) return { timedOut: false, instanceId: input.instanceId, previousStatus: null };
+    if (
+      state.status === "completed" ||
+      state.status === "failed" ||
+      state.status === "cancelled" ||
+      state.status === "compensated"
+    ) {
+      return { timedOut: false, instanceId: input.instanceId, previousStatus: state.status };
+    }
+    const nowMs = input.nowMs ?? this.clock.now().getTime();
+    if (nowMs < Date.parse(state.timeoutAt)) {
+      return { timedOut: false, instanceId: input.instanceId, previousStatus: state.status };
+    }
+    const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
+    await this.appendEvent({
+      instanceId: input.instanceId,
+      tenantId: state.tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "instance_failed",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: {
+        errorCode: "INSTANCE_TIMEOUT",
+        errorMessage: `instance exceeded timeout deadline ${state.timeoutAt}`,
+      },
+      correlationId: null,
+      causationEventId: null,
+    });
+    return { timedOut: true, instanceId: input.instanceId, previousStatus: state.status };
   }
 
   async getInstanceState(instanceId: string): Promise<ProjectedInstance | null> {
