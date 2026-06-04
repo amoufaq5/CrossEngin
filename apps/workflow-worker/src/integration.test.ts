@@ -33,6 +33,7 @@ import { formatIncidentId } from "@crossengin/observability-runtime";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { StaleWorkerMonitor, type StaleWorkerEnforcement } from "./stale-worker-monitor.js";
+import { PostgresIncidentSink } from "./incident-sink.js";
 
 /**
  * Real-Postgres integration test for the distributed-worker claim loops. Gated
@@ -447,6 +448,39 @@ suite("workflow-worker integration (real Postgres)", () => {
     expect(incidents).toHaveLength(1);
     expect(incidents[0]?.incident.id).toMatch(/^INC-2026-\d{4}$/);
     expect(incidents[0]?.incident.status).toBe("declared");
+  });
+
+  it("PostgresIncidentSink persists the monitor's stale-worker incident to meta.incidents", async () => {
+    // declared_by FK → seed a system user
+    const declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [declaredBy, "monitor@crossengin.test"]);
+
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const dead = `wh-inc-${Math.random().toString(36).slice(2, 8)}`;
+    await store.upsert({
+      workerId: dead, mode: "all", status: "running", hostname: "h", startedAt: "2026-06-04T11:00:00.000Z",
+      lastHeartbeatAt: "2026-06-04T11:55:00.000Z", lastRunAt: null, pollCount: 1, claimedTotal: 0, processedTotal: 0, errorCount: 0, lastError: null,
+    });
+
+    const sink = new PostgresIncidentSink(conn);
+    const incidentId = `INC-2026-${Math.floor(1000 + Math.random() * 8999).toString()}`;
+    const monitor = new StaleWorkerMonitor({
+      source: store,
+      declaredBy,
+      staleAfterMs: 60_000,
+      clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
+      nextIncidentId: () => incidentId,
+      onIncident: async (plan) => { await sink.record(plan.incident); },
+    });
+    await monitor.checkOnce();
+
+    const row = await conn.query<{ severity: string; status: string; declared_by: string }>(
+      `SELECT severity, status, declared_by::text FROM meta.incidents WHERE incident_id = $1`,
+      [incidentId],
+    );
+    expect(row.rows).toHaveLength(1);
+    expect(row.rows[0]).toMatchObject({ status: "declared", declared_by: declaredBy });
+    expect(["sev2", "sev3"]).toContain(row.rows[0]!.severity);
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {

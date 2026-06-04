@@ -14,6 +14,7 @@ import {
 import type { WorkerCliOptions } from "./cli.js";
 import { buildWorkerSet, type WorkerSet } from "./runner.js";
 import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
+import { PostgresIncidentSink } from "./incident-sink.js";
 
 /**
  * Parses a `--definitions` JSON file (an array of `WorkflowDefinition`s) into the
@@ -94,15 +95,19 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
   let monitor: StaleWorkerMonitor | null = null;
   if (options.monitorEnabled) {
     let incidentSeq = 0;
+    const incidentSink = options.persistIncidents
+      ? new PostgresIncidentSink(conn, options.schema !== null ? { schema: options.schema } : {})
+      : null;
     monitor = new StaleWorkerMonitor({
       source: new PostgresWorkerHeartbeatStore(conn, options.schema !== null ? { schema: options.schema } : {}),
       declaredBy: options.monitorDeclaredBy,
       staleAfterMs: options.staleAfterMs,
       nextIncidentId: () => formatIncidentId(new Date().getUTCFullYear(), (incidentSeq += 1)),
-      onIncident: (plan) => {
+      onIncident: async (plan) => {
         process.stdout.write(
           `[workflow-worker] STALE WORKERS — ${plan.incident.id} ${plan.severity}: ${plan.incident.title} (${plan.pages.length.toString()} page directive(s))\n`,
         );
+        if (incidentSink !== null) await incidentSink.record(plan.incident);
       },
       onError: logError,
     });

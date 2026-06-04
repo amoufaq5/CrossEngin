@@ -22,6 +22,7 @@ export interface WorkerCliOptions {
   readonly monitorIntervalMs: number;
   readonly staleAfterMs: number;
   readonly monitorDeclaredBy: string;
+  readonly persistIncidents: boolean;
   readonly definitionsPath: string | null;
   readonly help: boolean;
   readonly version: boolean;
@@ -91,6 +92,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
   let monitorIntervalMs = DEFAULTS.monitorIntervalMs;
   let staleAfterMs = DEFAULTS.staleAfterMs;
   let monitorDeclaredBy = DEFAULT_MONITOR_DECLARED_BY;
+  let persistIncidents = false;
   let definitionsPath: string | null = null;
   let help = false;
   let version = false;
@@ -161,6 +163,8 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     } else if (arg === "--monitor-declared-by" || arg.startsWith("--monitor-declared-by=")) {
       monitorDeclaredBy = takeValue(arg, next, "--monitor-declared-by");
       i += consumed();
+    } else if (arg === "--persist-incidents") {
+      persistIncidents = true;
     } else if (arg === "--definitions" || arg.startsWith("--definitions=")) {
       definitionsPath = takeValue(arg, next, "--definitions");
       i += consumed();
@@ -189,6 +193,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     monitorIntervalMs,
     staleAfterMs,
     monitorDeclaredBy,
+    persistIncidents,
     definitionsPath,
     help,
     version,
@@ -227,6 +232,8 @@ Options:
   --monitor-interval-ms <n>  Stale-worker monitor poll interval (default 30000)
   --stale-after-ms <n>     Heartbeat age that marks a worker stale (default 60000)
   --monitor-declared-by <uuid>  Actor id for auto-declared incidents
+  --persist-incidents      Write stale-worker incidents to meta.incidents (else
+                           just logged); requires --monitor
   --definitions <file>     JSON array of WorkflowDefinitions to run (default none)
   --help, -h               Show this help
   --version, -v            Print version

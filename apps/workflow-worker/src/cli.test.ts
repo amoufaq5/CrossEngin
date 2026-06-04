@@ -25,6 +25,7 @@ describe("parseWorkerArgs", () => {
       monitorIntervalMs: 30000,
       staleAfterMs: 60000,
       monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
+      persistIncidents: false,
       definitionsPath: null,
       help: false,
       version: false,
@@ -81,10 +82,16 @@ describe("parseWorkerArgs", () => {
       monitorIntervalMs: 30000,
       staleAfterMs: 60000,
       monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
+      persistIncidents: false,
       definitionsPath: "/defs.json",
       help: false,
       version: false,
     });
+  });
+
+  it("--persist-incidents enables the meta.incidents sink", () => {
+    expect(parseWorkerArgs(["--monitor", "--persist-incidents"]).persistIncidents).toBe(true);
+    expect(parseWorkerArgs([]).persistIncidents).toBe(false);
   });
 
   it("--no-heartbeat disables the heartbeat", () => {
