@@ -1271,6 +1271,9 @@ re-exporting everything.
   added ON DELETE SET NULL (nulls the ref column, keeps tenant_id) and
   the RLS-policy proof under a NOBYPASSRLS non-owner role (a raw SELECT
   with no WHERE tenant_id sees only the app.current_tenant_id tenant).
+  An ops guide (README.md) documents the stores (memory/pg/pg-columns),
+  auth (API key + JWT/JWKS), redaction/RBAC/pagination, the edge
+  adapter, and a deployment recipe.
 - **`apps/workflow-worker`** — Phase 3 P2.3: the runnable
   distributed-worker binary (third app under `apps/`, after
   `architect-cli` + `operate-server`). 4 src modules + a bin: cli
@@ -1314,7 +1317,9 @@ re-exporting everything.
   wires it live: run() starts the monitor under --monitor, minting
   incident ids via formatIncidentId + logging each declared incident;
   P2.16 added PostgresIncidentSink (--persist-incidents writes the
-  IncidentRecord to meta.incidents). All logic offline-tested.
+  IncidentRecord to meta.incidents). All logic offline-tested. An ops
+  guide (README.md) documents the 8 modes, flags, claim/lease model,
+  and the heartbeat → detect → plan → run → persist flow.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
