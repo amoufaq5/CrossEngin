@@ -118,9 +118,18 @@ importers:
 
   apps/workflow-worker:
     dependencies:
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../../packages/incident-response
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../../packages/kernel-pg
+      '@crossengin/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@crossengin/observability-runtime':
+        specifier: workspace:*
+        version: link:../../packages/observability-runtime
       '@crossengin/workflow-engine':
         specifier: workspace:*
         version: link:../../packages/workflow-engine
