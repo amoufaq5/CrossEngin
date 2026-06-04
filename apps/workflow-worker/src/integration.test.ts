@@ -24,6 +24,8 @@ import {
   RetryExecutorWorker,
   TimeoutSweeperWorker,
   WorkerHeartbeat,
+  summarizeWorkerHealth,
+  type HeartbeatSnapshot,
 } from "@crossengin/workflow-worker";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -350,6 +352,27 @@ suite("workflow-worker integration (real Postgres)", () => {
     await reporter.stop();
     const count = await conn.query<{ c: string }>(`SELECT count(*)::text AS c FROM meta.worker_heartbeats WHERE worker_id = $1`, [workerId]);
     expect(Number(count.rows[0]!.c)).toBe(1);
+  });
+
+  it("listStale + summarizeWorkerHealth flag a running worker that stopped beating", async () => {
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const now = new Date("2026-06-04T12:00:00.000Z");
+    const fresh = `wh-fresh-${Math.random().toString(36).slice(2, 8)}`;
+    const dead = `wh-dead-${Math.random().toString(36).slice(2, 8)}`;
+    const base = (workerId: string, lastHeartbeatAt: string): HeartbeatSnapshot => ({
+      workerId, mode: "all", status: "running", hostname: "h", startedAt: "2026-06-04T11:00:00.000Z",
+      lastHeartbeatAt, lastRunAt: lastHeartbeatAt, pollCount: 1, claimedTotal: 0, processedTotal: 0, errorCount: 0, lastError: null,
+    });
+    await store.upsert(base(fresh, new Date(now.getTime() - 5_000).toISOString()));
+    await store.upsert(base(dead, new Date(now.getTime() - 300_000).toISOString()));
+
+    const stale = await store.listStale({ now, staleAfterMs: 60_000 });
+    expect(stale.some((a) => a.workerId === dead)).toBe(true);
+    expect(stale.some((a) => a.workerId === fresh)).toBe(false);
+
+    const report = summarizeWorkerHealth(await store.listAll(), { now, staleAfterMs: 60_000 });
+    expect(report.alerts.some((a) => a.workerId === dead)).toBe(true);
+    expect(report.stale).toBeGreaterThanOrEqual(1);
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {

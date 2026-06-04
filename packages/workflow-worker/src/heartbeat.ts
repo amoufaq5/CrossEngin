@@ -2,6 +2,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 
 import type { Clock, IntervalHandle, IntervalScheduler, RunOutcome } from "./worker.js";
 import { DEFAULT_SCHEDULER } from "./worker.js";
+import { DEFAULT_STALE_AFTER_MS, type StaleWorkerAlert } from "./worker-health.js";
 
 export type HeartbeatMode = "tick" | "claim" | "retry" | "timeout" | "execute" | "all";
 export type HeartbeatStatus = "starting" | "running" | "stopped";
@@ -137,6 +138,88 @@ export class PostgresWorkerHeartbeatStore implements WorkerHeartbeatStore {
       ],
     );
   }
+
+  /** Reads every heartbeat row (for an in-memory health summary). */
+  async listAll(): Promise<readonly HeartbeatSnapshot[]> {
+    const res = await this.conn.query<HeartbeatRow>(
+      `SELECT worker_id, mode, status, hostname, started_at, last_heartbeat_at,
+              last_run_at, poll_count, claimed_total, processed_total, error_count, last_error
+         FROM ${this.table}
+        ORDER BY last_heartbeat_at`,
+    );
+    return res.rows.map(rowToSnapshot);
+  }
+
+  /**
+   * Pushes the stale-worker filter into SQL: `running` workers whose
+   * `last_heartbeat_at` is older than `staleAfterMs` before `now`, as
+   * `StaleWorkerAlert`s (with a computed `age_ms`), oldest first. The one-query
+   * "who's dead" lookup.
+   */
+  async listStale(opts: { now: Date; staleAfterMs?: number }): Promise<readonly StaleWorkerAlert[]> {
+    const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+    const nowIso = opts.now.toISOString();
+    const cutoffIso = new Date(opts.now.getTime() - staleAfterMs).toISOString();
+    const res = await this.conn.query<StaleRow>(
+      `SELECT worker_id, mode, hostname, last_heartbeat_at,
+              (EXTRACT(EPOCH FROM ($1::timestamptz - last_heartbeat_at)) * 1000)::bigint AS age_ms
+         FROM ${this.table}
+        WHERE status = 'running' AND last_heartbeat_at < $2
+        ORDER BY last_heartbeat_at`,
+      [nowIso, cutoffIso],
+    );
+    return res.rows.map((r) => ({
+      workerId: String(r.worker_id),
+      mode: r.mode as StaleWorkerAlert["mode"],
+      hostname: r.hostname === null ? null : String(r.hostname),
+      lastHeartbeatAt: typeof r.last_heartbeat_at === "string" ? r.last_heartbeat_at : new Date(r.last_heartbeat_at as unknown as string).toISOString(),
+      ageMs: Number(r.age_ms),
+    }));
+  }
+}
+
+interface HeartbeatRow {
+  readonly worker_id: string;
+  readonly mode: string;
+  readonly status: string;
+  readonly hostname: string | null;
+  readonly started_at: string;
+  readonly last_heartbeat_at: string;
+  readonly last_run_at: string | null;
+  readonly poll_count: string | number;
+  readonly claimed_total: string | number;
+  readonly processed_total: string | number;
+  readonly error_count: string | number;
+  readonly last_error: string | null;
+}
+
+interface StaleRow {
+  readonly worker_id: string;
+  readonly mode: string;
+  readonly hostname: string | null;
+  readonly last_heartbeat_at: string;
+  readonly age_ms: string | number;
+}
+
+function isoOf(value: string): string {
+  return typeof value === "string" ? value : new Date(value).toISOString();
+}
+
+function rowToSnapshot(r: HeartbeatRow): HeartbeatSnapshot {
+  return {
+    workerId: String(r.worker_id),
+    mode: r.mode as HeartbeatMode,
+    status: r.status as HeartbeatStatus,
+    hostname: r.hostname === null ? null : String(r.hostname),
+    startedAt: isoOf(r.started_at),
+    lastHeartbeatAt: isoOf(r.last_heartbeat_at),
+    lastRunAt: r.last_run_at === null ? null : isoOf(r.last_run_at),
+    pollCount: Number(r.poll_count),
+    claimedTotal: Number(r.claimed_total),
+    processedTotal: Number(r.processed_total),
+    errorCount: Number(r.error_count),
+    lastError: r.last_error,
+  };
 }
 
 export interface HeartbeatReporterOptions {

@@ -78,6 +78,43 @@ describe("PostgresWorkerHeartbeatStore", () => {
     expect(cap.last.sql).toContain("wf.worker_heartbeats");
     expect(() => new PostgresWorkerHeartbeatStore(cap.conn, { schema: "x; DROP" })).toThrow(/invalid schema/);
   });
+
+  it("listAll maps rows to snapshots", async () => {
+    const last = { sql: "", params: [] as readonly unknown[] };
+    const conn = {
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        last.sql = sql;
+        last.params = params ?? [];
+        return {
+          rows: [{
+            worker_id: "w1", mode: "all", status: "running", hostname: "h", started_at: NOW.toISOString(),
+            last_heartbeat_at: NOW.toISOString(), last_run_at: null, poll_count: "4", claimed_total: "10",
+            processed_total: "9", error_count: "1", last_error: "x",
+          }],
+          rowCount: 1,
+        };
+      }) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"], withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"], close: vi.fn() as PgConnection["close"],
+    };
+    const rows = await new PostgresWorkerHeartbeatStore(conn).listAll();
+    expect(last.sql).toContain("SELECT worker_id");
+    expect(rows[0]).toMatchObject({ workerId: "w1", pollCount: 4, claimedTotal: 10, processedTotal: 9, errorCount: 1, lastRunAt: null });
+  });
+
+  it("listStale filters running workers below the cutoff and maps alerts", async () => {
+    const cap = capture();
+    const cap2 = { conn: cap.conn, last: cap.last };
+    // override query to return a stale row
+    const last = cap2.last;
+    (cap2.conn as { query: PgConnection["query"] }).query = (async (sql: string, params?: readonly unknown[]) => {
+      last.sql = sql; last.params = params ?? [];
+      return { rows: [{ worker_id: "dead", mode: "claim", hostname: "h", last_heartbeat_at: "2026-06-04T11:58:00.000Z", age_ms: "120000" }], rowCount: 1 };
+    }) as PgConnection["query"];
+    const alerts = await new PostgresWorkerHeartbeatStore(cap2.conn).listStale({ now: NOW, staleAfterMs: 60_000 });
+    expect(last.sql).toContain("status = 'running' AND last_heartbeat_at < $2");
+    expect(last.params).toEqual([NOW.toISOString(), new Date(NOW.getTime() - 60_000).toISOString()]);
+    expect(alerts[0]).toMatchObject({ workerId: "dead", mode: "claim", ageMs: 120_000 });
+  });
 });
 
 function fakeScheduler(): { scheduler: IntervalScheduler; tick: () => void; cleared: () => boolean } {
