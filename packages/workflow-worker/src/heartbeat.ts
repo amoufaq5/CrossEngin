@@ -4,7 +4,7 @@ import type { Clock, IntervalHandle, IntervalScheduler, RunOutcome } from "./wor
 import { DEFAULT_SCHEDULER } from "./worker.js";
 import { DEFAULT_STALE_AFTER_MS, type StaleWorkerAlert } from "./worker-health.js";
 
-export type HeartbeatMode = "tick" | "claim" | "retry" | "timeout" | "execute" | "reap" | "all";
+export type HeartbeatMode = "tick" | "claim" | "retry" | "timeout" | "execute" | "reap" | "resync" | "all";
 export type HeartbeatStatus = "starting" | "running" | "stopped";
 
 /** A point-in-time view of a worker's liveness + cumulative counters. */

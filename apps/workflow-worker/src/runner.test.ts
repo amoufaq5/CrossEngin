@@ -74,6 +74,8 @@ const baseInput = {
   timeoutIntervalMs: 12000,
   executeIntervalMs: 3000,
   reapIntervalMs: 20000,
+  resyncIntervalMs: 120000,
+  resyncMax: 250,
   batchSize: 50,
   leaseMs: 30000,
 };
@@ -142,6 +144,25 @@ describe("buildWorkerSet", () => {
     set.start();
     set.stop();
     expect(registered.every((r) => r.cleared)).toBe(true);
+  });
+
+  it("mode=resync wires the drift sweeper over the resyncer, polling resyncIntervalMs", () => {
+    const { scheduler, registered } = recordingScheduler();
+    const resyncer = { async bulkResync() { return []; } };
+    const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "resync", scheduler, resyncer });
+    expect(set.labels).toEqual(["resync"]);
+    set.start();
+    expect(registered.map((r) => r.ms)).toEqual([120000]);
+  });
+
+  it("mode=resync without a resyncer throws", () => {
+    expect(() => buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "resync" })).toThrow(/requires a resyncer/);
+  });
+
+  it("mode=all does NOT include resync (opt-in only)", () => {
+    const { scheduler } = recordingScheduler();
+    const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "all", scheduler });
+    expect(set.labels).not.toContain("resync");
   });
 
   it("rejects an invalid schema name (via the claim store)", () => {

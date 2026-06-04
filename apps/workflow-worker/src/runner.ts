@@ -3,6 +3,7 @@ import {
   ActivityExecutorWorker,
   ActivityTimeoutSweeperWorker,
   ClaimingTimerWorker,
+  DriftSweepWorker,
   LeaseReaperWorker,
   PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
@@ -13,6 +14,7 @@ import {
   RetryExecutorWorker,
   TimeoutSweeperWorker,
   WorkflowWorker,
+  type DriftResyncer,
   type ExecuteActivityEngine,
   type FireTimerEngine,
   type IntervalScheduler,
@@ -46,8 +48,12 @@ export interface BuildWorkerSetInput {
   readonly timeoutIntervalMs: number;
   readonly executeIntervalMs: number;
   readonly reapIntervalMs: number;
+  readonly resyncIntervalMs: number;
+  readonly resyncMax: number;
   readonly batchSize: number;
   readonly leaseMs: number;
+  /** Required only for `--mode resync` — the projection drift sweeper's replayer. */
+  readonly resyncer?: DriftResyncer;
   readonly scheduler?: IntervalScheduler;
   readonly onError?: (err: unknown) => void;
   readonly onRun?: (outcome: RunOutcome) => void;
@@ -102,6 +108,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
   const wantTimeout = input.mode === "timeout" || input.mode === "all";
   const wantExecute = input.mode === "execute" || input.mode === "all";
   const wantReap = input.mode === "reap" || input.mode === "all";
+  const wantResync = input.mode === "resync"; // opt-in, not in `all` (heavy re-projection)
 
   if (wantTick) {
     const tickOnRun =
@@ -183,6 +190,11 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
     const reaper = new PostgresLeaseReaper(input.conn, schemaOpts);
     const worker = new LeaseReaperWorker({ reaper, ...sched, ...onErr, ...onRun });
     entries.push({ worker, intervalMs: input.reapIntervalMs, label: "reap" });
+  }
+  if (wantResync) {
+    if (input.resyncer === undefined) throw new Error("--mode resync requires a resyncer (WorkflowReplayer)");
+    const worker = new DriftSweepWorker({ resyncer: input.resyncer, maxInstances: input.resyncMax, ...sched, ...onErr, ...onRun });
+    entries.push({ worker, intervalMs: input.resyncIntervalMs, label: "resync" });
   }
 
   return {

@@ -15,6 +15,8 @@ describe("parseWorkerArgs", () => {
       timeoutIntervalMs: 10000,
       executeIntervalMs: 2000,
       reapIntervalMs: 30000,
+      resyncIntervalMs: 300000,
+      resyncMax: 500,
       batchSize: 50,
       leaseMs: 30000,
       heartbeatIntervalMs: 15000,
@@ -40,6 +42,8 @@ describe("parseWorkerArgs", () => {
       "--timeout-interval-ms", "12000",
       "--execute-interval-ms", "3000",
       "--reap-interval-ms", "20000",
+      "--resync-interval-ms", "120000",
+      "--resync-max", "250",
       "--batch-size", "25",
       "--lease-ms", "45000",
       "--heartbeat-interval-ms", "30000",
@@ -55,6 +59,8 @@ describe("parseWorkerArgs", () => {
       timeoutIntervalMs: 12000,
       executeIntervalMs: 3000,
       reapIntervalMs: 20000,
+      resyncIntervalMs: 120000,
+      resyncMax: 250,
       batchSize: 25,
       leaseMs: 45000,
       heartbeatIntervalMs: 30000,
@@ -76,8 +82,8 @@ describe("parseWorkerArgs", () => {
     expect(opts.batchSize).toBe(10);
   });
 
-  it("accepts all seven modes", () => {
-    for (const mode of ["tick", "claim", "retry", "timeout", "execute", "reap", "all"] as const) {
+  it("accepts all eight modes", () => {
+    for (const mode of ["tick", "claim", "retry", "timeout", "execute", "reap", "resync", "all"] as const) {
       expect(parseWorkerArgs(["--mode", mode]).mode).toBe(mode);
     }
   });

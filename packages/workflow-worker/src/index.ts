@@ -13,3 +13,4 @@ export * from "./execute-worker.js";
 export * from "./heartbeat.js";
 export * from "./worker-health.js";
 export * from "./lease-reaper.js";
+export * from "./drift-sweeper.js";

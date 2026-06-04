@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import { WorkflowDefinitionSchema, type WorkflowDefinition } from "@crossengin/workflow-engine";
-import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
+import { WorkflowReplayer, buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
 import {
   HeartbeatReporter,
   PostgresWorkerHeartbeatStore,
@@ -78,6 +78,9 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
     timeoutIntervalMs: options.timeoutIntervalMs,
     executeIntervalMs: options.executeIntervalMs,
     reapIntervalMs: options.reapIntervalMs,
+    resyncIntervalMs: options.resyncIntervalMs,
+    resyncMax: options.resyncMax,
+    resyncer: new WorkflowReplayer({ conn, definitions }),
     batchSize: options.batchSize,
     leaseMs: options.leaseMs,
     onError: (err) => {

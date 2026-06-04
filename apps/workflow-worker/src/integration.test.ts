@@ -9,11 +9,12 @@ import {
   WorkflowEngine,
   createDefaultRegistry,
 } from "@crossengin/workflow-runtime";
-import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
+import { WorkflowReplayer, buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
 import {
   ActivityExecutorWorker,
   ActivityTimeoutSweeperWorker,
   ClaimingTimerWorker,
+  DriftSweepWorker,
   HeartbeatReporter,
   PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
@@ -326,6 +327,26 @@ suite("workflow-worker integration (real Postgres)", () => {
     );
     expect(after.rows[0]!.status).toBe("timed_out");
     expect(after.rows[0]!.next_retry_at).not.toBeNull();
+  });
+
+  it("DriftSweepWorker re-projects an instance whose projection drifted", async () => {
+    const def = timerDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+    const start = await engine.startInstance({ definitionId: def.id, tenantId });
+    expect((await engine.getInstanceState(start.instanceId))?.status).toBe("waiting_for_timer");
+
+    // corrupt the projected status (as a crashed projection would leave it)
+    await conn.query(`UPDATE meta.workflow_instances SET status = 'created' WHERE instance_id = $1`, [start.instanceId]);
+
+    const resyncer = new WorkflowReplayer({ conn, definitions: new Map([[def.id, def]]) });
+    const worker = new DriftSweepWorker({ resyncer, maxInstances: 500 });
+    const res = await worker.runOnce();
+    expect(res.resynced).toBeGreaterThanOrEqual(1);
+
+    // the canonical event log re-projects the correct status
+    const fixed = await conn.query<{ status: string }>(`SELECT status FROM meta.workflow_instances WHERE instance_id = $1`, [start.instanceId]);
+    expect(fixed.rows[0]!.status).toBe("waiting_for_timer");
   });
 
   it("PostgresLeaseReaper clears expired leases across timers/activities/instances", async () => {
