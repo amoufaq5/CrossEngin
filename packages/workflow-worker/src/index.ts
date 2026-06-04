@@ -12,3 +12,4 @@ export * from "./activity-execute-claim-store.js";
 export * from "./execute-worker.js";
 export * from "./heartbeat.js";
 export * from "./worker-health.js";
+export * from "./lease-reaper.js";

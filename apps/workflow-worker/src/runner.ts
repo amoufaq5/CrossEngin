@@ -3,10 +3,12 @@ import {
   ActivityExecutorWorker,
   ActivityTimeoutSweeperWorker,
   ClaimingTimerWorker,
+  LeaseReaperWorker,
   PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
   PostgresActivityTimeoutClaimStore,
   PostgresInstanceTimeoutClaimStore,
+  PostgresLeaseReaper,
   PostgresTimerClaimStore,
   RetryExecutorWorker,
   TimeoutSweeperWorker,
@@ -43,6 +45,7 @@ export interface BuildWorkerSetInput {
   readonly retryIntervalMs: number;
   readonly timeoutIntervalMs: number;
   readonly executeIntervalMs: number;
+  readonly reapIntervalMs: number;
   readonly batchSize: number;
   readonly leaseMs: number;
   readonly scheduler?: IntervalScheduler;
@@ -79,8 +82,9 @@ export interface WorkerSet {
  * `ActivityTimeoutSweeperWorker` over `PostgresActivityTimeoutClaimStore` (both
  * deadline sweeps); `execute` →
  * the `ActivityExecutorWorker` over `PostgresActivityExecuteClaimStore` (the
- * async activity queue); `all` → claim + retry + timeout + execute (the parallel
- * production combo). Each worker polls on its own interval;
+ * async activity queue); `reap` → the `LeaseReaperWorker` over
+ * `PostgresLeaseReaper` (clears expired leases); `all` → claim + retry + timeout
+ * + execute + reap (the parallel production combo). Each worker polls on its own interval;
  * `start()` / `stop()` drive them together. The connection + engine come from
  * `buildPersistentEngine`, so every fire/retry persists through the projecting
  * event log.
@@ -97,6 +101,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
   const wantRetry = input.mode === "retry" || input.mode === "all";
   const wantTimeout = input.mode === "timeout" || input.mode === "all";
   const wantExecute = input.mode === "execute" || input.mode === "all";
+  const wantReap = input.mode === "reap" || input.mode === "all";
 
   if (wantTick) {
     const tickOnRun =
@@ -173,6 +178,11 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
       ...onRun,
     });
     entries.push({ worker, intervalMs: input.executeIntervalMs, label: "execute" });
+  }
+  if (wantReap) {
+    const reaper = new PostgresLeaseReaper(input.conn, schemaOpts);
+    const worker = new LeaseReaperWorker({ reaper, ...sched, ...onErr, ...onRun });
+    entries.push({ worker, intervalMs: input.reapIntervalMs, label: "reap" });
   }
 
   return {

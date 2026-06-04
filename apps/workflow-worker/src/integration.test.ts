@@ -19,6 +19,7 @@ import {
   PostgresActivityRetryClaimStore,
   PostgresActivityTimeoutClaimStore,
   PostgresInstanceTimeoutClaimStore,
+  PostgresLeaseReaper,
   PostgresTimerClaimStore,
   PostgresWorkerHeartbeatStore,
   RetryExecutorWorker,
@@ -325,6 +326,30 @@ suite("workflow-worker integration (real Postgres)", () => {
     );
     expect(after.rows[0]!.status).toBe("timed_out");
     expect(after.rows[0]!.next_retry_at).not.toBeNull();
+  });
+
+  it("PostgresLeaseReaper clears expired leases across timers/activities/instances", async () => {
+    const def = asyncActivityDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+    const start = await engine.startInstance({ definitionId: def.id, tenantId });
+
+    // stamp an expired lease on the instance + its scheduled activity (as a dead worker would leave)
+    const past = new Date(T0.getTime() - 10_000).toISOString();
+    await conn.query(`UPDATE meta.workflow_instances SET claimed_by = 'dead', lease_expires_at = $2 WHERE instance_id = $1`, [start.instanceId, past]);
+    await conn.query(
+      `UPDATE meta.workflow_activities SET claimed_by = 'dead', lease_expires_at = $1
+        WHERE instance_id = (SELECT id FROM meta.workflow_instances WHERE instance_id = $2)`,
+      [past, start.instanceId],
+    );
+
+    const reaper = new PostgresLeaseReaper(conn);
+    const result = await reaper.reapExpired(new Date(T0));
+    expect(result.instances).toBeGreaterThanOrEqual(1);
+    expect(result.activities).toBeGreaterThanOrEqual(1);
+
+    const inst = await conn.query<{ claimed_by: string | null }>(`SELECT claimed_by FROM meta.workflow_instances WHERE instance_id = $1`, [start.instanceId]);
+    expect(inst.rows[0]!.claimed_by).toBeNull();
   });
 
   it("HeartbeatReporter persists a worker heartbeat row upserted on worker_id", async () => {

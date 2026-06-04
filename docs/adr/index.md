@@ -166,3 +166,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 80 | 0112 | 3,500 | Drafted alongside the definition-level activity execution-mode default (Phase 3 P2.9) |
 | 81 | 0113 | 4,000 | Drafted alongside the activity-level timeout sweeper — `timeoutActivity` + claim (Phase 3 P2.10) |
 | 82 | 0114 | 3,500 | Drafted alongside stale-worker detection over the heartbeat table (Phase 3 P2.11) |
+| 83 | 0115 | 3,500 | Drafted alongside the lease-reaper — proactively clear expired worker leases (Phase 3 P2.12) |

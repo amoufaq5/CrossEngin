@@ -9392,7 +9392,7 @@ export const META_WORKER_HEARTBEATS: TableDefinition = {
       name: "mode",
       type: "TEXT",
       notNull: true,
-      check: "mode IN ('tick', 'claim', 'retry', 'timeout', 'execute', 'all')",
+      check: "mode IN ('tick', 'claim', 'retry', 'timeout', 'execute', 'reap', 'all')",
     },
     {
       name: "status",

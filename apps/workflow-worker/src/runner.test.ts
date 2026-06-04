@@ -73,6 +73,7 @@ const baseInput = {
   retryIntervalMs: 8000,
   timeoutIntervalMs: 12000,
   executeIntervalMs: 3000,
+  reapIntervalMs: 20000,
   batchSize: 50,
   leaseMs: 30000,
 };
@@ -119,12 +120,20 @@ describe("buildWorkerSet", () => {
     expect(registered.map((r) => r.ms)).toEqual([3000]);
   });
 
-  it("mode=all wires claim + retry + timeout (instance+activity) + execute, each on its own interval", () => {
+  it("mode=reap wires the lease reaper, polling reapIntervalMs", () => {
+    const { scheduler, registered } = recordingScheduler();
+    const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "reap", scheduler });
+    expect(set.labels).toEqual(["reap"]);
+    set.start();
+    expect(registered.map((r) => r.ms)).toEqual([20000]);
+  });
+
+  it("mode=all wires claim + retry + timeout (instance+activity) + execute + reap, each on its own interval", () => {
     const { scheduler, registered } = recordingScheduler();
     const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "all", scheduler });
-    expect(set.labels).toEqual(["claim", "retry", "timeout", "activity-timeout", "execute"]);
+    expect(set.labels).toEqual(["claim", "retry", "timeout", "activity-timeout", "execute", "reap"]);
     set.start();
-    expect(registered.map((r) => r.ms)).toEqual([1000, 8000, 12000, 12000, 3000]);
+    expect(registered.map((r) => r.ms)).toEqual([1000, 8000, 12000, 12000, 3000, 20000]);
   });
 
   it("stop() clears every registered interval", () => {
