@@ -228,6 +228,8 @@ export class WorkflowEngine {
           signalName: input.signalName,
           correlationKey: input.correlationKey,
           payload: input.payload ?? {},
+          deliveryGuarantee: "at_least_once",
+          sourceSystem: input.sourceSystem ?? this.systemActorId,
         },
         correlationId: input.correlationKey,
         causationEventId: null,
@@ -682,6 +684,7 @@ export class WorkflowEngine {
       payload: {
         kind,
         definitionActivityKey: activityKey,
+        label: activityKey,
         attemptNumber: 1,
         input: inputData,
         inputSha256: sha256(JSON.stringify(inputData)),
@@ -747,6 +750,10 @@ export class WorkflowEngine {
       attempts + 1,
       retryPolicy,
     );
+    // runActivityAttempt applies the immediate post-activity transition; run the
+    // step loop so a resulting terminal state finalizes (emits instance_completed
+    // /failed) — the inline schedule path gets this from its enclosing step loop.
+    await this.runStepLoop(input.instanceId, definition);
     return { retried: true, instanceId: input.instanceId, activityId: input.activityId, status: outcome };
   }
 
@@ -945,7 +952,7 @@ export class WorkflowEngine {
       timerId,
       childInstanceId: null,
       variableName: null,
-      payload: { timerName, fireAt },
+      payload: { timerName, fireAt, kind: "relative_after" },
       correlationId: null,
       causationEventId: null,
     });

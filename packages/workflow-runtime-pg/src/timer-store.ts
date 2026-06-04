@@ -11,6 +11,7 @@ export interface TimerProjection {
   readonly instanceId: string;
   readonly tenantId: string;
   readonly timerName: string;
+  readonly kind: string;
   readonly status: TimerStatus;
   readonly scheduledAt: string;
   readonly fireAt: string;
@@ -34,10 +35,10 @@ export class PostgresTimerStore {
     const instanceUuid = await this.instanceResolver.requireResolve(projection.instanceId);
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (
-         timer_id, instance_id, tenant_id, timer_name, status, scheduled_at,
+         timer_id, instance_id, tenant_id, timer_name, kind, status, scheduled_at,
          fire_at, fired_at, cancelled_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (timer_id) DO UPDATE
          SET status = EXCLUDED.status,
              fire_at = EXCLUDED.fire_at,
@@ -48,6 +49,7 @@ export class PostgresTimerStore {
         instanceUuid,
         projection.tenantId,
         projection.timerName,
+        projection.kind,
         projection.status,
         projection.scheduledAt,
         projection.fireAt,

@@ -12,6 +12,8 @@ export interface SignalProjection {
   readonly tenantId: string;
   readonly signalName: string;
   readonly correlationKey: string;
+  readonly deliveryGuarantee: string;
+  readonly sourceSystem: string;
   readonly status: SignalStatus;
   readonly receivedAt: string;
   readonly matchedAt: string | null;
@@ -38,9 +40,9 @@ export class PostgresSignalStore {
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (
          signal_id, instance_id, tenant_id, signal_name, correlation_key,
-         status, received_at, matched_at, consumed_at
+         delivery_guarantee, source_system, status, received_at, matched_at, consumed_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (signal_id) DO UPDATE
          SET status = EXCLUDED.status,
              matched_at = EXCLUDED.matched_at,
@@ -52,6 +54,8 @@ export class PostgresSignalStore {
         projection.tenantId,
         projection.signalName,
         projection.correlationKey,
+        projection.deliveryGuarantee,
+        projection.sourceSystem,
         projection.status,
         projection.receivedAt,
         projection.matchedAt,

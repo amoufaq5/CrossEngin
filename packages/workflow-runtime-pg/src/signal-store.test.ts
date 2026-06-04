@@ -14,6 +14,8 @@ function fixtureSignal(overrides: Partial<SignalProjection> = {}): SignalProject
     tenantId: TENANT,
     signalName: "external.approve",
     correlationKey: "po-1",
+    deliveryGuarantee: "at_least_once",
+    sourceSystem: "system",
     status: "matched_to_instance",
     receivedAt: "2026-05-16T12:00:00.000Z",
     matchedAt: "2026-05-16T12:00:00.000Z",
@@ -69,8 +71,8 @@ describe("PostgresSignalStore.upsert", () => {
       fixtureSignal({ status: "consumed", consumedAt: "2026-05-16T12:00:05.000Z" }),
     );
     expect(capture[0]?.sql).toContain("ON CONFLICT (signal_id) DO UPDATE");
-    expect(capture[0]?.params?.[5]).toBe("consumed");
-    expect(capture[0]?.params?.[8]).toBe("2026-05-16T12:00:05.000Z");
+    expect(capture[0]?.params?.[7]).toBe("consumed");
+    expect(capture[0]?.params?.[10]).toBe("2026-05-16T12:00:05.000Z");
   });
 
   it("upsertMany processes all signals", async () => {

@@ -17,8 +17,10 @@ function fixtureActivity(overrides: Partial<ActivityProjection> = {}): ActivityP
     tenantId: TENANT,
     kind: "http_call",
     definitionActivityKey: "charge_card",
+    label: "charge_card",
     status: "scheduled",
     attemptNumber: 1,
+    sequenceCursor: 1,
     maxAttempts: 3,
     retryPolicy: {
       strategy: "exponential_backoff",

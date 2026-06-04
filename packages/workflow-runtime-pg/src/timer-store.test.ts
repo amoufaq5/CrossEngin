@@ -13,6 +13,7 @@ function fixtureTimer(overrides: Partial<TimerProjection> = {}): TimerProjection
     instanceId: "wfi_inst0001",
     tenantId: TENANT,
     timerName: "approval_deadline",
+    kind: "relative_after",
     status: "scheduled",
     scheduledAt: "2026-05-16T12:00:00.000Z",
     fireAt: "2026-05-17T12:00:00.000Z",
@@ -60,8 +61,8 @@ describe("PostgresTimerStore.upsert", () => {
       fixtureTimer({ status: "fired", firedAt: "2026-05-17T12:00:00.000Z" }),
     );
     expect(capture[0]?.sql).toContain("ON CONFLICT (timer_id) DO UPDATE");
-    expect(capture[0]?.params?.[4]).toBe("fired");
-    expect(capture[0]?.params?.[7]).toBe("2026-05-17T12:00:00.000Z");
+    expect(capture[0]?.params?.[5]).toBe("fired");
+    expect(capture[0]?.params?.[8]).toBe("2026-05-17T12:00:00.000Z");
   });
 
   it("threads cancelledAt when cancelled", async () => {
@@ -73,7 +74,7 @@ describe("PostgresTimerStore.upsert", () => {
     await store.upsert(
       fixtureTimer({ status: "cancelled", cancelledAt: "2026-05-17T11:00:00.000Z" }),
     );
-    expect(capture[0]?.params?.[8]).toBe("2026-05-17T11:00:00.000Z");
+    expect(capture[0]?.params?.[9]).toBe("2026-05-17T11:00:00.000Z");
   });
 
   it("rejects when instance is not resolvable", async () => {

@@ -1,0 +1,267 @@
+import {
+  createNodePgConnection,
+  parsePgEnvConfig,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
+import type { WorkflowDefinition } from "@crossengin/workflow-engine";
+import {
+  FixedClock,
+  WorkflowEngine,
+  createDefaultRegistry,
+} from "@crossengin/workflow-runtime";
+import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
+import {
+  ClaimingTimerWorker,
+  PostgresActivityRetryClaimStore,
+  PostgresInstanceTimeoutClaimStore,
+  PostgresTimerClaimStore,
+  RetryExecutorWorker,
+  TimeoutSweeperWorker,
+} from "@crossengin/workflow-worker";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+/**
+ * Real-Postgres integration test for the distributed-worker claim loops. Gated
+ * on `CROSSENGIN_PG_TEST=1` (skipped offline / in normal CI). It proves the
+ * three claim stores' actual SQL — `FOR UPDATE SKIP LOCKED` disjoint claiming,
+ * the lease lifecycle, and the engine's per-unit primitives advancing real
+ * projection rows — which the unit tests (mocked connections) can't show.
+ *
+ * To run: bring up Postgres + apply the meta-schema, then
+ *   CROSSENGIN_PG_TEST=1 PGHOST=localhost PGUSER=… PGPASSWORD=… PGDATABASE=… \
+ *   PGSSLMODE=disable pnpm --filter @crossengin/workflow-worker-app test
+ * The connecting role must own / bypass RLS on the workflow tables (the worker
+ * spans all tenants).
+ */
+const RUN = process.env["CROSSENGIN_PG_TEST"] === "1";
+const suite = RUN ? describe : describe.skip;
+
+const T0 = new Date("2026-06-04T12:00:00.000Z");
+const USER = "00000000-0000-4000-8000-0000000000aa";
+
+function timerDef(id: string): WorkflowDefinition {
+  return {
+    id,
+    tenantId: null,
+    definitionKey: "it.timer",
+    version: "1.0.0",
+    label: "Timer def",
+    description: "",
+    status: "published",
+    states: [
+      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "working",
+        kind: "intermediate",
+        label: "Working",
+        onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds: 1 } }],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    ],
+    transitions: [
+      { name: "start", fromState: "draft", toState: "working", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      { name: "fire", fromState: "working", toState: "done", trigger: { kind: "timer_fired", timerName: "deadline" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+    ],
+    variables: [],
+    timers: [],
+    signals: [],
+    initialState: "draft",
+    compensationStrategy: "no_compensation",
+    timeoutSeconds: 86_400,
+    createdAt: T0.toISOString(),
+    createdBy: USER,
+    publishedAt: T0.toISOString(),
+    publishedBy: null,
+    deprecatedAt: null,
+    supersededByDefinitionId: null,
+    sourceManifestSha256: null,
+  };
+}
+
+function activityDef(id: string): WorkflowDefinition {
+  const base = timerDef(id);
+  return {
+    ...base,
+    definitionKey: "it.activity",
+    states: [
+      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "working",
+        kind: "intermediate",
+        label: "Working",
+        onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 7 } } }],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    ],
+    transitions: [
+      { name: "start", fromState: "draft", toState: "working", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      { name: "complete", fromState: "working", toState: "done", trigger: { kind: "activity_completed", activityKey: "work" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+    ],
+  };
+}
+
+function timeoutDef(id: string): WorkflowDefinition {
+  const base = timerDef(id);
+  return {
+    ...base,
+    definitionKey: "it.timeout",
+    states: [
+      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      { name: "waiting", kind: "waiting", label: "Waiting", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    ],
+    transitions: [
+      { name: "start", fromState: "draft", toState: "waiting", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      { name: "go", fromState: "waiting", toState: "done", trigger: { kind: "signal_received", signalName: "go" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+    ],
+    timeoutSeconds: 60,
+  };
+}
+
+const defId = (): string => `wfd_it${Math.random().toString(36).slice(2, 12)}`;
+
+suite("workflow-worker integration (real Postgres)", () => {
+  let conn: PgConnection;
+  let tenantId: string;
+
+  async function seedDefinition(def: WorkflowDefinition): Promise<void> {
+    await conn.query(
+      `INSERT INTO meta.workflow_definitions (
+         definition_id, definition_key, version, label, description, status,
+         states, transitions, initial_state, compensation_strategy,
+         timeout_seconds, created_by
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12)
+       ON CONFLICT (definition_id) DO NOTHING`,
+      [
+        def.id, def.definitionKey, def.version, def.label, def.description, def.status,
+        JSON.stringify(def.states), JSON.stringify(def.transitions), def.initialState,
+        def.compensationStrategy, def.timeoutSeconds, USER,
+      ],
+    );
+  }
+
+  function makeEngine(def: WorkflowDefinition, clock: FixedClock, flaky = false): WorkflowEngine {
+    const registry = createDefaultRegistry();
+    if (flaky) {
+      registry.registerForActivity(def.id, "work", async (inv) =>
+        inv.attemptNumber === 1
+          ? { status: "failed", errorCode: "FLAKY", errorMessage: "first attempt", retryable: true }
+          : { status: "succeeded", output: { ok: true } },
+      );
+    }
+    return buildPersistentEngine({ conn, definitions: new Map([[def.id, def]]), activityRegistry: registry, clock }).engine;
+  }
+
+  beforeAll(async () => {
+    conn = createNodePgConnection(parsePgEnvConfig());
+    const suffix = Math.random().toString(36).slice(2, 10);
+    const t = await conn.query<{ id: string }>(
+      `INSERT INTO meta.tenants (slug, name, schema_name) VALUES ($1,$1,$2) RETURNING id`,
+      [`it-${suffix}`, `tenant_it_${suffix}`],
+    );
+    tenantId = t.rows[0]!.id;
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [USER, "it@crossengin.test"]);
+  });
+
+  afterAll(async () => {
+    if (conn !== undefined) await conn.close();
+  });
+
+  it("ClaimingTimerWorker fires due timers and SKIP LOCKED keeps two workers disjoint", async () => {
+    const def = timerDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+
+    const N = 6;
+    for (let i = 0; i < N; i += 1) {
+      await engine.startInstance({ definitionId: def.id, tenantId });
+    }
+
+    const store = new PostgresTimerClaimStore(conn);
+    const clock = { now: () => new Date(T0.getTime() + 10_000) }; // past fire_at (T0+1s)
+    const wA = new ClaimingTimerWorker({ claimStore: store, engine, workerId: "wA", clock, batchSize: 3 });
+    const wB = new ClaimingTimerWorker({ claimStore: store, engine, workerId: "wB", clock, batchSize: 3 });
+
+    // two workers race the same backlog: SKIP LOCKED must partition it, no double-fire
+    const [rA, rB] = await Promise.all([wA.runOnce(), wB.runOnce()]);
+    expect(rA.fired + rB.fired).toBe(N);
+
+    const done = await conn.query<{ c: string }>(
+      `SELECT count(*)::text AS c FROM meta.workflow_instances
+        WHERE definition_key = 'it.timer' AND status = 'completed' AND tenant_id = $1`,
+      [tenantId],
+    );
+    expect(Number(done.rows[0]!.c)).toBe(N);
+  });
+
+  it("RetryExecutorWorker re-runs a failed activity once its backoff has elapsed", async () => {
+    const def = activityDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)), true);
+    const start = await engine.startInstance({ definitionId: def.id, tenantId });
+
+    const failed = await conn.query<{ status: string; next_retry_at: string | null }>(
+      `SELECT status, next_retry_at FROM meta.workflow_activities WHERE instance_id =
+         (SELECT id FROM meta.workflow_instances WHERE instance_id = $1)`,
+      [start.instanceId],
+    );
+    expect(failed.rows[0]!.status).toBe("failed");
+    expect(failed.rows[0]!.next_retry_at).not.toBeNull();
+
+    const store = new PostgresActivityRetryClaimStore(conn);
+    const worker = new RetryExecutorWorker({ claimStore: store, engine, workerId: "wr", clock: { now: () => new Date(T0.getTime() + 60_000) } });
+    const res = await worker.runOnce();
+    expect(res).toMatchObject({ retried: 1, succeeded: 1 });
+
+    const after = await conn.query<{ status: string }>(`SELECT status FROM meta.workflow_instances WHERE instance_id = $1`, [start.instanceId]);
+    expect(after.rows[0]!.status).toBe("completed");
+  });
+
+  it("TimeoutSweeperWorker fails an instance past its deadline with INSTANCE_TIMEOUT", async () => {
+    const def = timeoutDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+    const start = await engine.startInstance({ definitionId: def.id, tenantId });
+
+    const parked = await conn.query<{ status: string }>(`SELECT status FROM meta.workflow_instances WHERE instance_id = $1`, [start.instanceId]);
+    expect(parked.rows[0]!.status).toBe("waiting_for_signal");
+
+    const store = new PostgresInstanceTimeoutClaimStore(conn);
+    const worker = new TimeoutSweeperWorker({ claimStore: store, engine, workerId: "wt", clock: { now: () => new Date(T0.getTime() + 120_000) } });
+    const res = await worker.runOnce();
+    expect(res.timedOut).toBeGreaterThanOrEqual(1);
+
+    const after = await conn.query<{ status: string; failure_code: string | null }>(
+      `SELECT status, failure_code FROM meta.workflow_instances WHERE instance_id = $1`,
+      [start.instanceId],
+    );
+    expect(after.rows[0]!.status).toBe("failed");
+    expect(after.rows[0]!.failure_code).toBe("INSTANCE_TIMEOUT");
+  });
+
+  it("a claimed timer's lease blocks a second claimer until it expires", async () => {
+    const def = timerDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+    await engine.startInstance({ definitionId: def.id, tenantId });
+
+    const store = new PostgresTimerClaimStore(conn);
+    const now = new Date(T0.getTime() + 10_000);
+    const first = await store.claimDueTimers({ workerId: "w1", now, limit: 10, leaseMs: 60_000 });
+    expect(first.length).toBeGreaterThanOrEqual(1);
+
+    // a second claimer at the same instant sees the lease and skips the leased rows
+    const second = await store.claimDueTimers({ workerId: "w2", now, limit: 10, leaseMs: 60_000 });
+    const overlap = second.filter((s) => first.some((f) => f.timerId === s.timerId));
+    expect(overlap).toHaveLength(0);
+
+    // after the lease expires, the rows are reclaimable
+    const later = new Date(now.getTime() + 61_000);
+    const reclaimed = await store.claimDueTimers({ workerId: "w3", now: later, limit: 10, leaseMs: 60_000 });
+    expect(reclaimed.some((r) => first.some((f) => f.timerId === r.timerId))).toBe(true);
+  });
+});

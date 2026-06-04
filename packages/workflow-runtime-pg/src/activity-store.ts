@@ -12,8 +12,10 @@ export interface ActivityProjection {
   readonly tenantId: string;
   readonly kind: ActivityKind;
   readonly definitionActivityKey: string;
+  readonly label: string;
   readonly status: ActivityStatus;
   readonly attemptNumber: number;
+  readonly sequenceCursor: number;
   readonly maxAttempts: number;
   readonly retryPolicy: RetryPolicy;
   readonly scheduledAt: string;
@@ -47,11 +49,12 @@ export class PostgresActivityStore {
          activity_id, instance_id, tenant_id, definition_activity_key, kind,
          status, attempt_number, max_attempts, retry_policy, scheduled_at,
          started_at, completed_at, timeout_seconds, timeout_at,
-         input_sha256, output_sha256, error_code, error_message, next_retry_at
+         input_sha256, output_sha256, error_code, error_message, next_retry_at,
+         label, sequence_cursor
        )
        VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10,
-         $11, $12, $13, $14, $15, $16, $17, $18, $19
+         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
        )
        ON CONFLICT (activity_id) DO UPDATE
          SET status = EXCLUDED.status,
@@ -83,6 +86,8 @@ export class PostgresActivityStore {
         projection.errorCode,
         projection.errorMessage,
         projection.nextRetryAt,
+        projection.label,
+        projection.sequenceCursor,
       ],
     );
   }

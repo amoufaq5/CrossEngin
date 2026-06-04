@@ -359,8 +359,10 @@ interface MutableActivity {
   tenantId: string;
   kind: WorkflowActivity["kind"];
   definitionActivityKey: string;
+  label: string;
   status: ActivityStatus;
   attemptNumber: number;
+  sequenceCursor: number;
   maxAttempts: number;
   retryPolicy: RetryPolicy;
   scheduledAt: string;
@@ -398,11 +400,15 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
         kind: (event.payload["kind"] as WorkflowActivity["kind"]) ?? "transformation",
         definitionActivityKey:
           (asString(event.payload["definitionActivityKey"], "activity") ?? "activity"),
+        label:
+          asString(event.payload["label"], asString(event.payload["definitionActivityKey"], "activity") ?? "activity") ??
+          "activity",
         status: "scheduled",
         attemptNumber:
           typeof event.payload["attemptNumber"] === "number"
             ? (event.payload["attemptNumber"] as number)
             : 1,
+        sequenceCursor: event.sequenceNumber,
         maxAttempts:
           typeof event.payload["maxAttempts"] === "number"
             ? (event.payload["maxAttempts"] as number)
@@ -464,6 +470,8 @@ interface MutableSignal {
   tenantId: string;
   signalName: string;
   correlationKey: string;
+  deliveryGuarantee: string;
+  sourceSystem: string;
   status: SignalStatus;
   receivedAt: string;
   matchedAt: string | null;
@@ -482,6 +490,8 @@ export function projectSignals(events: readonly WorkflowEvent[]): readonly Mutab
         tenantId: event.tenantId,
         signalName: asString(event.payload["signalName"], "") ?? "",
         correlationKey: asString(event.payload["correlationKey"], "") ?? "",
+        deliveryGuarantee: asString(event.payload["deliveryGuarantee"], "at_least_once") ?? "at_least_once",
+        sourceSystem: asString(event.payload["sourceSystem"], event.actorSystemId ?? "system") ?? "system",
         status: "matched_to_instance",
         receivedAt: event.occurredAt,
         matchedAt: event.occurredAt,
@@ -505,6 +515,7 @@ interface MutableTimer {
   instanceId: string;
   tenantId: string;
   timerName: string;
+  kind: string;
   status: TimerStatus;
   scheduledAt: string;
   fireAt: string;
@@ -523,6 +534,7 @@ export function projectTimers(events: readonly WorkflowEvent[]): readonly Mutabl
         instanceId: event.instanceId,
         tenantId: event.tenantId,
         timerName: asString(event.payload["timerName"], "") ?? "",
+        kind: asString(event.payload["kind"], "relative_after") ?? "relative_after",
         status: "scheduled",
         scheduledAt: event.occurredAt,
         fireAt: asString(event.payload["fireAt"], event.occurredAt) ?? event.occurredAt,
