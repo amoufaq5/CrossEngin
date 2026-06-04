@@ -158,3 +158,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 72 | 0104 | 4,000 | Drafted alongside per-unit timer claim + `fireTimer` for parallel workers (Phase 3 P2.1) |
 | 73 | 0105 | 4,000 | Drafted alongside the activity retry executor — `retryActivity` + claim (Phase 3 P2.2) |
 | 74 | 0106 | 4,000 | Drafted alongside `apps/workflow-worker` — the runnable distributed worker binary (Phase 3 P2.3) |
+| 75 | 0107 | 4,000 | Drafted alongside activity retry backoff — `next_retry_at` population (Phase 3 P2.4) |

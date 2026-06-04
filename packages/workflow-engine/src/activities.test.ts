@@ -3,16 +3,19 @@ import {
   ACTIVITY_KINDS,
   ACTIVITY_STATUSES,
   ACTIVITY_TRANSITIONS,
+  DEFAULT_RETRY_POLICY,
   IDEMPOTENT_ACTIVITY_KINDS,
   RETRY_STRATEGIES,
   RetryPolicySchema,
   SIDE_EFFECT_ACTIVITY_KINDS,
   WorkflowActivitySchema,
   canTransitionActivity,
+  computeNextRetryAt,
   decideActivityRetry,
   isActivityTimedOut,
   isIdempotentActivity,
   isSideEffectActivity,
+  retryDelaySeconds,
   type RetryPolicy,
   type WorkflowActivity,
 } from "./activities.js";
@@ -54,6 +57,47 @@ const baseActivity: WorkflowActivity = {
   completedByUserId: null,
   sequenceCursor: 1,
 };
+
+describe("retryDelaySeconds + computeNextRetryAt", () => {
+  const now = new Date("2026-06-04T12:00:00.000Z");
+  const policy: RetryPolicy = {
+    strategy: "exponential_backoff",
+    maxAttempts: 4,
+    initialDelaySeconds: 2,
+    maxDelaySeconds: 60,
+    retryableErrorCodes: [],
+    nonRetryableErrorCodes: [],
+  };
+
+  it("DEFAULT_RETRY_POLICY is a valid 3-attempt exponential policy", () => {
+    expect(() => RetryPolicySchema.parse(DEFAULT_RETRY_POLICY)).not.toThrow();
+    expect(DEFAULT_RETRY_POLICY.maxAttempts).toBe(3);
+  });
+
+  it("computes exponential / linear / fixed delays", () => {
+    expect(retryDelaySeconds(policy, 1)).toBe(2); // 2 * 2^0
+    expect(retryDelaySeconds(policy, 2)).toBe(4); // 2 * 2^1
+    expect(retryDelaySeconds(policy, 3)).toBe(8); // 2 * 2^2
+    expect(retryDelaySeconds({ ...policy, strategy: "linear_backoff" }, 3)).toBe(6);
+    expect(retryDelaySeconds({ ...policy, strategy: "fixed_delay" }, 3)).toBe(2);
+  });
+
+  it("caps the delay at maxDelaySeconds", () => {
+    expect(retryDelaySeconds(policy, 10)).toBe(60); // 2*2^9 capped
+  });
+
+  it("stamps nextRetryAt at now + capped backoff", () => {
+    expect(computeNextRetryAt({ policy, attemptNumber: 2, now })).toBe(
+      new Date(now.getTime() + 4000).toISOString(),
+    );
+  });
+
+  it("returns null when attempts are exhausted or strategy is no_retry", () => {
+    expect(computeNextRetryAt({ policy, attemptNumber: 4, now })).toBeNull();
+    const noRetry: RetryPolicy = { ...policy, strategy: "no_retry", maxAttempts: 1 };
+    expect(computeNextRetryAt({ policy: noRetry, attemptNumber: 1, now })).toBeNull();
+  });
+});
 
 describe("constants", () => {
   it("has 10 activity kinds", () => {

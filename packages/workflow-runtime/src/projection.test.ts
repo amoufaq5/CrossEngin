@@ -343,6 +343,53 @@ describe("projectActivities", () => {
     expect(acts[0]?.status).toBe("failed");
     expect(acts[0]?.errorCode).toBe("503");
   });
+
+  it("projects retry policy, max attempts, timeoutAt, and a failure's nextRetryAt", () => {
+    const acts = projectActivities([
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 1,
+        activityId: "wfa_act00003",
+        payload: {
+          kind: "http_call",
+          maxAttempts: 5,
+          timeoutSeconds: 120,
+          retryPolicy: {
+            strategy: "fixed_delay",
+            maxAttempts: 5,
+            initialDelaySeconds: 30,
+            maxDelaySeconds: 300,
+            retryableErrorCodes: [],
+            nonRetryableErrorCodes: [],
+          },
+        },
+      }),
+      event({
+        kind: "activity_failed",
+        sequenceNumber: 2,
+        activityId: "wfa_act00003",
+        payload: { errorCode: "503", attemptNumber: 1, nextRetryAt: "2026-05-17T12:00:30.000Z" },
+      }),
+    ]);
+    expect(acts[0]?.maxAttempts).toBe(5);
+    expect(acts[0]?.retryPolicy.strategy).toBe("fixed_delay");
+    expect(acts[0]?.timeoutSeconds).toBe(120);
+    expect(acts[0]?.nextRetryAt).toBe("2026-05-17T12:00:30.000Z");
+    expect(acts[0]?.attemptNumber).toBe(1);
+  });
+
+  it("defaults retry policy + timeout when the scheduled event omits them, and clears nextRetryAt on retry", () => {
+    const acts = projectActivities([
+      event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_act00004", payload: { kind: "http_call" } }),
+      event({ kind: "activity_failed", sequenceNumber: 2, activityId: "wfa_act00004", payload: { errorCode: "503", nextRetryAt: "2026-05-17T12:00:01.000Z" } }),
+      event({ kind: "activity_started", sequenceNumber: 3, activityId: "wfa_act00004", payload: { attemptNumber: 2 } }),
+    ]);
+    expect(acts[0]?.retryPolicy.strategy).toBe("exponential_backoff"); // DEFAULT_RETRY_POLICY
+    expect(acts[0]?.maxAttempts).toBe(3);
+    expect(acts[0]?.status).toBe("running");
+    expect(acts[0]?.nextRetryAt).toBeNull(); // cleared when the retry attempt starts
+    expect(acts[0]?.attemptNumber).toBe(2);
+  });
 });
 
 describe("projectSignals", () => {

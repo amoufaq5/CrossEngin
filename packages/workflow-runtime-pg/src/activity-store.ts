@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { ActivityKind, ActivityStatus } from "@crossengin/workflow-engine";
+import type { ActivityKind, ActivityStatus, RetryPolicy } from "@crossengin/workflow-engine";
 
 import type { WorkflowInstanceIdResolver } from "./id-mapping.js";
 
@@ -14,6 +14,8 @@ export interface ActivityProjection {
   readonly definitionActivityKey: string;
   readonly status: ActivityStatus;
   readonly attemptNumber: number;
+  readonly maxAttempts: number;
+  readonly retryPolicy: RetryPolicy;
   readonly scheduledAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -21,6 +23,9 @@ export interface ActivityProjection {
   readonly errorMessage: string | null;
   readonly inputSha256: string | null;
   readonly outputSha256: string | null;
+  readonly nextRetryAt: string | null;
+  readonly timeoutSeconds: number;
+  readonly timeoutAt: string;
 }
 
 export class PostgresActivityStore {
@@ -40,11 +45,13 @@ export class PostgresActivityStore {
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (
          activity_id, instance_id, tenant_id, definition_activity_key, kind,
-         status, attempt_number, scheduled_at, started_at, completed_at,
-         input_sha256, output_sha256, error_code, error_message
+         status, attempt_number, max_attempts, retry_policy, scheduled_at,
+         started_at, completed_at, timeout_seconds, timeout_at,
+         input_sha256, output_sha256, error_code, error_message, next_retry_at
        )
        VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+         $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10,
+         $11, $12, $13, $14, $15, $16, $17, $18, $19
        )
        ON CONFLICT (activity_id) DO UPDATE
          SET status = EXCLUDED.status,
@@ -54,7 +61,8 @@ export class PostgresActivityStore {
              input_sha256 = EXCLUDED.input_sha256,
              output_sha256 = EXCLUDED.output_sha256,
              error_code = EXCLUDED.error_code,
-             error_message = EXCLUDED.error_message`,
+             error_message = EXCLUDED.error_message,
+             next_retry_at = EXCLUDED.next_retry_at`,
       [
         projection.id,
         instanceUuid,
@@ -63,13 +71,18 @@ export class PostgresActivityStore {
         projection.kind,
         projection.status,
         projection.attemptNumber,
+        projection.maxAttempts,
+        JSON.stringify(projection.retryPolicy),
         projection.scheduledAt,
         projection.startedAt,
         projection.completedAt,
+        projection.timeoutSeconds,
+        projection.timeoutAt,
         projection.inputSha256,
         projection.outputSha256,
         projection.errorCode,
         projection.errorMessage,
+        projection.nextRetryAt,
       ],
     );
   }

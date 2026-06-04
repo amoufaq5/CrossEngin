@@ -103,6 +103,62 @@ export const RetryPolicySchema = z
   });
 export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
 
+/**
+ * The retry policy applied to a scheduled activity when its `schedule_activity`
+ * action declares none: three attempts with exponential backoff from 1s, capped
+ * at 5 minutes. Conservative + bounded — a real definition overrides it.
+ */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  strategy: "exponential_backoff",
+  maxAttempts: 3,
+  initialDelaySeconds: 1,
+  maxDelaySeconds: 300,
+  retryableErrorCodes: [],
+  nonRetryableErrorCodes: [],
+};
+
+/**
+ * The backoff delay (seconds, capped at `maxDelaySeconds`) before the attempt
+ * *after* `attemptNumber`. Pure — the single source of the strategy math, shared
+ * by `decideActivityRetry` and the runtime's `next_retry_at` population.
+ */
+export const retryDelaySeconds = (
+  policy: RetryPolicy,
+  attemptNumber: number,
+): number => {
+  let delaySec: number;
+  switch (policy.strategy) {
+    case "no_retry":
+    case "fixed_delay":
+      delaySec = policy.initialDelaySeconds;
+      break;
+    case "linear_backoff":
+      delaySec = policy.initialDelaySeconds * attemptNumber;
+      break;
+    case "exponential_backoff":
+      delaySec = policy.initialDelaySeconds * Math.pow(2, attemptNumber - 1);
+      break;
+  }
+  return Math.min(delaySec, policy.maxDelaySeconds);
+};
+
+/**
+ * The ISO time at which the attempt after `attemptNumber` becomes eligible, or
+ * `null` if the policy won't retry (no_retry / attempts exhausted). Pure — the
+ * runtime stamps this on the `activity_failed`/`timed_out` event so the
+ * distributed retry claim honors the backoff instead of firing immediately.
+ */
+export const computeNextRetryAt = (input: {
+  readonly policy: RetryPolicy;
+  readonly attemptNumber: number;
+  readonly now: Date;
+}): string | null => {
+  if (input.policy.strategy === "no_retry") return null;
+  if (input.attemptNumber >= input.policy.maxAttempts) return null;
+  const delay = retryDelaySeconds(input.policy, input.attemptNumber);
+  return new Date(input.now.getTime() + delay * 1000).toISOString();
+};
+
 export const WorkflowActivitySchema = z
   .object({
     id: z.string().regex(/^wfa_[a-z0-9]{8,40}$/),
@@ -315,21 +371,7 @@ export const decideActivityRetry = (input: {
       reason: `error_code_${a.errorCode}_not_in_allowlist`,
     };
   }
-  let delaySec: number;
-  switch (a.retryPolicy.strategy) {
-    case "fixed_delay":
-      delaySec = a.retryPolicy.initialDelaySeconds;
-      break;
-    case "linear_backoff":
-      delaySec = a.retryPolicy.initialDelaySeconds * a.attemptNumber;
-      break;
-    case "exponential_backoff":
-      delaySec =
-        a.retryPolicy.initialDelaySeconds *
-        Math.pow(2, a.attemptNumber - 1);
-      break;
-  }
-  const cappedDelaySec = Math.min(delaySec, a.retryPolicy.maxDelaySeconds);
+  const cappedDelaySec = retryDelaySeconds(a.retryPolicy, a.attemptNumber);
   return {
     shouldRetry: true,
     nextRetryAt: new Date(

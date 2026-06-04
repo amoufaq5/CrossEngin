@@ -589,6 +589,106 @@ describe("schedule_activity action", () => {
     expect(events.map((e) => e.kind)).toContain("activity_failed");
   });
 
+  it("persists the retry policy on the scheduled event and stamps nextRetryAt on the failure", async () => {
+    const failingHandler: ActivityHandler = () => ({
+      status: "failed",
+      errorCode: "FLAKY",
+      errorMessage: "fails",
+      retryable: true,
+    });
+    const def: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_activity",
+              parameters: {
+                activityKey: "do_thing",
+                kind: "http_call",
+                input: {},
+                timeoutSeconds: 120,
+                retryPolicy: {
+                  strategy: "fixed_delay",
+                  maxAttempts: 3,
+                  initialDelaySeconds: 30,
+                  maxDelaySeconds: 300,
+                  retryableErrorCodes: [],
+                  nonRetryableErrorCodes: [],
+                },
+              },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "parked", kind: "waiting", label: "Parked", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [
+        { name: "park", fromState: "draft", toState: "parked", trigger: { kind: "activity_failed", activityKey: "do_thing" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      ],
+      initialState: "draft",
+    };
+    const registry = createDefaultRegistry().registerForKind("http_call", failingHandler);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    const scheduled = events.find((e) => e.kind === "activity_scheduled")!;
+    expect(scheduled.payload["maxAttempts"]).toBe(3);
+    expect((scheduled.payload["retryPolicy"] as { strategy: string }).strategy).toBe("fixed_delay");
+    expect(scheduled.payload["timeoutSeconds"]).toBe(120);
+    const failed = events.find((e) => e.kind === "activity_failed")!;
+    // clock fixed at 12:00:00, fixed_delay 30s → 12:00:30, attempt 1 < maxAttempts 3
+    expect(failed.payload["nextRetryAt"]).toBe("2026-05-16T12:00:30.000Z");
+  });
+
+  it("leaves nextRetryAt null when the policy won't retry (no_retry)", async () => {
+    const failingHandler: ActivityHandler = () => ({ status: "failed", errorCode: "X", errorMessage: "x", retryable: false });
+    const def: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_activity",
+              parameters: {
+                activityKey: "do_thing",
+                kind: "http_call",
+                input: {},
+                retryPolicy: {
+                  strategy: "no_retry",
+                  maxAttempts: 1,
+                  initialDelaySeconds: 1,
+                  maxDelaySeconds: 1,
+                  retryableErrorCodes: [],
+                  nonRetryableErrorCodes: [],
+                },
+              },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "parked", kind: "waiting", label: "Parked", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [
+        { name: "park", fromState: "draft", toState: "parked", trigger: { kind: "activity_failed", activityKey: "do_thing" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      ],
+      initialState: "draft",
+    };
+    const registry = createDefaultRegistry().registerForKind("http_call", failingHandler);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.find((e) => e.kind === "activity_failed")!.payload["nextRetryAt"]).toBeNull();
+  });
+
   it("uses unsupportedHandler when no handler is registered", async () => {
     const def: WorkflowDefinition = {
       ...definitionFixture(),

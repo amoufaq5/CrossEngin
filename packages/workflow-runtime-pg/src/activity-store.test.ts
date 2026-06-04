@@ -19,6 +19,15 @@ function fixtureActivity(overrides: Partial<ActivityProjection> = {}): ActivityP
     definitionActivityKey: "charge_card",
     status: "scheduled",
     attemptNumber: 1,
+    maxAttempts: 3,
+    retryPolicy: {
+      strategy: "exponential_backoff",
+      maxAttempts: 3,
+      initialDelaySeconds: 1,
+      maxDelaySeconds: 300,
+      retryableErrorCodes: [],
+      nonRetryableErrorCodes: [],
+    },
     scheduledAt: "2026-05-16T12:00:00.000Z",
     startedAt: null,
     completedAt: null,
@@ -26,6 +35,9 @@ function fixtureActivity(overrides: Partial<ActivityProjection> = {}): ActivityP
     errorMessage: null,
     inputSha256: null,
     outputSha256: null,
+    nextRetryAt: null,
+    timeoutSeconds: 300,
+    timeoutAt: "2026-05-16T12:05:00.000Z",
     ...overrides,
   };
 }
@@ -75,8 +87,8 @@ describe("PostgresActivityStore.upsert", () => {
         outputSha256: "a".repeat(64),
       }),
     );
-    expect(capture[0]?.params?.[9]).toBe("2026-05-16T12:00:30.000Z");
-    expect(capture[0]?.params?.[11]).toBe("a".repeat(64));
+    expect(capture[0]?.params?.[11]).toBe("2026-05-16T12:00:30.000Z");
+    expect(capture[0]?.params?.[15]).toBe("a".repeat(64));
   });
 
   it("threads errorCode + errorMessage for failed activities", async () => {
@@ -93,8 +105,34 @@ describe("PostgresActivityStore.upsert", () => {
         errorMessage: "service unavailable",
       }),
     );
-    expect(capture[0]?.params?.[12]).toBe("503");
-    expect(capture[0]?.params?.[13]).toBe("service unavailable");
+    expect(capture[0]?.params?.[16]).toBe("503");
+    expect(capture[0]?.params?.[17]).toBe("service unavailable");
+  });
+
+  it("persists max_attempts, retry_policy (jsonb), timeout, and next_retry_at", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), capture);
+    const resolver = new WorkflowInstanceIdResolver(conn);
+    resolver.register("wfi_inst0001", INSTANCE_UUID);
+    const store = new PostgresActivityStore({ conn, instanceResolver: resolver });
+    await store.upsert(
+      fixtureActivity({
+        status: "failed",
+        maxAttempts: 5,
+        nextRetryAt: "2026-05-16T12:00:30.000Z",
+        timeoutSeconds: 120,
+        timeoutAt: "2026-05-16T12:02:00.000Z",
+      }),
+    );
+    const insert = capture[0]!;
+    expect(insert.sql).toContain("retry_policy");
+    expect(insert.sql).toContain("$9::jsonb");
+    expect(insert.sql).toContain("next_retry_at = EXCLUDED.next_retry_at");
+    expect(insert.params?.[7]).toBe(5); // max_attempts
+    expect(JSON.parse(insert.params?.[8] as string).strategy).toBe("exponential_backoff");
+    expect(insert.params?.[12]).toBe(120); // timeout_seconds
+    expect(insert.params?.[13]).toBe("2026-05-16T12:02:00.000Z"); // timeout_at
+    expect(insert.params?.[18]).toBe("2026-05-16T12:00:30.000Z"); // next_retry_at
   });
 
   it("rejects when instance is not resolvable", async () => {

@@ -1,6 +1,10 @@
 import { sha256 } from "@crossengin/crypto";
 import {
+  DEFAULT_RETRY_POLICY,
+  RetryPolicySchema,
   TERMINAL_STATE_KINDS,
+  computeNextRetryAt,
+  type RetryPolicy,
   type StateAction,
   type TransitionDefinition,
   type WorkflowDefinition,
@@ -21,6 +25,13 @@ import {
 } from "./transitions.js";
 
 const MAX_STEP_ITERATIONS = 1000;
+const DEFAULT_ACTIVITY_TIMEOUT_SECONDS = 300;
+
+/** Reads a `schedule_activity` action's `retryPolicy` param, falling back to the default. */
+function resolveRetryPolicy(value: unknown): RetryPolicy {
+  const parsed = RetryPolicySchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_RETRY_POLICY;
+}
 
 export interface EngineOptions {
   readonly eventLog: EventLog;
@@ -588,6 +599,11 @@ export class WorkflowEngine {
         : "transformation";
     const activityId = this.ids.generate("wfa");
     const inputData = (action.parameters["input"] as Record<string, unknown>) ?? {};
+    const retryPolicy = resolveRetryPolicy(action.parameters["retryPolicy"]);
+    const timeoutSeconds =
+      typeof action.parameters["timeoutSeconds"] === "number"
+        ? (action.parameters["timeoutSeconds"] as number)
+        : DEFAULT_ACTIVITY_TIMEOUT_SECONDS;
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -610,12 +626,15 @@ export class WorkflowEngine {
         attemptNumber: 1,
         input: inputData,
         inputSha256: sha256(JSON.stringify(inputData)),
+        retryPolicy,
+        maxAttempts: retryPolicy.maxAttempts,
+        timeoutSeconds,
       },
       correlationId: null,
       causationEventId: null,
     });
 
-    await this.runActivityAttempt(instanceId, definition, tenantId, activityId, activityKey, kind, inputData, 1);
+    await this.runActivityAttempt(instanceId, definition, tenantId, activityId, activityKey, kind, inputData, 1, retryPolicy);
   }
 
   /**
@@ -641,6 +660,7 @@ export class WorkflowEngine {
     let activityKey: string | null = null;
     let kind = "transformation";
     let activityInput: Record<string, unknown> = {};
+    let retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY;
     let attempts = 0;
     let lastKind: string | null = null;
     for (const e of events) {
@@ -649,6 +669,7 @@ export class WorkflowEngine {
         activityKey = typeof e.payload["definitionActivityKey"] === "string" ? (e.payload["definitionActivityKey"] as string) : null;
         kind = typeof e.payload["kind"] === "string" ? (e.payload["kind"] as string) : "transformation";
         activityInput = (e.payload["input"] as Record<string, unknown>) ?? {};
+        retryPolicy = resolveRetryPolicy(e.payload["retryPolicy"]);
       } else if (e.kind === "activity_started") {
         attempts += 1;
       }
@@ -665,6 +686,7 @@ export class WorkflowEngine {
       kind,
       activityInput,
       attempts + 1,
+      retryPolicy,
     );
     return { retried: true, instanceId: input.instanceId, activityId: input.activityId, status: outcome };
   }
@@ -679,6 +701,7 @@ export class WorkflowEngine {
     kind: string,
     inputData: Record<string, unknown>,
     attemptNumber: number,
+    retryPolicy: RetryPolicy,
   ): Promise<"succeeded" | "failed" | "timed_out"> {
     const handler =
       this.registry.resolve({
@@ -782,7 +805,12 @@ export class WorkflowEngine {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { errorCode: outcome.errorCode, errorMessage: outcome.errorMessage, attemptNumber },
+        payload: {
+          errorCode: outcome.errorCode,
+          errorMessage: outcome.errorMessage,
+          attemptNumber,
+          nextRetryAt: computeNextRetryAt({ policy: retryPolicy, attemptNumber, now: this.clock.now() }),
+        },
         correlationId: null,
         causationEventId: null,
       });
@@ -815,7 +843,11 @@ export class WorkflowEngine {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { errorMessage: outcome.errorMessage, attemptNumber },
+        payload: {
+          errorMessage: outcome.errorMessage,
+          attemptNumber,
+          nextRetryAt: computeNextRetryAt({ policy: retryPolicy, attemptNumber, now: this.clock.now() }),
+        },
         correlationId: null,
         causationEventId: null,
       });

@@ -1,13 +1,16 @@
-import type {
-  ActivityStatus,
-  SignalStatus,
-  TimerStatus,
-  WorkflowActivity,
-  WorkflowDefinition,
-  WorkflowEvent,
-  WorkflowInstance,
-  WorkflowSignal,
-  WorkflowTimer,
+import {
+  DEFAULT_RETRY_POLICY,
+  RetryPolicySchema,
+  type ActivityStatus,
+  type RetryPolicy,
+  type SignalStatus,
+  type TimerStatus,
+  type WorkflowActivity,
+  type WorkflowDefinition,
+  type WorkflowEvent,
+  type WorkflowInstance,
+  type WorkflowSignal,
+  type WorkflowTimer,
 } from "@crossengin/workflow-engine";
 
 export interface ProjectedInstance {
@@ -358,6 +361,8 @@ interface MutableActivity {
   definitionActivityKey: string;
   status: ActivityStatus;
   attemptNumber: number;
+  maxAttempts: number;
+  retryPolicy: RetryPolicy;
   scheduledAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -365,6 +370,14 @@ interface MutableActivity {
   errorMessage: string | null;
   inputSha256: string | null;
   outputSha256: string | null;
+  nextRetryAt: string | null;
+  timeoutSeconds: number;
+  timeoutAt: string;
+}
+
+function resolveRetryPolicy(value: unknown): RetryPolicy {
+  const parsed = RetryPolicySchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_RETRY_POLICY;
 }
 
 export function projectActivities(events: readonly WorkflowEvent[]): readonly MutableActivity[] {
@@ -373,6 +386,11 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
     if (event.activityId === null) continue;
     const id = event.activityId;
     if (event.kind === "activity_scheduled") {
+      const retryPolicy = resolveRetryPolicy(event.payload["retryPolicy"]);
+      const timeoutSeconds =
+        typeof event.payload["timeoutSeconds"] === "number"
+          ? (event.payload["timeoutSeconds"] as number)
+          : 300;
       byId.set(id, {
         id,
         instanceId: event.instanceId,
@@ -385,6 +403,11 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
           typeof event.payload["attemptNumber"] === "number"
             ? (event.payload["attemptNumber"] as number)
             : 1,
+        maxAttempts:
+          typeof event.payload["maxAttempts"] === "number"
+            ? (event.payload["maxAttempts"] as number)
+            : retryPolicy.maxAttempts,
+        retryPolicy,
         scheduledAt: event.occurredAt,
         startedAt: null,
         completedAt: null,
@@ -392,6 +415,9 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
         errorMessage: null,
         inputSha256: asString(event.payload["inputSha256"]),
         outputSha256: null,
+        nextRetryAt: null,
+        timeoutSeconds,
+        timeoutAt: new Date(Date.parse(event.occurredAt) + timeoutSeconds * 1000).toISOString(),
       });
       continue;
     }
@@ -400,18 +426,31 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
     if (event.kind === "activity_started") {
       existing.status = "running";
       existing.startedAt = event.occurredAt;
+      existing.nextRetryAt = null;
+      if (typeof event.payload["attemptNumber"] === "number") {
+        existing.attemptNumber = event.payload["attemptNumber"];
+      }
     } else if (event.kind === "activity_completed") {
       existing.status = "succeeded";
       existing.completedAt = event.occurredAt;
       existing.outputSha256 = asString(event.payload["outputSha256"]);
+      existing.nextRetryAt = null;
     } else if (event.kind === "activity_failed") {
       existing.status = "failed";
       existing.completedAt = event.occurredAt;
       existing.errorCode = asString(event.payload["errorCode"]);
       existing.errorMessage = asString(event.payload["errorMessage"]);
+      existing.nextRetryAt = asString(event.payload["nextRetryAt"]);
+      if (typeof event.payload["attemptNumber"] === "number") {
+        existing.attemptNumber = event.payload["attemptNumber"];
+      }
     } else if (event.kind === "activity_timed_out") {
       existing.status = "timed_out";
       existing.completedAt = event.occurredAt;
+      existing.nextRetryAt = asString(event.payload["nextRetryAt"]);
+      if (typeof event.payload["attemptNumber"] === "number") {
+        existing.attemptNumber = event.payload["attemptNumber"];
+      }
     } else if (event.kind === "activity_compensated") {
       existing.status = "compensated";
     }
