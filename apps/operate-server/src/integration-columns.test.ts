@@ -5,6 +5,7 @@ import {
   parsePgEnvConfig,
   type PgConnection,
 } from "@crossengin/kernel-pg";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import { ColumnMappedEntityStore } from "@crossengin/operate-runtime-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -27,8 +28,9 @@ const suite = RUN ? describe : describe.skip;
 suite("ColumnMappedEntityStore integration (real Postgres)", () => {
   let conn: PgConnection;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     conn = createNodePgConnection(parsePgEnvConfig());
+    await conn.query("CREATE SCHEMA IF NOT EXISTS lk");
   });
 
   afterAll(async () => {
@@ -104,5 +106,57 @@ suite("ColumnMappedEntityStore integration (real Postgres)", () => {
     );
     expect(raw.rows[0]?.t).toBe("bytea");
     expect(raw.rows[0]?.mrn.toString("utf8")).not.toContain("MRN-998877");
+  });
+
+  it("manages many_to_many association links over a real join table (link/unlink/listLinks + FK cascade)", async () => {
+    const manifest = {
+      entities: [
+        { name: "Course", fields: [{ name: "title", type: { kind: "text" } }] },
+        { name: "Student", fields: [{ name: "name", type: { kind: "text" } }] },
+      ],
+      relations: [{ kind: "many_to_many", left: "Course", right: "Student" }],
+    } as unknown as Manifest;
+    const store = new ColumnMappedEntityStore(conn, manifest, { schema: "lk" });
+    await store.ensureSchema();
+
+    const tenant = randomUUID();
+    const course = await store.create(tenant, "Course", { title: "Algebra" });
+    const s1 = await store.create(tenant, "Student", { name: "Ada" });
+    const s2 = await store.create(tenant, "Student", { name: "Bo" });
+
+    await store.link(tenant, "Course", "Student", course.id as string, s1.id as string);
+    await store.link(tenant, "Course", "Student", course.id as string, s2.id as string);
+    await store.link(tenant, "Course", "Student", course.id as string, s1.id as string); // idempotent
+
+    expect(await store.isLinked(tenant, "Course", "Student", course.id as string, s1.id as string)).toBe(true);
+    const links = await store.listLinks(tenant, "Course", "Student", { leftId: course.id as string });
+    expect(links).toHaveLength(2);
+
+    expect(await store.unlink(tenant, "Course", "Student", course.id as string, s1.id as string)).toBe(true);
+    expect(await store.isLinked(tenant, "Course", "Student", course.id as string, s1.id as string)).toBe(false);
+    expect(await store.listLinks(tenant, "Course", "Student", { leftId: course.id as string })).toHaveLength(1);
+
+    // the join FK is ON DELETE CASCADE: removing the course clears its remaining links
+    await store.remove(tenant, "Course", course.id as string);
+    expect(await store.listLinks(tenant, "Course", "Student", { leftId: course.id as string })).toHaveLength(0);
+  });
+
+  it("enforces a many_to_one ON DELETE RESTRICT foreign key", async () => {
+    const manifest = {
+      entities: [
+        { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] },
+        { name: "Order", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] },
+      ],
+      relations: [{ kind: "many_to_one", from: "Order", field: "account", to: "Account", onDelete: "restrict" }],
+    } as unknown as Manifest;
+    const store = new ColumnMappedEntityStore(conn, manifest, { schema: "lk" });
+    await store.ensureSchema();
+
+    const tenant = randomUUID();
+    const account = await store.create(tenant, "Account", { name: "Acme" });
+    await store.create(tenant, "Order", { account: account.id });
+
+    // RESTRICT: the referenced account can't be deleted while an order references it
+    await expect(store.remove(tenant, "Account", account.id as string)).rejects.toThrow();
   });
 });

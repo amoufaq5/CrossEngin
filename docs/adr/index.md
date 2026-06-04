@@ -171,3 +171,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 85 | 0117 | 3,500 | Drafted alongside the operate-server real-Postgres integration test (Phase 3 P1.23) |
 | 86 | 0118 | 3,500 | Drafted alongside the projection drift-sweep worker mode (Phase 3 P2.14) |
 | 87 | 0119 | 3,500 | Drafted alongside the ColumnMappedEntityStore real-Postgres integration test (Phase 3 P1.24) |
+| 88 | 0120 | 3,000 | Drafted alongside the column-store m2m link + FK ON DELETE integration test (Phase 3 P1.25) |
