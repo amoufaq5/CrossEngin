@@ -441,7 +441,22 @@ function rowToRecord(plan: EntityTablePlan, row: Record<string, unknown>): Entit
   const out: EntityRecord = { id: row["id"] };
   for (const mapping of plan.columns) {
     const v = row[mapping.column];
-    if (v !== undefined && v !== null) out[mapping.field] = v;
+    if (v !== undefined && v !== null) out[mapping.field] = coerceColumnValue(mapping, v);
   }
   return out;
+}
+
+/**
+ * Restores a column value to its JS type. node-postgres returns `NUMERIC` as a
+ * string (to avoid float precision loss); a manifest `decimal` field is a
+ * number, so we coerce finite numeric strings back — matching what the in-memory
+ * and JSONB stores round-trip. (`INTEGER`/`BOOLEAN`/`TIMESTAMPTZ` are already
+ * parsed by the driver; an out-of-range / non-finite string is left untouched.)
+ */
+function coerceColumnValue(mapping: ColumnMapping, value: unknown): unknown {
+  if (typeof value === "string" && mapping.sqlType.startsWith("NUMERIC")) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : value;
+  }
+  return value;
 }

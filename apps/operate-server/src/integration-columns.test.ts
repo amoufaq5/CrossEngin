@@ -57,10 +57,10 @@ suite("ColumnMappedEntityStore integration (real Postgres)", () => {
     await mk("CS-2", 1, "inactive");
     await mk("CS-3", 2, "active");
 
-    // read back the typed record (NUMERIC round-trips as a pg string)
+    // read back the typed record — NUMERIC is coerced back to a JS number (P2/D fix)
     const got = await store.get(tenant, "Product", created.id as string);
-    expect(got).toMatchObject({ sku: "CS-1", status: "active" });
-    expect(Number(got?.["unit_price"])).toBe(3);
+    expect(got).toMatchObject({ sku: "CS-1", status: "active", unit_price: 3 });
+    expect(typeof got?.["unit_price"]).toBe("number");
 
     // column-native equality filter
     const active = await store.listPage(tenant, "Product", {
@@ -74,12 +74,12 @@ suite("ColumnMappedEntityStore integration (real Postgres)", () => {
     const firstPage = await store.listPage(tenant, "Product", {
       limit: 2, cursor: null, sort: [{ field: "unit_price", direction: "asc" }], filters: [],
     });
-    expect(firstPage.records.map((r) => Number(r["unit_price"]))).toEqual([1, 2]);
+    expect(firstPage.records.map((r) => r["unit_price"])).toEqual([1, 2]);
     expect(firstPage.nextCursor).not.toBeNull();
     const secondPage = await store.listPage(tenant, "Product", {
       limit: 2, cursor: firstPage.nextCursor, sort: [{ field: "unit_price", direction: "asc" }], filters: [],
     });
-    expect(secondPage.records.map((r) => Number(r["unit_price"]))).toEqual([3]);
+    expect(secondPage.records.map((r) => r["unit_price"])).toEqual([3]);
   });
 
   it("encrypts a phi column at rest (BYTEA ciphertext) and decrypts it on read", async () => {

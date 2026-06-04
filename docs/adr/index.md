@@ -176,3 +176,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 90 | 0122 | 3,000 | Drafted alongside the column-store set_null + non-bypassing-role RLS integration test (Phase 3 P1.26) |
 | 91 | 0123 | 3,000 | Drafted alongside the stale-worker incident persistence sink (Phase 3 P2.16) |
 | 92 | 0124 | 3,000 | Drafted alongside the worker incident lifecycle — open/resolve dedup (Phase 3 P2.17) |
+| 93 | 0125 | 2,500 | Drafted alongside the column-store NUMERIC read fidelity fix (Phase 3 P1.27) |

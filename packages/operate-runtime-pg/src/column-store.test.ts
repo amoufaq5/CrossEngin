@@ -129,6 +129,14 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     expect(select.params).toEqual([TENANT, "w1"]);
   });
 
+  it("coerces a NUMERIC column (returned as a string by pg) back to a number on read", async () => {
+    // node-postgres returns NUMERIC as a string; a `decimal` field is a number
+    const cap = capturePg([{ id: "w1", sku: "S1", price: "9.50", status: null, owner_id: null }]);
+    const record = await store(cap).get(TENANT, "Widget", "w1");
+    expect(record?.["price"]).toBe(9.5);
+    expect(typeof record?.["price"]).toBe("number");
+  });
+
   it("update SETs only patched columns + updated_at and returns the merged row", async () => {
     const cap = capturePg([{ id: "w1", sku: "S1", price: 12, owner_id: null }]);
     const updated = await store(cap).update(TENANT, "Widget", "w1", { price: 12 });
