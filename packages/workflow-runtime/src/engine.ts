@@ -672,7 +672,13 @@ export class WorkflowEngine {
       typeof action.parameters["timeoutSeconds"] === "number"
         ? (action.parameters["timeoutSeconds"] as number)
         : DEFAULT_ACTIVITY_TIMEOUT_SECONDS;
-    const executionMode = action.parameters["executionMode"] === "async" ? "async" : "inline";
+    // precedence: per-action executionMode → the definition's
+    // defaultActivityExecutionMode → "inline".
+    const actionMode = action.parameters["executionMode"];
+    const executionMode =
+      actionMode === "async" || actionMode === "inline"
+        ? actionMode
+        : definition.defaultActivityExecutionMode ?? "inline";
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,

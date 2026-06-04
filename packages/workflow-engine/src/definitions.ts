@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { ACTIVITY_EXECUTION_MODES } from "./activities.js";
+
 export const STATE_KINDS = [
   "initial",
   "intermediate",
@@ -301,6 +303,7 @@ export const WorkflowDefinitionSchema = z
     signals: z.array(SignalDefinitionSchema).default([]),
     initialState: z.string().min(1).max(80),
     compensationStrategy: z.enum(COMPENSATION_STRATEGIES),
+    defaultActivityExecutionMode: z.enum(ACTIVITY_EXECUTION_MODES).optional(),
     timeoutSeconds: z.number().int().min(60).max(31_536_000),
     createdAt: z.string().datetime({ offset: true }),
     createdBy: z.string().uuid(),

@@ -155,6 +155,14 @@ describe("WorkflowDefinitionSchema", () => {
     expect(() => WorkflowDefinitionSchema.parse(baseDefinition)).not.toThrow();
   });
 
+  it("accepts an optional defaultActivityExecutionMode and rejects an invalid one", () => {
+    expect(WorkflowDefinitionSchema.parse(baseDefinition).defaultActivityExecutionMode).toBeUndefined();
+    expect(
+      WorkflowDefinitionSchema.parse({ ...baseDefinition, defaultActivityExecutionMode: "async" }).defaultActivityExecutionMode,
+    ).toBe("async");
+    expect(() => WorkflowDefinitionSchema.parse({ ...baseDefinition, defaultActivityExecutionMode: "later" })).toThrow();
+  });
+
   it("rejects duplicate state names", () => {
     expect(() =>
       WorkflowDefinitionSchema.parse({

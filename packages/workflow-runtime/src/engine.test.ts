@@ -547,6 +547,41 @@ describe("executeActivity (async activity queue — first run by an executor)", 
     expect((await engine.executeActivity({ instanceId: "wfi_nope", activityId: "wfa_x" })).executed).toBe(false);
   });
 
+  it("defaultActivityExecutionMode='async' makes an unflagged activity async", async () => {
+    // the schedule_activity action has NO executionMode param — the definition default applies
+    const defaultedDef: WorkflowDefinition = {
+      ...asyncDef,
+      defaultActivityExecutionMode: "async",
+      states: asyncDef.states.map((s) =>
+        s.name === "working"
+          ? { ...s, onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 1 } } }] }
+          : s,
+      ),
+    };
+    const { engine } = makeEngine({ definition: defaultedDef });
+    const state = await engine.startInstance({ definitionId: defaultedDef.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("waiting_for_activity"); // parked, not run inline
+    const aId = await scheduledActivityId(engine, state.instanceId);
+    await engine.executeActivity({ instanceId: state.instanceId, activityId: aId });
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("a per-action executionMode overrides the definition default", async () => {
+    // definition default is async, but this action forces inline → runs synchronously
+    const overrideDef: WorkflowDefinition = {
+      ...asyncDef,
+      defaultActivityExecutionMode: "async",
+      states: asyncDef.states.map((s) =>
+        s.name === "working"
+          ? { ...s, onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 1 }, executionMode: "inline" } }] }
+          : s,
+      ),
+    };
+    const { engine } = makeEngine({ definition: overrideDef });
+    const state = await engine.startInstance({ definitionId: overrideDef.id, tenantId: TENANT });
+    expect(state.status).toBe("completed"); // ran inline despite the async default
+  });
+
   it("an inline activity (default) still runs at schedule time (no executor needed)", async () => {
     const inlineDef: WorkflowDefinition = {
       ...asyncDef,

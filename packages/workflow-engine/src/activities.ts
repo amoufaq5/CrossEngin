@@ -28,6 +28,16 @@ export const SIDE_EFFECT_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set([
   "child_workflow",
 ]);
 
+/**
+ * How an activity runs: `inline` (in the scheduling engine call — the default,
+ * synchronous) or `async` (left `scheduled` for a distributed
+ * `ActivityExecutorWorker` to claim + run). Selected per `schedule_activity`
+ * action (`executionMode`) or as a workflow-definition default
+ * (`defaultActivityExecutionMode`).
+ */
+export const ACTIVITY_EXECUTION_MODES = ["inline", "async"] as const;
+export type ActivityExecutionMode = (typeof ACTIVITY_EXECUTION_MODES)[number];
+
 export const ACTIVITY_STATUSES = [
   "pending",
   "scheduled",
