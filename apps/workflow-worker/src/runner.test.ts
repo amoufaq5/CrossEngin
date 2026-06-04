@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { FireTimerResult, RetryActivityResult, TickTimersResult, TimeoutInstanceResult } from "@crossengin/workflow-runtime";
+import type { ExecuteActivityResult, FireTimerResult, RetryActivityResult, TickTimersResult, TimeoutInstanceResult } from "@crossengin/workflow-runtime";
 import type { IntervalHandle, IntervalScheduler } from "@crossengin/workflow-worker";
 import { describe, expect, it } from "vitest";
 
@@ -32,6 +32,9 @@ const engine: WorkerEngine = {
   },
   async timeoutInstance(): Promise<TimeoutInstanceResult> {
     return { timedOut: false, instanceId: "wfi_x", previousStatus: null };
+  },
+  async executeActivity(): Promise<ExecuteActivityResult> {
+    return { executed: false, status: null, activityId: "wfa_x", instanceId: "wfi_x" };
   },
 };
 
@@ -66,6 +69,7 @@ const baseInput = {
   claimIntervalMs: 1000,
   retryIntervalMs: 8000,
   timeoutIntervalMs: 12000,
+  executeIntervalMs: 3000,
   batchSize: 50,
   leaseMs: 30000,
 };
@@ -104,12 +108,20 @@ describe("buildWorkerSet", () => {
     expect(registered.map((r) => r.ms)).toEqual([12000]);
   });
 
-  it("mode=all wires claim + retry + timeout (the parallel combo), each on its own interval", () => {
+  it("mode=execute wires the async activity executor, polling executeIntervalMs", () => {
+    const { scheduler, registered } = recordingScheduler();
+    const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "execute", scheduler });
+    expect(set.labels).toEqual(["execute"]);
+    set.start();
+    expect(registered.map((r) => r.ms)).toEqual([3000]);
+  });
+
+  it("mode=all wires claim + retry + timeout + execute (the parallel combo), each on its own interval", () => {
     const { scheduler, registered } = recordingScheduler();
     const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "all", scheduler });
-    expect(set.labels).toEqual(["claim", "retry", "timeout"]);
+    expect(set.labels).toEqual(["claim", "retry", "timeout", "execute"]);
     set.start();
-    expect(registered.map((r) => r.ms)).toEqual([1000, 8000, 12000]);
+    expect(registered.map((r) => r.ms)).toEqual([1000, 8000, 12000, 3000]);
   });
 
   it("stop() clears every registered interval", () => {

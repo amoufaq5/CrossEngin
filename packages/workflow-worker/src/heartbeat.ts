@@ -3,7 +3,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Clock, IntervalHandle, IntervalScheduler, RunOutcome } from "./worker.js";
 import { DEFAULT_SCHEDULER } from "./worker.js";
 
-export type HeartbeatMode = "tick" | "claim" | "retry" | "timeout" | "all";
+export type HeartbeatMode = "tick" | "claim" | "retry" | "timeout" | "execute" | "all";
 export type HeartbeatStatus = "starting" | "running" | "stopped";
 
 /** A point-in-time view of a worker's liveness + cumulative counters. */

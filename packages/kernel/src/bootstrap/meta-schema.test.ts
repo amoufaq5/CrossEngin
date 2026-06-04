@@ -1537,6 +1537,13 @@ describe("table column shapes", () => {
     expect(META_WORKFLOW_ACTIVITIES.indexes?.some((i) => i.name === "idx_workflow_activities_retry_claim")).toBe(true);
   });
 
+  it("META_WORKFLOW_ACTIVITIES carries execution_mode + an execute-claim index (async queue)", () => {
+    const mode = META_WORKFLOW_ACTIVITIES.columns.find((c) => c.name === "execution_mode");
+    expect(mode?.notNull).toBe(true);
+    expect(mode?.check).toContain("'async'");
+    expect(META_WORKFLOW_ACTIVITIES.indexes?.some((i) => i.name === "idx_workflow_activities_execute_claim")).toBe(true);
+  });
+
   it("META_WORKFLOW_EVENTS enforces append-only per-instance ordering via unique (instance, sequence)", () => {
     expect(
       META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns,

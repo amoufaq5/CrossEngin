@@ -364,6 +364,7 @@ interface MutableActivity {
   attemptNumber: number;
   sequenceCursor: number;
   maxAttempts: number;
+  executionMode: string;
   retryPolicy: RetryPolicy;
   scheduledAt: string;
   startedAt: string | null;
@@ -413,6 +414,7 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
           typeof event.payload["maxAttempts"] === "number"
             ? (event.payload["maxAttempts"] as number)
             : retryPolicy.maxAttempts,
+        executionMode: event.payload["executionMode"] === "async" ? "async" : "inline",
         retryPolicy,
         scheduledAt: event.occurredAt,
         startedAt: null,

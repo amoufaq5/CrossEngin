@@ -1,12 +1,15 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  ActivityExecutorWorker,
   ClaimingTimerWorker,
+  PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
   PostgresInstanceTimeoutClaimStore,
   PostgresTimerClaimStore,
   RetryExecutorWorker,
   TimeoutSweeperWorker,
   WorkflowWorker,
+  type ExecuteActivityEngine,
   type FireTimerEngine,
   type IntervalScheduler,
   type RetryActivityEngine,
@@ -17,12 +20,13 @@ import {
 
 import type { WorkerMode } from "./cli.js";
 
-/** The engine slice the worker set drives — all four per-mode capabilities. */
+/** The engine slice the worker set drives — all per-mode capabilities. */
 export interface WorkerEngine
   extends TimerTickEngine,
     FireTimerEngine,
     RetryActivityEngine,
-    TimeoutInstanceEngine {}
+    TimeoutInstanceEngine,
+    ExecuteActivityEngine {}
 
 export interface BuildWorkerSetInput {
   readonly conn: PgConnection;
@@ -34,6 +38,7 @@ export interface BuildWorkerSetInput {
   readonly claimIntervalMs: number;
   readonly retryIntervalMs: number;
   readonly timeoutIntervalMs: number;
+  readonly executeIntervalMs: number;
   readonly batchSize: number;
   readonly leaseMs: number;
   readonly scheduler?: IntervalScheduler;
@@ -66,8 +71,10 @@ export interface WorkerSet {
  * `tick` → the advisory-lock bulk `WorkflowWorker`; `claim` → the parallel
  * `ClaimingTimerWorker` over `PostgresTimerClaimStore`; `retry` → the
  * `RetryExecutorWorker` over `PostgresActivityRetryClaimStore`; `timeout` → the
- * `TimeoutSweeperWorker` over `PostgresInstanceTimeoutClaimStore`; `all` → claim
- * + retry + timeout (the parallel production combo). Each worker polls on its own interval;
+ * `TimeoutSweeperWorker` over `PostgresInstanceTimeoutClaimStore`; `execute` →
+ * the `ActivityExecutorWorker` over `PostgresActivityExecuteClaimStore` (the
+ * async activity queue); `all` → claim + retry + timeout + execute (the parallel
+ * production combo). Each worker polls on its own interval;
  * `start()` / `stop()` drive them together. The connection + engine come from
  * `buildPersistentEngine`, so every fire/retry persists through the projecting
  * event log.
@@ -83,6 +90,7 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
   const wantClaim = input.mode === "claim" || input.mode === "all";
   const wantRetry = input.mode === "retry" || input.mode === "all";
   const wantTimeout = input.mode === "timeout" || input.mode === "all";
+  const wantExecute = input.mode === "execute" || input.mode === "all";
 
   if (wantTick) {
     const tickOnRun =
@@ -133,6 +141,20 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
       ...onRun,
     });
     entries.push({ worker, intervalMs: input.timeoutIntervalMs, label: "timeout" });
+  }
+  if (wantExecute) {
+    const claimStore = new PostgresActivityExecuteClaimStore(input.conn, schemaOpts);
+    const worker = new ActivityExecutorWorker({
+      claimStore,
+      engine: input.engine,
+      workerId: input.workerId,
+      batchSize: input.batchSize,
+      leaseMs: input.leaseMs,
+      ...sched,
+      ...onErr,
+      ...onRun,
+    });
+    entries.push({ worker, intervalMs: input.executeIntervalMs, label: "execute" });
   }
 
   return {

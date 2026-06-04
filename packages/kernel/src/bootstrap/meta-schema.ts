@@ -6480,6 +6480,13 @@ export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
       check: "max_attempts BETWEEN 1 AND 50",
     },
     { name: "retry_policy", type: "JSONB", notNull: true },
+    {
+      name: "execution_mode",
+      type: "TEXT",
+      notNull: true,
+      default: "'inline'",
+      check: "execution_mode IN ('inline', 'async')",
+    },
     { name: "scheduled_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "started_at", type: "TIMESTAMPTZ" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
@@ -6539,6 +6546,10 @@ export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
     {
       name: "idx_workflow_activities_retry_claim",
       columns: ["status", "next_retry_at", "lease_expires_at"],
+    },
+    {
+      name: "idx_workflow_activities_execute_claim",
+      columns: ["status", "execution_mode", "lease_expires_at"],
     },
     {
       name: "idx_workflow_activities_timeout",
@@ -9377,7 +9388,7 @@ export const META_WORKER_HEARTBEATS: TableDefinition = {
       name: "mode",
       type: "TEXT",
       notNull: true,
-      check: "mode IN ('tick', 'claim', 'retry', 'timeout', 'all')",
+      check: "mode IN ('tick', 'claim', 'retry', 'timeout', 'execute', 'all')",
     },
     {
       name: "status",

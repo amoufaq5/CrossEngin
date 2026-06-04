@@ -20,8 +20,8 @@ M6.5 + M7 + M7.5 + M7.6 + M7.7 + M7.7.5 + M7.7.6 + M7.8 + M7.8.5
 M8.7 + **Phase 3 P1 + P1.5 + P1.6 + P1.7 + P1.8 + P1.9 + P1.10 +
 P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
-P2.5 + P2.6 + P2.7** landed: **60 packages + 3 apps, 124
-meta-schema tables, 6,468 offline tests + 5 gated real-Postgres
+P2.5 + P2.6 + P2.7 + P2.8** landed: **60 packages + 3 apps, 124
+meta-schema tables, 6,480 offline tests + 6 gated real-Postgres
 integration tests**, all green, no type errors.
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
@@ -144,8 +144,29 @@ stopped) to the new **platform-wide** `meta.worker_heartbeats` table
 Store` on an interval. `apps/workflow-worker` wires it (unless
 `--no-heartbeat`) on `--heartbeat-interval-ms` (default 15000) with
 `hostname` from `node:os`. A dead worker is now one query:
-`last_heartbeat_at < now() - interval '1 minute'`. The full async
-activity queue remains the deeper P2 follow-up. P1 added
+`last_heartbeat_at < now() - interval '1 minute'`. **P2.8 (ADR-0111)
+added the async activity queue** — decoupling activity schedule from
+execute (the deep P2 item), **additively**: a `schedule_activity`
+action with `executionMode: "async"` emits `activity_scheduled` and
+returns *without* running the handler (the activity stays `scheduled`,
+the instance parks), while the default `"inline"` runs in-call as
+before. `WorkflowEngine.executeActivity({instanceId, activityId})`
+runs the first attempt of a scheduled, never-started async activity
+(idempotent/race-safe — already-started/terminal/unknown → no-op),
+then steps to finalize. `meta.workflow_activities` gained
+`execution_mode` (inline|async, default inline) +
+`idx_workflow_activities_execute_claim`,
+`PostgresActivityExecuteClaimStore.claimScheduledActivities` claims
+`status='scheduled' AND execution_mode='async'` via `FOR UPDATE SKIP
+LOCKED`, and `ActivityExecutorWorker.runOnce` claims a batch + runs
+each via `executeActivity`. `apps/workflow-worker` gained `--mode
+execute` + `--execute-interval-ms`; the default `--mode all` now runs
+**claim + retry + timeout + execute**. The lifecycle: schedule(async)
+→ scheduled row → executor runs it → on failure the P2.4 backoff +
+P2.2 retry executor take over. The engine's per-unit primitives are
+now four (fireTimer · retryActivity · timeoutInstance ·
+executeActivity), all leased-claim-driven. **The P2 distributed-worker
+arc is complete.** P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
 `manifest → routes → handlers` compiler derives a `RouteSpec` per
@@ -805,7 +826,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers P2.7 (worker observability — heartbeats + per-run outcomes)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers P2.7 (worker observability — heartbeats + per-run outcomes), ADR-0111 covers P2.8 (async activity queue — decouple schedule from execute)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -914,8 +935,8 @@ re-exporting everything.
   expected projection vs stored rows; bulkResync iterates with
   pagination + maxInstances cap for periodic CI / observability
   guards).
-- **`workflow-worker`** — Phase 3 P2 + P2.1 + P2.2 + P2.5 + P2.7: the
-  distributed worker. 9 modules: lock-key (advisoryLockKey(namespace) → a stable signed
+- **`workflow-worker`** — Phase 3 P2 + P2.1 + P2.2 + P2.5 + P2.7 +
+  P2.8: the distributed worker. 11 modules: lock-key (advisoryLockKey(namespace) → a stable signed
   64-bit pg advisory-lock key from sha256), worker (WorkflowWorker.
   tickOnce runs engine.tickTimers(now) inside conn.withAdvisoryLock
   so N worker processes serialize on one lock — only one ticks at a
@@ -942,7 +963,13 @@ re-exporting everything.
   instances via FOR UPDATE SKIP LOCKED + lease — over the new
   workflow_instances lease columns), timeout-worker
   (TimeoutSweeperWorker.runOnce claims a batch + fails each via
-  engine.timeoutInstance, releasing the lease in a finally), heartbeat
+  engine.timeoutInstance, releasing the lease in a finally),
+  activity-execute-claim-store + execute-worker (P2.8 async activity
+  queue: PostgresActivityExecuteClaimStore.claimScheduledActivities
+  claims status='scheduled' AND execution_mode='async' via FOR UPDATE
+  SKIP LOCKED + lease; ActivityExecutorWorker.runOnce claims a batch +
+  runs each via engine.executeActivity — the first attempt of an async
+  activity the engine left pending), heartbeat
   (P2.7: every worker emits a normalized RunOutcome {claimed,
   processed} via onRun; the pure WorkerHeartbeat accumulator folds
   runs + errors into cumulative counters; PostgresWorkerHeartbeatStore
@@ -950,8 +977,8 @@ re-exporting everything.
   HeartbeatReporter exposes onRun/onError + flushes on an injectable
   unref'd interval, status starting→running→stopped). The
   engine's per-unit primitives WorkflowEngine.fireTimer +
-  retryActivity + timeoutInstance (all idempotent / settled-guarded)
-  live in workflow-runtime. Lease columns + indexes on
+  retryActivity + timeoutInstance + executeActivity (all idempotent /
+  settled-guarded) live in workflow-runtime. Lease columns + indexes on
   workflow_timers + workflow_activities + workflow_instances; P2.7
   adds the platform-wide meta.worker_heartbeats table. P2.4 populated
   the retry backoff (ADR-0107): the engine
@@ -960,8 +987,9 @@ re-exporting everything.
   retry claim store's next_retry_at gate sees real due times. P2.5
   (ADR-0108) added the instance timeout sweeper, completing the
   time-based-progression trio (timers · retries · timeouts); P2.7
-  (ADR-0110) added worker observability (heartbeats). A full async
-  activity queue remains the deeper follow-up.
+  (ADR-0110) added worker observability (heartbeats); P2.8 (ADR-0111)
+  added the async activity queue (executeActivity + execution_mode +
+  ActivityExecutorWorker), completing the P2 worker arc.
 - **`api-gateway-pg`** — Postgres-backed adapters for the four
   gateway runtime store interfaces + a replayer. 5 modules:
   idempotency-store (INSERT … ON CONFLICT DO UPDATE on tenant+
@@ -1150,11 +1178,13 @@ re-exporting everything.
   framework-neutral core: for the selected mode it constructs the
   worker(s) over one PgConnection + one structural WorkerEngine
   [TimerTickEngine & FireTimerEngine & RetryActivityEngine &
-  TimeoutInstanceEngine, all satisfied by buildPersistentEngine's
-  engine] — tick→WorkflowWorker, claim→ClaimingTimerWorker over
-  PostgresTimerClaimStore, retry→RetryExecutorWorker over
-  PostgresActivityRetryClaimStore, timeout→TimeoutSweeperWorker over
-  PostgresInstanceTimeoutClaimStore, all→claim+retry+timeout; each
+  TimeoutInstanceEngine & ExecuteActivityEngine, all satisfied by
+  buildPersistentEngine's engine] — tick→WorkflowWorker,
+  claim→ClaimingTimerWorker over PostgresTimerClaimStore,
+  retry→RetryExecutorWorker over PostgresActivityRetryClaimStore,
+  timeout→TimeoutSweeperWorker over PostgresInstanceTimeoutClaimStore,
+  execute→ActivityExecutorWorker over PostgresActivityExecuteClaimStore,
+  all→claim+retry+timeout+execute; each
   polls its own interval; scheduler + onError injectable so the wiring
   is fake-tested with no DB), node (run opens
   createNodePgConnection(parsePgEnvConfig()), loads the --definitions
@@ -2146,7 +2176,7 @@ Phase 3 P1.21 (field selection / projection on list + read in
 `operate-runtime`), ADR-0102 covers Phase 3 P1.22 (SQL-level
 projection pushdown in the column store), ADR-0103 covers Phase 3
 P2 (`workflow-worker` — the distributed tick worker over the PG
-event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers Phase 3 P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers Phase 3 P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers Phase 3 P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers Phase 3 P2.7 (worker observability — heartbeats + per-run outcomes; ADRs 0080-0085 reserved for P3-P8).
+event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers Phase 3 P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers Phase 3 P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers Phase 3 P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers Phase 3 P2.7 (worker observability — heartbeats + per-run outcomes), ADR-0111 covers Phase 3 P2.8 (async activity queue — decouple schedule from execute; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

@@ -6,4 +6,6 @@ export * from "./activity-claim-store.js";
 export * from "./retry-worker.js";
 export * from "./instance-timeout-claim-store.js";
 export * from "./timeout-worker.js";
+export * from "./activity-execute-claim-store.js";
+export * from "./execute-worker.js";
 export * from "./heartbeat.js";

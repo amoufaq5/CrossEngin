@@ -162,3 +162,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 76 | 0108 | 4,000 | Drafted alongside the instance timeout sweeper — `timeoutInstance` + claim (Phase 3 P2.5) |
 | 77 | 0109 | 4,000 | Drafted alongside the real-Postgres worker integration test + projection NOT NULL fixes (Phase 3 P2.6) |
 | 78 | 0110 | 4,000 | Drafted alongside worker observability — heartbeats + per-run outcomes (Phase 3 P2.7) |
+| 79 | 0111 | 4,500 | Drafted alongside the async activity queue — decouple schedule from execute (Phase 3 P2.8) |

@@ -22,6 +22,7 @@ function fixtureActivity(overrides: Partial<ActivityProjection> = {}): ActivityP
     attemptNumber: 1,
     sequenceCursor: 1,
     maxAttempts: 3,
+    executionMode: "inline",
     retryPolicy: {
       strategy: "exponential_backoff",
       maxAttempts: 3,

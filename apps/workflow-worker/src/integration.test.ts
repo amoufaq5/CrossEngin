@@ -11,8 +11,10 @@ import {
 } from "@crossengin/workflow-runtime";
 import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
 import {
+  ActivityExecutorWorker,
   ClaimingTimerWorker,
   HeartbeatReporter,
+  PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
   PostgresInstanceTimeoutClaimStore,
   PostgresTimerClaimStore,
@@ -95,6 +97,30 @@ function activityDef(id: string): WorkflowDefinition {
         kind: "intermediate",
         label: "Working",
         onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 7 } } }],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    ],
+    transitions: [
+      { name: "start", fromState: "draft", toState: "working", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      { name: "complete", fromState: "working", toState: "done", trigger: { kind: "activity_completed", activityKey: "work" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+    ],
+  };
+}
+
+function asyncActivityDef(id: string): WorkflowDefinition {
+  const base = timerDef(id);
+  return {
+    ...base,
+    definitionKey: "it.async",
+    states: [
+      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "working",
+        kind: "intermediate",
+        label: "Working",
+        onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 7 }, executionMode: "async" } }],
         onExitActions: [],
         slaSeconds: null,
       },
@@ -244,6 +270,29 @@ suite("workflow-worker integration (real Postgres)", () => {
     );
     expect(after.rows[0]!.status).toBe("failed");
     expect(after.rows[0]!.failure_code).toBe("INSTANCE_TIMEOUT");
+  });
+
+  it("ActivityExecutorWorker runs an async-scheduled activity the engine left pending", async () => {
+    const def = asyncActivityDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+    const start = await engine.startInstance({ definitionId: def.id, tenantId });
+
+    // async: the activity is scheduled but NOT run inline — instance parks
+    const pending = await conn.query<{ status: string; execution_mode: string }>(
+      `SELECT status, execution_mode FROM meta.workflow_activities WHERE instance_id =
+         (SELECT id FROM meta.workflow_instances WHERE instance_id = $1)`,
+      [start.instanceId],
+    );
+    expect(pending.rows[0]).toMatchObject({ status: "scheduled", execution_mode: "async" });
+
+    const store = new PostgresActivityExecuteClaimStore(conn);
+    const worker = new ActivityExecutorWorker({ claimStore: store, engine, workerId: "we", clock: { now: () => new Date(T0.getTime() + 1_000) } });
+    const res = await worker.runOnce();
+    expect(res).toMatchObject({ executed: 1, succeeded: 1 });
+
+    const after = await conn.query<{ status: string }>(`SELECT status FROM meta.workflow_instances WHERE instance_id = $1`, [start.instanceId]);
+    expect(after.rows[0]!.status).toBe("completed");
   });
 
   it("HeartbeatReporter persists a worker heartbeat row upserted on worker_id", async () => {

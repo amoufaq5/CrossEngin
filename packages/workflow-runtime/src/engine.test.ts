@@ -490,6 +490,78 @@ describe("retryActivity (per-unit, for the activity retry executor)", () => {
   });
 });
 
+describe("executeActivity (async activity queue — first run by an executor)", () => {
+  const asyncDef: WorkflowDefinition = {
+    ...definitionFixture(),
+    states: [
+      { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      {
+        name: "working",
+        kind: "intermediate",
+        label: "Working",
+        onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 1 }, executionMode: "async" } }],
+        onExitActions: [],
+        slaSeconds: null,
+      },
+      { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+    ],
+    transitions: [
+      { name: "start", fromState: "draft", toState: "working", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+      { name: "complete", fromState: "working", toState: "done", trigger: { kind: "activity_completed", activityKey: "work" }, guards: [], preTransitionActions: [], postTransitionActions: [] },
+    ],
+    initialState: "draft",
+  };
+
+  async function scheduledActivityId(engine: ReturnType<typeof makeEngine>["engine"], instanceId: string): Promise<string> {
+    const events = await engine.listEvents(instanceId);
+    return events.find((e) => e.kind === "activity_scheduled")!.activityId!;
+  }
+
+  it("leaves an async activity scheduled (not run) at start, then an executor runs it", async () => {
+    const { engine } = makeEngine({ definition: asyncDef });
+    const state = await engine.startInstance({ definitionId: asyncDef.id, tenantId: TENANT });
+    // async: the handler did NOT run inline — instance parks waiting_for_activity
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("waiting_for_activity");
+    const events1 = await engine.listEvents(state.instanceId);
+    expect(events1.map((e) => e.kind)).not.toContain("activity_started");
+
+    const aId = await scheduledActivityId(engine, state.instanceId);
+    const result = await engine.executeActivity({ instanceId: state.instanceId, activityId: aId });
+    expect(result).toMatchObject({ executed: true, status: "succeeded", activityId: aId });
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("is idempotent — a second execute of an already-run activity is a no-op", async () => {
+    const { engine } = makeEngine({ definition: asyncDef });
+    const state = await engine.startInstance({ definitionId: asyncDef.id, tenantId: TENANT });
+    const aId = await scheduledActivityId(engine, state.instanceId);
+    await engine.executeActivity({ instanceId: state.instanceId, activityId: aId });
+    const again = await engine.executeActivity({ instanceId: state.instanceId, activityId: aId });
+    expect(again.executed).toBe(false);
+  });
+
+  it("is a no-op for an unknown activity / instance", async () => {
+    const { engine } = makeEngine({ definition: asyncDef });
+    const state = await engine.startInstance({ definitionId: asyncDef.id, tenantId: TENANT });
+    expect((await engine.executeActivity({ instanceId: state.instanceId, activityId: "wfa_nope" })).executed).toBe(false);
+    expect((await engine.executeActivity({ instanceId: "wfi_nope", activityId: "wfa_x" })).executed).toBe(false);
+  });
+
+  it("an inline activity (default) still runs at schedule time (no executor needed)", async () => {
+    const inlineDef: WorkflowDefinition = {
+      ...asyncDef,
+      states: asyncDef.states.map((s) =>
+        s.name === "working"
+          ? { ...s, onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: { n: 1 } } }] }
+          : s,
+      ),
+    };
+    const { engine } = makeEngine({ definition: inlineDef });
+    const state = await engine.startInstance({ definitionId: inlineDef.id, tenantId: TENANT });
+    expect(state.status).toBe("completed"); // ran inline, synchronously
+  });
+});
+
 describe("timeoutInstance (per-unit, for the timeout sweeper)", () => {
   const FAR_FUTURE = new Date("2026-06-01T00:00:00.000Z").getTime();
 

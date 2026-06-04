@@ -1,6 +1,6 @@
-export type WorkerMode = "tick" | "claim" | "retry" | "timeout" | "all";
+export type WorkerMode = "tick" | "claim" | "retry" | "timeout" | "execute" | "all";
 
-const MODES: ReadonlySet<string> = new Set(["tick", "claim", "retry", "timeout", "all"]);
+const MODES: ReadonlySet<string> = new Set(["tick", "claim", "retry", "timeout", "execute", "all"]);
 
 export interface WorkerCliOptions {
   readonly mode: WorkerMode;
@@ -10,6 +10,7 @@ export interface WorkerCliOptions {
   readonly claimIntervalMs: number;
   readonly retryIntervalMs: number;
   readonly timeoutIntervalMs: number;
+  readonly executeIntervalMs: number;
   readonly batchSize: number;
   readonly leaseMs: number;
   readonly heartbeatIntervalMs: number;
@@ -43,6 +44,7 @@ const DEFAULTS = {
   claimIntervalMs: 1_000,
   retryIntervalMs: 5_000,
   timeoutIntervalMs: 10_000,
+  executeIntervalMs: 2_000,
   batchSize: 50,
   leaseMs: 30_000,
   heartbeatIntervalMs: 15_000,
@@ -62,6 +64,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
   let claimIntervalMs = DEFAULTS.claimIntervalMs;
   let retryIntervalMs = DEFAULTS.retryIntervalMs;
   let timeoutIntervalMs = DEFAULTS.timeoutIntervalMs;
+  let executeIntervalMs = DEFAULTS.executeIntervalMs;
   let batchSize = DEFAULTS.batchSize;
   let leaseMs = DEFAULTS.leaseMs;
   let heartbeatIntervalMs = DEFAULTS.heartbeatIntervalMs;
@@ -81,7 +84,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
       version = true;
     } else if (arg === "--mode" || arg.startsWith("--mode=")) {
       const raw = takeValue(arg, next, "--mode");
-      if (!MODES.has(raw)) throw new CliUsageError(`invalid --mode: ${raw} (tick|claim|retry|timeout|all)`);
+      if (!MODES.has(raw)) throw new CliUsageError(`invalid --mode: ${raw} (tick|claim|retry|timeout|execute|all)`);
       mode = raw as WorkerMode;
       i += consumed();
     } else if (arg === "--worker-id" || arg.startsWith("--worker-id=")) {
@@ -101,6 +104,9 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
       i += consumed();
     } else if (arg === "--timeout-interval-ms" || arg.startsWith("--timeout-interval-ms=")) {
       timeoutIntervalMs = intFlag(takeValue(arg, next, "--timeout-interval-ms"), "--timeout-interval-ms", 100);
+      i += consumed();
+    } else if (arg === "--execute-interval-ms" || arg.startsWith("--execute-interval-ms=")) {
+      executeIntervalMs = intFlag(takeValue(arg, next, "--execute-interval-ms"), "--execute-interval-ms", 100);
       i += consumed();
     } else if (arg === "--batch-size" || arg.startsWith("--batch-size=")) {
       batchSize = intFlag(takeValue(arg, next, "--batch-size"), "--batch-size", 1);
@@ -129,6 +135,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     claimIntervalMs,
     retryIntervalMs,
     timeoutIntervalMs,
+    executeIntervalMs,
     batchSize,
     leaseMs,
     heartbeatIntervalMs,
@@ -142,19 +149,21 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
 export const helpText = `workflow-worker — run the CrossEngin workflow runtime as a distributed worker
 
 Usage:
-  workflow-worker [--mode all|claim|retry|timeout|tick] [options]
+  workflow-worker [--mode all|claim|retry|timeout|execute|tick] [options]
 
 Options:
   --mode <m>               tick (advisory-lock bulk timer) | claim (parallel
                            per-unit timer claim) | retry (activity retry) |
-                           timeout (instance deadline sweep) | all (claim +
-                           retry + timeout) (default all)
+                           timeout (instance deadline sweep) | execute (async
+                           activity queue) | all (claim + retry + timeout +
+                           execute) (default all)
   --worker-id <id>         Lease owner id (default a random id)
   --schema <name>          Postgres schema for the workflow tables (default meta)
   --tick-interval-ms <n>     Bulk-tick poll interval (default 5000)
   --claim-interval-ms <n>    Timer-claim poll interval (default 1000)
   --retry-interval-ms <n>    Activity-retry poll interval (default 5000)
   --timeout-interval-ms <n>  Instance-timeout poll interval (default 10000)
+  --execute-interval-ms <n>  Async-activity execute poll interval (default 2000)
   --batch-size <n>         Claim batch size (default 50)
   --lease-ms <n>           Claim lease duration (default 30000)
   --heartbeat-interval-ms <n>  Heartbeat flush interval (default 15000)

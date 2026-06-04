@@ -93,6 +93,13 @@ export interface TimeoutInstanceResult {
   readonly previousStatus: string | null;
 }
 
+export interface ExecuteActivityResult {
+  readonly executed: boolean;
+  readonly instanceId: string;
+  readonly activityId: string;
+  readonly status: "succeeded" | "failed" | "timed_out" | null;
+}
+
 export class WorkflowEngine {
   private readonly eventLog: EventLog;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -665,6 +672,7 @@ export class WorkflowEngine {
       typeof action.parameters["timeoutSeconds"] === "number"
         ? (action.parameters["timeoutSeconds"] as number)
         : DEFAULT_ACTIVITY_TIMEOUT_SECONDS;
+    const executionMode = action.parameters["executionMode"] === "async" ? "async" : "inline";
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -691,12 +699,69 @@ export class WorkflowEngine {
         retryPolicy,
         maxAttempts: retryPolicy.maxAttempts,
         timeoutSeconds,
+        executionMode,
       },
       correlationId: null,
       causationEventId: null,
     });
 
+    // async activities are left scheduled for a distributed ActivityExecutorWorker
+    // to claim + run via executeActivity; inline activities run here, in-call.
+    if (executionMode === "async") return;
     await this.runActivityAttempt(instanceId, definition, tenantId, activityId, activityKey, kind, inputData, 1, retryPolicy);
+  }
+
+  /**
+   * Runs the **first** attempt of an `async`-scheduled activity that has not yet
+   * started — the per-unit primitive a distributed `ActivityExecutorWorker`
+   * drives after claiming a `scheduled` async activity. **Idempotent +
+   * race-safe**: an activity that has already started (any `activity_started`
+   * event), succeeded/failed/cancelled, or an unknown/terminal instance is a
+   * no-op (`executed: false`), so two executors can't double-run it. Replays the
+   * input persisted on `activity_scheduled` and advances the workflow on success.
+   */
+  async executeActivity(input: {
+    instanceId: string;
+    activityId: string;
+  }): Promise<ExecuteActivityResult> {
+    const miss: ExecuteActivityResult = { executed: false, instanceId: input.instanceId, activityId: input.activityId, status: null };
+    const state = await this.getInstanceState(input.instanceId);
+    if (state === null) return miss;
+    if (state.status === "completed" || state.status === "cancelled" || state.status === "compensated" || state.status === "failed") return miss;
+    const definition = this.definitions.get(state.definitionId);
+    if (definition === undefined) return miss;
+    const events = await this.eventLog.listByInstance(input.instanceId);
+    let activityKey: string | null = null;
+    let kind = "transformation";
+    let activityInput: Record<string, unknown> = {};
+    let retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY;
+    let started = false;
+    for (const e of events) {
+      if (e.activityId !== input.activityId) continue;
+      if (e.kind === "activity_scheduled") {
+        activityKey = typeof e.payload["definitionActivityKey"] === "string" ? (e.payload["definitionActivityKey"] as string) : null;
+        kind = typeof e.payload["kind"] === "string" ? (e.payload["kind"] as string) : "transformation";
+        activityInput = (e.payload["input"] as Record<string, unknown>) ?? {};
+        retryPolicy = resolveRetryPolicy(e.payload["retryPolicy"]);
+      } else if (e.kind === "activity_started") {
+        started = true;
+      }
+    }
+    // execute only a scheduled, never-started activity (first attempt)
+    if (activityKey === null || started) return miss;
+    const outcome = await this.runActivityAttempt(
+      input.instanceId,
+      definition,
+      state.tenantId,
+      input.activityId,
+      activityKey,
+      kind,
+      activityInput,
+      1,
+      retryPolicy,
+    );
+    await this.runStepLoop(input.instanceId, definition);
+    return { executed: true, instanceId: input.instanceId, activityId: input.activityId, status: outcome };
   }
 
   /**
