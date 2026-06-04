@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import { readFile } from "node:fs/promises";
 
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+import { formatIncidentId } from "@crossengin/observability-runtime";
 import { WorkflowDefinitionSchema, type WorkflowDefinition } from "@crossengin/workflow-engine";
 import { WorkflowReplayer, buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
 import {
@@ -12,6 +13,7 @@ import {
 
 import type { WorkerCliOptions } from "./cli.js";
 import { buildWorkerSet, type WorkerSet } from "./runner.js";
+import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
 
 /**
  * Parses a `--definitions` JSON file (an array of `WorkflowDefinition`s) into the
@@ -89,13 +91,32 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
     },
     ...(reporter !== null ? { onRun: reporter.onRun } : {}),
   });
+  let monitor: StaleWorkerMonitor | null = null;
+  if (options.monitorEnabled) {
+    let incidentSeq = 0;
+    monitor = new StaleWorkerMonitor({
+      source: new PostgresWorkerHeartbeatStore(conn, options.schema !== null ? { schema: options.schema } : {}),
+      declaredBy: options.monitorDeclaredBy,
+      staleAfterMs: options.staleAfterMs,
+      nextIncidentId: () => formatIncidentId(new Date().getUTCFullYear(), (incidentSeq += 1)),
+      onIncident: (plan) => {
+        process.stdout.write(
+          `[workflow-worker] STALE WORKERS — ${plan.incident.id} ${plan.severity}: ${plan.incident.title} (${plan.pages.length.toString()} page directive(s))\n`,
+        );
+      },
+      onError: logError,
+    });
+  }
+
   workers.start();
   reporter?.start(options.heartbeatIntervalMs);
+  monitor?.start(options.monitorIntervalMs);
   return {
     labels: workers.labels,
     workerId: options.workerId,
     close: async () => {
       workers.stop();
+      monitor?.stop();
       if (reporter !== null) await reporter.stop();
       await conn.close();
     },

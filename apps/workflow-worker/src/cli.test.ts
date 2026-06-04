@@ -21,10 +21,22 @@ describe("parseWorkerArgs", () => {
       leaseMs: 30000,
       heartbeatIntervalMs: 15000,
       heartbeatEnabled: true,
+      monitorEnabled: false,
+      monitorIntervalMs: 30000,
+      staleAfterMs: 60000,
+      monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
       definitionsPath: null,
       help: false,
       version: false,
     });
+  });
+
+  it("enables the stale-worker monitor with --monitor and its tuning flags", () => {
+    const opts = parseWorkerArgs(["--monitor", "--monitor-interval-ms", "5000", "--stale-after-ms", "90000", "--monitor-declared-by", "00000000-0000-4000-8000-0000000000ff"]);
+    expect(opts.monitorEnabled).toBe(true);
+    expect(opts.monitorIntervalMs).toBe(5000);
+    expect(opts.staleAfterMs).toBe(90000);
+    expect(opts.monitorDeclaredBy).toBe("00000000-0000-4000-8000-0000000000ff");
   });
 
   it("generates a distinct worker id per invocation", () => {
@@ -65,6 +77,10 @@ describe("parseWorkerArgs", () => {
       leaseMs: 45000,
       heartbeatIntervalMs: 30000,
       heartbeatEnabled: true,
+      monitorEnabled: false,
+      monitorIntervalMs: 30000,
+      staleAfterMs: 60000,
+      monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
       definitionsPath: "/defs.json",
       help: false,
       version: false,

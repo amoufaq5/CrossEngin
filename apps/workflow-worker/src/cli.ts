@@ -18,10 +18,17 @@ export interface WorkerCliOptions {
   readonly leaseMs: number;
   readonly heartbeatIntervalMs: number;
   readonly heartbeatEnabled: boolean;
+  readonly monitorEnabled: boolean;
+  readonly monitorIntervalMs: number;
+  readonly staleAfterMs: number;
+  readonly monitorDeclaredBy: string;
   readonly definitionsPath: string | null;
   readonly help: boolean;
   readonly version: boolean;
 }
+
+/** A system actor id for auto-declared stale-worker incidents (a valid UUID). */
+export const DEFAULT_MONITOR_DECLARED_BY = "00000000-0000-4000-8000-000000000000";
 
 export class CliUsageError extends Error {}
 
@@ -51,6 +58,8 @@ const DEFAULTS = {
   reapIntervalMs: 30_000,
   resyncIntervalMs: 300_000,
   resyncMax: 500,
+  monitorIntervalMs: 30_000,
+  staleAfterMs: 60_000,
   batchSize: 50,
   leaseMs: 30_000,
   heartbeatIntervalMs: 15_000,
@@ -78,6 +87,10 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
   let leaseMs = DEFAULTS.leaseMs;
   let heartbeatIntervalMs = DEFAULTS.heartbeatIntervalMs;
   let heartbeatEnabled = true;
+  let monitorEnabled = false;
+  let monitorIntervalMs = DEFAULTS.monitorIntervalMs;
+  let staleAfterMs = DEFAULTS.staleAfterMs;
+  let monitorDeclaredBy = DEFAULT_MONITOR_DECLARED_BY;
   let definitionsPath: string | null = null;
   let help = false;
   let version = false;
@@ -137,6 +150,17 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
       i += consumed();
     } else if (arg === "--no-heartbeat") {
       heartbeatEnabled = false;
+    } else if (arg === "--monitor") {
+      monitorEnabled = true;
+    } else if (arg === "--monitor-interval-ms" || arg.startsWith("--monitor-interval-ms=")) {
+      monitorIntervalMs = intFlag(takeValue(arg, next, "--monitor-interval-ms"), "--monitor-interval-ms", 1000);
+      i += consumed();
+    } else if (arg === "--stale-after-ms" || arg.startsWith("--stale-after-ms=")) {
+      staleAfterMs = intFlag(takeValue(arg, next, "--stale-after-ms"), "--stale-after-ms", 1000);
+      i += consumed();
+    } else if (arg === "--monitor-declared-by" || arg.startsWith("--monitor-declared-by=")) {
+      monitorDeclaredBy = takeValue(arg, next, "--monitor-declared-by");
+      i += consumed();
     } else if (arg === "--definitions" || arg.startsWith("--definitions=")) {
       definitionsPath = takeValue(arg, next, "--definitions");
       i += consumed();
@@ -161,6 +185,10 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     leaseMs,
     heartbeatIntervalMs,
     heartbeatEnabled,
+    monitorEnabled,
+    monitorIntervalMs,
+    staleAfterMs,
+    monitorDeclaredBy,
     definitionsPath,
     help,
     version,
@@ -194,6 +222,11 @@ Options:
   --lease-ms <n>           Claim lease duration (default 30000)
   --heartbeat-interval-ms <n>  Heartbeat flush interval (default 15000)
   --no-heartbeat           Disable the meta.worker_heartbeats heartbeat
+  --monitor                Watch worker_heartbeats + declare an incident for
+                           stale (presumed-dead) workers
+  --monitor-interval-ms <n>  Stale-worker monitor poll interval (default 30000)
+  --stale-after-ms <n>     Heartbeat age that marks a worker stale (default 60000)
+  --monitor-declared-by <uuid>  Actor id for auto-declared incidents
   --definitions <file>     JSON array of WorkflowDefinitions to run (default none)
   --help, -h               Show this help
   --version, -v            Print version

@@ -29,7 +29,10 @@ import {
   summarizeWorkerHealth,
   type HeartbeatSnapshot,
 } from "@crossengin/workflow-worker";
+import { formatIncidentId } from "@crossengin/observability-runtime";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { StaleWorkerMonitor, type StaleWorkerEnforcement } from "./stale-worker-monitor.js";
 
 /**
  * Real-Postgres integration test for the distributed-worker claim loops. Gated
@@ -419,6 +422,31 @@ suite("workflow-worker integration (real Postgres)", () => {
     const report = summarizeWorkerHealth(await store.listAll(), { now, staleAfterMs: 60_000 });
     expect(report.alerts.some((a) => a.workerId === dead)).toBe(true);
     expect(report.stale).toBeGreaterThanOrEqual(1);
+  });
+
+  it("StaleWorkerMonitor (as run() wires it) declares an incident for a stale worker", async () => {
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const dead = `wh-mon-${Math.random().toString(36).slice(2, 8)}`;
+    await store.upsert({
+      workerId: dead, mode: "all", status: "running", hostname: "h", startedAt: "2026-06-04T11:00:00.000Z",
+      lastHeartbeatAt: "2026-06-04T11:55:00.000Z", lastRunAt: null, pollCount: 1, claimedTotal: 0, processedTotal: 0, errorCount: 0, lastError: null,
+    });
+
+    const incidents: StaleWorkerEnforcement[] = [];
+    let seq = 0;
+    const monitor = new StaleWorkerMonitor({
+      source: store,
+      declaredBy: "00000000-0000-4000-8000-000000000000",
+      staleAfterMs: 60_000,
+      clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
+      nextIncidentId: () => formatIncidentId(2026, (seq += 1)),
+      onIncident: (plan) => { incidents.push(plan); },
+    });
+    const report = await monitor.checkOnce();
+    expect(report.stale).toBeGreaterThanOrEqual(1);
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]?.incident.id).toMatch(/^INC-2026-\d{4}$/);
+    expect(incidents[0]?.incident.status).toBe("declared");
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {
