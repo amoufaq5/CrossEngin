@@ -154,9 +154,9 @@ Usage:
 Options:
   --mode <m>               tick (advisory-lock bulk timer) | claim (parallel
                            per-unit timer claim) | retry (activity retry) |
-                           timeout (instance deadline sweep) | execute (async
-                           activity queue) | all (claim + retry + timeout +
-                           execute) (default all)
+                           timeout (instance + activity deadline sweep) |
+                           execute (async activity queue) | all (claim + retry +
+                           timeout + execute) (default all)
   --worker-id <id>         Lease owner id (default a random id)
   --schema <name>          Postgres schema for the workflow tables (default meta)
   --tick-interval-ms <n>     Bulk-tick poll interval (default 5000)

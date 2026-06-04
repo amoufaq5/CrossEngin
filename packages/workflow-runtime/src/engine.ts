@@ -100,6 +100,12 @@ export interface ExecuteActivityResult {
   readonly status: "succeeded" | "failed" | "timed_out" | null;
 }
 
+export interface TimeoutActivityResult {
+  readonly timedOut: boolean;
+  readonly instanceId: string;
+  readonly activityId: string;
+}
+
 export class WorkflowEngine {
   private readonly eventLog: EventLog;
   private readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -768,6 +774,73 @@ export class WorkflowEngine {
     );
     await this.runStepLoop(input.instanceId, definition);
     return { executed: true, instanceId: input.instanceId, activityId: input.activityId, status: outcome };
+  }
+
+  /**
+   * Times out a **non-settled** activity (still `scheduled` or `running`) that
+   * has passed its deadline (`scheduledAt + timeoutSeconds`) — the per-unit
+   * primitive a distributed activity-timeout sweeper drives. Catches an async
+   * activity no executor ran in time, and an in-flight activity orphaned by a
+   * dead worker. Emits `activity_timed_out` (stamping `nextRetryAt` so the retry
+   * executor can re-run it). **Idempotent + race-safe**: an already-settled
+   * activity, one not yet past its deadline, or an unknown/terminal instance is a
+   * no-op (`timedOut: false`).
+   */
+  async timeoutActivity(input: {
+    instanceId: string;
+    activityId: string;
+    nowMs?: number;
+  }): Promise<TimeoutActivityResult> {
+    const miss: TimeoutActivityResult = { timedOut: false, instanceId: input.instanceId, activityId: input.activityId };
+    const state = await this.getInstanceState(input.instanceId);
+    if (state === null) return miss;
+    if (state.status === "completed" || state.status === "cancelled" || state.status === "compensated" || state.status === "failed") return miss;
+    const events = await this.eventLog.listByInstance(input.instanceId);
+    let scheduledAt: string | null = null;
+    let timeoutSeconds = DEFAULT_ACTIVITY_TIMEOUT_SECONDS;
+    let retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY;
+    let attemptNumber = 1;
+    let lastKind: string | null = null;
+    for (const e of events) {
+      if (e.activityId !== input.activityId) continue;
+      if (e.kind === "activity_scheduled") {
+        scheduledAt = e.occurredAt;
+        if (typeof e.payload["timeoutSeconds"] === "number") timeoutSeconds = e.payload["timeoutSeconds"];
+        retryPolicy = resolveRetryPolicy(e.payload["retryPolicy"]);
+      } else if (e.kind === "activity_started") {
+        if (typeof e.payload["attemptNumber"] === "number") attemptNumber = e.payload["attemptNumber"];
+      }
+      lastKind = e.kind;
+    }
+    // only a non-settled activity (last event scheduled or started)
+    if (scheduledAt === null || (lastKind !== "activity_scheduled" && lastKind !== "activity_started")) return miss;
+    const nowMs = input.nowMs ?? this.clock.now().getTime();
+    if (nowMs < Date.parse(scheduledAt) + timeoutSeconds * 1000) return miss;
+    const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
+    await this.appendEvent({
+      instanceId: input.instanceId,
+      tenantId: state.tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "activity_timed_out",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: input.activityId,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: {
+        errorMessage: `activity exceeded timeout (${timeoutSeconds.toString()}s)`,
+        attemptNumber,
+        nextRetryAt: computeNextRetryAt({ policy: retryPolicy, attemptNumber, now: this.clock.now() }),
+      },
+      correlationId: null,
+      causationEventId: null,
+    });
+    return { timedOut: true, instanceId: input.instanceId, activityId: input.activityId };
   }
 
   /**

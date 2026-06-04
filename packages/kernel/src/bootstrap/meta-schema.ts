@@ -6552,6 +6552,10 @@ export const META_WORKFLOW_ACTIVITIES: TableDefinition = {
       columns: ["status", "execution_mode", "lease_expires_at"],
     },
     {
+      name: "idx_workflow_activities_timeout_claim",
+      columns: ["status", "timeout_at", "lease_expires_at"],
+    },
+    {
       name: "idx_workflow_activities_timeout",
       columns: ["timeout_at"],
     },

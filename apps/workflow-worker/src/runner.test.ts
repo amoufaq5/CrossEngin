@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { ExecuteActivityResult, FireTimerResult, RetryActivityResult, TickTimersResult, TimeoutInstanceResult } from "@crossengin/workflow-runtime";
+import type { ExecuteActivityResult, FireTimerResult, RetryActivityResult, TickTimersResult, TimeoutActivityResult, TimeoutInstanceResult } from "@crossengin/workflow-runtime";
 import type { IntervalHandle, IntervalScheduler } from "@crossengin/workflow-worker";
 import { describe, expect, it } from "vitest";
 
@@ -35,6 +35,9 @@ const engine: WorkerEngine = {
   },
   async executeActivity(): Promise<ExecuteActivityResult> {
     return { executed: false, status: null, activityId: "wfa_x", instanceId: "wfi_x" };
+  },
+  async timeoutActivity(): Promise<TimeoutActivityResult> {
+    return { timedOut: false, activityId: "wfa_x", instanceId: "wfi_x" };
   },
 };
 
@@ -100,12 +103,12 @@ describe("buildWorkerSet", () => {
     expect(registered.map((r) => r.ms)).toEqual([8000]);
   });
 
-  it("mode=timeout wires the instance timeout sweeper, polling timeoutIntervalMs", () => {
+  it("mode=timeout wires the instance + activity timeout sweepers, polling timeoutIntervalMs", () => {
     const { scheduler, registered } = recordingScheduler();
     const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "timeout", scheduler });
-    expect(set.labels).toEqual(["timeout"]);
+    expect(set.labels).toEqual(["timeout", "activity-timeout"]);
     set.start();
-    expect(registered.map((r) => r.ms)).toEqual([12000]);
+    expect(registered.map((r) => r.ms)).toEqual([12000, 12000]);
   });
 
   it("mode=execute wires the async activity executor, polling executeIntervalMs", () => {
@@ -116,12 +119,12 @@ describe("buildWorkerSet", () => {
     expect(registered.map((r) => r.ms)).toEqual([3000]);
   });
 
-  it("mode=all wires claim + retry + timeout + execute (the parallel combo), each on its own interval", () => {
+  it("mode=all wires claim + retry + timeout (instance+activity) + execute, each on its own interval", () => {
     const { scheduler, registered } = recordingScheduler();
     const set = buildWorkerSet({ ...baseInput, conn: fakeConn(), mode: "all", scheduler });
-    expect(set.labels).toEqual(["claim", "retry", "timeout", "execute"]);
+    expect(set.labels).toEqual(["claim", "retry", "timeout", "activity-timeout", "execute"]);
     set.start();
-    expect(registered.map((r) => r.ms)).toEqual([1000, 8000, 12000, 3000]);
+    expect(registered.map((r) => r.ms)).toEqual([1000, 8000, 12000, 12000, 3000]);
   });
 
   it("stop() clears every registered interval", () => {

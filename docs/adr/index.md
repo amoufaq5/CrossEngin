@@ -164,3 +164,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 78 | 0110 | 4,000 | Drafted alongside worker observability — heartbeats + per-run outcomes (Phase 3 P2.7) |
 | 79 | 0111 | 4,500 | Drafted alongside the async activity queue — decouple schedule from execute (Phase 3 P2.8) |
 | 80 | 0112 | 3,500 | Drafted alongside the definition-level activity execution-mode default (Phase 3 P2.9) |
+| 81 | 0113 | 4,000 | Drafted alongside the activity-level timeout sweeper — `timeoutActivity` + claim (Phase 3 P2.10) |

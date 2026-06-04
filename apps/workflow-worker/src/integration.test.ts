@@ -12,10 +12,12 @@ import {
 import { buildPersistentEngine } from "@crossengin/workflow-runtime-pg";
 import {
   ActivityExecutorWorker,
+  ActivityTimeoutSweeperWorker,
   ClaimingTimerWorker,
   HeartbeatReporter,
   PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
+  PostgresActivityTimeoutClaimStore,
   PostgresInstanceTimeoutClaimStore,
   PostgresTimerClaimStore,
   PostgresWorkerHeartbeatStore,
@@ -293,6 +295,34 @@ suite("workflow-worker integration (real Postgres)", () => {
 
     const after = await conn.query<{ status: string }>(`SELECT status FROM meta.workflow_instances WHERE instance_id = $1`, [start.instanceId]);
     expect(after.rows[0]!.status).toBe("completed");
+  });
+
+  it("ActivityTimeoutSweeperWorker times out an async activity no executor ran in time", async () => {
+    const def = asyncActivityDef(defId());
+    await seedDefinition(def);
+    const engine = makeEngine(def, new FixedClock(new Date(T0)));
+    const start = await engine.startInstance({ definitionId: def.id, tenantId });
+
+    // scheduled async (default 300s timeout), never executed; timeout_at = T0 + 300s
+    const before = await conn.query<{ status: string; timeout_at: string }>(
+      `SELECT status, timeout_at FROM meta.workflow_activities WHERE instance_id =
+         (SELECT id FROM meta.workflow_instances WHERE instance_id = $1)`,
+      [start.instanceId],
+    );
+    expect(before.rows[0]!.status).toBe("scheduled");
+
+    const store = new PostgresActivityTimeoutClaimStore(conn);
+    const worker = new ActivityTimeoutSweeperWorker({ claimStore: store, engine, workerId: "wat", clock: { now: () => new Date(T0.getTime() + 400_000) } });
+    const res = await worker.runOnce();
+    expect(res.timedOut).toBeGreaterThanOrEqual(1);
+
+    const after = await conn.query<{ status: string; next_retry_at: string | null }>(
+      `SELECT status, next_retry_at FROM meta.workflow_activities WHERE instance_id =
+         (SELECT id FROM meta.workflow_instances WHERE instance_id = $1)`,
+      [start.instanceId],
+    );
+    expect(after.rows[0]!.status).toBe("timed_out");
+    expect(after.rows[0]!.next_retry_at).not.toBeNull();
   });
 
   it("HeartbeatReporter persists a worker heartbeat row upserted on worker_id", async () => {

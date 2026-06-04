@@ -595,6 +595,43 @@ describe("executeActivity (async activity queue — first run by an executor)", 
     const state = await engine.startInstance({ definitionId: inlineDef.id, tenantId: TENANT });
     expect(state.status).toBe("completed"); // ran inline, synchronously
   });
+
+  describe("timeoutActivity", () => {
+    // async activity scheduled with a short timeout that no executor runs
+    const shortTimeoutDef: WorkflowDefinition = {
+      ...asyncDef,
+      states: asyncDef.states.map((s) =>
+        s.name === "working"
+          ? { ...s, onEntryActions: [{ kind: "schedule_activity", parameters: { activityKey: "work", kind: "transformation", input: {}, executionMode: "async", timeoutSeconds: 60 } }] }
+          : s,
+      ),
+    };
+
+    it("times out a scheduled async activity past its deadline, stamping nextRetryAt", async () => {
+      const { engine } = makeEngine({ definition: shortTimeoutDef });
+      const state = await engine.startInstance({ definitionId: shortTimeoutDef.id, tenantId: TENANT });
+      const aId = await scheduledActivityId(engine, state.instanceId);
+      // clock fixed at 12:00:00, timeoutSeconds 60 → deadline 12:01:00; sweep at 12:05:00
+      const result = await engine.timeoutActivity({ instanceId: state.instanceId, activityId: aId, nowMs: Date.parse("2026-05-16T12:05:00.000Z") });
+      expect(result.timedOut).toBe(true);
+      const events = await engine.listEvents(state.instanceId);
+      const timedOut = events.find((e) => e.kind === "activity_timed_out")!;
+      expect(timedOut.payload["nextRetryAt"]).not.toBeNull();
+    });
+
+    it("is a no-op before the deadline, for a settled activity, and for unknown ids", async () => {
+      const { engine } = makeEngine({ definition: shortTimeoutDef });
+      const state = await engine.startInstance({ definitionId: shortTimeoutDef.id, tenantId: TENANT });
+      const aId = await scheduledActivityId(engine, state.instanceId);
+      // not yet due
+      expect((await engine.timeoutActivity({ instanceId: state.instanceId, activityId: aId, nowMs: Date.parse("2026-05-16T12:00:30.000Z") })).timedOut).toBe(false);
+      // unknown
+      expect((await engine.timeoutActivity({ instanceId: state.instanceId, activityId: "wfa_nope", nowMs: Date.parse("2026-05-16T12:05:00.000Z") })).timedOut).toBe(false);
+      // settle it (timed out), then a second sweep is a no-op
+      await engine.timeoutActivity({ instanceId: state.instanceId, activityId: aId, nowMs: Date.parse("2026-05-16T12:05:00.000Z") });
+      expect((await engine.timeoutActivity({ instanceId: state.instanceId, activityId: aId, nowMs: Date.parse("2026-05-16T12:05:00.000Z") })).timedOut).toBe(false);
+    });
+  });
 });
 
 describe("timeoutInstance (per-unit, for the timeout sweeper)", () => {

@@ -1,9 +1,11 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   ActivityExecutorWorker,
+  ActivityTimeoutSweeperWorker,
   ClaimingTimerWorker,
   PostgresActivityExecuteClaimStore,
   PostgresActivityRetryClaimStore,
+  PostgresActivityTimeoutClaimStore,
   PostgresInstanceTimeoutClaimStore,
   PostgresTimerClaimStore,
   RetryExecutorWorker,
@@ -14,6 +16,7 @@ import {
   type IntervalScheduler,
   type RetryActivityEngine,
   type RunOutcome,
+  type TimeoutActivityEngine,
   type TimeoutInstanceEngine,
   type TimerTickEngine,
 } from "@crossengin/workflow-worker";
@@ -26,6 +29,7 @@ export interface WorkerEngine
     FireTimerEngine,
     RetryActivityEngine,
     TimeoutInstanceEngine,
+    TimeoutActivityEngine,
     ExecuteActivityEngine {}
 
 export interface BuildWorkerSetInput {
@@ -71,7 +75,9 @@ export interface WorkerSet {
  * `tick` → the advisory-lock bulk `WorkflowWorker`; `claim` → the parallel
  * `ClaimingTimerWorker` over `PostgresTimerClaimStore`; `retry` → the
  * `RetryExecutorWorker` over `PostgresActivityRetryClaimStore`; `timeout` → the
- * `TimeoutSweeperWorker` over `PostgresInstanceTimeoutClaimStore`; `execute` →
+ * `TimeoutSweeperWorker` over `PostgresInstanceTimeoutClaimStore` **plus** the
+ * `ActivityTimeoutSweeperWorker` over `PostgresActivityTimeoutClaimStore` (both
+ * deadline sweeps); `execute` →
  * the `ActivityExecutorWorker` over `PostgresActivityExecuteClaimStore` (the
  * async activity queue); `all` → claim + retry + timeout + execute (the parallel
  * production combo). Each worker polls on its own interval;
@@ -141,6 +147,18 @@ export function buildWorkerSet(input: BuildWorkerSetInput): WorkerSet {
       ...onRun,
     });
     entries.push({ worker, intervalMs: input.timeoutIntervalMs, label: "timeout" });
+    const activityClaimStore = new PostgresActivityTimeoutClaimStore(input.conn, schemaOpts);
+    const activityWorker = new ActivityTimeoutSweeperWorker({
+      claimStore: activityClaimStore,
+      engine: input.engine,
+      workerId: input.workerId,
+      batchSize: input.batchSize,
+      leaseMs: input.leaseMs,
+      ...sched,
+      ...onErr,
+      ...onRun,
+    });
+    entries.push({ worker: activityWorker, intervalMs: input.timeoutIntervalMs, label: "activity-timeout" });
   }
   if (wantExecute) {
     const claimStore = new PostgresActivityExecuteClaimStore(input.conn, schemaOpts);
