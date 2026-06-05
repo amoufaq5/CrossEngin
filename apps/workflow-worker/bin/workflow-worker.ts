@@ -1,11 +1,36 @@
 #!/usr/bin/env node
 
 import { CliUsageError, helpText, parseWorkerArgs } from "../src/cli.js";
-import { run } from "../src/node.js";
+import { incidentsHelpText, parseIncidentsArgs } from "../src/incidents-cli.js";
+import { executeIncidents, run } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
+async function runIncidentsCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseIncidentsArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${incidentsHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(incidentsHelpText);
+    return 0;
+  }
+  return executeIncidents(options);
+}
+
 async function main(): Promise<number> {
+  // Subcommand: `workflow-worker incidents <open|period|verify> …` is a one-shot
+  // query (it exits); everything else is the long-running worker loop.
+  if (process.argv[2] === "incidents") {
+    return runIncidentsCommand(process.argv.slice(3));
+  }
+
   let options;
   try {
     options = parseWorkerArgs(process.argv.slice(2));

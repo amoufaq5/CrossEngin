@@ -204,6 +204,8 @@ export const helpText = `workflow-worker — run the CrossEngin workflow runtime
 
 Usage:
   workflow-worker [--mode all|claim|retry|timeout|execute|reap|resync|tick] [options]
+  workflow-worker incidents <open|period|verify> [options]   (one-shot query; see
+                                                              'incidents --help')
 
 Options:
   --mode <m>               tick (advisory-lock bulk timer) | claim (parallel

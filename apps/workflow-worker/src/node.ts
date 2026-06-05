@@ -15,7 +15,9 @@ import type { WorkerCliOptions } from "./cli.js";
 import { buildWorkerSet, type WorkerSet } from "./runner.js";
 import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
 import { PostgresIncidentSink } from "./incident-sink.js";
+import { PostgresIncidentReplayer } from "./incident-replayer.js";
 import { LoggingPageDeliverer, deliverPages } from "./page-sink.js";
+import { runIncidents, type IncidentsCliOptions } from "./incidents-cli.js";
 
 /**
  * Parses a `--definitions` JSON file (an array of `WorkflowDefinition`s) into the
@@ -38,6 +40,26 @@ export function parseDefinitionsJson(text: string): ReadonlyMap<string, Workflow
 async function loadDefinitions(path: string | null): Promise<ReadonlyMap<string, WorkflowDefinition>> {
   if (path === null) return new Map<string, WorkflowDefinition>();
   return parseDefinitionsJson(await readFile(path, "utf8"));
+}
+
+/**
+ * Runs a one-shot `incidents` query against `meta.incidents`: opens a Postgres
+ * connection from the `PG*` env vars, builds a `PostgresIncidentReplayer`,
+ * dispatches the parsed command (open / period / verify) through `runIncidents`,
+ * closes the connection, and returns the exit code (`verify` returns 1 on drift).
+ */
+export async function executeIncidents(
+  options: IncidentsCliOptions,
+  out: (line: string) => void = (line) => void process.stdout.write(`${line}\n`),
+): Promise<number> {
+  const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const replayer = new PostgresIncidentReplayer(conn, options.schema !== null ? { schema: options.schema } : {});
+    const { exitCode } = await runIncidents(options, replayer, out);
+    return exitCode;
+  } finally {
+    await conn.close();
+  }
 }
 
 export interface RunningWorker {

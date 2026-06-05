@@ -111,6 +111,28 @@ enable it on its own slow cadence.
   otherwise it logs. The flow: **write → detect → plan → page → run → persist →
   escalate → re-page → resolve**.
 
+## `incidents` subcommand (one-shot query)
+
+Read the `meta.incidents` audit table from the shell. `workflow-worker
+incidents …` runs a single query and exits (it does not start the worker loop):
+
+```bash
+# incidents that are still open (status not resolved/closed/cancelled)
+workflow-worker incidents open [--limit N] [--format human|json]
+
+# every incident declared within a window
+workflow-worker incidents period --from <iso> --to <iso> [--limit N] [--format json]
+
+# timeline drift sweep over a window — exits 1 if any incident's timeline
+# drifted from declared -> (escalated)* -> resolved (gate CI on it)
+workflow-worker incidents verify --from <iso> --to <iso> [--format json]
+```
+
+`verify` reports per-incident issues (`empty_timeline`,
+`first_entry_not_declared`, `non_monotonic_timeline`, the resolved
+status/stamp/entry disagreements, …) and a clean/with-issues summary; a non-zero
+exit means drift was found. All three honor `--schema` (default `meta`).
+
 ## Postgres
 
 Connects via the standard `PG*` env vars (`PGHOST`, `PGPORT`, `PGUSER`,
