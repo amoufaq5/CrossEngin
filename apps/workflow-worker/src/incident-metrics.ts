@@ -17,6 +17,7 @@ export interface IncidentMetrics {
   readonly bySeverity: Readonly<Record<Severity, number>>;
   readonly openBySeverity: Readonly<Record<Severity, number>>;
   readonly escalations: number;
+  readonly mttp: MttrStats | null;
   readonly mtta: MttrStats | null;
   readonly mttm: MttrStats | null;
   readonly mttr: MttrStats | null;
@@ -81,6 +82,16 @@ export function incidentMilestoneMs(summary: IncidentSummary, targetStatus: stri
   return nonNegativeDeltaMs(declaredAtOf(summary), milestone);
 }
 
+/**
+ * The wall-clock time from declaration to the **first** `comms_sent` timeline
+ * entry (on-call was paged), in ms — MTTP. `null` when the incident was never
+ * paged or the delta isn't a non-negative finite number. Pure.
+ */
+export function incidentTimeToPageMs(summary: IncidentSummary): number | null {
+  const paged = summary.timeline.find((e) => e.kind === "comms_sent")?.occurredAt;
+  return nonNegativeDeltaMs(declaredAtOf(summary), paged);
+}
+
 function statsFrom(durations: number[]): MttrStats | null {
   if (durations.length === 0) return null;
   durations.sort((a, b) => a - b);
@@ -107,6 +118,7 @@ export function computeIncidentMetrics(summaries: readonly IncidentSummary[]): I
   let open = 0;
   let resolved = 0;
   let escalations = 0;
+  const pageDurations: number[] = [];
   const ackDurations: number[] = [];
   const mitigateDurations: number[] = [];
   const resolveDurations: number[] = [];
@@ -119,6 +131,8 @@ export function computeIncidentMetrics(summaries: readonly IncidentSummary[]): I
       openBySeverity[s.severity] += 1;
     }
     if (s.status === "resolved") resolved += 1;
+    const page = incidentTimeToPageMs(s);
+    if (page !== null) pageDurations.push(page);
     const ack = incidentMilestoneMs(s, "triaged");
     if (ack !== null) ackDurations.push(ack);
     const mitigate = incidentMilestoneMs(s, "mitigated");
@@ -134,6 +148,7 @@ export function computeIncidentMetrics(summaries: readonly IncidentSummary[]): I
     bySeverity,
     openBySeverity,
     escalations,
+    mttp: statsFrom(pageDurations),
     mtta: statsFrom(ackDurations),
     mttm: statsFrom(mitigateDurations),
     mttr: statsFrom(resolveDurations),
@@ -170,6 +185,7 @@ export function formatIncidentMetrics(metrics: IncidentMetrics, heading: string)
     `  total ${metrics.total.toString()}  open ${metrics.open.toString()}  resolved ${metrics.resolved.toString()}  escalations ${metrics.escalations.toString()}`,
     `  by severity:      ${severityBreakdown(metrics.bySeverity)}`,
     `  open by severity: ${severityBreakdown(metrics.openBySeverity)}`,
+    statsLine("MTTP", "paged", metrics.mttp),
     statsLine("MTTA", "acknowledged", metrics.mtta),
     statsLine("MTTM", "mitigated", metrics.mttm),
     statsLine("MTTR", "resolved", metrics.mttr),
