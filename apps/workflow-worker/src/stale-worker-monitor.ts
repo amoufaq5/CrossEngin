@@ -36,6 +36,31 @@ export interface StaleWorkerEnforcement {
   readonly severity: Severity;
 }
 
+/** An escalation of an already-open incident: the new (higher) severity + the
+ * page directives recomputed at that severity, so on-call is re-paged at the
+ * higher urgency. */
+export interface StaleWorkerEscalation {
+  readonly incidentId: string;
+  readonly severity: Severity;
+  readonly pages: readonly PageDirective[];
+}
+
+/**
+ * Resolves the page directives for a stale-worker incident at a given severity
+ * from the alert policy (empty when no policy is supplied or the policy has no
+ * route for the resolved alert severity). Shared by the declaration plan and the
+ * escalation path so both page through the same policy resolution. Pure.
+ */
+export function staleWorkerPages(
+  policy: AlertPolicy | undefined,
+  severity: Severity,
+  incidentId: string,
+): readonly PageDirective[] {
+  if (policy === undefined) return [];
+  const page = planPageDirective(policy, severity, incidentId);
+  return page === null ? [] : [page];
+}
+
 export interface PlanStaleWorkerInput {
   readonly report: WorkerHealthReport;
   readonly now: Date;
@@ -65,10 +90,7 @@ export function planStaleWorkerEnforcement(input: PlanStaleWorkerInput): StaleWo
     declaredBy: input.declaredBy,
     detail: formatWorkerHealth(input.report),
   });
-  const pages =
-    input.policy === undefined
-      ? []
-      : [planPageDirective(input.policy, severity, input.incidentId)].filter((p): p is PageDirective => p !== null);
+  const pages = staleWorkerPages(input.policy, severity, input.incidentId);
   return { incident, pages, severity };
 }
 
@@ -85,8 +107,10 @@ export interface StaleWorkerMonitorOptions {
   readonly onIncident: (plan: StaleWorkerEnforcement) => void | Promise<void>;
   /** Fired when the open stale-worker incident clears (all workers recovered). */
   readonly onResolve?: (incidentId: string) => void | Promise<void>;
-  /** Fired when more workers go stale and the open incident's severity should rise. */
-  readonly onEscalate?: (incidentId: string, severity: Severity) => void | Promise<void>;
+  /** Fired when more workers go stale and the open incident's severity should
+   * rise. Carries the page directives recomputed at the higher severity so the
+   * consumer can re-page on-call at the higher urgency. */
+  readonly onEscalate?: (escalation: StaleWorkerEscalation) => void | Promise<void>;
   readonly staleAfterMs?: number;
   readonly surface?: string;
   readonly policy?: AlertPolicy;
@@ -162,7 +186,11 @@ export class StaleWorkerMonitor {
         if (current !== null && this.openSeverity !== null && isMoreSevere(current, this.openSeverity)) {
           const id = this.openIncidentId;
           this.openSeverity = current;
-          await this.opts.onEscalate?.(id, current);
+          await this.opts.onEscalate?.({
+            incidentId: id,
+            severity: current,
+            pages: staleWorkerPages(this.opts.policy, current, id),
+          });
         }
       }
     } else if (this.openIncidentId !== null) {

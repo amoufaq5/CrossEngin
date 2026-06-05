@@ -15,6 +15,7 @@ import type { WorkerCliOptions } from "./cli.js";
 import { buildWorkerSet, type WorkerSet } from "./runner.js";
 import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
 import { PostgresIncidentSink } from "./incident-sink.js";
+import { LoggingPageDeliverer, deliverPages } from "./page-sink.js";
 
 /**
  * Parses a `--definitions` JSON file (an array of `WorkflowDefinition`s) into the
@@ -98,6 +99,7 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
     const incidentSink = options.persistIncidents
       ? new PostgresIncidentSink(conn, options.schema !== null ? { schema: options.schema } : {})
       : null;
+    const pageDeliverer = new LoggingPageDeliverer();
     monitor = new StaleWorkerMonitor({
       source: new PostgresWorkerHeartbeatStore(conn, options.schema !== null ? { schema: options.schema } : {}),
       declaredBy: options.monitorDeclaredBy,
@@ -108,14 +110,16 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
           `[workflow-worker] STALE WORKERS — ${plan.incident.id} ${plan.severity}: ${plan.incident.title} (${plan.pages.length.toString()} page directive(s))\n`,
         );
         if (incidentSink !== null) await incidentSink.record(plan.incident);
+        await deliverPages(pageDeliverer, plan.pages, { incidentId: plan.incident.id, severity: plan.severity, reason: "declared" });
       },
       onResolve: async (incidentId) => {
         process.stdout.write(`[workflow-worker] STALE WORKERS RESOLVED — ${incidentId}\n`);
         if (incidentSink !== null) await incidentSink.resolve(incidentId, options.monitorDeclaredBy);
       },
-      onEscalate: async (incidentId, severity) => {
-        process.stdout.write(`[workflow-worker] STALE WORKERS ESCALATED — ${incidentId} → ${severity}\n`);
+      onEscalate: async ({ incidentId, severity, pages }) => {
+        process.stdout.write(`[workflow-worker] STALE WORKERS ESCALATED — ${incidentId} → ${severity} (${pages.length.toString()} page directive(s))\n`);
         if (incidentSink !== null) await incidentSink.escalate(incidentId, severity, options.monitorDeclaredBy);
+        await deliverPages(pageDeliverer, pages, { incidentId, severity, reason: "escalated" });
       },
       onError: logError,
     });

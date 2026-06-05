@@ -543,7 +543,7 @@ suite("workflow-worker integration (real Postgres)", () => {
       clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
       nextIncidentId: () => incidentId,
       onIncident: async (plan) => { await sink.record(plan.incident); },
-      onEscalate: async (id, severity) => { await sink.escalate(id, severity, declaredBy); },
+      onEscalate: async ({ incidentId: id, severity }) => { await sink.escalate(id, severity, declaredBy); },
     });
     await monitor.checkOnce(); // declares sev3
     const declared = await conn.query<{ severity: string }>(`SELECT severity FROM meta.incidents WHERE incident_id = $1`, [incidentId]);

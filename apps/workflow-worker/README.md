@@ -101,9 +101,15 @@ enable it on its own slow cadence.
 
 - **Stale-worker monitor** (`--monitor`). Polls the heartbeat table, summarizes
   health, and declares an `IncidentRecord` for stale (presumed-dead) workers —
-  severity scaled (sev3 at 1–2 stale, sev2 at 3+). With `--persist-incidents` it
-  writes the incident to `meta.incidents`; otherwise it logs. The flow:
-  **write → detect → plan → run → persist**.
+  severity scaled (sev3 at 1–2 stale, sev2 at 3+). It holds one incident per
+  stale period (no re-declare while ongoing), **escalates** its severity if more
+  workers go stale (and **re-pages** on-call at the higher urgency through the
+  `PageDeliverer` transport seam — `LoggingPageDeliverer` by default, a real
+  PagerDuty/Slack transport swaps in behind the interface), and **resolves** it
+  when workers recover — each transition appending a timeline entry. With
+  `--persist-incidents` it writes/transitions the incident in `meta.incidents`;
+  otherwise it logs. The flow: **write → detect → plan → page → run → persist →
+  escalate → re-page → resolve**.
 
 ## Postgres
 

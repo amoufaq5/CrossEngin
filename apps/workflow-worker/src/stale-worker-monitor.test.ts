@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   StaleWorkerMonitor,
   planStaleWorkerEnforcement,
+  staleWorkerPages,
   staleWorkerSeverity,
   type HeartbeatSource,
 } from "./stale-worker-monitor.js";
@@ -33,6 +34,28 @@ describe("staleWorkerSeverity", () => {
     expect(staleWorkerSeverity(1)).toBe("sev3");
     expect(staleWorkerSeverity(2)).toBe("sev3");
     expect(staleWorkerSeverity(3)).toBe("sev2");
+  });
+});
+
+describe("staleWorkerPages", () => {
+  it("returns no pages without a policy", () => {
+    expect(staleWorkerPages(undefined, "sev2", "INC-2026-0001")).toEqual([]);
+  });
+
+  it("resolves a page directive from the policy at the given severity", () => {
+    const pages = staleWorkerPages(policy, "sev2", "INC-2026-0001"); // sev2 → P1 route
+    expect(pages).toHaveLength(1);
+    expect(pages[0]?.incidentId).toBe("INC-2026-0001");
+    expect(pages[0]?.severity).toBe("sev2");
+  });
+
+  it("returns no pages when the policy has no route for the resolved alert severity", () => {
+    const sparse = AlertPolicySchema.parse({
+      id: "sparse",
+      routes: [{ severity: "P1", channels: [{ kind: "pagerduty_phone", serviceKey: "abc" }] }],
+    });
+    // sev3 → P2, which `sparse` has no route for
+    expect(staleWorkerPages(sparse, "sev3", "INC-2026-0001")).toEqual([]);
   });
 });
 
@@ -132,16 +155,17 @@ describe("StaleWorkerMonitor", () => {
     expect(incidents).toEqual(["INC-2026-0001", "INC-2026-0002"]);
   });
 
-  it("escalates the open incident's severity (sev3 → sev2) when more workers go stale, once", async () => {
+  it("escalates the open incident's severity (sev3 → sev2) when more workers go stale, once, re-paging at the higher severity", async () => {
     let rows: HeartbeatSnapshot[] = [snap("d1", 120_000)]; // 1 stale → sev3
     const source: HeartbeatSource = { async listAll() { return rows; } };
     const incidents: Array<{ id: string; severity: string }> = [];
-    const escalations: Array<{ id: string; severity: string }> = [];
+    const escalations: Array<{ id: string; severity: string; pageCount: number }> = [];
     const monitor = new StaleWorkerMonitor({
       source, declaredBy: "00000000-0000-4000-8000-000000000001",
       nextIncidentId: () => "INC-2026-0001",
       onIncident: (plan) => { incidents.push({ id: plan.incident.id, severity: plan.severity }); },
-      onEscalate: (id, severity) => { escalations.push({ id, severity }); },
+      onEscalate: (esc) => { escalations.push({ id: esc.incidentId, severity: esc.severity, pageCount: esc.pages.length }); },
+      policy,
       clock,
     });
 
@@ -151,7 +175,8 @@ describe("StaleWorkerMonitor", () => {
     rows = [snap("d1", 120_000), snap("d2", 120_000), snap("d3", 120_000)]; // 3 stale → sev2
     await monitor.checkOnce(); // escalate
     await monitor.checkOnce(); // still 3 stale — no second escalation
-    expect(escalations).toEqual([{ id: "INC-2026-0001", severity: "sev2" }]);
+    // sev2 → P1, which the policy has a route for, so the escalation re-pages once
+    expect(escalations).toEqual([{ id: "INC-2026-0001", severity: "sev2", pageCount: 1 }]);
     expect(incidents).toHaveLength(1); // never re-declared
   });
 
