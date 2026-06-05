@@ -371,7 +371,23 @@ gained an `onRequest(status, latencyMs)` hook (timed in a finally);
 `--slo-actor` / `--slo-interval-ms`). A gated test bursts 5xx → the
 declared availability incident lands in `meta.incidents` and is read back
 via the shared `PostgresIncidentReplayer` — proving the P2.31 extraction's
-reuse. **P2.14 (ADR-0118) added a projection
+reuse. **P2.36 (ADR-0145) wired the schema-drift gate into CI** — a
+sibling of the P2.26 incident-drift + P2.27 PHI-encryption gates. A
+new `Schema drift gate` step in `.github/workflows/ci.yml`'s
+`integration` job runs `crossengin-pg drift` immediately after
+`scripts/setup-integration-db.sh` provisions + bootstraps the database,
+so it gates the **freshly-provisioned baseline** of the `meta` schema
+against `META_TABLES` (the source-of-truth the bootstrap DDL was
+emitted from). The bin's pre-existing exit-1-on-drift contract (any
+added/removed/modified table, column, index, policy, or RLS toggle)
+**fails the build**, before the gated suites run. Placement choice:
+*before* the suites — the suites write rows but don't migrate `meta`,
+so any drift at this point is a real applier-vs-meta-schema divergence,
+not test pollution; running it first also fails the job faster than the
+incident-drift gate would. CI-workflow-only change; no source / tests /
+tables changed. The meta-schema applier path is now self-policing in
+CI: bootstrap emits DDL, drift verifies the live schema matches it on
+every push/PR. **P2.14 (ADR-0118) added a projection
 drift-sweep worker mode** — a structural `DriftResyncer` (satisfied by
 `WorkflowReplayer`) + `DriftSweepWorker` that periodically re-projects
 a bounded batch of instances from the canonical event log and
@@ -1979,12 +1995,17 @@ CROSSENGIN_PG_TEST=1 PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres \
 
 `.github/workflows/ci.yml` runs this automatically: a `build-test`
 job (build + typecheck + offline tests) and an `integration` job (a
-`postgres:16` service + `scripts/setup-integration-db.sh` + the gated
-suites under `CROSSENGIN_PG_TEST=1`, then two gates — an **incident-drift
-gate** (`workflow-worker incidents verify` over a wide window, exits 1 on
-any drifted incident timeline) and a **PHI at-rest encryption gate**
-(`crossengin-pg encrypt --verify` over `meta` + `public`, exits 1 on any
-plaintext PHI column / missing pgcrypto), both failing the build).
+`postgres:16` service + `scripts/setup-integration-db.sh`, then a
+**schema drift gate** (`crossengin-pg drift` against the freshly-
+provisioned `meta` schema — exits 1 on any added/removed/modified
+table, column, index, policy, or RLS toggle vs `META_TABLES`; runs
+before the suites so it gates the bootstrap baseline, not test
+pollution), then the gated suites under `CROSSENGIN_PG_TEST=1`, then
+two more gates — an **incident-drift gate** (`workflow-worker
+incidents verify` over a wide window, exits 1 on any drifted incident
+timeline) and a **PHI at-rest encryption gate** (`crossengin-pg
+encrypt --verify` over `meta` + `public`, exits 1 on any plaintext PHI
+column / missing pgcrypto), all three failing the build).
 `scripts/emit-bootstrap.mjs`
 emits the meta-schema DDL the setup script applies. (Production uses
 the `pg_uuidv7` extension; the test shim is `gen_random_uuid()`.)

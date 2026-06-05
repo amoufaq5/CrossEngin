@@ -62,6 +62,15 @@ jobs:
       - run: pnpm -r build
       - name: Provision the integration database
         run: bash scripts/setup-integration-db.sh
+      - name: Schema drift gate
+        # `crossengin-pg drift` introspects the live `meta` schema and diffs it
+        # against META_TABLES (the source-of-truth the bootstrap DDL was emitted
+        # from). It EXITS 1 on any drift (added/removed/modified table, column,
+        # index, policy, or RLS toggle). Run *before* the gated suites so it
+        # gates the freshly-provisioned baseline — those suites write rows but
+        # don't migrate the meta schema, so any drift here is a real
+        # meta-schema-vs-applier divergence, not test pollution.
+        run: node packages/kernel-pg/dist/bin/crossengin-pg.js drift
       - name: Gated integration tests (workflow-worker + operate-server)
         # CROSSENGIN_PG_TEST=1 (env above) un-skips the gated suites; the offline
         # tests in these apps run too and stay green.
