@@ -6,6 +6,7 @@ import {
   formatDurationMs,
   formatIncidentMetrics,
   incidentEscalationCount,
+  incidentMilestoneMs,
   incidentResolutionMs,
   percentile,
 } from "./incident-metrics.js";
@@ -40,6 +41,26 @@ function resolved(id: string, severity: IncidentSummary["severity"], durationMs:
     status: "resolved",
     resolvedAt: end,
     timeline: [entry("declared", "2026-06-05T12:00:00.000Z"), entry("resolved", end)],
+  });
+}
+
+function statusEntry(status: string, occurredAt: string): TimelineEntry {
+  return { occurredAt, actorUserId: "00000000-0000-4000-8000-000000000001", kind: "status_changed", message: status, metadata: { status } };
+}
+
+function milestoned(id: string): IncidentSummary {
+  const base = Date.parse("2026-06-05T12:00:00.000Z");
+  const at = (ms: number) => new Date(base + ms).toISOString();
+  return summary({
+    incidentId: id,
+    status: "resolved",
+    resolvedAt: at(300_000),
+    timeline: [
+      entry("declared", at(0)),
+      statusEntry("triaged", at(60_000)), // MTTA 1m
+      statusEntry("mitigated", at(120_000)), // MTTM 2m
+      entry("resolved", at(300_000)), // MTTR 5m
+    ],
   });
 }
 
@@ -83,6 +104,27 @@ describe("incidentEscalationCount", () => {
   });
 });
 
+describe("incidentMilestoneMs", () => {
+  it("computes declared → the first status_changed entry of the target status", () => {
+    const s = milestoned("INC-2026-0001");
+    expect(incidentMilestoneMs(s, "triaged")).toBe(60_000);
+    expect(incidentMilestoneMs(s, "mitigated")).toBe(120_000);
+  });
+
+  it("returns null when the milestone is absent", () => {
+    expect(incidentMilestoneMs(summary(), "triaged")).toBeNull();
+  });
+
+  it("takes the first matching milestone (idempotent re-stamps ignored)", () => {
+    const base = Date.parse("2026-06-05T12:00:00.000Z");
+    const at = (ms: number) => new Date(base + ms).toISOString();
+    const s = summary({
+      timeline: [entry("declared", at(0)), statusEntry("triaged", at(30_000)), statusEntry("triaged", at(90_000))],
+    });
+    expect(incidentMilestoneMs(s, "triaged")).toBe(30_000);
+  });
+});
+
 describe("computeIncidentMetrics", () => {
   it("aggregates counts, severities, escalations, and MTTR", () => {
     const incidents = [
@@ -104,18 +146,30 @@ describe("computeIncidentMetrics", () => {
     expect(m.mttr?.meanMs).toBe(180_000); // (60+180+300)/3
     expect(m.mttr?.maxMs).toBe(300_000);
     expect(m.mttr?.p50Ms).toBe(180_000);
+    expect(m.mtta).toBeNull(); // these resolved incidents have no triaged milestone
+    expect(m.mttm).toBeNull();
+  });
+
+  it("computes MTTA + MTTM + MTTR from a fully-milestoned incident", () => {
+    const m = computeIncidentMetrics([milestoned("INC-2026-0001"), milestoned("INC-2026-0002")]);
+    expect(m.mtta?.count).toBe(2);
+    expect(m.mtta?.meanMs).toBe(60_000);
+    expect(m.mttm?.meanMs).toBe(120_000);
+    expect(m.mttr?.meanMs).toBe(300_000);
   });
 
   it("reports null MTTR when nothing resolved", () => {
     const m = computeIncidentMetrics([summary(), summary({ incidentId: "INC-2026-0002" })]);
     expect(m.resolved).toBe(0);
     expect(m.mttr).toBeNull();
+    expect(m.mtta).toBeNull();
+    expect(m.mttm).toBeNull();
     expect(m.open).toBe(2);
   });
 
   it("handles an empty list", () => {
     const m = computeIncidentMetrics([]);
-    expect(m).toMatchObject({ total: 0, open: 0, resolved: 0, escalations: 0, mttr: null });
+    expect(m).toMatchObject({ total: 0, open: 0, resolved: 0, escalations: 0, mtta: null, mttm: null, mttr: null });
   });
 });
 
@@ -130,17 +184,20 @@ describe("formatDurationMs", () => {
 });
 
 describe("formatIncidentMetrics", () => {
-  it("renders the headline counts and MTTR line", () => {
-    const m = computeIncidentMetrics([resolved("INC-2026-0002", "sev3", 300_000)]);
+  it("renders the headline counts and the MTTA/MTTM/MTTR lines", () => {
+    const m = computeIncidentMetrics([milestoned("INC-2026-0001")]);
     const text = formatIncidentMetrics(m, "incident metrics");
     expect(text).toContain("total 1");
     expect(text).toContain("resolved 1");
-    expect(text).toContain("MTTR (1 resolved)");
-    expect(text).toContain("5m");
+    expect(text).toContain("MTTA (1 acknowledged): mean 1m");
+    expect(text).toContain("MTTM (1 mitigated): mean 2m");
+    expect(text).toContain("MTTR (1 resolved): mean 5m");
   });
 
-  it("renders n/a MTTR when nothing resolved", () => {
+  it("renders n/a for the milestones nothing reached", () => {
     const text = formatIncidentMetrics(computeIncidentMetrics([summary()]), "incident metrics");
+    expect(text).toContain("MTTA: n/a");
+    expect(text).toContain("MTTM: n/a");
     expect(text).toContain("MTTR: n/a");
   });
 });

@@ -74,6 +74,40 @@ export class PostgresIncidentSink {
     );
   }
 
+  /**
+   * Records an **acknowledgement** milestone — transitions a just-declared
+   * incident to `triaged`, stamps `acked_at` (first ack wins, via COALESCE), and
+   * appends a `status_changed` timeline entry. Guarded to `status = 'declared'`
+   * so only the first ack records (MTTA = declared → this entry); a re-ack is a
+   * no-op.
+   */
+  async acknowledge(incidentId: string, actorUserId: string): Promise<void> {
+    const entry = this.timelineEntry(actorUserId, "status_changed", "incident acknowledged", { status: "triaged" });
+    await this.conn.query(
+      `UPDATE ${this.table}
+          SET status = 'triaged', acked_at = COALESCE(acked_at, now()), timeline = timeline || $2::jsonb
+        WHERE incident_id = $1 AND status = 'declared'`,
+      [incidentId, JSON.stringify([entry])],
+    );
+  }
+
+  /**
+   * Records a **mitigation** milestone — transitions a non-settled incident to
+   * `mitigated`, stamps `mitigated_at` (first mitigation wins, via COALESCE), and
+   * appends a `status_changed` timeline entry. Guarded to the pre-mitigated open
+   * states (MTTM = declared → this entry); a re-mitigation / resolved incident is
+   * a no-op.
+   */
+  async mitigate(incidentId: string, actorUserId: string): Promise<void> {
+    const entry = this.timelineEntry(actorUserId, "status_changed", "incident mitigated", { status: "mitigated" });
+    await this.conn.query(
+      `UPDATE ${this.table}
+          SET status = 'mitigated', mitigated_at = COALESCE(mitigated_at, now()), timeline = timeline || $2::jsonb
+        WHERE incident_id = $1 AND status IN ('declared', 'triaged', 'mitigating')`,
+      [incidentId, JSON.stringify([entry])],
+    );
+  }
+
   private timelineEntry(actorUserId: string, kind: string, message: string, metadata: Record<string, unknown>): Record<string, unknown> {
     return { occurredAt: new Date().toISOString(), actorUserId, kind, message, metadata };
   }

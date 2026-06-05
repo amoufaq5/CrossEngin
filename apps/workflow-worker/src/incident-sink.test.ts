@@ -64,6 +64,27 @@ describe("PostgresIncidentSink.record", () => {
     expect(typeof entries[0]?.occurredAt).toBe("string");
   });
 
+  it("acknowledge transitions declared → triaged, stamps acked_at, appends a status_changed entry", async () => {
+    const cap = capture();
+    await new PostgresIncidentSink(cap.conn).acknowledge("INC-2026-0001", "00000000-0000-4000-8000-000000000001");
+    expect(cap.last.sql).toContain("UPDATE meta.incidents");
+    expect(cap.last.sql).toContain("SET status = 'triaged', acked_at = COALESCE(acked_at, now()), timeline = timeline || $2::jsonb");
+    expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status = 'declared'");
+    const entries = JSON.parse(cap.last.params?.[1] as string) as ReadonlyArray<Record<string, unknown>>;
+    expect(entries[0]?.kind).toBe("status_changed");
+    expect(entries[0]?.metadata).toEqual({ status: "triaged" });
+  });
+
+  it("mitigate transitions a pre-mitigated incident → mitigated, stamps mitigated_at, appends a status_changed entry", async () => {
+    const cap = capture();
+    await new PostgresIncidentSink(cap.conn).mitigate("INC-2026-0001", "00000000-0000-4000-8000-000000000001");
+    expect(cap.last.sql).toContain("SET status = 'mitigated', mitigated_at = COALESCE(mitigated_at, now()), timeline = timeline || $2::jsonb");
+    expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status IN ('declared', 'triaged', 'mitigating')");
+    const entries = JSON.parse(cap.last.params?.[1] as string) as ReadonlyArray<Record<string, unknown>>;
+    expect(entries[0]?.kind).toBe("status_changed");
+    expect(entries[0]?.metadata).toEqual({ status: "mitigated" });
+  });
+
   it("escalate raises the severity of an open incident and appends a timeline entry", async () => {
     const cap = capture();
     await new PostgresIncidentSink(cap.conn).escalate("INC-2026-0001", "sev2", "00000000-0000-4000-8000-000000000001");

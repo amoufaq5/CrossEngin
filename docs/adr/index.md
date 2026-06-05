@@ -184,3 +184,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 98 | 0130 | 3,000 | Drafted alongside the incident replayer — typed read API over meta.incidents (Phase 3 P2.21) |
 | 99 | 0131 | 2,500 | Drafted alongside the `incidents` CLI subcommand on workflow-worker (Phase 3 P2.22) |
 | 100 | 0132 | 2,500 | Drafted alongside incident metrics — MTTR + open gauges from the timeline (Phase 3 P2.23) |
+| 101 | 0133 | 2,500 | Drafted alongside incident ack/mitigate milestones — MTTA + MTTM (Phase 3 P2.24) |

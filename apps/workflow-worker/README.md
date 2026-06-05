@@ -127,8 +127,8 @@ workflow-worker incidents period --from <iso> --to <iso> [--limit N] [--format j
 # drifted from declared -> (escalated)* -> resolved (gate CI on it)
 workflow-worker incidents verify --from <iso> --to <iso> [--format json]
 
-# operational KPIs over a window: MTTR (mean/p50/p95/max), open/resolved
-# counts, per-severity gauges, escalation totals
+# operational KPIs over a window: MTTA / MTTM / MTTR (mean/p50/p95/max),
+# open/resolved counts, per-severity gauges, escalation totals
 workflow-worker incidents metrics --from <iso> --to <iso> [--limit N] [--format json]
 ```
 

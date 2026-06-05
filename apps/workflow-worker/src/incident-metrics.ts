@@ -17,6 +17,8 @@ export interface IncidentMetrics {
   readonly bySeverity: Readonly<Record<Severity, number>>;
   readonly openBySeverity: Readonly<Record<Severity, number>>;
   readonly escalations: number;
+  readonly mtta: MttrStats | null;
+  readonly mttm: MttrStats | null;
   readonly mttr: MttrStats | null;
 }
 
@@ -56,6 +58,42 @@ export function incidentEscalationCount(summary: IncidentSummary): number {
   return summary.timeline.reduce((n, e) => (e.kind === "severity_changed" ? n + 1 : n), 0);
 }
 
+function declaredAtOf(summary: IncidentSummary): string {
+  return summary.timeline.find((e) => e.kind === "declared")?.occurredAt ?? summary.declaredAt;
+}
+
+function nonNegativeDeltaMs(fromIso: string, toIso: string | undefined): number | null {
+  if (toIso === undefined || fromIso.length === 0) return null;
+  const ms = Date.parse(toIso) - Date.parse(fromIso);
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}
+
+/**
+ * The wall-clock time from declaration to the **first** `status_changed` timeline
+ * entry that moved the incident to `targetStatus` (e.g. `triaged` for MTTA,
+ * `mitigated` for MTTM), in ms. `null` when no such milestone exists or the
+ * delta isn't a non-negative finite number. Pure.
+ */
+export function incidentMilestoneMs(summary: IncidentSummary, targetStatus: string): number | null {
+  const milestone = summary.timeline.find(
+    (e) => e.kind === "status_changed" && e.metadata["status"] === targetStatus,
+  )?.occurredAt;
+  return nonNegativeDeltaMs(declaredAtOf(summary), milestone);
+}
+
+function statsFrom(durations: number[]): MttrStats | null {
+  if (durations.length === 0) return null;
+  durations.sort((a, b) => a - b);
+  const sum = durations.reduce((acc, n) => acc + n, 0);
+  return {
+    count: durations.length,
+    meanMs: Math.round(sum / durations.length),
+    p50Ms: percentile(durations, 0.5),
+    p95Ms: percentile(durations, 0.95),
+    maxMs: durations[durations.length - 1] ?? 0,
+  };
+}
+
 /**
  * Folds a list of incident summaries into operational metrics: total / open /
  * resolved counts, per-severity + open-per-severity gauges, total escalations,
@@ -69,7 +107,9 @@ export function computeIncidentMetrics(summaries: readonly IncidentSummary[]): I
   let open = 0;
   let resolved = 0;
   let escalations = 0;
-  const durations: number[] = [];
+  const ackDurations: number[] = [];
+  const mitigateDurations: number[] = [];
+  const resolveDurations: number[] = [];
 
   for (const s of summaries) {
     bySeverity[s.severity] += 1;
@@ -79,21 +119,12 @@ export function computeIncidentMetrics(summaries: readonly IncidentSummary[]): I
       openBySeverity[s.severity] += 1;
     }
     if (s.status === "resolved") resolved += 1;
-    const ms = incidentResolutionMs(s);
-    if (ms !== null) durations.push(ms);
-  }
-
-  let mttr: MttrStats | null = null;
-  if (durations.length > 0) {
-    durations.sort((a, b) => a - b);
-    const sum = durations.reduce((acc, n) => acc + n, 0);
-    mttr = {
-      count: durations.length,
-      meanMs: Math.round(sum / durations.length),
-      p50Ms: percentile(durations, 0.5),
-      p95Ms: percentile(durations, 0.95),
-      maxMs: durations[durations.length - 1] ?? 0,
-    };
+    const ack = incidentMilestoneMs(s, "triaged");
+    if (ack !== null) ackDurations.push(ack);
+    const mitigate = incidentMilestoneMs(s, "mitigated");
+    if (mitigate !== null) mitigateDurations.push(mitigate);
+    const resolve = incidentResolutionMs(s);
+    if (resolve !== null) resolveDurations.push(resolve);
   }
 
   return {
@@ -103,7 +134,9 @@ export function computeIncidentMetrics(summaries: readonly IncidentSummary[]): I
     bySeverity,
     openBySeverity,
     escalations,
-    mttr,
+    mtta: statsFrom(ackDurations),
+    mttm: statsFrom(mitigateDurations),
+    mttr: statsFrom(resolveDurations),
   };
 }
 
@@ -125,21 +158,20 @@ function severityBreakdown(counts: Readonly<Record<Severity, number>>): string {
   return SEVERITIES.filter((s) => counts[s] > 0).map((s) => `${s}=${counts[s].toString()}`).join(" ") || "none";
 }
 
+function statsLine(label: string, noun: string, stats: MttrStats | null): string {
+  if (stats === null) return `  ${label}: n/a (no ${noun} in range)`;
+  return `  ${label} (${stats.count.toString()} ${noun}): mean ${formatDurationMs(stats.meanMs)}  p50 ${formatDurationMs(stats.p50Ms)}  p95 ${formatDurationMs(stats.p95Ms)}  max ${formatDurationMs(stats.maxMs)}`;
+}
+
 /** Human-readable rendering of the incident metrics. */
 export function formatIncidentMetrics(metrics: IncidentMetrics, heading: string): string {
-  const lines = [
+  return [
     `${heading}:`,
     `  total ${metrics.total.toString()}  open ${metrics.open.toString()}  resolved ${metrics.resolved.toString()}  escalations ${metrics.escalations.toString()}`,
     `  by severity:      ${severityBreakdown(metrics.bySeverity)}`,
     `  open by severity: ${severityBreakdown(metrics.openBySeverity)}`,
-  ];
-  if (metrics.mttr === null) {
-    lines.push("  MTTR: n/a (no resolved incidents in range)");
-  } else {
-    const { mttr } = metrics;
-    lines.push(
-      `  MTTR (${mttr.count.toString()} resolved): mean ${formatDurationMs(mttr.meanMs)}  p50 ${formatDurationMs(mttr.p50Ms)}  p95 ${formatDurationMs(mttr.p95Ms)}  max ${formatDurationMs(mttr.maxMs)}`,
-    );
-  }
-  return lines.join("\n");
+    statsLine("MTTA", "acknowledged", metrics.mtta),
+    statsLine("MTTM", "mitigated", metrics.mttm),
+    statsLine("MTTR", "resolved", metrics.mttr),
+  ].join("\n");
 }

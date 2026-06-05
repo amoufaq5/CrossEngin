@@ -35,6 +35,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { StaleWorkerMonitor, type StaleWorkerEnforcement } from "./stale-worker-monitor.js";
 import { PostgresIncidentSink } from "./incident-sink.js";
 import { PostgresIncidentReplayer } from "./incident-replayer.js";
+import { computeIncidentMetrics } from "./incident-metrics.js";
 
 /**
  * Real-Postgres integration test for the distributed-worker claim loops. Gated
@@ -612,6 +613,51 @@ suite("workflow-worker integration (real Postgres)", () => {
     // listForPeriod returns the incident in a window spanning its declaration
     const window = await replayer.listForPeriod({ from: "2026-06-04T00:00:00.000Z", to: "2026-06-05T00:00:00.000Z" });
     expect(window.some((s) => s.incidentId === openId)).toBe(true);
+  });
+
+  it("records ack + mitigate milestones and the replayer + metrics compute MTTA/MTTM/MTTR", async () => {
+    const declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [declaredBy, "monitor@crossengin.test"]);
+
+    const sink = new PostgresIncidentSink(conn);
+    const id = `INC-2026-${Math.floor(1000 + Math.random() * 8999).toString()}`;
+    // declare via a hand-built record so the test owns the whole lifecycle
+    await sink.record({
+      id, title: "1 workflow worker(s) stale", severity: "sev3", category: "availability", status: "declared",
+      affectedTenantIds: [], affectedRegions: [], publiclyVisible: false,
+      declaredAt: "2026-06-04T12:00:00.000Z", declaredBy,
+      roleAssignments: [],
+      timeline: [{ occurredAt: "2026-06-04T12:00:00.000Z", actorUserId: declaredBy, kind: "declared", message: "stale", metadata: {} }],
+      securityIncident: false, breachDataClasses: [],
+    } as unknown as Parameters<typeof sink.record>[0]);
+
+    await sink.acknowledge(id, declaredBy);
+    await sink.mitigate(id, declaredBy);
+    await sink.resolve(id, declaredBy);
+
+    const replayer = new PostgresIncidentReplayer(conn);
+    const summary = await replayer.getByIncidentId(id);
+    expect(summary?.status).toBe("resolved");
+    // the timeline carries declared → triaged → mitigated → resolved
+    expect(summary?.timeline.map((e) => e.kind)).toEqual(["declared", "status_changed", "status_changed", "resolved"]);
+    const statuses = (summary?.timeline ?? []).filter((e) => e.kind === "status_changed").map((e) => e.metadata["status"]);
+    expect(statuses).toEqual(["triaged", "mitigated"]);
+
+    // acked_at / mitigated_at / resolved_at were all stamped
+    const stamps = await conn.query<{ acked_at: string | null; mitigated_at: string | null; resolved_at: string | null }>(
+      `SELECT acked_at, mitigated_at, resolved_at FROM meta.incidents WHERE incident_id = $1`, [id],
+    );
+    expect(stamps.rows[0]?.acked_at).not.toBeNull();
+    expect(stamps.rows[0]?.mitigated_at).not.toBeNull();
+    expect(stamps.rows[0]?.resolved_at).not.toBeNull();
+
+    // metrics over just this incident compute all three milestones (declared at a
+    // fixed past time, milestones stamped at now() → positive durations)
+    const metrics = computeIncidentMetrics(summary === null ? [] : [summary]);
+    expect(metrics.mtta?.count).toBe(1);
+    expect(metrics.mttm?.count).toBe(1);
+    expect(metrics.mttr?.count).toBe(1);
+    expect(await replayer.verifyByIncidentId(id)).toEqual([]); // still a clean timeline
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {
