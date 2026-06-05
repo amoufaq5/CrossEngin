@@ -5,7 +5,7 @@ import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@cr
 import { FixedClock } from "@crossengin/observability-runtime";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { OperateSloMonitor, buildServingSloEngine } from "./slo-incidents.js";
+import { OperateSloMonitor, buildServingLatencyEngine, buildServingSloEngine } from "./slo-incidents.js";
 
 /**
  * Real-Postgres integration test (gated on `CROSSENGIN_PG_TEST=1`) proving
@@ -91,7 +91,7 @@ suite("operate-server SLO incidents (real Postgres)", () => {
       clock.advance(1_000);
     }
     const decisions = await monitor.sweep(clock.now());
-    expect(decisions.some((d) => d.kind === "breach_opened")).toBe(true);
+    expect(decisions.some((d) => d.signal === "availability" && d.decision.kind === "breach_opened")).toBe(true);
 
     const after = await conn.query<{ actions: string; evals: string }>(
       `SELECT
@@ -103,5 +103,47 @@ suite("operate-server SLO incidents (real Postgres)", () => {
     const newEvals = Number(after.rows[0]?.evals ?? "0") - baselineEvals;
     expect(newActions).toBeGreaterThanOrEqual(1);
     expect(newEvals).toBeGreaterThanOrEqual(1);
+  });
+
+  it("declares + persists a serving-latency incident on a 2000ms burst against a 300ms budget", async () => {
+    const actor = randomUUID();
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [actor, `lat-${actor}@crossengin.test`]);
+
+    const clock = new FixedClock(BASE);
+    const surface = `operate-server-${Math.random().toString(36).slice(2, 8)}`;
+    const availabilityEngine = buildServingSloEngine({ clock, surface, systemActorUserId: actor });
+    const latencyEngine = buildServingLatencyEngine({
+      clock,
+      surface,
+      systemActorUserId: actor,
+      p95Budget: "300ms",
+    });
+    const sink = new PostgresIncidentSink(conn);
+    const monitor = new OperateSloMonitor({
+      engine: availabilityEngine,
+      latencyEngine,
+      sink,
+      clock,
+      surface,
+      declaredBy: actor,
+    });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(200, 2_000);
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    const latencyOpened = decisions.find((d) => d.signal === "latency" && d.decision.kind === "breach_opened");
+    expect(latencyOpened).toBeDefined();
+    const incidentId =
+      latencyOpened?.decision.kind === "breach_opened" ? latencyOpened.decision.plan.incident.id : "";
+    expect(incidentId).toMatch(/^INC-\d{4}-\d{4,8}$/);
+
+    const replayer = new PostgresIncidentReplayer(conn);
+    const summary = await replayer.getByIncidentId(incidentId);
+    expect(summary?.status).toBe("declared");
+    expect(summary?.category).toBe("performance");
+    expect(summary?.timeline[0]?.kind).toBe("declared");
+    expect(await replayer.verifyByIncidentId(incidentId)).toEqual([]);
   });
 });

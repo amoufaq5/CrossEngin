@@ -1,3 +1,5 @@
+import { parseLatencyBudgetMs } from "@crossengin/observability-runtime";
+
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
@@ -20,6 +22,7 @@ export interface ServeOptions {
   readonly sloPersist: boolean;
   readonly sloActor: string | null;
   readonly sloIntervalMs: number | null;
+  readonly sloLatencyBudget: string | null;
   readonly help: boolean;
   readonly version: boolean;
 }
@@ -62,6 +65,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let sloPersist = false;
   let sloActor: string | null = null;
   let sloIntervalMs: number | null = null;
+  let sloLatencyBudget: string | null = null;
   let help = false;
   let version = false;
 
@@ -140,6 +144,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --slo-interval-ms: ${raw} (>= 1000)`);
       sloIntervalMs = n;
       i += consumed();
+    } else if (arg === "--slo-latency-budget" || arg.startsWith("--slo-latency-budget=")) {
+      const raw = takeValue(arg, next, "--slo-latency-budget");
+      try {
+        parseLatencyBudgetMs(raw);
+      } catch {
+        throw new CliUsageError(`invalid --slo-latency-budget: ${raw} (expected like '300ms' or '5s')`);
+      }
+      sloLatencyBudget = raw;
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -179,6 +192,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     sloPersist,
     sloActor,
     sloIntervalMs,
+    sloLatencyBudget,
     help,
     version,
   };
@@ -214,6 +228,11 @@ Options:
                        else log-only). Requires --slo
   --slo-actor <uuid>   System actor (declared_by) for SLO incidents
   --slo-interval-ms <n> SLO evaluation interval (default 30000; >=1000)
+  --slo-latency-budget <ms-or-duration>
+                       p95 latency budget for the serving surface (default
+                       300ms; e.g. '300ms', '5s'). Sets up a sibling latency
+                       SLO whose breach declares a 'performance' incident
+                       through the same sink (requires --slo)
   --help, -h           Show this help
   --version, -v        Print version
 

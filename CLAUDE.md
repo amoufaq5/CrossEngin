@@ -378,16 +378,28 @@ new `Schema drift gate` step in `.github/workflows/ci.yml`'s
 `scripts/setup-integration-db.sh` provisions + bootstraps the database,
 so it gates the **freshly-provisioned baseline** of the `meta` schema
 against `META_TABLES` (the source-of-truth the bootstrap DDL was
-emitted from). The bin's pre-existing exit-1-on-drift contract (any
-added/removed/modified table, column, index, policy, or RLS toggle)
-**fails the build**, before the gated suites run. Placement choice:
-*before* the suites — the suites write rows but don't migrate `meta`,
-so any drift at this point is a real applier-vs-meta-schema divergence,
-not test pollution; running it first also fails the job faster than the
-incident-drift gate would. CI-workflow-only change; no source / tests /
-tables changed. The meta-schema applier path is now self-policing in
-CI: bootstrap emits DDL, drift verifies the live schema matches it on
-every push/PR. **P2.14 (ADR-0118) added a projection
+emitted from). The bin's pre-existing exit-1-on-drift contract **fails
+the build** before the gated suites run. Placement: *before* the suites
+— the suites write rows but don't migrate `meta`, so any drift at this
+point is a real applier-vs-meta-schema divergence, not test pollution.
+**P2.38 (ADR-0147) added the latency sibling** so the M8.6
+`LatencySloEngine` rides the same serving stream:
+`buildServingLatencyEngine` (one latency SLO, p95 ≤ 300ms / 30d, the
+same P1 page route + UUID actor; budget parsed via the runtime's
+`parseLatencyBudgetMs`, so `'5s'` works) plus an optional
+`latencyEngine: LatencyEngineLike` on `OperateSloMonitorOptions`. With
+both wired, `recordRequest` feeds both engines, and `sweep` evaluates
+both — each `breach_opened` decision's `plan.incident` is persisted
+as-is (the runtime stamps `category: 'availability'` from the burn-rate
+engine, `'performance'` from the latency engine, so the shared
+`PostgresIncidentSink` files them side-by-side without sink changes).
+The sweep return became a `ServingDecision[]` with a `signal:
+'availability' | 'latency'` discriminator. `--slo-latency-budget
+<ms-or-duration>` is the single new CLI knob (default `'300ms'`); `--slo`
+keeps enabling **both** engines. A gated test bursts 25× `(200, 2000ms)`
+→ a declared `performance` incident lands in `meta.incidents` via the
+same shared sink and reads back via the same shared replayer.
+**P2.14 (ADR-0118) added a projection
 drift-sweep worker mode** — a structural `DriftResyncer` (satisfied by
 `WorkflowReplayer`) + `DriftSweepWorker` that periodically re-projects
 a bounded batch of instances from the canonical event log and

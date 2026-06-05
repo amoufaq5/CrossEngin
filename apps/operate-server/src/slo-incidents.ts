@@ -3,9 +3,12 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import {
+  LatencySloEngine,
   SloEnforcementEngine,
+  parseLatencyBudgetMs,
   type Clock,
   type EnforcementDecision,
+  type LatencyEnforcementDecision,
   type RequestOutcome,
   type SloEnforcementEngineOptions,
   type SloRegistration,
@@ -15,6 +18,9 @@ import { manifestRouteSpecs, type RouteSpec } from "@crossengin/operate-runtime"
 
 /** A system actor id (UUID) used as the default SLO incident declarer. */
 export const DEFAULT_SLO_ACTOR = "00000000-0000-4000-8000-000000000000";
+
+/** The default p95 latency budget for the serving surface. */
+export const DEFAULT_SERVING_LATENCY_BUDGET = "300ms";
 
 /** The structural write surface the monitor persists through — `PostgresIncidentSink` satisfies it. */
 export interface IncidentPersistSink {
@@ -32,6 +38,12 @@ export interface IncidentPersistSink {
 export interface SloEngineLike {
   recordOutcome(outcome: RequestOutcome): void;
   evaluate(now?: Date): readonly EnforcementDecision[] | Promise<readonly EnforcementDecision[]>;
+}
+
+/** The structural slice of `LatencySloEngine` the monitor drives (injectable for tests). */
+export interface LatencyEngineLike {
+  recordOutcome(outcome: RequestOutcome): void;
+  evaluate(now?: Date): readonly LatencyEnforcementDecision[];
 }
 
 /** A single route exposed by a compiled manifest: a (method, operationId) pair. */
@@ -170,6 +182,50 @@ export function buildServingSloEngineForManifest(
   return buildPersistentSloEnforcementEngine(options.conn, engineOptions);
 }
 
+export interface BuildServingLatencyEngineOptions {
+  /** The aggregate serving surface the latency SLO covers. */
+  readonly surface?: string;
+  /** p95 budget string ("300ms", "5s", …). Parsed via `parseLatencyBudgetMs` to validate. */
+  readonly p95Budget?: string;
+  /** A UUID system actor for the declared incidents / kill switches. */
+  readonly systemActorUserId?: string;
+  readonly alertPolicy?: AlertPolicy;
+  readonly clock?: Clock;
+}
+
+/**
+ * Builds a latency `LatencySloEngine` for the operate-server serving surface:
+ * one rolling-window latency SLO whose percentile-budget breach declares a
+ * `performance` `IncidentRecord` via the same shared `IncidentPersistSink`. The
+ * defaults (surface `operate-server`, p95 ≤ 300ms / 30d, a single P1 page route)
+ * mirror `buildServingSloEngine`; the declarer is the same UUID system actor so
+ * the persisted incident's `declared_by` satisfies the `meta.users` FK.
+ */
+export function buildServingLatencyEngine(
+  options: BuildServingLatencyEngineOptions = {},
+): LatencySloEngine {
+  const surface = options.surface ?? "operate-server";
+  const actor = options.systemActorUserId ?? DEFAULT_SLO_ACTOR;
+  const budget = options.p95Budget ?? DEFAULT_SERVING_LATENCY_BUDGET;
+  parseLatencyBudgetMs(budget);
+  const slo: Slo = {
+    id: `${surface}-latency`,
+    surface,
+    targets: [{ kind: "latency", p95: budget, window: "30d" }],
+  };
+  const alertPolicy: AlertPolicy = options.alertPolicy ?? {
+    id: "operate-server",
+    routes: [{ severity: "P1", channels: [{ kind: "pagerduty_phone", serviceKey: "operate-server-oncall" }] }],
+  };
+  return new LatencySloEngine({
+    alertPolicy,
+    systemActorUserId: actor,
+    declaredBy: actor,
+    registrations: [{ slo, category: "performance" }],
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
+  });
+}
+
 const DEFAULT_SCHEDULER: SloScheduler = {
   setInterval(handler, ms) {
     const h = setInterval(handler, ms);
@@ -188,6 +244,8 @@ export interface SloScheduler {
 
 export interface OperateSloMonitorOptions {
   readonly engine: SloEngineLike;
+  /** Optional latency engine — when set, every request feeds both engines and a sweep evaluates both. */
+  readonly latencyEngine?: LatencyEngineLike;
   /** When set, declared incidents persist to `meta.incidents` (else log-only). */
   readonly sink?: IncidentPersistSink;
   /** The fallback serving surface when `recordRequest` is called without one. */
@@ -201,15 +259,27 @@ export interface OperateSloMonitorOptions {
 }
 
 /**
+ * The discriminated union the monitor's `sweep` returns: availability decisions
+ * from the burn-rate engine and latency decisions from the percentile engine
+ * are surfaced verbatim, distinguished by an added `signal` discriminator so a
+ * test can assert which engine produced each verdict.
+ */
+export type ServingDecision =
+  | { readonly signal: "availability"; readonly decision: EnforcementDecision }
+  | { readonly signal: "latency"; readonly decision: LatencyEnforcementDecision };
+
+/**
  * Drives the serving SLO loop: feeds each HTTP request's outcome into the engine
  * and, on a `sweep`, persists a declared availability incident to `meta.incidents`
  * via the shared `@crossengin/incident-response-pg` sink (and resolves it on
  * recovery). With a per-route engine (P2.37) the listener passes the matched
- * route's surface so each route is its own SLO; absent a surface the aggregate
- * fallback is used.
+ * route's surface so each route is its own SLO. P2.38 (ADR-0147) added the
+ * latency sibling so a latency-budget breach declares its own `performance`
+ * incident through the same sink.
  */
 export class OperateSloMonitor {
   private readonly engine: SloEngineLike;
+  private readonly latencyEngine: LatencyEngineLike | null;
   private readonly sink: IncidentPersistSink | null;
   private readonly surface: string;
   private readonly declaredBy: string;
@@ -221,6 +291,7 @@ export class OperateSloMonitor {
 
   constructor(options: OperateSloMonitorOptions) {
     this.engine = options.engine;
+    this.latencyEngine = options.latencyEngine ?? null;
     this.sink = options.sink ?? null;
     this.surface = options.surface ?? DEFAULT_SERVING_SURFACE;
     this.declaredBy = options.declaredBy ?? DEFAULT_SLO_ACTOR;
@@ -234,30 +305,39 @@ export class OperateSloMonitor {
    * Records one request: a 5xx status is an `error` outcome, anything else `ok`.
    * `surface` lets the listener pass the matched route's surface so per-route SLOs
    * fire on that route alone; if omitted, the monitor's aggregate surface is used.
+   * Feeds both the availability and (when wired) latency engines.
    */
   recordRequest(status: number, latencyMs: number, surface?: string): void {
-    this.engine.recordOutcome({
+    const outcome: RequestOutcome = {
       surface: surface ?? this.surface,
       outcome: status >= 500 ? "error" : "ok",
       at: this.clock.now().toISOString(),
       statusCode: status,
       latencyMs,
-    });
+    };
+    this.engine.recordOutcome(outcome);
+    if (this.latencyEngine !== null) this.latencyEngine.recordOutcome(outcome);
   }
 
-  /** Evaluates the SLO; persists a newly declared incident and resolves a recovered one. */
-  async sweep(now: Date = this.clock.now()): Promise<readonly EnforcementDecision[]> {
-    const decisions = await this.engine.evaluate(now);
-    for (const decision of decisions) {
-      if (decision.kind === "breach_opened") {
-        this.log(`[operate-server] SLO BREACH ${decision.plan.incident.id} ${decision.severity} on ${decision.surface}`);
-        if (this.sink !== null) await this.sink.record(decision.plan.incident);
-      } else if (decision.kind === "recovered") {
-        this.log(`[operate-server] SLO RECOVERED ${decision.incidentId} on ${decision.surface}`);
-        if (this.sink !== null) await this.sink.resolve(decision.incidentId, this.declaredBy);
+  /** Evaluates both engines; persists each newly declared incident and resolves each recovered one. */
+  async sweep(now: Date = this.clock.now()): Promise<readonly ServingDecision[]> {
+    const surfaced: ServingDecision[] = [];
+
+    // Availability engine's evaluate may be sync (in-process) or async (persistent
+    // wrapper from observability-runtime-pg) — await either.
+    for (const decision of await this.engine.evaluate(now)) {
+      surfaced.push({ signal: "availability", decision });
+      await this.applyAvailability(decision);
+    }
+
+    if (this.latencyEngine !== null) {
+      for (const decision of this.latencyEngine.evaluate(now)) {
+        surfaced.push({ signal: "latency", decision });
+        await this.applyLatency(decision);
       }
     }
-    return decisions;
+
+    return surfaced;
   }
 
   start(intervalMs: number): void {
@@ -269,6 +349,28 @@ export class OperateSloMonitor {
     if (this.handle === null) return;
     this.scheduler.clearInterval(this.handle);
     this.handle = null;
+  }
+
+  private async applyAvailability(decision: EnforcementDecision): Promise<void> {
+    if (decision.kind === "breach_opened") {
+      this.log(`[operate-server] SLO BREACH ${decision.plan.incident.id} ${decision.severity} on ${decision.surface}`);
+      if (this.sink !== null) await this.sink.record(decision.plan.incident);
+    } else if (decision.kind === "recovered") {
+      this.log(`[operate-server] SLO RECOVERED ${decision.incidentId} on ${decision.surface}`);
+      if (this.sink !== null) await this.sink.resolve(decision.incidentId, this.declaredBy);
+    }
+  }
+
+  private async applyLatency(decision: LatencyEnforcementDecision): Promise<void> {
+    if (decision.kind === "breach_opened") {
+      this.log(
+        `[operate-server] LATENCY BREACH ${decision.plan.incident.id} ${decision.severity} on ${decision.surface}`,
+      );
+      if (this.sink !== null) await this.sink.record(decision.plan.incident);
+    } else if (decision.kind === "recovered") {
+      this.log(`[operate-server] LATENCY RECOVERED ${decision.incidentId}`);
+      if (this.sink !== null) await this.sink.resolve(decision.incidentId, this.declaredBy);
+    }
   }
 
   private async safeSweep(): Promise<void> {

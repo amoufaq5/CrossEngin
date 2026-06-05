@@ -26,12 +26,31 @@ describe("parseServeArgs", () => {
     expect(off.sloPersist).toBe(false);
     expect(off.sloActor).toBeNull();
     expect(off.sloIntervalMs).toBeNull();
+    expect(off.sloLatencyBudget).toBeNull();
     const on = parseServeArgs([
       "--pack", "erp-core", "--slo", "--slo-persist",
       "--slo-actor", "00000000-0000-4000-8000-000000000009", "--slo-interval-ms", "5000",
+      "--slo-latency-budget", "500ms",
     ]);
-    expect(on).toMatchObject({ slo: true, sloPersist: true, sloActor: "00000000-0000-4000-8000-000000000009", sloIntervalMs: 5000 });
+    expect(on).toMatchObject({
+      slo: true,
+      sloPersist: true,
+      sloActor: "00000000-0000-4000-8000-000000000009",
+      sloIntervalMs: 5000,
+      sloLatencyBudget: "500ms",
+    });
     expect(() => parseServeArgs(["--pack", "erp-core", "--slo-interval-ms", "500"])).toThrow(CliUsageError);
+  });
+
+  it("rejects an invalid --slo-latency-budget", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--slo-latency-budget", "fast"]),
+    ).toThrow(CliUsageError);
+  });
+
+  it("accepts --slo-latency-budget in seconds", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--slo-latency-budget=5s"]);
+    expect(opts.sloLatencyBudget).toBe("5s");
   });
 
   it("supports --flag=value form", () => {

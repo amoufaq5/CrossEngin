@@ -1,16 +1,23 @@
 import type { IncidentRecord } from "@crossengin/incident-response";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import { FixedClock, type EnforcementDecision, type RequestOutcome } from "@crossengin/observability-runtime";
+import {
+  FixedClock,
+  type EnforcementDecision,
+  type LatencyEnforcementDecision,
+  type RequestOutcome,
+} from "@crossengin/observability-runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import { loadBuiltinPack } from "./manifest-source.js";
 import {
   OperateSloMonitor,
+  buildServingLatencyEngine,
   buildServingSloEngine,
   buildServingSloEngineForManifest,
   perRouteSloId,
   routesForManifest,
   type IncidentPersistSink,
+  type LatencyEngineLike,
   type SloEngineLike,
   type SloScheduler,
 } from "./slo-incidents.js";
@@ -39,9 +46,26 @@ describe("OperateSloMonitor.recordRequest", () => {
     expect(outcomes.map((o) => o.outcome)).toEqual(["ok", "ok", "error"]);
     expect(outcomes[2]).toMatchObject({ surface: "svc", statusCode: 503, latencyMs: 20, at: BASE.toISOString() });
   });
+
+  it("feeds both engines when a latency engine is wired", () => {
+    const availability: RequestOutcome[] = [];
+    const latency: RequestOutcome[] = [];
+    const engine: SloEngineLike = { recordOutcome: (o) => availability.push(o), evaluate: () => [] };
+    const latencyEngine: LatencyEngineLike = { recordOutcome: (o) => latency.push(o), evaluate: () => [] };
+    const monitor = new OperateSloMonitor({
+      engine,
+      latencyEngine,
+      clock: new FixedClock(BASE),
+      surface: "svc",
+    });
+    monitor.recordRequest(200, 1234);
+    expect(availability).toHaveLength(1);
+    expect(latency).toHaveLength(1);
+    expect(latency[0]).toMatchObject({ surface: "svc", outcome: "ok", latencyMs: 1234 });
+  });
 });
 
-describe("OperateSloMonitor.sweep — real engine", () => {
+describe("OperateSloMonitor.sweep — real availability engine", () => {
   it("declares + persists one availability incident on a 5xx burst, then no re-persist", async () => {
     const clock = new FixedClock(BASE);
     const engine = buildServingSloEngine({ clock, surface: "operate-server" });
@@ -53,7 +77,9 @@ describe("OperateSloMonitor.sweep — real engine", () => {
       clock.advance(1_000);
     }
     const decisions = await monitor.sweep(clock.now());
-    expect(decisions.some((d) => d.kind === "breach_opened")).toBe(true);
+    const opened = decisions.find((s) => s.decision.kind === "breach_opened");
+    expect(opened).toBeDefined();
+    expect(opened?.signal).toBe("availability");
     expect(sink.recorded).toHaveLength(1);
     expect(sink.recorded[0]?.status).toBe("declared");
     expect(sink.recorded[0]?.category).toBe("availability");
@@ -75,10 +101,96 @@ describe("OperateSloMonitor.sweep — real engine", () => {
     await monitor.sweep(clock.now());
     expect(sink.recorded).toHaveLength(0);
   });
+
+  it("only fires availability when no latency engine is wired (back-compat)", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = buildServingSloEngine({ clock, surface: "operate-server" });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({ engine, sink, clock, surface: "operate-server" });
+    for (let i = 0; i < 25; i += 1) {
+      // 5xx with 2000ms latency — would breach a 300ms budget IF a latency engine were attached
+      monitor.recordRequest(503, 2_000);
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    expect(decisions.every((s) => s.signal === "availability")).toBe(true);
+    expect(sink.recorded).toHaveLength(1);
+    expect(sink.recorded[0]?.category).toBe("availability");
+  });
+});
+
+describe("OperateSloMonitor.sweep — latency engine", () => {
+  it("declares + persists one performance incident on a 2000ms burst against a 300ms budget", async () => {
+    const clock = new FixedClock(BASE);
+    const engine: SloEngineLike = { recordOutcome: () => {}, evaluate: () => [] };
+    const latencyEngine = buildServingLatencyEngine({ clock, surface: "operate-server" });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({
+      engine,
+      latencyEngine,
+      sink,
+      clock,
+      surface: "operate-server",
+    });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(200, 2_000);
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    const opened = decisions.find((s) => s.decision.kind === "breach_opened");
+    expect(opened).toBeDefined();
+    expect(opened?.signal).toBe("latency");
+    expect(sink.recorded).toHaveLength(1);
+    expect(sink.recorded[0]?.status).toBe("declared");
+    expect(sink.recorded[0]?.category).toBe("performance");
+  });
+
+  it("does not declare when latency is well under budget", async () => {
+    const clock = new FixedClock(BASE);
+    const engine: SloEngineLike = { recordOutcome: () => {}, evaluate: () => [] };
+    const latencyEngine = buildServingLatencyEngine({ clock, p95Budget: "300ms" });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({ engine, latencyEngine, sink, clock });
+    for (let i = 0; i < 50; i += 1) {
+      monitor.recordRequest(200, 50);
+      clock.advance(1_000);
+    }
+    await monitor.sweep(clock.now());
+    expect(sink.recorded).toHaveLength(0);
+  });
+
+  it("availability stays clean when every request is ok-but-slow", async () => {
+    const clock = new FixedClock(BASE);
+    const availabilityEngine = buildServingSloEngine({ clock, surface: "operate-server" });
+    const latencyEngine = buildServingLatencyEngine({ clock, surface: "operate-server" });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({
+      engine: availabilityEngine,
+      latencyEngine,
+      sink,
+      clock,
+      surface: "operate-server",
+    });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(200, 2_000);
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    const openedLatency = decisions.find((s) => s.signal === "latency" && s.decision.kind === "breach_opened");
+    const openedAvailability = decisions.find(
+      (s) => s.signal === "availability" && s.decision.kind === "breach_opened",
+    );
+    expect(openedLatency).toBeDefined();
+    expect(openedAvailability).toBeUndefined();
+    expect(sink.recorded).toHaveLength(1);
+    expect(sink.recorded[0]?.category).toBe("performance");
+  });
 });
 
 describe("OperateSloMonitor.sweep — recovery", () => {
-  it("resolves the incident on a recovered decision", async () => {
+  it("resolves the incident on a recovered availability decision", async () => {
     const recovered: EnforcementDecision = {
       kind: "recovered",
       surface: "operate-server",
@@ -93,6 +205,27 @@ describe("OperateSloMonitor.sweep — recovery", () => {
     expect(sink.resolved).toEqual([{ id: "INC-2026-0001", actor: "00000000-0000-4000-8000-000000000009" }]);
   });
 
+  it("resolves the incident on a recovered latency decision", async () => {
+    const recovered: LatencyEnforcementDecision = {
+      kind: "recovered",
+      surface: "operate-server",
+      sloId: "operate-server-latency",
+      incidentId: "INC-2026-0042",
+      killSwitchId: null,
+    };
+    const engine: SloEngineLike = { recordOutcome: () => {}, evaluate: () => [] };
+    const latencyEngine: LatencyEngineLike = { recordOutcome: () => {}, evaluate: () => [recovered] };
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({
+      engine,
+      latencyEngine,
+      sink,
+      declaredBy: "00000000-0000-4000-8000-00000000000a",
+    });
+    await monitor.sweep(BASE);
+    expect(sink.resolved).toEqual([{ id: "INC-2026-0042", actor: "00000000-0000-4000-8000-00000000000a" }]);
+  });
+
   it("is log-only when no sink is wired", async () => {
     const recovered: EnforcementDecision = {
       kind: "recovered", surface: "s", sloId: "s-availability", incidentId: "INC-2026-0001", killSwitchId: null,
@@ -102,6 +235,26 @@ describe("OperateSloMonitor.sweep — recovery", () => {
     const monitor = new OperateSloMonitor({ engine, log: (l) => logs.push(l) });
     await monitor.sweep(BASE);
     expect(logs.join("\n")).toContain("SLO RECOVERED INC-2026-0001");
+  });
+
+  it("logs the latency breach line on a latency breach without a sink", async () => {
+    const clock = new FixedClock(BASE);
+    const engine: SloEngineLike = { recordOutcome: () => {}, evaluate: () => [] };
+    const latencyEngine = buildServingLatencyEngine({ clock, surface: "operate-server" });
+    const logs: string[] = [];
+    const monitor = new OperateSloMonitor({
+      engine,
+      latencyEngine,
+      clock,
+      surface: "operate-server",
+      log: (l) => logs.push(l),
+    });
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(200, 2_000);
+      clock.advance(1_000);
+    }
+    await monitor.sweep(clock.now());
+    expect(logs.join("\n")).toMatch(/LATENCY BREACH INC-\d{4}-\d{4,8}/);
   });
 });
 
@@ -310,5 +463,27 @@ describe("OperateSloMonitor.recordRequest — per-route surface", () => {
     monitor.recordRequest(503, 2, "product.list");
     expect(outcomes[0]?.surface).toBe("agg");
     expect(outcomes[1]?.surface).toBe("product.list");
+  });
+});
+
+describe("buildServingLatencyEngine", () => {
+  it("rejects an invalid budget string", () => {
+    expect(() => buildServingLatencyEngine({ p95Budget: "fast" })).toThrow();
+  });
+
+  it("accepts a seconds-suffixed budget", () => {
+    const clock = new FixedClock(BASE);
+    const engine = buildServingLatencyEngine({ p95Budget: "5s", clock });
+    for (let i = 0; i < 25; i += 1) {
+      engine.recordOutcome({
+        surface: "operate-server",
+        outcome: "ok",
+        at: clock.now().toISOString(),
+        latencyMs: 200,
+      });
+      clock.advance(1_000);
+    }
+    // 200ms is well under a 5s budget — no breach
+    expect(engine.evaluate(clock.now())).toEqual([]);
   });
 });

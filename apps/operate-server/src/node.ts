@@ -21,6 +21,7 @@ import {
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 import {
   OperateSloMonitor,
+  buildServingLatencyEngine,
   buildServingSloEngineForManifest,
 } from "./slo-incidents.js";
 
@@ -189,8 +190,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (options.sloPersist) {
       incidentConn = createNodePgConnection(parsePgEnvConfig());
     }
-    // Per-route engine over the compiled manifest (P2.37). Wrapped with the
-    // persistent decoration (P2.33) when --slo-persist is set so every
+    // Per-route availability engine over the compiled manifest (P2.37). Wrapped
+    // with the persistent decoration (P2.33) when --slo-persist is set so every
     // per-route decision also writes a row to meta.slo_enforcement_actions /
     // meta.slo_evaluations.
     const engine = buildServingSloEngineForManifest({
@@ -198,8 +199,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {}),
       ...(incidentConn !== null ? { conn: incidentConn } : {}),
     });
+    // Aggregate latency engine (P2.38) — fires a `performance` incident through
+    // the same shared sink on a p95-budget breach. Single-surface for now;
+    // per-route latency SLOs are a deferred follow-up.
+    const latencyEngine = buildServingLatencyEngine({
+      ...(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {}),
+      ...(options.sloLatencyBudget !== null ? { p95Budget: options.sloLatencyBudget } : {}),
+    });
     sloMonitor = new OperateSloMonitor({
       engine,
+      latencyEngine,
       ...(incidentConn !== null ? { sink: new PostgresIncidentSink(incidentConn) } : {}),
       ...(options.sloActor !== null ? { declaredBy: options.sloActor } : {}),
       onError: (err) => process.stderr.write(`[operate-server] SLO sweep error: ${err instanceof Error ? err.message : String(err)}\n`),
