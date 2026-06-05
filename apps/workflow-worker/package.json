@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@crossengin/incident-response": "workspace:*",
+    "@crossengin/incident-response-pg": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/observability": "workspace:*",
     "@crossengin/observability-runtime": "workspace:*",

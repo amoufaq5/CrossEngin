@@ -2,7 +2,7 @@ import type { IncidentRecord } from "@crossengin/incident-response";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
-import { PostgresIncidentSink } from "./incident-sink.js";
+import { PostgresIncidentSink } from "./sink.js";
 
 function capture(): { conn: PgConnection; last: { sql: string; params: readonly unknown[] } } {
   const last = { sql: "", params: [] as readonly unknown[] };

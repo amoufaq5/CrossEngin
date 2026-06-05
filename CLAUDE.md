@@ -22,13 +22,13 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30** landed: **61 packages + 3 apps, 124
-meta-schema tables, 6,607 offline tests + 28 gated real-Postgres
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31** landed: **62 packages + 3 apps, 124
+meta-schema tables, 6,606 offline tests + 28 gated real-Postgres
 integration tests (17 worker + 11 operate-server) + two CI gates
 (incident-drift + PHI-encryption)**, all green, no type errors. (Earlier
-per-increment lines below say "60 packages" — an off-by-one that
-predates `workflow-worker` being added as a package in P2.3; the live
-count is 61.)
+per-increment lines below say "60"/"61 packages" — those are point-in-time
+snapshots; the live count is 62 after `incident-response-pg` landed in
+P2.31.)
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
 `@crossengin/workflow-worker` runs the workflow runtime as a worker
@@ -347,6 +347,19 @@ feeds a fourth `IncidentMetrics.mttp` (mean/p50/p95/max), so
 `incidents metrics` now reports the full incident-response KPI set
 **MTTP · MTTA · MTTM · MTTR** — the four declared-anchored intervals
 (paged → acknowledged → mitigated → resolved), each from the timeline.
+**P2.31 (ADR-0140) extracted `@crossengin/incident-response-pg`** — the
+incident layer the P2.16–P2.30 increments built (sink · replayer ·
+metrics · CLI runner) moved out of `apps/workflow-worker` into a reusable
+package (deps `incident-response` + `kernel-pg`): `sink.ts`
+(PostgresIncidentSink), `replayer.ts` (PostgresIncidentReplayer +
+verifyTimelineShape + IncidentSummary), `metrics.ts`
+(computeIncidentMetrics + the MTTP/MTTA/MTTM/MTTR helpers), `query.ts`
+(framework-neutral runIncidents / runIncidentWrite over structural
+IncidentQuerySource / IncidentWriteSink). The app keeps the
+`parseIncidentsArgs` parser (tied to its CliUsageError), the page-sink
+transport, the stale-worker-monitor, and the node/bin wiring — now
+importing the domain layer from the package. A pure reorg (no behavior
+change); any `meta.incidents` consumer can now reuse it.
 **P2.14 (ADR-0118) added a projection
 drift-sweep worker mode** — a structural `DriftResyncer` (satisfied by
 `WorkflowReplayer`) + `DriftSweepWorker` that periodically re-projects
@@ -1016,7 +1029,7 @@ covers P1.14 (many_to_many join tables in the column store),
 ADR-0095 covers P1.15 (association link/unlink API over join
 tables), ADR-0096 covers P1.16 (keyset pagination + typed filter
 operators), ADR-0097 covers P1.17 (production JWT/JWKS identity in
-operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers P2.7 (worker observability — heartbeats + per-run outcomes), ADR-0111 covers P2.8 (async activity queue — decouple schedule from execute), ADR-0112 covers P2.9 (definition-level activity execution-mode default), ADR-0113 covers P2.10 (activity-level timeout sweeper — timeoutActivity + claim), ADR-0114 covers P2.11 (stale-worker detection over the heartbeat table), ADR-0115 covers P2.12 (lease-reaper — proactively clear expired worker leases), ADR-0116 covers P2.13 (stale-worker → incident bridge in apps/workflow-worker), ADR-0117 covers P1.23 (operate-server real-Postgres integration test), ADR-0118 covers P2.14 (projection drift-sweep worker mode), ADR-0119 covers P1.24 (ColumnMappedEntityStore real-Postgres integration test), ADR-0120 covers P1.25 (column-store m2m link + FK ON DELETE integration test), ADR-0121 covers P2.15 (live stale-worker monitor in the worker binary), ADR-0122 covers P1.26 (column-store set_null + non-bypassing-role RLS integration test), ADR-0123 covers P2.16 (stale-worker incident persistence sink), ADR-0124 covers P2.17 (worker incident lifecycle — open/resolve dedup), ADR-0125 covers P1.27 (column-store NUMERIC read fidelity), ADR-0126 covers P1.28 (column-store DATE / TIMESTAMPTZ read fidelity), ADR-0127 covers P2.18 (stale-worker incident severity escalation), ADR-0128 covers P2.19 (stale-worker incident timeline entries), ADR-0129 covers P2.20 (stale-worker re-page on escalation), ADR-0130 covers P2.21 (incident replayer — typed read API over meta.incidents), ADR-0131 covers P2.22 (incidents CLI subcommand on workflow-worker), ADR-0132 covers P2.23 (incident metrics — MTTR + open gauges from the timeline), ADR-0133 covers P2.24 (incident ack/mitigate milestones — MTTA + MTTM), ADR-0134 covers P2.25 (incidents ack/mitigate write CLI commands), ADR-0135 covers P2.26 (incident timeline drift CI gate), ADR-0136 covers P2.27 (PHI at-rest encryption CI gate), ADR-0137 covers P2.28 (webhook page transport), ADR-0138 covers P2.29 (page-delivery comms_sent timeline audit), ADR-0139 covers P2.30 (MTTP time-to-page metric)).
+operate-server), ADR-0098 covers P1.18 (JWT/tenant cross-check in the gateway), ADR-0099 covers P1.19 (remote JWKS provider with caching + rotation), ADR-0100 covers P1.20 (background JWKS refresh poller), ADR-0101 covers P1.21 (field selection / projection on list + read), ADR-0102 covers P1.22 (SQL-level projection pushdown in the column store); ADR-0103 covers P2 (workflow-worker — the distributed tick worker), ADR-0104 covers P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers P2.2 (activity retry executor — retryActivity + claim), ADR-0106 covers P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers P2.7 (worker observability — heartbeats + per-run outcomes), ADR-0111 covers P2.8 (async activity queue — decouple schedule from execute), ADR-0112 covers P2.9 (definition-level activity execution-mode default), ADR-0113 covers P2.10 (activity-level timeout sweeper — timeoutActivity + claim), ADR-0114 covers P2.11 (stale-worker detection over the heartbeat table), ADR-0115 covers P2.12 (lease-reaper — proactively clear expired worker leases), ADR-0116 covers P2.13 (stale-worker → incident bridge in apps/workflow-worker), ADR-0117 covers P1.23 (operate-server real-Postgres integration test), ADR-0118 covers P2.14 (projection drift-sweep worker mode), ADR-0119 covers P1.24 (ColumnMappedEntityStore real-Postgres integration test), ADR-0120 covers P1.25 (column-store m2m link + FK ON DELETE integration test), ADR-0121 covers P2.15 (live stale-worker monitor in the worker binary), ADR-0122 covers P1.26 (column-store set_null + non-bypassing-role RLS integration test), ADR-0123 covers P2.16 (stale-worker incident persistence sink), ADR-0124 covers P2.17 (worker incident lifecycle — open/resolve dedup), ADR-0125 covers P1.27 (column-store NUMERIC read fidelity), ADR-0126 covers P1.28 (column-store DATE / TIMESTAMPTZ read fidelity), ADR-0127 covers P2.18 (stale-worker incident severity escalation), ADR-0128 covers P2.19 (stale-worker incident timeline entries), ADR-0129 covers P2.20 (stale-worker re-page on escalation), ADR-0130 covers P2.21 (incident replayer — typed read API over meta.incidents), ADR-0131 covers P2.22 (incidents CLI subcommand on workflow-worker), ADR-0132 covers P2.23 (incident metrics — MTTR + open gauges from the timeline), ADR-0133 covers P2.24 (incident ack/mitigate milestones — MTTA + MTTM), ADR-0134 covers P2.25 (incidents ack/mitigate write CLI commands), ADR-0135 covers P2.26 (incident timeline drift CI gate), ADR-0136 covers P2.27 (PHI at-rest encryption CI gate), ADR-0137 covers P2.28 (webhook page transport), ADR-0138 covers P2.29 (page-delivery comms_sent timeline audit), ADR-0139 covers P2.30 (MTTP time-to-page metric), ADR-0140 covers P2.31 (incident-response-pg package extraction)).
 ADR-0047 covers M1, ADR-0048 covers M2,
 ADR-0049 covers M3, ADR-0050 covers M4, ADR-0051 covers M5,
 ADR-0052 covers M6, ADR-0053 covers M2.7 (Anthropic provider),
@@ -1473,6 +1486,10 @@ re-exporting everything.
   added the `incidents ack|mitigate <id>` write commands —
   runIncidentWrite over a structural IncidentWriteSink, the sink returns
   rowCount>0 so the CLI reports a real transition vs an idempotent no-op).
+  **P2.31 (ADR-0140) extracted the incident sink/replayer/metrics/runner
+  into `@crossengin/incident-response-pg`** (see its own entry); the app
+  now imports them and keeps only `parseIncidentsArgs`, page-sink,
+  stale-worker-monitor, and the node/bin wiring.
   All logic offline-tested. An ops guide (README.md) documents the 8 modes,
   flags, claim/lease model, and the heartbeat → detect → plan → page →
   run → persist → escalate → re-page → resolve flow.
@@ -1822,6 +1839,23 @@ re-exporting everything.
   incident roles, 8-state incident lifecycle, runbook
   executions, blameless postmortems with action items,
   customer comms with GDPR 72h breach notification deadline.
+- **`incident-response-pg`** — Phase 3 P2.31: the Postgres
+  persistence + ops layer over `meta.incidents` (extracted from
+  `apps/workflow-worker`). 4 modules: sink (PostgresIncidentSink —
+  record/resolve/escalate/acknowledge/mitigate/recordCommsSent, each a
+  guarded UPDATE appending a typed timeline entry), replayer
+  (PostgresIncidentReplayer listOpen/listForPeriod/getByIncidentId +
+  pure verifyTimelineShape [8 drift kinds] / summarizeIncidentIssues /
+  rowToIncidentSummary + IncidentSummary read projection), metrics
+  (computeIncidentMetrics → MTTP/MTTA/MTTM/MTTR mean/p50/p95/max +
+  open/resolved + per-severity gauges + escalation totals;
+  incidentTimeToPageMs / incidentMilestoneMs / incidentResolutionMs +
+  formatIncidentMetrics), query (framework-neutral runIncidents /
+  runIncidentWrite over structural IncidentQuerySource /
+  IncidentWriteSink + formatIncidentList / formatVerifyReport +
+  IncidentsCliOptions). Deps: `incident-response` + `kernel-pg`. The
+  workflow-worker app's `incidents` CLI + `--monitor` paths wire it in;
+  any other `meta.incidents` consumer can reuse it.
 - **`forensics`** — hash-chained tamper-evident logs, evidence
   with sealed/retention/destruction lifecycle, chain-of-custody
   with sha256-verified transfers, legal holds with separation of
@@ -2480,7 +2514,7 @@ Phase 3 P1.21 (field selection / projection on list + read in
 `operate-runtime`), ADR-0102 covers Phase 3 P1.22 (SQL-level
 projection pushdown in the column store), ADR-0103 covers Phase 3
 P2 (`workflow-worker` — the distributed tick worker over the PG
-event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers Phase 3 P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers Phase 3 P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers Phase 3 P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers Phase 3 P2.7 (worker observability — heartbeats + per-run outcomes), ADR-0111 covers Phase 3 P2.8 (async activity queue — decouple schedule from execute), ADR-0112 covers Phase 3 P2.9 (definition-level activity execution-mode default), ADR-0113 covers Phase 3 P2.10 (activity-level timeout sweeper — timeoutActivity + claim), ADR-0114 covers Phase 3 P2.11 (stale-worker detection over the heartbeat table), ADR-0115 covers Phase 3 P2.12 (lease-reaper — proactively clear expired worker leases), ADR-0116 covers Phase 3 P2.13 (stale-worker → incident bridge in apps/workflow-worker), ADR-0117 covers Phase 3 P1.23 (operate-server real-Postgres integration test), ADR-0118 covers Phase 3 P2.14 (projection drift-sweep worker mode), ADR-0119 covers Phase 3 P1.24 (ColumnMappedEntityStore real-Postgres integration test), ADR-0120 covers Phase 3 P1.25 (column-store m2m link + FK ON DELETE integration test), ADR-0121 covers Phase 3 P2.15 (live stale-worker monitor in the worker binary), ADR-0122 covers Phase 3 P1.26 (column-store set_null + non-bypassing-role RLS integration test), ADR-0123 covers Phase 3 P2.16 (stale-worker incident persistence sink), ADR-0124 covers Phase 3 P2.17 (worker incident lifecycle — open/resolve dedup), ADR-0125 covers Phase 3 P1.27 (column-store NUMERIC read fidelity), ADR-0126 covers Phase 3 P1.28 (column-store DATE / TIMESTAMPTZ read fidelity), ADR-0127 covers Phase 3 P2.18 (stale-worker incident severity escalation), ADR-0128 covers Phase 3 P2.19 (stale-worker incident timeline entries), ADR-0129 covers Phase 3 P2.20 (stale-worker re-page on escalation), ADR-0130 covers Phase 3 P2.21 (incident replayer — typed read API over meta.incidents), ADR-0131 covers Phase 3 P2.22 (incidents CLI subcommand on workflow-worker), ADR-0132 covers Phase 3 P2.23 (incident metrics — MTTR + open gauges from the timeline), ADR-0133 covers Phase 3 P2.24 (incident ack/mitigate milestones — MTTA + MTTM), ADR-0134 covers Phase 3 P2.25 (incidents ack/mitigate write CLI commands), ADR-0135 covers Phase 3 P2.26 (incident timeline drift CI gate), ADR-0136 covers Phase 3 P2.27 (PHI at-rest encryption CI gate), ADR-0137 covers Phase 3 P2.28 (webhook page transport), ADR-0138 covers Phase 3 P2.29 (page-delivery comms_sent timeline audit), ADR-0139 covers Phase 3 P2.30 (MTTP time-to-page metric; ADRs 0080-0085 reserved for P3-P8).
+event log), ADR-0104 covers Phase 3 P2.1 (per-unit timer claim + fireTimer for parallel workers), ADR-0105 covers Phase 3 P2.2 (activity retry executor in workflow-worker), ADR-0106 covers Phase 3 P2.3 (apps/workflow-worker — the runnable distributed worker binary), ADR-0107 covers Phase 3 P2.4 (activity retry backoff — next_retry_at population), ADR-0108 covers Phase 3 P2.5 (instance timeout sweeper — timeoutInstance + claim), ADR-0109 covers Phase 3 P2.6 (real-Postgres worker integration test + projection NOT NULL fixes), ADR-0110 covers Phase 3 P2.7 (worker observability — heartbeats + per-run outcomes), ADR-0111 covers Phase 3 P2.8 (async activity queue — decouple schedule from execute), ADR-0112 covers Phase 3 P2.9 (definition-level activity execution-mode default), ADR-0113 covers Phase 3 P2.10 (activity-level timeout sweeper — timeoutActivity + claim), ADR-0114 covers Phase 3 P2.11 (stale-worker detection over the heartbeat table), ADR-0115 covers Phase 3 P2.12 (lease-reaper — proactively clear expired worker leases), ADR-0116 covers Phase 3 P2.13 (stale-worker → incident bridge in apps/workflow-worker), ADR-0117 covers Phase 3 P1.23 (operate-server real-Postgres integration test), ADR-0118 covers Phase 3 P2.14 (projection drift-sweep worker mode), ADR-0119 covers Phase 3 P1.24 (ColumnMappedEntityStore real-Postgres integration test), ADR-0120 covers Phase 3 P1.25 (column-store m2m link + FK ON DELETE integration test), ADR-0121 covers Phase 3 P2.15 (live stale-worker monitor in the worker binary), ADR-0122 covers Phase 3 P1.26 (column-store set_null + non-bypassing-role RLS integration test), ADR-0123 covers Phase 3 P2.16 (stale-worker incident persistence sink), ADR-0124 covers Phase 3 P2.17 (worker incident lifecycle — open/resolve dedup), ADR-0125 covers Phase 3 P1.27 (column-store NUMERIC read fidelity), ADR-0126 covers Phase 3 P1.28 (column-store DATE / TIMESTAMPTZ read fidelity), ADR-0127 covers Phase 3 P2.18 (stale-worker incident severity escalation), ADR-0128 covers Phase 3 P2.19 (stale-worker incident timeline entries), ADR-0129 covers Phase 3 P2.20 (stale-worker re-page on escalation), ADR-0130 covers Phase 3 P2.21 (incident replayer — typed read API over meta.incidents), ADR-0131 covers Phase 3 P2.22 (incidents CLI subcommand on workflow-worker), ADR-0132 covers Phase 3 P2.23 (incident metrics — MTTR + open gauges from the timeline), ADR-0133 covers Phase 3 P2.24 (incident ack/mitigate milestones — MTTA + MTTM), ADR-0134 covers Phase 3 P2.25 (incidents ack/mitigate write CLI commands), ADR-0135 covers Phase 3 P2.26 (incident timeline drift CI gate), ADR-0136 covers Phase 3 P2.27 (PHI at-rest encryption CI gate), ADR-0137 covers Phase 3 P2.28 (webhook page transport), ADR-0138 covers Phase 3 P2.29 (page-delivery comms_sent timeline audit), ADR-0139 covers Phase 3 P2.30 (MTTP time-to-page metric), ADR-0140 covers Phase 3 P2.31 (incident-response-pg package extraction; ADRs 0080-0085 reserved for P3-P8).
 When you ship
 a new package, write the matching ADR in the same session,
 following `0000-template.md` and the style of the existing

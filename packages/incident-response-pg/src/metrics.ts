@@ -1,6 +1,6 @@
 import { SEVERITIES, type Severity } from "@crossengin/incident-response";
 
-import { isOpenIncidentStatus, type IncidentSummary } from "./incident-replayer.js";
+import { isOpenIncidentStatus, type IncidentSummary } from "./replayer.js";
 
 export interface MttrStats {
   readonly count: number;

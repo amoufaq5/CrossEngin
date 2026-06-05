@@ -121,6 +121,9 @@ importers:
       '@crossengin/incident-response':
         specifier: workspace:*
         version: link:../../packages/incident-response
+      '@crossengin/incident-response-pg':
+        specifier: workspace:*
+        version: link:../../packages/incident-response-pg
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../../packages/kernel-pg
@@ -774,6 +777,31 @@ importers:
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/incident-response-pg:
+    dependencies:
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../incident-response
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../kernel-pg
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

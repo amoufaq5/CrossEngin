@@ -9,7 +9,7 @@ import {
   summarizeIncidentIssues,
   verifyTimelineShape,
   type IncidentSummary,
-} from "./incident-replayer.js";
+} from "./replayer.js";
 
 function entry(kind: TimelineEntry["kind"], occurredAt: string): TimelineEntry {
   return { occurredAt, actorUserId: "00000000-0000-4000-8000-000000000001", kind, message: kind, metadata: {} };

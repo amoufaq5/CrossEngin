@@ -11,13 +11,18 @@ import {
   WorkerHeartbeat,
 } from "@crossengin/workflow-worker";
 
+import {
+  PostgresIncidentReplayer,
+  PostgresIncidentSink,
+  runIncidents,
+  runIncidentWrite,
+  type IncidentsCliOptions,
+} from "@crossengin/incident-response-pg";
+
 import type { WorkerCliOptions } from "./cli.js";
 import { buildWorkerSet, type WorkerSet } from "./runner.js";
 import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
-import { PostgresIncidentSink } from "./incident-sink.js";
-import { PostgresIncidentReplayer } from "./incident-replayer.js";
 import { LoggingPageDeliverer, WebhookPageDeliverer, deliverPages, type PageDeliverer } from "./page-sink.js";
-import { runIncidents, runIncidentWrite, type IncidentsCliOptions } from "./incidents-cli.js";
 
 /**
  * Parses a `--definitions` JSON file (an array of `WorkflowDefinition`s) into the

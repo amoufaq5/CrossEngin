@@ -32,10 +32,13 @@ import {
 import { formatIncidentId } from "@crossengin/observability-runtime";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import {
+  PostgresIncidentReplayer,
+  PostgresIncidentSink,
+  computeIncidentMetrics,
+} from "@crossengin/incident-response-pg";
+
 import { StaleWorkerMonitor, type StaleWorkerEnforcement } from "./stale-worker-monitor.js";
-import { PostgresIncidentSink } from "./incident-sink.js";
-import { PostgresIncidentReplayer } from "./incident-replayer.js";
-import { computeIncidentMetrics } from "./incident-metrics.js";
 
 /**
  * Real-Postgres integration test for the distributed-worker claim loops. Gated
