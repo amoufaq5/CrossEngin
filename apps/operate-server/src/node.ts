@@ -19,7 +19,10 @@ import {
   type JwtVerifyConfig,
 } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
-import { OperateSloMonitor, buildServingSloEngine } from "./slo-incidents.js";
+import {
+  OperateSloMonitor,
+  buildServingSloEngineForManifest,
+} from "./slo-incidents.js";
 
 /** The slice of Node's `IncomingMessage` the adapter reads. */
 export interface NodeReqLike extends AsyncIterable<Uint8Array> {
@@ -59,11 +62,12 @@ async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
  */
 export function createNodeRequestListener(
   server: OperateHttpServer,
-  onRequest?: (status: number, latencyMs: number) => void,
+  onRequest?: (status: number, latencyMs: number, surface: string | null) => void,
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   return async (req, res) => {
     const startedAt = Date.now();
     let status = 500;
+    let matchedOperationId: string | null = null;
     try {
       const body = await readBody(req);
       const raw: RawHttpRequest = {
@@ -72,7 +76,9 @@ export function createNodeRequestListener(
         headers: req.headers,
         remoteAddress: req.socket?.remoteAddress ?? null,
       };
-      const response = await server.dispatch(raw, body);
+      const dispatched = await server.dispatchWithMatch(raw, body);
+      const response = dispatched.response;
+      matchedOperationId = dispatched.matchedOperationId;
       status = response.status;
       res.writeHead(response.status, response.headers);
       res.end(response.body ?? undefined);
@@ -93,7 +99,7 @@ export function createNodeRequestListener(
       });
       res.end(payload);
     } finally {
-      onRequest?.(status, Date.now() - startedAt);
+      onRequest?.(status, Date.now() - startedAt, matchedOperationId);
     }
   };
 }
@@ -183,7 +189,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (options.sloPersist) {
       incidentConn = createNodePgConnection(parsePgEnvConfig());
     }
-    const engine = buildServingSloEngine({
+    // Per-route engine over the compiled manifest (P2.37). Wrapped with the
+    // persistent decoration (P2.33) when --slo-persist is set so every
+    // per-route decision also writes a row to meta.slo_enforcement_actions /
+    // meta.slo_evaluations.
+    const engine = buildServingSloEngineForManifest({
+      manifest,
       ...(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {}),
       ...(incidentConn !== null ? { conn: incidentConn } : {}),
     });
@@ -199,7 +210,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
 
   const listener = createNodeRequestListener(
     httpServer,
-    sloMonitor !== null ? (status, latencyMs) => sloMonitor?.recordRequest(status, latencyMs) : undefined,
+    sloMonitor !== null
+      ? (status, latencyMs, surface) =>
+          sloMonitor?.recordRequest(status, latencyMs, surface ?? undefined)
+      : undefined,
   );
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);

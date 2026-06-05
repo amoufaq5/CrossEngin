@@ -41,9 +41,29 @@ export class OperateHttpServer {
   }
 
   async dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> {
+    return (await this.dispatchWithMatch(raw, body)).response;
+  }
+
+  /**
+   * Like `dispatch`, but additionally surfaces the matched route's operationId so
+   * the listener can attribute the request to a per-route SLO surface. `null`
+   * means no route matched (e.g. 404 or unknown method).
+   */
+  async dispatchWithMatch(
+    raw: RawHttpRequest,
+    body: Uint8Array | null,
+  ): Promise<{ response: RawHttpResponse; matchedOperationId: string | null }> {
     const method = parseMethod(raw.method);
     if (method === null) {
-      return problem(405, METHOD_NOT_ALLOWED_TYPE, "Method not allowed", `unsupported method ${raw.method}`);
+      return {
+        response: problem(
+          405,
+          METHOD_NOT_ALLOWED_TYPE,
+          "Method not allowed",
+          `unsupported method ${raw.method}`,
+        ),
+        matchedOperationId: null,
+      };
     }
     const forwardedProto = headerScheme(raw) ?? this.scheme;
     const incoming = rawToIncoming(raw, body, {
@@ -52,8 +72,11 @@ export class OperateHttpServer {
       id: this.idGenerator(),
       receivedAt: this.now().toISOString(),
     });
-    const { response } = await this.gateway.runtime.handleRequest(incoming);
-    return { status: response.status, headers: { ...response.headers }, body: response.bodyBytes };
+    const { response, execution } = await this.gateway.runtime.handleRequest(incoming);
+    return {
+      response: { status: response.status, headers: { ...response.headers }, body: response.bodyBytes },
+      matchedOperationId: execution.routeOperationId,
+    };
   }
 }
 

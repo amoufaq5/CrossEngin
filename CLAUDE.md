@@ -1444,16 +1444,25 @@ re-exporting everything.
   serve() wires it under --slo (+ --slo-persist / --slo-actor /
   --slo-interval-ms). A gated test declares + persists a serving-availability
   incident and reads it back via the shared PostgresIncidentReplayer. P2.33
-  (ADR-0142) completed the SLO persistence story: buildServingSloEngine now
-  takes an optional PgConnection and, when set, wraps the engine via
+  (ADR-0142) completed the SLO persistence story: buildServingSloEngine takes
+  an optional PgConnection and, when set, wraps the engine via
   buildPersistentSloEnforcementEngine (from `@crossengin/observability-runtime-pg`)
   so every `recordOutcome→evaluate` cycle also writes an enforcement action
   to meta.slo_enforcement_actions per decision and an evaluation snapshot to
-  meta.slo_evaluations per breach_opened (M8.5). --slo-persist now threads
-  the same incident PgConnection into the engine wrapping; the in-process
-  default (no conn) is unchanged. The serving app now persists the full SLO
-  audit trail — incident + enforcement actions + breach snapshots — under
-  one durable flag.
+  meta.slo_evaluations per breach_opened (M8.5). P2.37 (ADR-0146) refined the
+  single aggregate SLO into **one availability SLO per (method, operationId)**:
+  `routesForManifest(manifest)` derives the route shape from `manifestRouteSpecs`
+  (one entry per CRUD verb + per `entityLifecycle` transition),
+  `buildServingSloEngineForManifest` constructs the engine with N registrations
+  (`<method>-<surface>-availability` id, default 99% / 30d, accepts the same
+  `conn` for persistence), and `OperateHttpServer.dispatchWithMatch` returns the
+  matched operationId so the Node listener threads the per-request surface into
+  `OperateSloMonitor.recordRequest(status, latencyMs, surface?)`. A 5xx burst on
+  `POST /v1/orders` declares its own incident on `POST-salesOrder.create-
+  availability`, leaving a parallel healthy `GET /v1/products` stream out of
+  the burn; `serve()` builds the per-manifest engine under `--slo` (and threads
+  the incident-sink conn into it under `--slo-persist` so the full audit trail —
+  incident + enforcement actions + breach snapshots — is durable under one flag).
 - **`apps/workflow-worker`** — Phase 3 P2.3: the runnable
   distributed-worker binary (third app under `apps/`, after
   `architect-cli` + `operate-server`). 4 src modules + a bin: cli

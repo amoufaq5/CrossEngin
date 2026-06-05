@@ -1,5 +1,6 @@
 import type { IncidentRecord } from "@crossengin/incident-response";
 import type { PgConnection } from "@crossengin/kernel-pg";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import {
   SloEnforcementEngine,
@@ -7,8 +8,10 @@ import {
   type EnforcementDecision,
   type RequestOutcome,
   type SloEnforcementEngineOptions,
+  type SloRegistration,
 } from "@crossengin/observability-runtime";
 import { buildPersistentSloEnforcementEngine } from "@crossengin/observability-runtime-pg";
+import { manifestRouteSpecs, type RouteSpec } from "@crossengin/operate-runtime";
 
 /** A system actor id (UUID) used as the default SLO incident declarer. */
 export const DEFAULT_SLO_ACTOR = "00000000-0000-4000-8000-000000000000";
@@ -31,6 +34,31 @@ export interface SloEngineLike {
   evaluate(now?: Date): readonly EnforcementDecision[] | Promise<readonly EnforcementDecision[]>;
 }
 
+/** A single route exposed by a compiled manifest: a (method, operationId) pair. */
+export interface ServingRoute {
+  readonly method: string;
+  readonly surface: string;
+}
+
+/**
+ * Derives one `ServingRoute` per (method, operationId) the compiled manifest
+ * exposes. Each route becomes a candidate per-route SLO surface; the operationId
+ * is the stable identifier (camelCase, e.g. `product.list`) that survives URL
+ * path-parameter substitution.
+ */
+export function routesForManifest(manifest: Manifest): readonly ServingRoute[] {
+  const specs: readonly RouteSpec[] = manifestRouteSpecs(manifest);
+  return specs.map((spec) => ({ method: spec.method, surface: spec.operationId }));
+}
+
+/** Composes the per-route SLO id from a (method, surface) pair. */
+export function perRouteSloId(method: string, surface: string): string {
+  return `${method}-${surface}-availability`;
+}
+
+/** The default aggregate surface used when no per-route surface is passed. */
+export const DEFAULT_SERVING_SURFACE = "operate-server";
+
 export interface BuildServingSloEngineOptions {
   /** The aggregate serving surface the availability SLO covers (request outcomes ride this). */
   readonly surface?: string;
@@ -50,18 +78,22 @@ export interface BuildServingSloEngineOptions {
   readonly conn?: PgConnection;
 }
 
+function defaultAlertPolicy(): AlertPolicy {
+  return {
+    id: "operate-server",
+    routes: [{ severity: "P1", channels: [{ kind: "pagerduty_phone", serviceKey: "operate-server-oncall" }] }],
+  };
+}
+
 function sloEnforcementOptions(options: BuildServingSloEngineOptions): SloEnforcementEngineOptions {
-  const surface = options.surface ?? "operate-server";
+  const surface = options.surface ?? DEFAULT_SERVING_SURFACE;
   const actor = options.systemActorUserId ?? DEFAULT_SLO_ACTOR;
   const slo: Slo = {
     id: `${surface}-availability`,
     surface,
     targets: [{ kind: "availability", target: options.target ?? 0.99, window: "30d" }],
   };
-  const alertPolicy: AlertPolicy = options.alertPolicy ?? {
-    id: "operate-server",
-    routes: [{ severity: "P1", channels: [{ kind: "pagerduty_phone", serviceKey: "operate-server-oncall" }] }],
-  };
+  const alertPolicy: AlertPolicy = options.alertPolicy ?? defaultAlertPolicy();
   return {
     alertPolicy,
     systemActorUserId: actor,
@@ -88,6 +120,56 @@ export function buildServingSloEngine(options: BuildServingSloEngineOptions = {}
   return buildPersistentSloEnforcementEngine(options.conn, engineOptions);
 }
 
+export interface BuildServingSloEngineForManifestOptions {
+  readonly manifest: Manifest;
+  /** Availability target applied to every per-route SLO (default 0.99). */
+  readonly target?: number;
+  /** A UUID system actor for the declared incidents / kill switches. */
+  readonly systemActorUserId?: string;
+  readonly alertPolicy?: AlertPolicy;
+  readonly clock?: Clock;
+  /**
+   * When set, the returned engine is wrapped by `buildPersistentSloEnforcementEngine`
+   * — same persistence semantics as `buildServingSloEngine`'s `conn` option, applied
+   * across every per-route registration.
+   */
+  readonly conn?: PgConnection;
+}
+
+/**
+ * Builds an availability SLO engine with **one SLO per (method, operationId)**
+ * the manifest exposes — so a 5xx burst on one route declares its own incident
+ * rather than diluting a global one. Routes the gateway doesn't expose get no
+ * SLO; only routes derived from `manifestRouteSpecs` (CRUD + lifecycle
+ * transitions) are covered. With `conn`, the engine is wrapped by
+ * `buildPersistentSloEnforcementEngine` so per-route decisions persist too.
+ */
+export function buildServingSloEngineForManifest(
+  options: BuildServingSloEngineForManifestOptions,
+): SloEngineLike {
+  const actor = options.systemActorUserId ?? DEFAULT_SLO_ACTOR;
+  const target = options.target ?? 0.99;
+  const alertPolicy: AlertPolicy = options.alertPolicy ?? defaultAlertPolicy();
+  const routes = routesForManifest(options.manifest);
+  const registrations: SloRegistration[] = routes.map((route) => ({
+    slo: {
+      id: perRouteSloId(route.method, route.surface),
+      surface: route.surface,
+      targets: [{ kind: "availability", target, window: "30d" }],
+    },
+    category: "availability",
+  }));
+  const engineOptions: SloEnforcementEngineOptions = {
+    alertPolicy,
+    systemActorUserId: actor,
+    declaredBy: actor,
+    registrations,
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
+  };
+  if (options.conn === undefined) return new SloEnforcementEngine(engineOptions);
+  return buildPersistentSloEnforcementEngine(options.conn, engineOptions);
+}
+
 const DEFAULT_SCHEDULER: SloScheduler = {
   setInterval(handler, ms) {
     const h = setInterval(handler, ms);
@@ -108,7 +190,7 @@ export interface OperateSloMonitorOptions {
   readonly engine: SloEngineLike;
   /** When set, declared incidents persist to `meta.incidents` (else log-only). */
   readonly sink?: IncidentPersistSink;
-  /** The serving surface request outcomes are recorded under (matches the SLO). */
+  /** The fallback serving surface when `recordRequest` is called without one. */
   readonly surface?: string;
   /** Actor for the `resolve` transition on recovery. */
   readonly declaredBy?: string;
@@ -122,8 +204,9 @@ export interface OperateSloMonitorOptions {
  * Drives the serving SLO loop: feeds each HTTP request's outcome into the engine
  * and, on a `sweep`, persists a declared availability incident to `meta.incidents`
  * via the shared `@crossengin/incident-response-pg` sink (and resolves it on
- * recovery). The second consumer of `incident-response-pg` — the serving app now
- * declares its own SLO breaches through the same sink the worker uses.
+ * recovery). With a per-route engine (P2.37) the listener passes the matched
+ * route's surface so each route is its own SLO; absent a surface the aggregate
+ * fallback is used.
  */
 export class OperateSloMonitor {
   private readonly engine: SloEngineLike;
@@ -139,7 +222,7 @@ export class OperateSloMonitor {
   constructor(options: OperateSloMonitorOptions) {
     this.engine = options.engine;
     this.sink = options.sink ?? null;
-    this.surface = options.surface ?? "operate-server";
+    this.surface = options.surface ?? DEFAULT_SERVING_SURFACE;
     this.declaredBy = options.declaredBy ?? DEFAULT_SLO_ACTOR;
     this.clock = options.clock ?? { now: () => new Date() };
     this.onError = options.onError ?? (() => {});
@@ -147,10 +230,14 @@ export class OperateSloMonitor {
     this.scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
   }
 
-  /** Records one request: a 5xx status is an `error` outcome, anything else `ok`. */
-  recordRequest(status: number, latencyMs: number): void {
+  /**
+   * Records one request: a 5xx status is an `error` outcome, anything else `ok`.
+   * `surface` lets the listener pass the matched route's surface so per-route SLOs
+   * fire on that route alone; if omitted, the monitor's aggregate surface is used.
+   */
+  recordRequest(status: number, latencyMs: number, surface?: string): void {
     this.engine.recordOutcome({
-      surface: this.surface,
+      surface: surface ?? this.surface,
       outcome: status >= 500 ? "error" : "ok",
       at: this.clock.now().toISOString(),
       statusCode: status,
@@ -166,7 +253,7 @@ export class OperateSloMonitor {
         this.log(`[operate-server] SLO BREACH ${decision.plan.incident.id} ${decision.severity} on ${decision.surface}`);
         if (this.sink !== null) await this.sink.record(decision.plan.incident);
       } else if (decision.kind === "recovered") {
-        this.log(`[operate-server] SLO RECOVERED ${decision.incidentId}`);
+        this.log(`[operate-server] SLO RECOVERED ${decision.incidentId} on ${decision.surface}`);
         if (this.sink !== null) await this.sink.resolve(decision.incidentId, this.declaredBy);
       }
     }

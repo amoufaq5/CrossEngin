@@ -3,9 +3,13 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { FixedClock, type EnforcementDecision, type RequestOutcome } from "@crossengin/observability-runtime";
 import { describe, expect, it, vi } from "vitest";
 
+import { loadBuiltinPack } from "./manifest-source.js";
 import {
   OperateSloMonitor,
   buildServingSloEngine,
+  buildServingSloEngineForManifest,
+  perRouteSloId,
+  routesForManifest,
   type IncidentPersistSink,
   type SloEngineLike,
   type SloScheduler,
@@ -215,5 +219,96 @@ describe("buildServingSloEngine — persistence wrapping", () => {
     const inserts = capture.filter((c) => c.sql.includes("INSERT INTO"));
     expect(inserts.some((c) => c.sql.includes("slo_enforcement_actions"))).toBe(true);
     expect(inserts.some((c) => c.sql.includes("slo_evaluations"))).toBe(true);
+  });
+});
+
+const retailManifest = await loadBuiltinPack("erp-retail");
+
+describe("routesForManifest", () => {
+  it("derives one (method, surface=operationId) per route the manifest exposes", () => {
+    const routes = routesForManifest(retailManifest);
+    expect(routes.length).toBeGreaterThan(0);
+    for (const r of routes) {
+      expect(["GET", "POST", "PATCH", "DELETE"]).toContain(r.method);
+      expect(r.surface).toMatch(/^[a-z][a-zA-Z]*\.[a-zA-Z_]+$/);
+    }
+    const ids = routes.map((r) => `${r.method} ${r.surface}`);
+    expect(ids).toContain("GET product.list");
+    expect(ids).toContain("POST product.create");
+    expect(ids).toContain("GET product.read");
+    expect(ids).toContain("PATCH product.update");
+    expect(ids).toContain("DELETE product.delete");
+  });
+
+  it("includes one route per entityLifecycle transition", () => {
+    const routes = routesForManifest(retailManifest);
+    const transitions = routes.filter((r) => r.method === "POST" && r.surface.startsWith("salesOrder."));
+    expect(transitions.length).toBeGreaterThan(0);
+    expect(transitions.some((r) => r.surface === "salesOrder.create")).toBe(true);
+    expect(transitions.some((r) => r.surface !== "salesOrder.create")).toBe(true);
+  });
+});
+
+describe("perRouteSloId", () => {
+  it("composes a stable id from method + surface", () => {
+    expect(perRouteSloId("GET", "product.list")).toBe("GET-product.list-availability");
+    expect(perRouteSloId("POST", "salesOrder.place")).toBe("POST-salesOrder.place-availability");
+  });
+});
+
+describe("buildServingSloEngineForManifest", () => {
+  it("registers one availability SLO per manifest route", () => {
+    const clock = new FixedClock(BASE);
+    const engine = buildServingSloEngineForManifest({ manifest: retailManifest, clock });
+    const routes = routesForManifest(retailManifest);
+    expect(engine.activeBreaches()).toHaveLength(0);
+    expect(routes.length).toBeGreaterThan(5);
+
+    for (let i = 0; i < 25; i += 1) {
+      engine.recordOutcome({
+        surface: "product.list",
+        outcome: "error",
+        at: clock.now().toISOString(),
+        statusCode: 503,
+        latencyMs: 5,
+      });
+      clock.advance(1_000);
+    }
+    const decisions = engine.evaluate(clock.now());
+    const opened = decisions.filter((d) => d.kind === "breach_opened");
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.sloId).toBe("GET-product.list-availability");
+    expect(opened[0]?.surface).toBe("product.list");
+  });
+
+  it("a 5xx burst on one route does not declare on a healthy second route", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = buildServingSloEngineForManifest({ manifest: retailManifest, clock });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({ engine, sink, clock });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(503, 5, "product.list");
+      monitor.recordRequest(200, 5, "product.read");
+      clock.advance(1_000);
+    }
+    await monitor.sweep(clock.now());
+    expect(sink.recorded).toHaveLength(1);
+    expect(sink.recorded[0]?.status).toBe("declared");
+    expect(sink.recorded[0]?.category).toBe("availability");
+    const declared = sink.recorded[0]?.timeline.find((t) => t.kind === "declared");
+    expect(declared?.metadata?.["surface"]).toBe("product.list");
+  });
+});
+
+describe("OperateSloMonitor.recordRequest — per-route surface", () => {
+  it("falls back to the aggregate surface when no surface is passed", () => {
+    const outcomes: RequestOutcome[] = [];
+    const engine: SloEngineLike = { recordOutcome: (o) => outcomes.push(o), evaluate: () => [] };
+    const monitor = new OperateSloMonitor({ engine, clock: new FixedClock(BASE), surface: "agg" });
+    monitor.recordRequest(200, 1);
+    monitor.recordRequest(503, 2, "product.list");
+    expect(outcomes[0]?.surface).toBe("agg");
+    expect(outcomes[1]?.surface).toBe("product.list");
   });
 });
