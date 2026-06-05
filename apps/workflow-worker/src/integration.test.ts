@@ -34,6 +34,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { StaleWorkerMonitor, type StaleWorkerEnforcement } from "./stale-worker-monitor.js";
 import { PostgresIncidentSink } from "./incident-sink.js";
+import { PostgresIncidentReplayer } from "./incident-replayer.js";
 
 /**
  * Real-Postgres integration test for the distributed-worker claim loops. Gated
@@ -558,6 +559,59 @@ suite("workflow-worker integration (real Postgres)", () => {
     const timeline = escalated.rows[0]?.timeline as ReadonlyArray<{ kind: string; metadata?: { severity?: string } }>;
     const changed = timeline.find((e) => e.kind === "severity_changed");
     expect(changed?.metadata?.severity).toBe("sev2");
+  });
+
+  it("the incident replayer reads open incidents, a window, and verifies a clean timeline", async () => {
+    const declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [declaredBy, "monitor@crossengin.test"]);
+    await conn.query("UPDATE meta.worker_heartbeats SET status = 'stopped' WHERE status = 'running'");
+
+    const store = new PostgresWorkerHeartbeatStore(conn);
+    const worker = `wh-rep-${Math.random().toString(36).slice(2, 8)}`;
+    const beat = (lastHeartbeatAt: string) =>
+      store.upsert({ workerId: worker, mode: "all", status: "running", hostname: "h", startedAt: "2026-06-04T11:00:00.000Z", lastHeartbeatAt, lastRunAt: null, pollCount: 1, claimedTotal: 0, processedTotal: 0, errorCount: 0, lastError: null });
+    await beat("2026-06-04T11:55:00.000Z"); // stale
+
+    const sink = new PostgresIncidentSink(conn);
+    const openId = `INC-2026-${Math.floor(1000 + Math.random() * 8999).toString()}`;
+    const monitor = new StaleWorkerMonitor({
+      source: store, declaredBy, staleAfterMs: 60_000,
+      clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
+      nextIncidentId: () => openId,
+      onIncident: async (plan) => { await sink.record(plan.incident); },
+      onResolve: async (id) => { await sink.resolve(id, declaredBy); },
+    });
+    await monitor.checkOnce(); // declares the open incident
+
+    const replayer = new PostgresIncidentReplayer(conn);
+
+    // listOpen surfaces the just-declared (non-terminal) incident with its timeline
+    const open = await replayer.listOpen();
+    const mine = open.find((s) => s.incidentId === openId);
+    expect(mine).toBeDefined();
+    expect(mine?.status).toBe("declared");
+    expect(mine?.timeline.map((e) => e.kind)).toEqual(["declared"]);
+
+    // verify the declared incident is clean
+    expect(await replayer.verifyByIncidentId(openId)).toEqual([]);
+
+    // resolve it, then confirm it leaves the open set and verifies clean (declared → resolved)
+    await conn.query(`UPDATE meta.worker_heartbeats SET status = 'stopped' WHERE worker_id <> $1 AND status = 'running' AND last_heartbeat_at < $2`, [worker, "2026-06-04T11:59:00.000Z"]);
+    await beat("2026-06-04T11:59:30.000Z"); // recovered
+    await monitor.checkOnce(); // resolves
+
+    const afterResolve = await replayer.listOpen();
+    expect(afterResolve.find((s) => s.incidentId === openId)).toBeUndefined();
+
+    const resolved = await replayer.getByIncidentId(openId);
+    expect(resolved?.status).toBe("resolved");
+    expect(resolved?.resolvedAt).not.toBeNull();
+    expect(resolved?.timeline.map((e) => e.kind)).toEqual(["declared", "resolved"]);
+    expect(await replayer.verifyByIncidentId(openId)).toEqual([]);
+
+    // listForPeriod returns the incident in a window spanning its declaration
+    const window = await replayer.listForPeriod({ from: "2026-06-04T00:00:00.000Z", to: "2026-06-05T00:00:00.000Z" });
+    expect(window.some((s) => s.incidentId === openId)).toBe(true);
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {

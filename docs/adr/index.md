@@ -181,3 +181,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 95 | 0127 | 2,500 | Drafted alongside the stale-worker incident severity escalation (Phase 3 P2.18) |
 | 96 | 0128 | 2,500 | Drafted alongside the stale-worker incident timeline entries (Phase 3 P2.19) |
 | 97 | 0129 | 2,500 | Drafted alongside the stale-worker re-page on escalation (Phase 3 P2.20) |
+| 98 | 0130 | 3,000 | Drafted alongside the incident replayer — typed read API over meta.incidents (Phase 3 P2.21) |
