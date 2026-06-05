@@ -660,6 +660,32 @@ suite("workflow-worker integration (real Postgres)", () => {
     expect(await replayer.verifyByIncidentId(id)).toEqual([]); // still a clean timeline
   });
 
+  it("recordCommsSent appends a comms_sent entry to a live incident and verify stays clean", async () => {
+    const declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [declaredBy, "monitor@crossengin.test"]);
+
+    const sink = new PostgresIncidentSink(conn);
+    const id = `INC-2026-${Math.floor(1000 + Math.random() * 8999).toString()}`;
+    await sink.record({
+      id, title: "1 workflow worker(s) stale", severity: "sev3", category: "availability", status: "declared",
+      affectedTenantIds: [], affectedRegions: [], publiclyVisible: false,
+      declaredAt: "2026-06-04T12:00:00.000Z", declaredBy,
+      roleAssignments: [],
+      timeline: [{ occurredAt: "2026-06-04T12:00:00.000Z", actorUserId: declaredBy, kind: "declared", message: "stale", metadata: {} }],
+      securityIncident: false, breachDataClasses: [],
+    } as unknown as Parameters<typeof sink.record>[0]);
+
+    await sink.recordCommsSent(id, declaredBy, { reason: "declared", pageCount: 2 });
+
+    const replayer = new PostgresIncidentReplayer(conn);
+    const summary = await replayer.getByIncidentId(id);
+    expect(summary?.timeline.map((e) => e.kind)).toEqual(["declared", "comms_sent"]);
+    const comms = (summary?.timeline ?? []).find((e) => e.kind === "comms_sent");
+    expect(comms?.metadata).toMatchObject({ reason: "declared", pageCount: 2 });
+    // a comms_sent entry on an open incident is not timeline drift
+    expect(await replayer.verifyByIncidentId(id)).toEqual([]);
+  });
+
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {
     const def = timerDef(defId());
     await seedDefinition(def);

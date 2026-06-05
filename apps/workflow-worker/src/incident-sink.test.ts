@@ -85,6 +85,19 @@ describe("PostgresIncidentSink.record", () => {
     expect(entries[0]?.metadata).toEqual({ status: "mitigated" });
   });
 
+  it("recordCommsSent appends a comms_sent entry without changing status/severity", async () => {
+    const cap = capture();
+    await new PostgresIncidentSink(cap.conn).recordCommsSent("INC-2026-0001", "00000000-0000-4000-8000-000000000001", { reason: "escalated", pageCount: 2 });
+    expect(cap.last.sql).toContain("UPDATE meta.incidents");
+    expect(cap.last.sql).toContain("SET timeline = timeline || $2::jsonb");
+    expect(cap.last.sql).not.toContain("status =");
+    expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status <> 'resolved'");
+    const entries = JSON.parse(cap.last.params?.[1] as string) as ReadonlyArray<Record<string, unknown>>;
+    expect(entries[0]?.kind).toBe("comms_sent");
+    expect(entries[0]?.metadata).toEqual({ reason: "escalated", pageCount: 2 });
+    expect(entries[0]?.message).toContain("paged on-call (2 directive(s), escalated)");
+  });
+
   it("escalate raises the severity of an open incident and appends a timeline entry", async () => {
     const cap = capture();
     await new PostgresIncidentSink(cap.conn).escalate("INC-2026-0001", "sev2", "00000000-0000-4000-8000-000000000001");

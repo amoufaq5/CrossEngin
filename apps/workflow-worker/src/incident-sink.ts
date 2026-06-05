@@ -110,6 +110,32 @@ export class PostgresIncidentSink {
     return res.rowCount > 0;
   }
 
+  /**
+   * Records a **communication** milestone — appends a `comms_sent` timeline entry
+   * noting that `pageCount` page directive(s) were delivered to on-call (for
+   * `reason` declared|escalated), **without** changing status/severity. Guarded to
+   * a non-resolved incident. The audit half of the paging path: a page that left
+   * the process (P2.28) becomes part of the incident's timeline.
+   */
+  async recordCommsSent(
+    incidentId: string,
+    actorUserId: string,
+    opts: { readonly reason: string; readonly pageCount: number },
+  ): Promise<void> {
+    const entry = this.timelineEntry(
+      actorUserId,
+      "comms_sent",
+      `paged on-call (${opts.pageCount.toString()} directive(s), ${opts.reason})`,
+      { reason: opts.reason, pageCount: opts.pageCount },
+    );
+    await this.conn.query(
+      `UPDATE ${this.table}
+          SET timeline = timeline || $2::jsonb
+        WHERE incident_id = $1 AND status <> 'resolved'`,
+      [incidentId, JSON.stringify([entry])],
+    );
+  }
+
   private timelineEntry(actorUserId: string, kind: string, message: string, metadata: Record<string, unknown>): Record<string, unknown> {
     return { occurredAt: new Date().toISOString(), actorUserId, kind, message, metadata };
   }

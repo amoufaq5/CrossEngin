@@ -142,6 +142,9 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
         );
         if (incidentSink !== null) await incidentSink.record(plan.incident);
         await deliverPages(pageDeliverer, plan.pages, { incidentId: plan.incident.id, severity: plan.severity, reason: "declared" });
+        if (incidentSink !== null && plan.pages.length > 0) {
+          await incidentSink.recordCommsSent(plan.incident.id, options.monitorDeclaredBy, { reason: "declared", pageCount: plan.pages.length });
+        }
       },
       onResolve: async (incidentId) => {
         process.stdout.write(`[workflow-worker] STALE WORKERS RESOLVED — ${incidentId}\n`);
@@ -151,6 +154,9 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
         process.stdout.write(`[workflow-worker] STALE WORKERS ESCALATED — ${incidentId} → ${severity} (${pages.length.toString()} page directive(s))\n`);
         if (incidentSink !== null) await incidentSink.escalate(incidentId, severity, options.monitorDeclaredBy);
         await deliverPages(pageDeliverer, pages, { incidentId, severity, reason: "escalated" });
+        if (incidentSink !== null && pages.length > 0) {
+          await incidentSink.recordCommsSent(incidentId, options.monitorDeclaredBy, { reason: "escalated", pageCount: pages.length });
+        }
       },
       onError: logError,
     });
