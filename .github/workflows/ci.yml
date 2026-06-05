@@ -68,3 +68,10 @@ jobs:
         run: |
           pnpm --filter @crossengin/workflow-worker-app test
           pnpm --filter @crossengin/operate-server test
+      - name: Incident timeline drift gate
+        # The gated suites above declare/escalate/resolve/ack/mitigate real
+        # incidents in meta.incidents. `incidents verify` runs the timeline drift
+        # sweep over a wide window and EXITS 1 if any incident's timeline drifted
+        # from declared -> (severity_changed|status_changed)* -> resolved, failing
+        # the job. An empty table verifies clean (exit 0).
+        run: node apps/workflow-worker/dist/bin/workflow-worker.js incidents verify --from 2000-01-01 --to 2100-01-01
