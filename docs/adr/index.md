@@ -192,3 +192,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 106 | 0138 | 2,500 | Drafted alongside the page-delivery comms_sent timeline audit (Phase 3 P2.29) |
 | 107 | 0139 | 2,000 | Drafted alongside the MTTP (time-to-page) metric (Phase 3 P2.30) |
 | 108 | 0140 | 3,000 | Drafted alongside the `incident-response-pg` package extraction (Phase 3 P2.31) |
+| 109 | 0141 | 3,000 | Drafted alongside operate-server SLO incidents via incident-response-pg (Phase 3 P2.32) |

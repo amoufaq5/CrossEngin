@@ -16,6 +16,10 @@ export interface ServeOptions {
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
   readonly defaultScheme: "http" | "https";
+  readonly slo: boolean;
+  readonly sloPersist: boolean;
+  readonly sloActor: string | null;
+  readonly sloIntervalMs: number | null;
   readonly help: boolean;
   readonly version: boolean;
 }
@@ -54,6 +58,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let jwksRefreshMs: number | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
+  let slo = false;
+  let sloPersist = false;
+  let sloActor: string | null = null;
+  let sloIntervalMs: number | null = null;
   let help = false;
   let version = false;
 
@@ -119,6 +127,19 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
       jwtAudience = takeValue(arg, next, "--jwt-audience");
       i += consumed();
+    } else if (arg === "--slo") {
+      slo = true;
+    } else if (arg === "--slo-persist") {
+      sloPersist = true;
+    } else if (arg === "--slo-actor" || arg.startsWith("--slo-actor=")) {
+      sloActor = takeValue(arg, next, "--slo-actor");
+      i += consumed();
+    } else if (arg === "--slo-interval-ms" || arg.startsWith("--slo-interval-ms=")) {
+      const raw = takeValue(arg, next, "--slo-interval-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --slo-interval-ms: ${raw} (>= 1000)`);
+      sloIntervalMs = n;
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -154,6 +175,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwtIssuer,
     jwtAudience,
     defaultScheme,
+    slo,
+    sloPersist,
+    sloActor,
+    sloIntervalMs,
     help,
     version,
   };
@@ -183,6 +208,12 @@ Options:
   --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
+  --slo                Watch serving availability; declare an incident on a
+                       burn-rate breach (via @crossengin/incident-response-pg)
+  --slo-persist        Persist SLO incidents to meta.incidents (needs Postgres;
+                       else log-only). Requires --slo
+  --slo-actor <uuid>   System actor (declared_by) for SLO incidents
+  --slo-interval-ms <n> SLO evaluation interval (default 30000; >=1000)
   --help, -h           Show this help
   --version, -v        Print version
 

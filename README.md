@@ -1,7 +1,7 @@
 # CrossEngin
 
 > **Status — Phase 3 in progress.** 62 packages + 3 apps, 124
-> meta-schema tables, **6,606 offline tests + 28 gated real-Postgres
+> meta-schema tables, **6,613 offline tests + 29 gated real-Postgres
 > integration tests**, all green, zero type errors. Phase 2 (the four
 > runtime pillars) is complete; Phase 3 has shipped the serving keystone
 > (`operate-runtime` + `apps/operate-server`) and the distributed

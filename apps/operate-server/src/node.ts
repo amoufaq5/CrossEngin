@@ -1,7 +1,8 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
-import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
+import { PostgresIncidentSink } from "@crossengin/incident-response-pg";
+import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
 import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
@@ -18,6 +19,7 @@ import {
   type JwtVerifyConfig,
 } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import { OperateSloMonitor, buildServingSloEngine } from "./slo-incidents.js";
 
 /** The slice of Node's `IncomingMessage` the adapter reads. */
 export interface NodeReqLike extends AsyncIterable<Uint8Array> {
@@ -57,8 +59,11 @@ async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
  */
 export function createNodeRequestListener(
   server: OperateHttpServer,
+  onRequest?: (status: number, latencyMs: number) => void,
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   return async (req, res) => {
+    const startedAt = Date.now();
+    let status = 500;
     try {
       const body = await readBody(req);
       const raw: RawHttpRequest = {
@@ -68,6 +73,7 @@ export function createNodeRequestListener(
         remoteAddress: req.socket?.remoteAddress ?? null,
       };
       const response = await server.dispatch(raw, body);
+      status = response.status;
       res.writeHead(response.status, response.headers);
       res.end(response.body ?? undefined);
     } catch (err) {
@@ -86,6 +92,8 @@ export function createNodeRequestListener(
         "content-length": payload.byteLength.toString(),
       });
       res.end(payload);
+    } finally {
+      onRequest?.(status, Date.now() - startedAt);
     }
   };
 }
@@ -160,7 +168,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(jwt !== null ? { jwt } : {}),
   });
   poller?.start();
-  const listener = createNodeRequestListener(httpServer);
+
+  // Optional serving-availability SLO loop: feed each request's outcome into the
+  // burn-rate engine and, on a breach, declare an incident — persisted to
+  // meta.incidents via the shared @crossengin/incident-response-pg sink when
+  // --slo-persist is set (else log-only). The serving app is the second consumer
+  // of incident-response-pg, alongside the workflow worker.
+  let sloMonitor: OperateSloMonitor | null = null;
+  let incidentConn: PgConnection | null = null;
+  if (options.slo) {
+    const engine = buildServingSloEngine(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {});
+    if (options.sloPersist) {
+      incidentConn = createNodePgConnection(parsePgEnvConfig());
+    }
+    sloMonitor = new OperateSloMonitor({
+      engine,
+      ...(incidentConn !== null ? { sink: new PostgresIncidentSink(incidentConn) } : {}),
+      ...(options.sloActor !== null ? { declaredBy: options.sloActor } : {}),
+      onError: (err) => process.stderr.write(`[operate-server] SLO sweep error: ${err instanceof Error ? err.message : String(err)}\n`),
+      log: (line) => void process.stdout.write(`${line}\n`),
+    });
+    sloMonitor.start(options.sloIntervalMs ?? 30_000);
+  }
+
+  const listener = createNodeRequestListener(
+    httpServer,
+    sloMonitor !== null ? (status, latencyMs) => sloMonitor?.recordRequest(status, latencyMs) : undefined,
+  );
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });
@@ -173,7 +207,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     close: () =>
       new Promise<void>((resolve, reject) => {
         poller?.stop();
-        server.close((err) => (err ? reject(err) : resolve()));
+        sloMonitor?.stop();
+        server.close((err) => {
+          void (incidentConn !== null ? incidentConn.close() : Promise.resolve()).then(() =>
+            err ? reject(err) : resolve(),
+          );
+        });
       }),
   };
 }

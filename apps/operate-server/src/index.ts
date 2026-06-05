@@ -5,4 +5,5 @@ export * from "./manifest-source.js";
 export * from "./server.js";
 export * from "./edge.js";
 export * from "./cli.js";
+export * from "./slo-incidents.js";
 export * from "./node.js";

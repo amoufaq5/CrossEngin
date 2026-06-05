@@ -69,12 +69,24 @@ importers:
       '@crossengin/api-gateway-runtime':
         specifier: workspace:*
         version: link:../../packages/api-gateway-runtime
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../../packages/incident-response
+      '@crossengin/incident-response-pg':
+        specifier: workspace:*
+        version: link:../../packages/incident-response-pg
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../../packages/kernel-pg
+      '@crossengin/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@crossengin/observability-runtime':
+        specifier: workspace:*
+        version: link:../../packages/observability-runtime
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../../packages/operate-runtime

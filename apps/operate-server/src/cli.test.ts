@@ -20,6 +20,20 @@ describe("parseServeArgs", () => {
     expect(opts.store).toBe("memory");
   });
 
+  it("parses the SLO flags (defaults off)", () => {
+    const off = parseServeArgs(["--pack", "erp-core"]);
+    expect(off.slo).toBe(false);
+    expect(off.sloPersist).toBe(false);
+    expect(off.sloActor).toBeNull();
+    expect(off.sloIntervalMs).toBeNull();
+    const on = parseServeArgs([
+      "--pack", "erp-core", "--slo", "--slo-persist",
+      "--slo-actor", "00000000-0000-4000-8000-000000000009", "--slo-interval-ms", "5000",
+    ]);
+    expect(on).toMatchObject({ slo: true, sloPersist: true, sloActor: "00000000-0000-4000-8000-000000000009", sloIntervalMs: 5000 });
+    expect(() => parseServeArgs(["--pack", "erp-core", "--slo-interval-ms", "500"])).toThrow(CliUsageError);
+  });
+
   it("supports --flag=value form", () => {
     const opts = parseServeArgs(["--pack=erp-core", "--port=8080", "--store=pg", "--schema=tenant_app"]);
     expect(opts.pack).toBe("erp-core");

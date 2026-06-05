@@ -26,8 +26,12 @@
   "dependencies": {
     "@crossengin/api-gateway": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
+    "@crossengin/incident-response": "workspace:*",
+    "@crossengin/incident-response-pg": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
+    "@crossengin/observability": "workspace:*",
+    "@crossengin/observability-runtime": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",
     "@crossengin/operate-runtime-pg": "workspace:*",
     "@crossengin/pack-erp-core": "workspace:*",
