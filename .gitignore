@@ -1,3 +1,6 @@
+# Claude Code harness (agent worktrees, session state)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
