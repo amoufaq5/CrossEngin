@@ -1,4 +1,5 @@
 import { CliUsageError } from "./cli.js";
+import { computeIncidentMetrics, formatIncidentMetrics } from "./incident-metrics.js";
 import {
   summarizeIncidentIssues,
   type IncidentSummary,
@@ -6,7 +7,7 @@ import {
   type ListPeriodQuery,
 } from "./incident-replayer.js";
 
-export type IncidentsCommand = "open" | "period" | "verify";
+export type IncidentsCommand = "open" | "period" | "verify" | "metrics";
 export type OutputFormat = "human" | "json";
 
 export interface IncidentsCliOptions {
@@ -19,7 +20,8 @@ export interface IncidentsCliOptions {
   readonly help: boolean;
 }
 
-const COMMANDS: ReadonlySet<string> = new Set(["open", "period", "verify"]);
+const COMMANDS: ReadonlySet<string> = new Set(["open", "period", "verify", "metrics"]);
+const WINDOW_COMMANDS: ReadonlySet<string> = new Set(["period", "verify", "metrics"]);
 
 function takeValue(arg: string, next: string | undefined, flag: string): string {
   if (arg.includes("=")) return arg.slice(arg.indexOf("=") + 1);
@@ -83,7 +85,7 @@ export function parseIncidentsArgs(argv: readonly string[]): IncidentsCliOptions
     }
   }
 
-  if ((command === "period" || command === "verify") && (from === null || to === null)) {
+  if (WINDOW_COMMANDS.has(command) && (from === null || to === null)) {
     throw new CliUsageError(`incidents ${command} requires --from and --to (an ISO window)`);
   }
   return { command, from, to, limit, schema, format, help };
@@ -152,6 +154,12 @@ export async function runIncidents(
     out(json ? JSON.stringify(list, null, 2) : formatIncidentList(list, `incidents ${query.from as string}..${query.to as string}`));
     return { exitCode: 0 };
   }
+  if (options.command === "metrics") {
+    const list = await source.listForPeriod(query);
+    const metrics = computeIncidentMetrics(list);
+    out(json ? JSON.stringify(metrics, null, 2) : formatIncidentMetrics(metrics, `incident metrics ${query.from as string}..${query.to as string}`));
+    return { exitCode: 0 };
+  }
   // verify
   const list = await source.listForPeriod(query);
   const issues = await source.bulkVerify(query);
@@ -166,14 +174,17 @@ export async function runIncidents(
 export const incidentsHelpText = `workflow-worker incidents — query the meta.incidents audit table
 
 Usage:
-  workflow-worker incidents open   [--limit N] [--format human|json] [--schema s]
-  workflow-worker incidents period --from <iso> --to <iso> [--limit N] [--format human|json] [--schema s]
-  workflow-worker incidents verify --from <iso> --to <iso> [--format human|json] [--schema s]
+  workflow-worker incidents open    [--limit N] [--format human|json] [--schema s]
+  workflow-worker incidents period  --from <iso> --to <iso> [--limit N] [--format human|json] [--schema s]
+  workflow-worker incidents verify  --from <iso> --to <iso> [--format human|json] [--schema s]
+  workflow-worker incidents metrics --from <iso> --to <iso> [--limit N] [--format human|json] [--schema s]
 
 Commands:
   open     List incidents that are still open (status not resolved/closed/cancelled)
   period   List every incident declared within the --from..--to window
   verify   Run the timeline drift sweep over the window; exits 1 if any drift
+  metrics  Aggregate the window into MTTR (mean/p50/p95/max), open/resolved
+           counts, per-severity gauges, and escalation totals
 
 Options:
   --from <iso>     Window start (ISO timestamp; required for period/verify)

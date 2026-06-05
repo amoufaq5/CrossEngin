@@ -126,6 +126,10 @@ workflow-worker incidents period --from <iso> --to <iso> [--limit N] [--format j
 # timeline drift sweep over a window — exits 1 if any incident's timeline
 # drifted from declared -> (escalated)* -> resolved (gate CI on it)
 workflow-worker incidents verify --from <iso> --to <iso> [--format json]
+
+# operational KPIs over a window: MTTR (mean/p50/p95/max), open/resolved
+# counts, per-severity gauges, escalation totals
+workflow-worker incidents metrics --from <iso> --to <iso> [--limit N] [--format json]
 ```
 
 `verify` reports per-incident issues (`empty_timeline`,

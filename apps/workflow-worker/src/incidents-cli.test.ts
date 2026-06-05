@@ -135,6 +135,28 @@ describe("runIncidents", () => {
     expect(parsed[0]?.incidentId).toBe("INC-2026-0001");
   });
 
+  it("metrics: aggregates the window and exits 0", async () => {
+    const src = new FakeSource([], [summary({ status: "resolved", resolvedAt: "2026-06-05T12:05:00.000Z", timeline: [entry("declared", "2026-06-05T12:00:00.000Z"), entry("resolved", "2026-06-05T12:05:00.000Z")] })], []);
+    const out: string[] = [];
+    const res = await runIncidents(parseIncidentsArgs(["metrics", "--from", "2026-06-01", "--to", "2026-06-30"]), src, (l) => out.push(l));
+    expect(res.exitCode).toBe(0);
+    expect(src.lastPeriod).toMatchObject({ from: "2026-06-01", to: "2026-06-30" });
+    expect(out.join("\n")).toContain("MTTR (1 resolved)");
+  });
+
+  it("metrics --format json emits the metrics object", async () => {
+    const src = new FakeSource([], [summary()], []);
+    const out: string[] = [];
+    await runIncidents(parseIncidentsArgs(["metrics", "--from", "2026-06-01", "--to", "2026-06-30", "--format", "json"]), src, (l) => out.push(l));
+    const parsed = JSON.parse(out.join("\n")) as { total: number; mttr: unknown };
+    expect(parsed.total).toBe(1);
+    expect(parsed.mttr).toBeNull();
+  });
+
+  it("metrics requires a window", () => {
+    expect(() => parseIncidentsArgs(["metrics"])).toThrow(/requires --from and --to/);
+  });
+
   it("period: binds the window and lists", async () => {
     const src = new FakeSource([], [summary()], []);
     const out: string[] = [];
