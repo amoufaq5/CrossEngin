@@ -50,21 +50,31 @@ describe("PostgresIncidentSink.record", () => {
     expect(() => new PostgresIncidentSink(cap.conn, { schema: "x; DROP" })).toThrow(/invalid schema/);
   });
 
-  it("resolve transitions an open incident to resolved (idempotent)", async () => {
+  it("resolve transitions an open incident to resolved and appends a timeline entry", async () => {
     const cap = capture();
-    await new PostgresIncidentSink(cap.conn).resolve("INC-2026-0001");
+    await new PostgresIncidentSink(cap.conn).resolve("INC-2026-0001", "00000000-0000-4000-8000-000000000001");
     expect(cap.last.sql).toContain("UPDATE meta.incidents");
-    expect(cap.last.sql).toContain("SET status = 'resolved', resolved_at = now()");
+    expect(cap.last.sql).toContain("SET status = 'resolved', resolved_at = now(), timeline = timeline || $2::jsonb");
     expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status <> 'resolved'");
-    expect(cap.last.params).toEqual(["INC-2026-0001"]);
+    expect(cap.last.params?.[0]).toBe("INC-2026-0001");
+    const entries = JSON.parse(cap.last.params?.[1] as string) as ReadonlyArray<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("resolved");
+    expect(entries[0]?.actorUserId).toBe("00000000-0000-4000-8000-000000000001");
+    expect(typeof entries[0]?.occurredAt).toBe("string");
   });
 
-  it("escalate raises the severity of an open (non-resolved) incident", async () => {
+  it("escalate raises the severity of an open incident and appends a timeline entry", async () => {
     const cap = capture();
-    await new PostgresIncidentSink(cap.conn).escalate("INC-2026-0001", "sev2");
+    await new PostgresIncidentSink(cap.conn).escalate("INC-2026-0001", "sev2", "00000000-0000-4000-8000-000000000001");
     expect(cap.last.sql).toContain("UPDATE meta.incidents");
-    expect(cap.last.sql).toContain("SET severity = $2");
+    expect(cap.last.sql).toContain("SET severity = $2, timeline = timeline || $3::jsonb");
     expect(cap.last.sql).toContain("WHERE incident_id = $1 AND status <> 'resolved'");
-    expect(cap.last.params).toEqual(["INC-2026-0001", "sev2"]);
+    expect(cap.last.params?.slice(0, 2)).toEqual(["INC-2026-0001", "sev2"]);
+    const entries = JSON.parse(cap.last.params?.[2] as string) as ReadonlyArray<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("severity_changed");
+    expect(entries[0]?.metadata).toEqual({ severity: "sev2" });
+    expect(entries[0]?.actorUserId).toBe("00000000-0000-4000-8000-000000000001");
   });
 });

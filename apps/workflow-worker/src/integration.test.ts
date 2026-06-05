@@ -502,7 +502,7 @@ suite("workflow-worker integration (real Postgres)", () => {
       clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
       nextIncidentId: () => incidentId,
       onIncident: async (plan) => { await sink.record(plan.incident); },
-      onResolve: async (id) => { await sink.resolve(id); },
+      onResolve: async (id) => { await sink.resolve(id, declaredBy); },
     });
 
     // this run only owns its `worker`, but other rows may be stale → assert on our incident id
@@ -512,12 +512,15 @@ suite("workflow-worker integration (real Postgres)", () => {
     await beat("2026-06-04T11:59:30.000Z"); // recovered (30s old)
     await monitor.checkOnce(); // resolves
 
-    const row = await conn.query<{ status: string; resolved_at: string | null }>(
-      `SELECT status, resolved_at FROM meta.incidents WHERE incident_id = $1`, [incidentId],
+    const row = await conn.query<{ status: string; resolved_at: string | null; timeline: unknown }>(
+      `SELECT status, resolved_at, timeline FROM meta.incidents WHERE incident_id = $1`, [incidentId],
     );
     // the incident was declared then resolved
     expect(row.rows[0]?.status).toBe("resolved");
     expect(row.rows[0]?.resolved_at).not.toBeNull();
+    // the timeline grew with a `resolved` entry alongside the `declared` one
+    const timeline = row.rows[0]?.timeline as ReadonlyArray<{ kind: string }>;
+    expect(timeline.map((e) => e.kind)).toContain("resolved");
   });
 
   it("escalates a persisted incident's severity when more workers go stale", async () => {
@@ -540,7 +543,7 @@ suite("workflow-worker integration (real Postgres)", () => {
       clock: { now: () => new Date("2026-06-04T12:00:00.000Z") },
       nextIncidentId: () => incidentId,
       onIncident: async (plan) => { await sink.record(plan.incident); },
-      onEscalate: async (id, severity) => { await sink.escalate(id, severity); },
+      onEscalate: async (id, severity) => { await sink.escalate(id, severity, declaredBy); },
     });
     await monitor.checkOnce(); // declares sev3
     const declared = await conn.query<{ severity: string }>(`SELECT severity FROM meta.incidents WHERE incident_id = $1`, [incidentId]);
@@ -549,8 +552,12 @@ suite("workflow-worker integration (real Postgres)", () => {
     await beat(`${pfx}-2`);
     await beat(`${pfx}-3`); // now 3 stale → sev2
     await monitor.checkOnce(); // escalate
-    const escalated = await conn.query<{ severity: string }>(`SELECT severity FROM meta.incidents WHERE incident_id = $1`, [incidentId]);
+    const escalated = await conn.query<{ severity: string; timeline: unknown }>(`SELECT severity, timeline FROM meta.incidents WHERE incident_id = $1`, [incidentId]);
     expect(escalated.rows[0]?.severity).toBe("sev2");
+    // the escalation appended a `severity_changed` timeline entry
+    const timeline = escalated.rows[0]?.timeline as ReadonlyArray<{ kind: string; metadata?: { severity?: string } }>;
+    const changed = timeline.find((e) => e.kind === "severity_changed");
+    expect(changed?.metadata?.severity).toBe("sev2");
   });
 
   it("a claimed timer's lease blocks a second claimer until it expires", async () => {

@@ -44,31 +44,37 @@ export class PostgresIncidentSink {
   }
 
   /**
-   * Transitions an open incident to `resolved` (stamping `resolved_at`) — the
-   * recovery side of the loop, called when the workers that triggered it start
-   * beating again. Idempotent: a no-op if the incident is absent or already
-   * resolved.
+   * Transitions an open incident to `resolved` (stamping `resolved_at`) and
+   * appends a `resolved` timeline entry — the recovery side of the loop, called
+   * when the workers that triggered it start beating again. Idempotent: a no-op
+   * if the incident is absent or already resolved.
    */
-  async resolve(incidentId: string): Promise<void> {
+  async resolve(incidentId: string, actorUserId: string): Promise<void> {
+    const entry = this.timelineEntry(actorUserId, "resolved", "stale workers recovered", {});
     await this.conn.query(
       `UPDATE ${this.table}
-          SET status = 'resolved', resolved_at = now()
+          SET status = 'resolved', resolved_at = now(), timeline = timeline || $2::jsonb
         WHERE incident_id = $1 AND status <> 'resolved'`,
-      [incidentId],
+      [incidentId, JSON.stringify([entry])],
     );
   }
 
   /**
-   * Raises an open incident's severity (when more workers go stale mid-incident).
-   * A no-op for a resolved incident; the monitor only ever escalates (raises),
-   * never lowers.
+   * Raises an open incident's severity (when more workers go stale mid-incident)
+   * and appends a `severity_changed` timeline entry. A no-op for a resolved
+   * incident; the monitor only ever escalates (raises), never lowers.
    */
-  async escalate(incidentId: string, severity: Severity): Promise<void> {
+  async escalate(incidentId: string, severity: Severity, actorUserId: string): Promise<void> {
+    const entry = this.timelineEntry(actorUserId, "severity_changed", `severity raised to ${severity}`, { severity });
     await this.conn.query(
       `UPDATE ${this.table}
-          SET severity = $2
+          SET severity = $2, timeline = timeline || $3::jsonb
         WHERE incident_id = $1 AND status <> 'resolved'`,
-      [incidentId, severity],
+      [incidentId, severity, JSON.stringify([entry])],
     );
+  }
+
+  private timelineEntry(actorUserId: string, kind: string, message: string, metadata: Record<string, unknown>): Record<string, unknown> {
+    return { occurredAt: new Date().toISOString(), actorUserId, kind, message, metadata };
   }
 }
