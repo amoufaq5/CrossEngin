@@ -75,3 +75,15 @@ jobs:
         # from declared -> (severity_changed|status_changed)* -> resolved, failing
         # the job. An empty table verifies clean (exit 0).
         run: node apps/workflow-worker/dist/bin/workflow-worker.js incidents verify --from 2000-01-01 --to 2100-01-01
+      - name: PHI at-rest encryption gate
+        # The operate-server column-store suite provisions encrypted PHI tables
+        # (e.g. Patient.mrn -> BYTEA) in the `public` schema. `encrypt --verify`
+        # reports at-rest coverage for every column hinted
+        # crossengin.encrypt=at_rest and EXITS 1 on any plaintext PHI column (or
+        # missing pgcrypto), failing the job. `meta` asserts the platform catalog
+        # carries zero plaintext PHI (an HIPAA control); `public` verifies the
+        # column store actually encrypted the PHI it provisioned. An un-hinted
+        # schema verifies clean (exit 0).
+        run: |
+          node packages/kernel-pg/dist/bin/crossengin-pg.js encrypt --verify --schema=meta
+          node packages/kernel-pg/dist/bin/crossengin-pg.js encrypt --verify --schema=public
