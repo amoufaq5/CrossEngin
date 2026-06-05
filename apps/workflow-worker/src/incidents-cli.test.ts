@@ -4,11 +4,14 @@ import { describe, expect, it } from "vitest";
 import { CliUsageError } from "./cli.js";
 import type { IncidentSummary, IncidentTimelineIssue, ListPeriodQuery } from "./incident-replayer.js";
 import {
+  DEFAULT_INCIDENT_ACTOR,
   formatIncidentList,
   formatVerifyReport,
   parseIncidentsArgs,
+  runIncidentWrite,
   runIncidents,
   type IncidentQuerySource,
+  type IncidentWriteSink,
 } from "./incidents-cli.js";
 
 function entry(kind: TimelineEntry["kind"], occurredAt: string): TimelineEntry {
@@ -62,6 +65,59 @@ describe("parseIncidentsArgs", () => {
 
   it("carries a custom schema", () => {
     expect(parseIncidentsArgs(["open", "--schema", "ops"]).schema).toBe("ops");
+  });
+
+  it("parses ack/mitigate with a positional incident id + default actor", () => {
+    const a = parseIncidentsArgs(["ack", "INC-2026-0001"]);
+    expect(a).toMatchObject({ command: "ack", incidentId: "INC-2026-0001", actor: DEFAULT_INCIDENT_ACTOR });
+    const m = parseIncidentsArgs(["mitigate", "INC-2026-0002", "--actor", "00000000-0000-4000-8000-000000000009"]);
+    expect(m).toMatchObject({ command: "mitigate", incidentId: "INC-2026-0002", actor: "00000000-0000-4000-8000-000000000009" });
+  });
+
+  it("requires an incident id for ack/mitigate", () => {
+    expect(() => parseIncidentsArgs(["ack"])).toThrow(/requires an incident id/);
+    expect(() => parseIncidentsArgs(["mitigate", "--actor", "x"])).toThrow(/requires an incident id/);
+  });
+});
+
+class FakeWriteSink implements IncidentWriteSink {
+  acked: Array<{ id: string; actor: string }> = [];
+  mitigated: Array<{ id: string; actor: string }> = [];
+  constructor(private readonly changed: boolean) {}
+  async acknowledge(id: string, actor: string): Promise<boolean> {
+    this.acked.push({ id, actor });
+    return this.changed;
+  }
+  async mitigate(id: string, actor: string): Promise<boolean> {
+    this.mitigated.push({ id, actor });
+    return this.changed;
+  }
+}
+
+describe("runIncidentWrite", () => {
+  it("ack records the milestone and reports it (exit 0)", async () => {
+    const sink = new FakeWriteSink(true);
+    const out: string[] = [];
+    const res = await runIncidentWrite(parseIncidentsArgs(["ack", "INC-2026-0001", "--actor", "u1"]), sink, (l) => out.push(l));
+    expect(res.exitCode).toBe(0);
+    expect(sink.acked).toEqual([{ id: "INC-2026-0001", actor: "u1" }]);
+    expect(out.join("\n")).toContain("acknowledged INC-2026-0001 (actor u1)");
+  });
+
+  it("mitigate records the milestone and reports it", async () => {
+    const sink = new FakeWriteSink(true);
+    const out: string[] = [];
+    await runIncidentWrite(parseIncidentsArgs(["mitigate", "INC-2026-0001"]), sink, (l) => out.push(l));
+    expect(sink.mitigated).toHaveLength(1);
+    expect(out.join("\n")).toContain("mitigated INC-2026-0001");
+  });
+
+  it("reports a no-op (exit 0) when the sink changed nothing", async () => {
+    const sink = new FakeWriteSink(false);
+    const out: string[] = [];
+    const res = await runIncidentWrite(parseIncidentsArgs(["ack", "INC-2026-9999"]), sink, (l) => out.push(l));
+    expect(res.exitCode).toBe(0);
+    expect(out.join("\n")).toContain("no-op: INC-2026-9999 was not acknowledged");
   });
 });
 

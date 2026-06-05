@@ -17,7 +17,7 @@ import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
 import { PostgresIncidentSink } from "./incident-sink.js";
 import { PostgresIncidentReplayer } from "./incident-replayer.js";
 import { LoggingPageDeliverer, deliverPages } from "./page-sink.js";
-import { runIncidents, type IncidentsCliOptions } from "./incidents-cli.js";
+import { runIncidents, runIncidentWrite, type IncidentsCliOptions } from "./incidents-cli.js";
 
 /**
  * Parses a `--definitions` JSON file (an array of `WorkflowDefinition`s) into the
@@ -53,8 +53,14 @@ export async function executeIncidents(
   out: (line: string) => void = (line) => void process.stdout.write(`${line}\n`),
 ): Promise<number> {
   const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+  const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   try {
-    const replayer = new PostgresIncidentReplayer(conn, options.schema !== null ? { schema: options.schema } : {});
+    if (options.command === "ack" || options.command === "mitigate") {
+      const sink = new PostgresIncidentSink(conn, schemaOpt);
+      const { exitCode } = await runIncidentWrite(options, sink, out);
+      return exitCode;
+    }
+    const replayer = new PostgresIncidentReplayer(conn, schemaOpt);
     const { exitCode } = await runIncidents(options, replayer, out);
     return exitCode;
   } finally {

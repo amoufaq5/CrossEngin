@@ -130,6 +130,11 @@ workflow-worker incidents verify --from <iso> --to <iso> [--format json]
 # operational KPIs over a window: MTTA / MTTM / MTTR (mean/p50/p95/max),
 # open/resolved counts, per-severity gauges, escalation totals
 workflow-worker incidents metrics --from <iso> --to <iso> [--limit N] [--format json]
+
+# record the ack / mitigate milestones (drives MTTA / MTTM). Idempotent:
+# a no-op (absent / already past that state) still exits 0.
+workflow-worker incidents ack      <incident-id> [--actor <uuid>]
+workflow-worker incidents mitigate <incident-id> [--actor <uuid>]
 ```
 
 `verify` reports per-incident issues (`empty_timeline`,
