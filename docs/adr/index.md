@@ -193,3 +193,10 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 107 | 0139 | 2,000 | Drafted alongside the MTTP (time-to-page) metric (Phase 3 P2.30) |
 | 108 | 0140 | 3,000 | Drafted alongside the `incident-response-pg` package extraction (Phase 3 P2.31) |
 | 109 | 0141 | 3,000 | Drafted alongside operate-server SLO incidents via incident-response-pg (Phase 3 P2.32) |
+| 110 | 0142 | 2,500 | Drafted alongside operate-server SLO evaluation + enforcement-action persistence (Phase 3 P2.33) |
+| 111 | 0143 | 2,500 | Drafted alongside the `incidents` CLI subcommand on operate-server (Phase 3 P2.34) |
+| 112 | 0144 | 2,500 | Drafted alongside webhook page transport — auth headers + bounded retry (Phase 3 P2.35) |
+| 113 | 0145 | 2,000 | Drafted alongside the schema drift CI gate (Phase 3 P2.36) |
+| 114 | 0146 | 2,500 | Drafted alongside per-route serving SLOs (Phase 3 P2.37) |
+| 115 | 0147 | 2,500 | Drafted alongside the serving latency SLO (Phase 3 P2.38) |
+| 116 | 0148 | 2,500 | Drafted alongside column-store encrypted PHI read-fidelity + NULL fix (Phase 3 P2.39) |

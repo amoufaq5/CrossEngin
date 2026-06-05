@@ -22,10 +22,10 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32** landed: **62 packages + 3 apps, 124
-meta-schema tables, 6,613 offline tests + 29 gated real-Postgres
-integration tests (17 worker + 12 operate-server) + two CI gates
-(incident-drift + PHI-encryption)**, all green, no type errors. (Earlier
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39** landed: **62 packages + 3 apps, 124
+meta-schema tables, 6,665 offline tests + 36 gated real-Postgres
+integration tests (17 worker + 19 operate-server) + three CI gates
+(schema-drift + incident-drift + PHI-encryption)**, all green, no type errors. (Earlier
 per-increment lines below say "60"/"61 packages" — those are point-in-time
 snapshots; the live count is 62 after `incident-response-pg` landed in
 P2.31.)
