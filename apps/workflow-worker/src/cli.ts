@@ -24,6 +24,8 @@ export interface WorkerCliOptions {
   readonly monitorDeclaredBy: string;
   readonly persistIncidents: boolean;
   readonly pageWebhookUrl: string | null;
+  readonly pageWebhookHeaders: Readonly<Record<string, string>>;
+  readonly pageWebhookMaxAttempts: number;
   readonly definitionsPath: string | null;
   readonly help: boolean;
   readonly version: boolean;
@@ -32,7 +34,28 @@ export interface WorkerCliOptions {
 /** A system actor id for auto-declared stale-worker incidents (a valid UUID). */
 export const DEFAULT_MONITOR_DECLARED_BY = "00000000-0000-4000-8000-000000000000";
 
+/** Default total attempts (one initial + 3 retries) for the page webhook on 5xx/network. */
+export const DEFAULT_PAGE_WEBHOOK_MAX_ATTEMPTS = 4;
+
 export class CliUsageError extends Error {}
+
+/**
+ * Parses a `key:value` header spec. The value may contain ':' (everything after
+ * the first ':' is the value), which matters for values like `Bearer abc:def` or
+ * URL-shaped tokens. Trims whitespace around both sides. Empty key rejected.
+ */
+export function parseWebhookHeaderSpec(raw: string): { key: string; value: string } {
+  const i = raw.indexOf(":");
+  if (i === -1) {
+    throw new CliUsageError(`invalid --page-webhook-header: ${raw} (expected key:value)`);
+  }
+  const key = raw.slice(0, i).trim();
+  const value = raw.slice(i + 1).trim();
+  if (key.length === 0) {
+    throw new CliUsageError(`invalid --page-webhook-header: ${raw} (empty header name)`);
+  }
+  return { key, value };
+}
 
 function takeValue(arg: string, next: string | undefined, flag: string): string {
   if (arg.includes("=")) return arg.slice(arg.indexOf("=") + 1);
@@ -95,6 +118,8 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
   let monitorDeclaredBy = DEFAULT_MONITOR_DECLARED_BY;
   let persistIncidents = false;
   let pageWebhookUrl: string | null = null;
+  const pageWebhookHeaders: Record<string, string> = {};
+  let pageWebhookMaxAttempts = DEFAULT_PAGE_WEBHOOK_MAX_ATTEMPTS;
   let definitionsPath: string | null = null;
   let help = false;
   let version = false;
@@ -170,6 +195,14 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     } else if (arg === "--page-webhook-url" || arg.startsWith("--page-webhook-url=")) {
       pageWebhookUrl = takeValue(arg, next, "--page-webhook-url");
       i += consumed();
+    } else if (arg === "--page-webhook-header" || arg.startsWith("--page-webhook-header=")) {
+      const raw = takeValue(arg, next, "--page-webhook-header");
+      const parsed = parseWebhookHeaderSpec(raw);
+      pageWebhookHeaders[parsed.key] = parsed.value;
+      i += consumed();
+    } else if (arg === "--page-webhook-max-attempts" || arg.startsWith("--page-webhook-max-attempts=")) {
+      pageWebhookMaxAttempts = intFlag(takeValue(arg, next, "--page-webhook-max-attempts"), "--page-webhook-max-attempts", 1);
+      i += consumed();
     } else if (arg === "--definitions" || arg.startsWith("--definitions=")) {
       definitionsPath = takeValue(arg, next, "--definitions");
       i += consumed();
@@ -200,6 +233,8 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     monitorDeclaredBy,
     persistIncidents,
     pageWebhookUrl,
+    pageWebhookHeaders,
+    pageWebhookMaxAttempts,
     definitionsPath,
     help,
     version,
@@ -245,6 +280,12 @@ Options:
   --page-webhook-url <url>  POST resolved page directives (on declaration +
                            escalation) to this webhook (PagerDuty/Slack/Opsgenie/
                            any HTTP sink); default logs them. Requires --monitor
+  --page-webhook-header <k:v>  Extra header on the page webhook POST (e.g.
+                           "authorization:Bearer abc" or "PagerDuty-Token:xyz");
+                           repeatable. Values may contain ':'.
+  --page-webhook-max-attempts <n>  Total attempts (initial + retries) on
+                           transient 5xx / network errors with exponential
+                           backoff (default 4); 4xx is not retried.
   --definitions <file>     JSON array of WorkflowDefinitions to run (default none)
   --help, -h               Show this help
   --version, -v            Print version

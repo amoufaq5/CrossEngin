@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CliUsageError, helpText, parseWorkerArgs } from "./cli.js";
+import { CliUsageError, DEFAULT_PAGE_WEBHOOK_MAX_ATTEMPTS, helpText, parseWebhookHeaderSpec, parseWorkerArgs } from "./cli.js";
 
 describe("parseWorkerArgs", () => {
   it("defaults to mode=all with a random worker id and standard intervals", () => {
@@ -26,6 +26,8 @@ describe("parseWorkerArgs", () => {
       staleAfterMs: 60000,
       monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
       persistIncidents: false,
+      pageWebhookHeaders: {},
+      pageWebhookMaxAttempts: DEFAULT_PAGE_WEBHOOK_MAX_ATTEMPTS,
       definitionsPath: null,
       help: false,
       version: false,
@@ -84,10 +86,37 @@ describe("parseWorkerArgs", () => {
       monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
       persistIncidents: false,
       pageWebhookUrl: null,
+      pageWebhookHeaders: {},
+      pageWebhookMaxAttempts: DEFAULT_PAGE_WEBHOOK_MAX_ATTEMPTS,
       definitionsPath: "/defs.json",
       help: false,
       version: false,
     });
+  });
+
+  it("--page-webhook-header is repeatable and parses values containing ':'", () => {
+    const opts = parseWorkerArgs([
+      "--page-webhook-header", "authorization:Bearer abc:def",
+      "--page-webhook-header", "PagerDuty-Token:xyz",
+      "--page-webhook-header=Slack-Signature:v0=hex",
+    ]);
+    expect(opts.pageWebhookHeaders).toEqual({
+      authorization: "Bearer abc:def",
+      "PagerDuty-Token": "xyz",
+      "Slack-Signature": "v0=hex",
+    });
+  });
+
+  it("--page-webhook-max-attempts sets the retry budget (min 1)", () => {
+    expect(parseWorkerArgs(["--page-webhook-max-attempts", "7"]).pageWebhookMaxAttempts).toBe(7);
+    expect(parseWorkerArgs(["--page-webhook-max-attempts=1"]).pageWebhookMaxAttempts).toBe(1);
+    expect(() => parseWorkerArgs(["--page-webhook-max-attempts", "0"])).toThrow(CliUsageError);
+    expect(() => parseWorkerArgs(["--page-webhook-max-attempts", "abc"])).toThrow(CliUsageError);
+  });
+
+  it("rejects a malformed --page-webhook-header", () => {
+    expect(() => parseWorkerArgs(["--page-webhook-header", "noColonHere"])).toThrow(CliUsageError);
+    expect(() => parseWorkerArgs(["--page-webhook-header", ":empty-key"])).toThrow(CliUsageError);
   });
 
   it("--persist-incidents enables the meta.incidents sink", () => {
@@ -146,5 +175,25 @@ describe("helpText", () => {
     expect(helpText).toContain("--mode");
     expect(helpText).toContain("PGHOST");
     expect(helpText).toContain("BYPASSRLS");
+  });
+
+  it("documents the new page-webhook auth and retry flags", () => {
+    expect(helpText).toContain("--page-webhook-header");
+    expect(helpText).toContain("--page-webhook-max-attempts");
+  });
+});
+
+describe("parseWebhookHeaderSpec", () => {
+  it("splits at the first colon and trims both sides", () => {
+    expect(parseWebhookHeaderSpec("Authorization: Bearer xyz")).toEqual({ key: "Authorization", value: "Bearer xyz" });
+  });
+
+  it("preserves colons in the value", () => {
+    expect(parseWebhookHeaderSpec("x:a:b:c")).toEqual({ key: "x", value: "a:b:c" });
+  });
+
+  it("rejects an empty key or missing colon", () => {
+    expect(() => parseWebhookHeaderSpec(":v")).toThrow(CliUsageError);
+    expect(() => parseWebhookHeaderSpec("nope")).toThrow(CliUsageError);
   });
 });

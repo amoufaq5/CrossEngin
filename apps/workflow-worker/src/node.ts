@@ -134,7 +134,11 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
       : null;
     const pageDeliverer: PageDeliverer =
       options.pageWebhookUrl !== null
-        ? new WebhookPageDeliverer({ url: options.pageWebhookUrl })
+        ? new WebhookPageDeliverer({
+            url: options.pageWebhookUrl,
+            headers: { ...options.pageWebhookHeaders },
+            retry: { maxAttempts: options.pageWebhookMaxAttempts },
+          })
         : new LoggingPageDeliverer();
     monitor = new StaleWorkerMonitor({
       source: new PostgresWorkerHeartbeatStore(conn, options.schema !== null ? { schema: options.schema } : {}),
