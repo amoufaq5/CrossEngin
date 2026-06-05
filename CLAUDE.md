@@ -622,7 +622,24 @@ projection can't bypass redaction. `id` is always kept. **P1.22
 columns (needed for the keyset cursor), so unselected large/
 encrypted columns are never read/decrypted; the handler still
 re-projects to the exact set, and in-memory/JSONB ignore the hint
-(handler-level projection, still correct). M7.9.1 added
+(handler-level projection, still correct). **P2.39 (ADR-0148)
+deepened the encrypted-column read-fidelity coverage** in the
+column store — a gated real-Postgres test
+(`integration-columns-encrypted.test.ts`) drives `pgp_sym_encrypt`
++ `pgp_sym_decrypt` through five edge cases (NULL PHI, empty-string
+PHI, multibyte / Arabic PHI, >700-char PHI, `listPage` decryption
+under projection), and surfaced a latent bug in
+`ColumnMappedEntityStore.writePlaceholder`: an encrypted column
+written with `value === null` was binding `String(null)` =
+`"null"` and emitting `pgp_sym_encrypt('null', keyRef)` — storing
+the four-character ciphertext `n,u,l,l` instead of SQL NULL, so a
+clear PHI value to `null` round-tripped as the unrelated string
+"null". The fix short-circuits a `null` value to a bare `NULL`
+literal regardless of classification, so NULL is now a first-class
+write that round-trips as `null` on read for encrypted and
+plaintext columns alike (and `""` stays distinct — empty plaintext
+yields a real non-null BYTEA envelope). Three offline unit tests
+lock the placeholder shape. M7.9.1 added
 `@crossengin/pack-erp-grocery` — the fourth vertical pack,
 proving **transitive (three-level) `meta.extends` lineage**:
 grocery extends `operate-erp/retail`, which itself extends core,

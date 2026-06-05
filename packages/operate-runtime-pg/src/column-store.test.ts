@@ -322,6 +322,35 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
     const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
     expect(insert.sql).toContain("pgp_sym_encrypt($3::text, $$kref$$)");
   });
+
+  it("binds NULL as a bare SQL literal (not the encrypted string 'null') on create", async () => {
+    const cap = capturePg();
+    await store(cap).create(TENANT, "Widget", { id: "w1", sku: "S1", mrn: null });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain('"mrn"');
+    // the mrn placeholder is bare NULL, not pgp_sym_encrypt($N::text,...)
+    expect(insert.sql).toContain("VALUES ($1, $2, $3, NULL)");
+    expect(insert.sql).not.toContain("$4");
+    expect(insert.params).toEqual([TENANT, "w1", "S1"]);
+  });
+
+  it("binds NULL as a bare SQL literal on update (clears the encrypted column)", async () => {
+    const cap = capturePg([{ id: "w1", mrn: null }]);
+    await store(cap).update(TENANT, "Widget", "w1", { mrn: null });
+    const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+    expect(upd.sql).toContain('"mrn" = NULL');
+    // tenant + id are the only bound params; no encrypted-text bind for null
+    expect(upd.params).toEqual([TENANT, "w1"]);
+  });
+
+  it("still encrypts an empty-string PHI value (BYTEA encoded, not NULL)", async () => {
+    const cap = capturePg();
+    await store(cap).create(TENANT, "Widget", { id: "w1", sku: "S1", mrn: "" });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    // empty string is encrypted-on-write (distinct from null)
+    expect(insert.sql).toContain(`pgp_sym_encrypt($4::text, ${KEY_REF})`);
+    expect(insert.params).toEqual([TENANT, "w1", "S1", ""]);
+  });
 });
 
 describe("ColumnMappedEntityStore — many_to_many association links", () => {

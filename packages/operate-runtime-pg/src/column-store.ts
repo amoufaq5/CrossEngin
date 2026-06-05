@@ -425,8 +425,17 @@ export class ColumnMappedEntityStore implements EntityStore {
    * Appends a write value to `params` and returns its SQL placeholder. An
    * encrypted column binds the plaintext as text and wraps it in
    * `pgp_sym_encrypt(…::text, keyRef)`; a plaintext column binds the raw value.
+   *
+   * A `null` value short-circuits both paths to a bare `NULL` SQL literal — for
+   * a plaintext column this is identical to binding `null`, but for an
+   * encrypted column it is the difference between *no ciphertext* (the column
+   * is NULL) and the literal string `"null"` accidentally encrypted in place
+   * (which is what `String(null)` would otherwise bind). NULL is therefore a
+   * first-class write that round-trips as `null` on read for encrypted and
+   * plaintext columns alike.
    */
   private writePlaceholder(mapping: ColumnMapping, value: unknown, params: unknown[]): string {
+    if (value === null) return "NULL";
     if (mapping.encryptAtRest) {
       params.push(String(value));
       return pgpSymEncryptExpr(`$${params.length.toString()}::text`, this.keyRef);
