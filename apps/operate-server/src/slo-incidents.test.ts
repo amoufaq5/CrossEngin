@@ -1,6 +1,7 @@
 import type { IncidentRecord } from "@crossengin/incident-response";
+import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { FixedClock, type EnforcementDecision, type RequestOutcome } from "@crossengin/observability-runtime";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   OperateSloMonitor,
@@ -128,5 +129,91 @@ describe("OperateSloMonitor.start/stop", () => {
     expect(errors).toHaveLength(1);
     monitor.stop();
     expect(f.cleared()).toBe(true);
+  });
+});
+
+function captureConnection(
+  capture: Array<{ sql: string; params: readonly unknown[] | undefined }>,
+): PgConnection {
+  const result: PgQueryResult = { rows: [], rowCount: 1 };
+  return {
+    query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
+      capture.push({ sql, params });
+      return result;
+    }) as PgConnection["query"],
+    transaction: vi.fn() as PgConnection["transaction"],
+    withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+    close: vi.fn() as PgConnection["close"],
+  };
+}
+
+describe("buildServingSloEngine — persistence wrapping", () => {
+  it("returns an in-process engine when no conn is set", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = buildServingSloEngine({ clock });
+    // a plain SloEnforcementEngine: synchronous evaluate; the sweep awaits either way
+    const decisions = await engine.evaluate(clock.now());
+    expect(Array.isArray(decisions)).toBe(true);
+  });
+
+  it("wraps the engine with buildPersistentSloEnforcementEngine when conn is set", async () => {
+    const clock = new FixedClock(BASE);
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = captureConnection(capture);
+    const engine = buildServingSloEngine({ clock, conn, surface: "operate-server" });
+
+    // a real-engine 5xx burst → breach_opened
+    for (let i = 0; i < 25; i += 1) {
+      engine.recordOutcome({
+        surface: "operate-server",
+        outcome: "error",
+        at: new Date(clock.now().getTime() - i * 1_000).toISOString(),
+        statusCode: 503,
+      });
+    }
+    const decisions = await engine.evaluate(clock.now());
+    expect(decisions[0]?.kind).toBe("breach_opened");
+
+    const inserts = capture.filter((c) => c.sql.includes("INSERT INTO"));
+    expect(inserts.some((c) => c.sql.includes("slo_enforcement_actions"))).toBe(true);
+    expect(inserts.some((c) => c.sql.includes("slo_evaluations"))).toBe(true);
+  });
+
+  it("a healthy traffic sweep with conn persists nothing", async () => {
+    const clock = new FixedClock(BASE);
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = captureConnection(capture);
+    const engine = buildServingSloEngine({ clock, conn });
+    for (let i = 0; i < 50; i += 1) {
+      engine.recordOutcome({
+        surface: "operate-server",
+        outcome: "ok",
+        at: new Date(clock.now().getTime() - i * 1_000).toISOString(),
+      });
+    }
+    const decisions = await engine.evaluate(clock.now());
+    expect(decisions).toHaveLength(0);
+    expect(capture.filter((c) => c.sql.includes("INSERT INTO"))).toHaveLength(0);
+  });
+
+  it("OperateSloMonitor over the persistent engine records actions + evaluations", async () => {
+    const clock = new FixedClock(BASE);
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = captureConnection(capture);
+    const engine = buildServingSloEngine({ clock, conn, surface: "operate-server" });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({ engine, sink, clock, surface: "operate-server" });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(503, 5);
+      clock.advance(1_000);
+    }
+    await monitor.sweep(clock.now());
+
+    // incident persisted via the sink + an enforcement action + a breach snapshot
+    expect(sink.recorded).toHaveLength(1);
+    const inserts = capture.filter((c) => c.sql.includes("INSERT INTO"));
+    expect(inserts.some((c) => c.sql.includes("slo_enforcement_actions"))).toBe(true);
+    expect(inserts.some((c) => c.sql.includes("slo_evaluations"))).toBe(true);
   });
 });

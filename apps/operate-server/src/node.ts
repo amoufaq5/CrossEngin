@@ -172,15 +172,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Optional serving-availability SLO loop: feed each request's outcome into the
   // burn-rate engine and, on a breach, declare an incident — persisted to
   // meta.incidents via the shared @crossengin/incident-response-pg sink when
-  // --slo-persist is set (else log-only). The serving app is the second consumer
-  // of incident-response-pg, alongside the workflow worker.
+  // --slo-persist is set (else log-only). With --slo-persist the engine itself is
+  // wrapped by buildPersistentSloEnforcementEngine so every decision also writes
+  // an enforcement action + a breach evaluation snapshot to
+  // meta.slo_enforcement_actions / meta.slo_evaluations (M8.5). The serving app is
+  // the second consumer of incident-response-pg, alongside the workflow worker.
   let sloMonitor: OperateSloMonitor | null = null;
   let incidentConn: PgConnection | null = null;
   if (options.slo) {
-    const engine = buildServingSloEngine(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {});
     if (options.sloPersist) {
       incidentConn = createNodePgConnection(parsePgEnvConfig());
     }
+    const engine = buildServingSloEngine({
+      ...(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {}),
+      ...(incidentConn !== null ? { conn: incidentConn } : {}),
+    });
     sloMonitor = new OperateSloMonitor({
       engine,
       ...(incidentConn !== null ? { sink: new PostgresIncidentSink(incidentConn) } : {}),

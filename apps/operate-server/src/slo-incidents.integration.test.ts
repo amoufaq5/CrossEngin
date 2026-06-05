@@ -64,4 +64,44 @@ suite("operate-server SLO incidents (real Postgres)", () => {
     const open = await replayer.listOpen();
     expect(open.some((s) => s.incidentId === incidentId)).toBe(true);
   });
+
+  it("persists every decision as an enforcement action + breach snapshots via the persistent engine wrapper (P2.33)", async () => {
+    const actor = randomUUID();
+    await conn.query(`INSERT INTO meta.users (id, email) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [actor, `slo-pe-${actor}@crossengin.test`]);
+
+    const clock = new FixedClock(BASE);
+    const surface = `operate-server-pe-${Math.random().toString(36).slice(2, 8)}`;
+
+    // count baseline rows for this surface (none yet)
+    const before = await conn.query<{ actions: string; evals: string }>(
+      `SELECT
+         (SELECT count(*) FROM meta.slo_enforcement_actions WHERE surface = $1) AS actions,
+         (SELECT count(*) FROM meta.slo_evaluations WHERE surface = $1) AS evals`,
+      [surface],
+    );
+    const baselineActions = Number(before.rows[0]?.actions ?? "0");
+    const baselineEvals = Number(before.rows[0]?.evals ?? "0");
+
+    const engine = buildServingSloEngine({ clock, surface, systemActorUserId: actor, conn });
+    const sink = new PostgresIncidentSink(conn);
+    const monitor = new OperateSloMonitor({ engine, sink, clock, surface, declaredBy: actor });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(503, 5);
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    expect(decisions.some((d) => d.kind === "breach_opened")).toBe(true);
+
+    const after = await conn.query<{ actions: string; evals: string }>(
+      `SELECT
+         (SELECT count(*) FROM meta.slo_enforcement_actions WHERE surface = $1) AS actions,
+         (SELECT count(*) FROM meta.slo_evaluations WHERE surface = $1) AS evals`,
+      [surface],
+    );
+    const newActions = Number(after.rows[0]?.actions ?? "0") - baselineActions;
+    const newEvals = Number(after.rows[0]?.evals ?? "0") - baselineEvals;
+    expect(newActions).toBeGreaterThanOrEqual(1);
+    expect(newEvals).toBeGreaterThanOrEqual(1);
+  });
 });

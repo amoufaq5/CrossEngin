@@ -87,6 +87,9 @@ importers:
       '@crossengin/observability-runtime':
         specifier: workspace:*
         version: link:../../packages/observability-runtime
+      '@crossengin/observability-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/observability-runtime-pg
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../../packages/operate-runtime

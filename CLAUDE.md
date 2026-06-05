@@ -1443,7 +1443,17 @@ re-exporting everything.
   resolves on recovered). The Node listener gained an onRequest hook;
   serve() wires it under --slo (+ --slo-persist / --slo-actor /
   --slo-interval-ms). A gated test declares + persists a serving-availability
-  incident and reads it back via the shared PostgresIncidentReplayer.
+  incident and reads it back via the shared PostgresIncidentReplayer. P2.33
+  (ADR-0142) completed the SLO persistence story: buildServingSloEngine now
+  takes an optional PgConnection and, when set, wraps the engine via
+  buildPersistentSloEnforcementEngine (from `@crossengin/observability-runtime-pg`)
+  so every `recordOutcome→evaluate` cycle also writes an enforcement action
+  to meta.slo_enforcement_actions per decision and an evaluation snapshot to
+  meta.slo_evaluations per breach_opened (M8.5). --slo-persist now threads
+  the same incident PgConnection into the engine wrapping; the in-process
+  default (no conn) is unchanged. The serving app now persists the full SLO
+  audit trail — incident + enforcement actions + breach snapshots — under
+  one durable flag.
 - **`apps/workflow-worker`** — Phase 3 P2.3: the runnable
   distributed-worker binary (third app under `apps/`, after
   `architect-cli` + `operate-server`). 4 src modules + a bin: cli

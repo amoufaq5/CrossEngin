@@ -1,11 +1,14 @@
 import type { IncidentRecord } from "@crossengin/incident-response";
+import type { PgConnection } from "@crossengin/kernel-pg";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import {
   SloEnforcementEngine,
   type Clock,
   type EnforcementDecision,
   type RequestOutcome,
+  type SloEnforcementEngineOptions,
 } from "@crossengin/observability-runtime";
+import { buildPersistentSloEnforcementEngine } from "@crossengin/observability-runtime-pg";
 
 /** A system actor id (UUID) used as the default SLO incident declarer. */
 export const DEFAULT_SLO_ACTOR = "00000000-0000-4000-8000-000000000000";
@@ -16,10 +19,16 @@ export interface IncidentPersistSink {
   resolve(incidentId: string, actorUserId: string): Promise<void>;
 }
 
-/** The structural slice of `SloEnforcementEngine` the monitor drives (injectable for tests). */
+/**
+ * The structural slice of an SLO engine the monitor drives. `evaluate` may be
+ * sync (the in-process `SloEnforcementEngine`) or async (the persistent wrapper
+ * from `@crossengin/observability-runtime-pg`, which writes an evaluation
+ * snapshot per `breach_opened` + an enforcement action per decision); `sweep`
+ * always awaits.
+ */
 export interface SloEngineLike {
   recordOutcome(outcome: RequestOutcome): void;
-  evaluate(now?: Date): readonly EnforcementDecision[];
+  evaluate(now?: Date): readonly EnforcementDecision[] | Promise<readonly EnforcementDecision[]>;
 }
 
 export interface BuildServingSloEngineOptions {
@@ -31,16 +40,17 @@ export interface BuildServingSloEngineOptions {
   readonly systemActorUserId?: string;
   readonly alertPolicy?: AlertPolicy;
   readonly clock?: Clock;
+  /**
+   * When set, the returned engine is wrapped by `buildPersistentSloEnforcementEngine`
+   * (from `@crossengin/observability-runtime-pg`): every `evaluate()` writes an
+   * enforcement action per decision to `meta.slo_enforcement_actions` and an
+   * evaluation snapshot per `breach_opened` to `meta.slo_evaluations`. With no
+   * conn, returns the in-process engine — no persistence.
+   */
+  readonly conn?: PgConnection;
 }
 
-/**
- * Builds an availability `SloEnforcementEngine` for the operate-server serving
- * surface: one rolling-window availability SLO whose burn-rate breach declares an
- * `IncidentRecord`. The defaults (surface `operate-server`, 99% / 30d, a single
- * P1 page route) make it usable with no config; the declarer is a UUID so the
- * declared incident's `declared_by` satisfies the `meta.users` FK on persist.
- */
-export function buildServingSloEngine(options: BuildServingSloEngineOptions = {}): SloEnforcementEngine {
+function sloEnforcementOptions(options: BuildServingSloEngineOptions): SloEnforcementEngineOptions {
   const surface = options.surface ?? "operate-server";
   const actor = options.systemActorUserId ?? DEFAULT_SLO_ACTOR;
   const slo: Slo = {
@@ -52,13 +62,30 @@ export function buildServingSloEngine(options: BuildServingSloEngineOptions = {}
     id: "operate-server",
     routes: [{ severity: "P1", channels: [{ kind: "pagerduty_phone", serviceKey: "operate-server-oncall" }] }],
   };
-  return new SloEnforcementEngine({
+  return {
     alertPolicy,
     systemActorUserId: actor,
     declaredBy: actor,
     registrations: [{ slo, category: "availability" }],
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
-  });
+  };
+}
+
+/**
+ * Builds an availability SLO engine for the operate-server serving surface: one
+ * rolling-window availability SLO whose burn-rate breach declares an
+ * `IncidentRecord`. The defaults (surface `operate-server`, 99% / 30d, a single
+ * P1 page route) make it usable with no config; the declarer is a UUID so the
+ * declared incident's `declared_by` satisfies the `meta.users` FK on persist.
+ *
+ * Without `conn` returns the in-process `SloEnforcementEngine`; with `conn`
+ * returns a persistent wrapper that also writes every decision + breach snapshot
+ * to `meta.slo_enforcement_actions` / `meta.slo_evaluations` (M8.5).
+ */
+export function buildServingSloEngine(options: BuildServingSloEngineOptions = {}): SloEngineLike {
+  const engineOptions = sloEnforcementOptions(options);
+  if (options.conn === undefined) return new SloEnforcementEngine(engineOptions);
+  return buildPersistentSloEnforcementEngine(options.conn, engineOptions);
 }
 
 const DEFAULT_SCHEDULER: SloScheduler = {
@@ -133,7 +160,7 @@ export class OperateSloMonitor {
 
   /** Evaluates the SLO; persists a newly declared incident and resolves a recovered one. */
   async sweep(now: Date = this.clock.now()): Promise<readonly EnforcementDecision[]> {
-    const decisions = this.engine.evaluate(now);
+    const decisions = await this.engine.evaluate(now);
     for (const decision of decisions) {
       if (decision.kind === "breach_opened") {
         this.log(`[operate-server] SLO BREACH ${decision.plan.incident.id} ${decision.severity} on ${decision.surface}`);

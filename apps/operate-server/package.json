@@ -32,6 +32,7 @@
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/observability": "workspace:*",
     "@crossengin/observability-runtime": "workspace:*",
+    "@crossengin/observability-runtime-pg": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",
     "@crossengin/operate-runtime-pg": "workspace:*",
     "@crossengin/pack-erp-core": "workspace:*",
