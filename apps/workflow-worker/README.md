@@ -86,6 +86,7 @@ enable it on its own slow cadence.
 --stale-after-ms <n>          heartbeat age that marks a worker stale (default 60000)
 --monitor-declared-by <uuid>  actor id for auto-declared incidents
 --persist-incidents           write stale-worker incidents to meta.incidents (requires --monitor)
+--page-webhook-url <url>      POST resolved page directives to this webhook (else logged; requires --monitor)
 ```
 
 ## Observability
@@ -104,8 +105,9 @@ enable it on its own slow cadence.
   severity scaled (sev3 at 1–2 stale, sev2 at 3+). It holds one incident per
   stale period (no re-declare while ongoing), **escalates** its severity if more
   workers go stale (and **re-pages** on-call at the higher urgency through the
-  `PageDeliverer` transport seam — `LoggingPageDeliverer` by default, a real
-  PagerDuty/Slack transport swaps in behind the interface), and **resolves** it
+  `PageDeliverer` transport seam — `LoggingPageDeliverer` by default, or
+  `--page-webhook-url <url>` to **POST** each resolved page directive as JSON to
+  a PagerDuty/Slack/Opsgenie/any HTTP sink), and **resolves** it
   when workers recover — each transition appending a timeline entry. With
   `--persist-incidents` it writes/transitions the incident in `meta.incidents`;
   otherwise it logs. The flow: **write → detect → plan → page → run → persist →

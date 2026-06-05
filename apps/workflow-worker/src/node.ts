@@ -16,7 +16,7 @@ import { buildWorkerSet, type WorkerSet } from "./runner.js";
 import { StaleWorkerMonitor } from "./stale-worker-monitor.js";
 import { PostgresIncidentSink } from "./incident-sink.js";
 import { PostgresIncidentReplayer } from "./incident-replayer.js";
-import { LoggingPageDeliverer, deliverPages } from "./page-sink.js";
+import { LoggingPageDeliverer, WebhookPageDeliverer, deliverPages, type PageDeliverer } from "./page-sink.js";
 import { runIncidents, runIncidentWrite, type IncidentsCliOptions } from "./incidents-cli.js";
 
 /**
@@ -127,7 +127,10 @@ export async function run(options: WorkerCliOptions): Promise<RunningWorker> {
     const incidentSink = options.persistIncidents
       ? new PostgresIncidentSink(conn, options.schema !== null ? { schema: options.schema } : {})
       : null;
-    const pageDeliverer = new LoggingPageDeliverer();
+    const pageDeliverer: PageDeliverer =
+      options.pageWebhookUrl !== null
+        ? new WebhookPageDeliverer({ url: options.pageWebhookUrl })
+        : new LoggingPageDeliverer();
     monitor = new StaleWorkerMonitor({
       source: new PostgresWorkerHeartbeatStore(conn, options.schema !== null ? { schema: options.schema } : {}),
       declaredBy: options.monitorDeclaredBy,

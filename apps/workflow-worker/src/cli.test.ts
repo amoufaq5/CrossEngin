@@ -83,6 +83,7 @@ describe("parseWorkerArgs", () => {
       staleAfterMs: 60000,
       monitorDeclaredBy: "00000000-0000-4000-8000-000000000000",
       persistIncidents: false,
+      pageWebhookUrl: null,
       definitionsPath: "/defs.json",
       help: false,
       version: false,
@@ -92,6 +93,9 @@ describe("parseWorkerArgs", () => {
   it("--persist-incidents enables the meta.incidents sink", () => {
     expect(parseWorkerArgs(["--monitor", "--persist-incidents"]).persistIncidents).toBe(true);
     expect(parseWorkerArgs([]).persistIncidents).toBe(false);
+    expect(parseWorkerArgs(["--page-webhook-url", "https://hooks.example/x"]).pageWebhookUrl).toBe("https://hooks.example/x");
+    expect(parseWorkerArgs(["--page-webhook-url=https://h/y"]).pageWebhookUrl).toBe("https://h/y");
+    expect(parseWorkerArgs([]).pageWebhookUrl).toBeNull();
   });
 
   it("--no-heartbeat disables the heartbeat", () => {

@@ -23,6 +23,7 @@ export interface WorkerCliOptions {
   readonly staleAfterMs: number;
   readonly monitorDeclaredBy: string;
   readonly persistIncidents: boolean;
+  readonly pageWebhookUrl: string | null;
   readonly definitionsPath: string | null;
   readonly help: boolean;
   readonly version: boolean;
@@ -93,6 +94,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
   let staleAfterMs = DEFAULTS.staleAfterMs;
   let monitorDeclaredBy = DEFAULT_MONITOR_DECLARED_BY;
   let persistIncidents = false;
+  let pageWebhookUrl: string | null = null;
   let definitionsPath: string | null = null;
   let help = false;
   let version = false;
@@ -165,6 +167,9 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
       i += consumed();
     } else if (arg === "--persist-incidents") {
       persistIncidents = true;
+    } else if (arg === "--page-webhook-url" || arg.startsWith("--page-webhook-url=")) {
+      pageWebhookUrl = takeValue(arg, next, "--page-webhook-url");
+      i += consumed();
     } else if (arg === "--definitions" || arg.startsWith("--definitions=")) {
       definitionsPath = takeValue(arg, next, "--definitions");
       i += consumed();
@@ -194,6 +199,7 @@ export function parseWorkerArgs(argv: readonly string[]): WorkerCliOptions {
     staleAfterMs,
     monitorDeclaredBy,
     persistIncidents,
+    pageWebhookUrl,
     definitionsPath,
     help,
     version,
@@ -236,6 +242,9 @@ Options:
   --monitor-declared-by <uuid>  Actor id for auto-declared incidents
   --persist-incidents      Write stale-worker incidents to meta.incidents (else
                            just logged); requires --monitor
+  --page-webhook-url <url>  POST resolved page directives (on declaration +
+                           escalation) to this webhook (PagerDuty/Slack/Opsgenie/
+                           any HTTP sink); default logs them. Requires --monitor
   --definitions <file>     JSON array of WorkflowDefinitions to run (default none)
   --help, -h               Show this help
   --version, -v            Print version
