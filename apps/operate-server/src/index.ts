@@ -6,4 +6,5 @@ export * from "./server.js";
 export * from "./edge.js";
 export * from "./cli.js";
 export * from "./slo-incidents.js";
+export * from "./incidents-cli.js";
 export * from "./node.js";

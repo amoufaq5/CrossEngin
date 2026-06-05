@@ -371,17 +371,17 @@ gained an `onRequest(status, latencyMs)` hook (timed in a finally);
 `--slo-actor` / `--slo-interval-ms`). A gated test bursts 5xx → the
 declared availability incident lands in `meta.incidents` and is read back
 via the shared `PostgresIncidentReplayer` — proving the P2.31 extraction's
-reuse. **P2.36 (ADR-0145) wired the schema-drift gate into CI** — a
-sibling of the P2.26 incident-drift + P2.27 PHI-encryption gates. A
-new `Schema drift gate` step in `.github/workflows/ci.yml`'s
-`integration` job runs `crossengin-pg drift` immediately after
-`scripts/setup-integration-db.sh` provisions + bootstraps the database,
-so it gates the **freshly-provisioned baseline** of the `meta` schema
-against `META_TABLES` (the source-of-truth the bootstrap DDL was
-emitted from). The bin's pre-existing exit-1-on-drift contract **fails
-the build** before the gated suites run. Placement: *before* the suites
-— the suites write rows but don't migrate `meta`, so any drift at this
-point is a real applier-vs-meta-schema divergence, not test pollution.
+reuse. **P2.34 (ADR-0143) mirrored the `incidents` CLI subcommand onto
+`apps/operate-server`** so an operator can query/transition the same
+`meta.incidents` audit table from the serving binary, backed by the shared
+`@crossengin/incident-response-pg` runner. **P2.36 (ADR-0145) wired the
+schema-drift gate into CI** — a sibling of the P2.26 incident-drift +
+P2.27 PHI-encryption gates. A new `Schema drift gate` step in
+`.github/workflows/ci.yml`'s `integration` job runs `crossengin-pg drift`
+immediately after `scripts/setup-integration-db.sh` provisions +
+bootstraps the database, so it gates the **freshly-provisioned baseline**
+of the `meta` schema against `META_TABLES`. The bin's pre-existing
+exit-1-on-drift contract **fails the build** before the gated suites run.
 **P2.38 (ADR-0147) added the latency sibling** so the M8.6
 `LatencySloEngine` rides the same serving stream:
 `buildServingLatencyEngine` (one latency SLO, p95 ≤ 300ms / 30d, the

@@ -1,7 +1,13 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
-import { PostgresIncidentSink } from "@crossengin/incident-response-pg";
+import {
+  PostgresIncidentReplayer,
+  PostgresIncidentSink,
+  runIncidentWrite,
+  runIncidents,
+  type IncidentsCliOptions,
+} from "@crossengin/incident-response-pg";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
@@ -103,6 +109,36 @@ export function createNodeRequestListener(
       onRequest?.(status, Date.now() - startedAt, matchedOperationId);
     }
   };
+}
+
+/**
+ * Runs a one-shot `incidents` query against `meta.incidents`: opens a Postgres
+ * connection from the `PG*` env vars, builds either a `PostgresIncidentReplayer`
+ * (open/period/verify/metrics) or a `PostgresIncidentSink` (ack/mitigate),
+ * dispatches the parsed command through `runIncidents` / `runIncidentWrite`,
+ * closes the connection in a `finally`, and returns the exit code (`verify`
+ * returns 1 on drift). Mirrors `apps/workflow-worker`'s `executeIncidents` so
+ * operators can query/transition the same `meta.incidents` audit table — now
+ * populated by the operate-server SLO loop (P2.32) too — from either binary.
+ */
+export async function executeIncidents(
+  options: IncidentsCliOptions,
+  out: (line: string) => void = (line) => void process.stdout.write(`${line}\n`),
+): Promise<number> {
+  const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+  const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
+  try {
+    if (options.command === "ack" || options.command === "mitigate") {
+      const sink = new PostgresIncidentSink(conn, schemaOpt);
+      const { exitCode } = await runIncidentWrite(options, sink, out);
+      return exitCode;
+    }
+    const replayer = new PostgresIncidentReplayer(conn, schemaOpt);
+    const { exitCode } = await runIncidents(options, replayer, out);
+    return exitCode;
+  } finally {
+    await conn.close();
+  }
 }
 
 async function resolveJwtConfig(

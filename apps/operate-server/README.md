@@ -110,6 +110,38 @@ operate-server --pack erp-healthcare --store pg-columns --port 8080 --api-key de
 The same server also runs on the edge: `buildEdgeFetchHandler` / `asModuleWorker`
 yield a Cloudflare `{fetch}` default export over the identical `dispatch` core.
 
+## `incidents` subcommand (one-shot query)
+
+Read/transition the `meta.incidents` audit table from the shell. With `--slo`
+the serving app declares availability incidents into it; this subcommand
+queries and operates on them without switching binaries. `operate-server
+incidents …` runs a single query and exits:
+
+```bash
+# incidents that are still open (status not resolved/closed/cancelled)
+operate-server incidents open [--limit N] [--format human|json]
+
+# every incident declared within a window
+operate-server incidents period --from <iso> --to <iso> [--limit N] [--format json]
+
+# timeline drift sweep over a window — exits 1 if any incident's timeline
+# drifted from declared -> (escalated)* -> resolved (gate CI on it)
+operate-server incidents verify --from <iso> --to <iso> [--format json]
+
+# operational KPIs over a window: MTTP / MTTA / MTTM / MTTR (mean/p50/p95/max),
+# open/resolved counts, per-severity gauges, escalation totals
+operate-server incidents metrics --from <iso> --to <iso> [--limit N] [--format json]
+
+# record the ack / mitigate milestones (drives MTTA / MTTM). Idempotent:
+# a no-op (absent / already past that state) still exits 0.
+operate-server incidents ack      <incident-id> [--actor <uuid>]
+operate-server incidents mitigate <incident-id> [--actor <uuid>]
+```
+
+All commands honor `--schema` (default `meta`). This is the same subcommand
+surface `workflow-worker` ships — both binaries query the same
+`@crossengin/incident-response-pg` layer over `meta.incidents`.
+
 ## Tests
 
 Unit tests run offline over the in-memory store. A gated real-Postgres

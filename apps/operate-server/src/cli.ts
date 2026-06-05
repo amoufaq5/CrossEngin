@@ -203,6 +203,9 @@ export const helpText = `operate-server — serve a resolved CrossEngin manifest
 Usage:
   operate-server --pack <name> [options]
   operate-server --manifest <file.json> [options]
+  operate-server incidents <open|period|verify|metrics|ack|mitigate> [opts]
+                       Query/transition the meta.incidents audit table (populated
+                       by --slo); see \`operate-server incidents --help\`.
 
 Manifest source (exactly one):
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
