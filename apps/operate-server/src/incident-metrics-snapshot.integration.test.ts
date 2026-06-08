@@ -67,10 +67,13 @@ suite("operate-server incident metric snapshots (real Postgres)", () => {
     expect(written.snapshotId).toMatch(/^ims_/);
     expect(written.total).toBe(metrics.total);
 
-    // read it back newest-first
+    // read it back newest-first. listSnapshots filters on computed_at (the trend
+    // axis), which the store stamps with the real now() on insert — so the read
+    // window must span the present, not the (fixed, historical) metrics window.
+    const nowMs = Date.now();
     const read = await store.listSnapshots({
-      from: new Date("2026-06-05T00:00:00.000Z"),
-      to: new Date("2026-06-06T00:00:00.000Z"),
+      from: new Date(nowMs - 60 * 60 * 1000),
+      to: new Date(nowMs + 60 * 60 * 1000),
       limit: 50,
     });
     const got = read.find((s) => s.snapshotId === written.snapshotId);

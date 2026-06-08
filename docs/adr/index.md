@@ -200,3 +200,6 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 114 | 0146 | 2,500 | Drafted alongside per-route serving SLOs (Phase 3 P2.37) |
 | 115 | 0147 | 2,500 | Drafted alongside the serving latency SLO (Phase 3 P2.38) |
 | 116 | 0148 | 2,500 | Drafted alongside column-store encrypted PHI read-fidelity + NULL fix (Phase 3 P2.39) |
+| 117 | 0149 | 2,500 | Drafted alongside incident KPI metric snapshots (Phase 3 P2.40) |
+| 118 | 0150 | 2,500 | Drafted alongside per-route serving latency SLOs (Phase 3 P2.41) |
+| 119 | 0151 | 2,500 | Drafted alongside the gateway execution drift CI gate (Phase 3 P2.42) |

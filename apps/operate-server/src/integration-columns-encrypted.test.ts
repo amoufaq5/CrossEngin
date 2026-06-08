@@ -68,9 +68,14 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
 
   beforeAll(async () => {
     conn = createNodePgConnection(parsePgEnvConfig());
+    // Dedicated schemas so this suite never races the integration-columns.test
+    // suite, which provisions its own Patient/m2m tables in public/lk under
+    // concurrent vitest file parallelism.
+    await conn.query("CREATE SCHEMA IF NOT EXISTS encfid");
+    await conn.query("CREATE SCHEMA IF NOT EXISTS encfidlk");
     healthcare = await loadBuiltinPack("erp-healthcare");
     store = new ColumnMappedEntityStore(conn, healthcare, {
-      schema: "public",
+      schema: "encfid",
       encryptionKeyRef: KEY_REF,
     });
     await store.ensureSchema();
@@ -104,7 +109,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
       ],
     } as unknown as Manifest;
     const nullStore = new ColumnMappedEntityStore(conn, nullableManifest, {
-      schema: "lk",
+      schema: "encfidlk",
       encryptionKeyRef: KEY_REF,
     });
     await nullStore.ensureSchema();
@@ -114,7 +119,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
 
     // raw row: the BYTEA column is genuinely NULL (no ciphertext written for null)
     const raw = await conn.query<{ secret: Buffer | null }>(
-      `SELECT secret FROM lk.phi_box WHERE tenant_id = $1 AND id = $2`,
+      `SELECT secret FROM encfidlk.phi_box WHERE tenant_id = $1 AND id = $2`,
       [t, created.id],
     );
     expect(raw.rows[0]?.secret).toBeNull();
@@ -130,7 +135,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
     });
     expect(updated?.["secret"]).toBe("now-set");
     const rawAfter = await conn.query<{ secret: Buffer | null }>(
-      `SELECT secret FROM lk.phi_box WHERE tenant_id = $1 AND id = $2`,
+      `SELECT secret FROM encfidlk.phi_box WHERE tenant_id = $1 AND id = $2`,
       [t, created.id],
     );
     expect(rawAfter.rows[0]?.secret).toBeInstanceOf(Buffer);
@@ -143,7 +148,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
     });
     expect(cleared?.["secret"] ?? null).toBeNull();
     const rawCleared = await conn.query<{ secret: Buffer | null }>(
-      `SELECT secret FROM lk.phi_box WHERE tenant_id = $1 AND id = $2`,
+      `SELECT secret FROM encfidlk.phi_box WHERE tenant_id = $1 AND id = $2`,
       [t, created.id],
     );
     expect(rawCleared.rows[0]?.secret).toBeNull();
@@ -159,7 +164,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
     // the BYTEA column is non-null even for an empty plaintext — pgp_sym_encrypt
     // emits a real envelope (header + zero-length payload) for ""
     const raw = await conn.query<{ mrn: Buffer | null; t: string }>(
-      `SELECT mrn, pg_typeof(mrn)::text AS t FROM public.patient WHERE tenant_id = $1 AND id = $2`,
+      `SELECT mrn, pg_typeof(mrn)::text AS t FROM encfid.patient WHERE tenant_id = $1 AND id = $2`,
       [tenant, patient.id],
     );
     expect(raw.rows[0]?.t).toBe("bytea");
@@ -175,7 +180,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
     // the ciphertext doesn't contain the plaintext substring (a sanity check the
     // characters round-tripped through UTF-8 + pgcrypto rather than being mangled)
     const raw = await conn.query<{ mrn: Buffer }>(
-      `SELECT mrn FROM public.patient WHERE tenant_id = $1 AND id = $2`,
+      `SELECT mrn FROM encfid.patient WHERE tenant_id = $1 AND id = $2`,
       [tenant, patient.id],
     );
     expect(raw.rows[0]?.mrn.toString("utf8")).not.toContain("محمد");
@@ -197,7 +202,7 @@ suite("ColumnMappedEntityStore encrypted-PHI read fidelity (real Postgres)", () 
       ],
     } as unknown as Manifest;
     const longStore = new ColumnMappedEntityStore(conn, longManifest, {
-      schema: "lk",
+      schema: "encfidlk",
       encryptionKeyRef: KEY_REF,
     });
     await longStore.ensureSchema();
