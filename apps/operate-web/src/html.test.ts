@@ -12,7 +12,7 @@ beforeAll(async () => {
     port: 0,
     pack: "erp-retail",
     manifestPath: null,
-    apiKeys: ["mgr:store_manager:t1", "csh:cashier:t1"],
+    apiKeys: ["mgr:store_manager:t1", "csh:cashier:t1", "adm:retail_admin:t1"],
     store: "memory",
     schema: null,
     jwksKeys: [],
@@ -87,6 +87,31 @@ describe("operate-web SSR HTML routes", () => {
     const html = await res.text();
     expect(html).toContain("<form");
     expect(html).toContain('data-entity="Product"');
+  });
+
+  it("gates the detail page's Edit/Delete affordances by the caller's RBAC", async () => {
+    // store_manager: may update Product (Edit) but not delete (admin-only) → no Delete
+    const mgr = await (await fetch(`${base}/app/Product/p1`, { headers: { "x-api-key": "mgr" } })).text();
+    expect(mgr).toContain('data-action="edit"');
+    expect(mgr).not.toContain('data-action="delete"');
+    // retail_admin: may both edit and delete
+    const adm = await (await fetch(`${base}/app/Product/p1`, { headers: { "x-api-key": "adm" } })).text();
+    expect(adm).toContain('data-action="edit"');
+    expect(adm).toContain('data-action="delete"');
+    // cashier: may neither update nor delete Product → no affordances
+    const csh = await (await fetch(`${base}/app/Product/p1`, { headers: { "x-api-key": "csh" } })).text();
+    expect(csh).not.toContain('data-action="edit"');
+    expect(csh).not.toContain('data-action="delete"');
+  });
+
+  it("renders the edit form prefilled with the record, carrying the PATCH target id", async () => {
+    const res = await fetch(`${base}/app/Product/p1/edit`, { headers: { "x-api-key": "mgr" } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("<form");
+    expect(html).toContain('data-mode="edit"');
+    expect(html).toContain('value="ABC-1"');
+    expect(html).toContain('"entityId":"p1"');
   });
 
   it("emits the hydration scaffold: #root, embedded state, and the client script", async () => {

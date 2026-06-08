@@ -217,3 +217,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 131 | 0162 | 3,000 | Drafted alongside operate-web kanban + calendar view models (Phase 3 P3.6) |
 | 132 | 0163 | 3,000 | Drafted alongside operate-web Postgres entity store + gated integration test (Phase 3 P3.7) |
 | 133 | 0164 | 3,000 | Drafted alongside the operate-web write path — RBAC + write-mask mutations (Phase 3 P3.8) |
+| 134 | 0165 | 3,000 | Drafted alongside operate-web client-side form submit + delete (Phase 3 P3.9) |

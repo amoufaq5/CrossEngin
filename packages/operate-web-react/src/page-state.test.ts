@@ -1,12 +1,18 @@
-import type { TableModel, WebAppModel } from "@crossengin/operate-web";
+import type { FormModel, TableModel, WebAppModel } from "@crossengin/operate-web";
 import { describe, expect, it } from "vitest";
 
 import {
   PAGE_STATE_GLOBAL,
   buildListQueryUrl,
+  buildWriteUrl,
+  coerceFormValues,
   parsePageState,
   serializePageState,
+  submitDelete,
+  submitFormWrite,
   type WebPageState,
+  type WriteFetcher,
+  type WriteResult,
 } from "./page-state.js";
 
 const APP: WebAppModel = {
@@ -124,5 +130,80 @@ describe("buildListQueryUrl", () => {
 
   it("path-encodes the entity name", () => {
     expect(buildListQueryUrl("Sales Order")).toBe("/ui/Sales%20Order");
+  });
+});
+
+const FORM: FormModel = {
+  entity: "Product",
+  mode: "create",
+  title: "New Product",
+  fields: [
+    { field: "sku", label: "SKU", type: "text", required: true, readOnly: false, validations: [] },
+    { field: "unit_price", label: "Price", type: "decimal", required: false, readOnly: false, validations: [] },
+    { field: "active", label: "Active", type: "boolean", required: false, readOnly: false, validations: [] },
+    { field: "computed", label: "Computed", type: "text", required: false, readOnly: true, validations: [] },
+  ],
+};
+
+describe("buildWriteUrl", () => {
+  it("targets the collection without an id and a record with one", () => {
+    expect(buildWriteUrl("Product")).toBe("/ui/Product");
+    expect(buildWriteUrl("Product", "p1")).toBe("/ui/Product/p1");
+    expect(buildWriteUrl("Product", null)).toBe("/ui/Product");
+    expect(buildWriteUrl("Sales Order", "a b")).toBe("/ui/Sales%20Order/a%20b");
+  });
+});
+
+describe("coerceFormValues", () => {
+  it("coerces numbers + booleans, drops read-only + empty optional fields", () => {
+    const out = coerceFormValues(FORM, { sku: "ABC", unit_price: "9.5", active: "on", computed: "x" });
+    expect(out).toEqual({ sku: "ABC", unit_price: 9.5, active: true });
+  });
+
+  it("an absent checkbox is false; an empty optional number/text is omitted", () => {
+    const out = coerceFormValues(FORM, { sku: "ABC", unit_price: "" });
+    expect(out).toEqual({ sku: "ABC", active: false });
+  });
+
+  it("drops a non-numeric number field", () => {
+    const out = coerceFormValues(FORM, { sku: "ABC", unit_price: "notnum" });
+    expect("unit_price" in out).toBe(false);
+  });
+});
+
+describe("submitFormWrite / submitDelete", () => {
+  function recordingFetcher(result: WriteResult): { calls: { method: string; url: string; payload: unknown }[]; fetcher: WriteFetcher } {
+    const calls: { method: string; url: string; payload: unknown }[] = [];
+    const fetcher: WriteFetcher = async (method, url, payload) => {
+      calls.push({ method, url, payload });
+      return result;
+    };
+    return { calls, fetcher };
+  }
+
+  it("POSTs to the collection on create", async () => {
+    const { calls, fetcher } = recordingFetcher({ ok: true, status: 201, record: { id: "p9" } });
+    const res = await submitFormWrite({ entity: "Product", payload: { sku: "A" }, fetcher });
+    expect(calls[0]).toEqual({ method: "POST", url: "/ui/Product", payload: { sku: "A" } });
+    expect(res.record?.["id"]).toBe("p9");
+  });
+
+  it("PATCHes the record on edit", async () => {
+    const { calls, fetcher } = recordingFetcher({ ok: true, status: 200 });
+    await submitFormWrite({ entity: "Product", entityId: "p1", payload: { sku: "B" }, fetcher });
+    expect(calls[0]).toEqual({ method: "PATCH", url: "/ui/Product/p1", payload: { sku: "B" } });
+  });
+
+  it("surfaces a non-ok result (e.g. a write-mask 422)", async () => {
+    const { fetcher } = recordingFetcher({ ok: false, status: 422, detail: "cannot write field(s): unit_cost" });
+    const res = await submitFormWrite({ entity: "Product", payload: { unit_cost: 1 }, fetcher });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toContain("unit_cost");
+  });
+
+  it("submitDelete DELETEs the record with a null payload", async () => {
+    const { calls, fetcher } = recordingFetcher({ ok: true, status: 204 });
+    await submitDelete("Product", "p1", fetcher);
+    expect(calls[0]).toEqual({ method: "DELETE", url: "/ui/Product/p1", payload: null });
   });
 });

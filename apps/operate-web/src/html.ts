@@ -53,17 +53,40 @@ export function renderDetailPage(
   app: WebAppModel,
   detail: DetailModel,
   record: Readonly<Record<string, unknown>>,
+  permissions: { canEdit: boolean; canDelete: boolean } = { canEdit: false, canDelete: false },
 ): RawWebResponse {
   return pageFor(
-    { kind: "detail", app, detail, record, basePath: APP_BASE_PATH },
+    {
+      kind: "detail",
+      app,
+      detail,
+      record,
+      basePath: APP_BASE_PATH,
+      canEdit: permissions.canEdit,
+      canDelete: permissions.canDelete,
+    },
     `${detail.title} — ${app.title}`,
   );
 }
 
-/** Renders a create form to a hydratable HTML page. */
-export function renderFormPage(app: WebAppModel, form: FormModel): RawWebResponse {
+/**
+ * Renders a form to a hydratable HTML page. With an `edit` argument (the record
+ * id + prefill values) it's an edit form the hydrated client PATCHes; without,
+ * a create form (POST).
+ */
+export function renderFormPage(
+  app: WebAppModel,
+  form: FormModel,
+  edit?: { entityId: string; values: Readonly<Record<string, unknown>> },
+): RawWebResponse {
   return pageFor(
-    { kind: "form", app, form, basePath: APP_BASE_PATH },
+    {
+      kind: "form",
+      app,
+      form,
+      basePath: APP_BASE_PATH,
+      ...(edit !== undefined ? { entityId: edit.entityId, values: edit.values } : {}),
+    },
     `${form.title} — ${app.title}`,
   );
 }

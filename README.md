@@ -1,7 +1,7 @@
 # CrossEngin
 
 > **Status — Phase 3 in progress.** 64 packages + 4 apps, 125
-> meta-schema tables, **6,933 offline tests + 45 gated real-Postgres
+> meta-schema tables, **6,947 offline tests + 45 gated real-Postgres
 > integration tests + five CI gates** (schema-drift · incident-drift ·
 > PHI-encryption · gateway-execution · slo-enforcement-drift), all green,
 > zero type errors. Phase 2
@@ -10,7 +10,7 @@
 > workflow worker (`workflow-worker` + `apps/workflow-worker`), and the
 > redaction-aware UI layer (`operate-web` + `operate-web-react` +
 > `apps/operate-web` — view models → SSR React → hydrated pages), all proven
-> end-to-end against real Postgres. ADRs 0001–0164 are drafted in
+> end-to-end against real Postgres. ADRs 0001–0165 are drafted in
 > `docs/adr/`. Resuming work? Read **[CLAUDE.md](CLAUDE.md)** — the
 > concise state snapshot.
 
@@ -125,7 +125,7 @@ updating `meta-schema.test.ts` (count, sorted names, column checks).
 
 ```
 CrossEngin/
-├── docs/             vision + ADRs 0001-0164  (CC BY 4.0)
+├── docs/             vision + ADRs 0001-0165  (CC BY 4.0)
 │   ├── vision.md
 │   └── adr/          docs/adr/index.md is the running index
 ├── apps/             4 runnable binaries  (architect-cli, operate-server, workflow-worker, operate-web)
@@ -140,7 +140,7 @@ CrossEngin/
 
 - **Human contributor?** Start with **[`docs/vision.md`](docs/vision.md)**
   (the north star), then **[`docs/adr/index.md`](docs/adr/index.md)** (the
-  index of 164 architecture decisions). Individual ADRs live at
+  index of 165 architecture decisions). Individual ADRs live at
   `docs/adr/NNNN-<slug>.md`, following
   **[`0000-template.md`](docs/adr/0000-template.md)**.
 - **AI assistant resuming work?** Start with **[CLAUDE.md](CLAUDE.md)** —

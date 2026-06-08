@@ -184,9 +184,10 @@ Routes (all GET; auth via x-api-key or Authorization: Bearer <key|jwt>):
     /ui/:entity/:id      { detail, record } — record view + the record
   SSR React HTML pages (hydrated by /assets/operate-web-client.js) —
     /app                 the app shell + nav
-    /app/:entity         the table page
-    /app/:entity/new     the create form page
-    /app/:entity/:id     the detail page
+    /app/:entity         the table page (sort + paginate)
+    /app/:entity/new     the create form page (submits POST /ui/:entity)
+    /app/:entity/:id     the detail page (Edit / Delete when authorized)
+    /app/:entity/:id/edit the edit form page (submits PATCH /ui/:entity/:id)
   /assets/operate-web-client.js   the hydration bundle (built via build:client)
 
 Every model, data row, and embedded hydration state is compiled / redacted for

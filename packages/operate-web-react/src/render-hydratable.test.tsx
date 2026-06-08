@@ -53,6 +53,8 @@ describe("renderHydratablePage", () => {
       detail: { entity: "Product", title: "Product", sections: [] },
       record: { id: "p1", note: "</script><script>alert(1)</script>" },
       basePath: "/app",
+      canEdit: false,
+      canDelete: false,
     };
     const html = renderHydratablePage(state);
     // the only </script> occurrences are our two real closing tags, never the data's
@@ -67,5 +69,60 @@ describe("renderHydratablePage", () => {
     const state: WebPageState = { kind: "app", app: APP, basePath: "/app" };
     const html = renderHydratablePage(state, { clientScriptSrc: "/static/app.js" });
     expect(html).toContain('<script src="/static/app.js" defer></script>');
+  });
+});
+
+describe("detail write affordances (canEdit / canDelete)", () => {
+  const DETAIL = {
+    entity: "Product",
+    title: "Product",
+    sections: [{ title: "Details", fields: [{ field: "sku", label: "SKU", type: "text" as const }] }],
+  };
+
+  function detailState(canEdit: boolean, canDelete: boolean): WebPageState {
+    return { kind: "detail", app: APP, detail: DETAIL, record: { id: "p1", sku: "ABC" }, basePath: "/app", canEdit, canDelete };
+  }
+
+  it("renders an Edit link + Delete button only when authorized", () => {
+    const both = renderHydratablePage(detailState(true, true));
+    expect(both).toContain('data-action="edit"');
+    expect(both).toContain("/app/Product/p1/edit");
+    expect(both).toContain('data-action="delete"');
+  });
+
+  it("omits both affordances when the caller can neither edit nor delete", () => {
+    const none = renderHydratablePage(detailState(false, false));
+    expect(none).not.toContain('data-action="edit"');
+    expect(none).not.toContain('data-action="delete"');
+  });
+
+  it("shows only Edit when delete is forbidden", () => {
+    const editOnly = renderHydratablePage(detailState(true, false));
+    expect(editOnly).toContain('data-action="edit"');
+    expect(editOnly).not.toContain('data-action="delete"');
+  });
+});
+
+describe("form section (create vs edit prefill)", () => {
+  const FORM = {
+    entity: "Product",
+    mode: "edit" as const,
+    title: "Edit Product",
+    fields: [{ field: "sku", label: "SKU", type: "text" as const, required: true, readOnly: false, validations: [] }],
+  };
+
+  it("prefills an edit form's control with the record value", () => {
+    const state: WebPageState = {
+      kind: "form",
+      app: APP,
+      form: FORM,
+      basePath: "/app",
+      entityId: "p1",
+      values: { sku: "ABC-1" },
+    };
+    const html = renderHydratablePage(state);
+    expect(html).toContain('value="ABC-1"');
+    // the edit target id rides in the embedded state for the client PATCH
+    expect(html).toContain('"entityId":"p1"');
   });
 });

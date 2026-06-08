@@ -207,6 +207,9 @@ export class OperateWebServer {
     if (rest.length === 2) {
       return this.serveDetailHtml(rest[0]!, rest[1]!, viewer, viewerCtx);
     }
+    if (rest.length === 3 && rest[2] === "edit") {
+      return this.serveEditFormHtml(rest[0]!, rest[1]!, viewer, viewerCtx);
+    }
     return problemResponse(404, "Not found", `no route for ${path}`);
   }
 
@@ -417,11 +420,18 @@ export class OperateWebServer {
     if (miss !== null) return miss;
     const record = await this.store.get(viewer.tenantId, entity, id);
     if (record === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
-    const access = this.accessFor(entity, viewerCtx);
+    const resolver = this.resolverFor(entity, viewerCtx);
+    const access = resolver.resolve(entityFields((this.manifest.entities ?? []).find((e) => e.name === entity)!));
     const redacted = redactRecord(record, access);
     const app = compileWebApp(this.manifest, viewerCtx);
     const detail = compileDetailModel(this.manifest, entity, viewerCtx, redacted, this.compileOptions);
-    return renderDetailPage(app, detail, redacted);
+    // Edit / Delete affordances are gated by the caller's RBAC grants — the
+    // hydrated client only shows a control the server would authorize.
+    const permissions = {
+      canEdit: resolver.canPerform("update").allowed,
+      canDelete: resolver.canPerform("delete").allowed,
+    };
+    return renderDetailPage(app, detail, redacted, permissions);
   }
 
   private serveFormHtml(entity: string, viewerCtx: ViewerContext): RawWebResponse {
@@ -430,6 +440,23 @@ export class OperateWebServer {
     const app = compileWebApp(this.manifest, viewerCtx);
     const form = compileFormModel(this.manifest, entity, viewerCtx, "create", this.compileOptions);
     return renderFormPage(app, form);
+  }
+
+  private async serveEditFormHtml(
+    entity: string,
+    id: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const record = await this.store.get(viewer.tenantId, entity, id);
+    if (record === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    const access = this.accessFor(entity, viewerCtx);
+    const redacted = redactRecord(record, access);
+    const app = compileWebApp(this.manifest, viewerCtx);
+    const form = compileFormModel(this.manifest, entity, viewerCtx, "edit", this.compileOptions);
+    return renderFormPage(app, form, { entityId: id, values: redacted });
   }
 }
 

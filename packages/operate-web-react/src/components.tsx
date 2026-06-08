@@ -5,7 +5,7 @@ import type {
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
-import type { JSX, ReactNode } from "react";
+import type { FormEvent, JSX, ReactNode } from "react";
 
 /**
  * Presentational, framework-pure React components over the `operate-web` view
@@ -177,8 +177,25 @@ function inputTypeFor(type: FormFieldModel["type"]): string {
 
 export interface FormViewProps {
   readonly model: FormModel;
-  /** The path the form POSTs to (default `/app/:entity` for create). */
+  /** The path the form POSTs to (default `/app/:entity` for create; the no-JS fallback). */
   readonly action?: string;
+  /** Prefill values keyed by field name (an edit form). */
+  readonly values?: Readonly<Record<string, unknown>>;
+  /** When set, the form submits via this handler (the hydrated client) instead of a native POST. */
+  readonly onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
+  /** Disables the submit button while a write is in flight. */
+  readonly submitting?: boolean;
+  /** An optional status / error node rendered under the actions. */
+  readonly statusNode?: ReactNode;
+}
+
+/** Coerces a prefill value into the string an input's `defaultValue` expects. */
+function prefillString(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
 }
 
 /**
@@ -186,12 +203,22 @@ export interface FormViewProps {
  * A read-only field's control is `disabled`; a required field is marked
  * `required` and flagged in its label. `long_text` renders a `<textarea>`,
  * `boolean` a checkbox, `enum` a `<select>` over its declared values, else a
- * typed `<input>`. Only the model's (redacted) fields appear.
+ * typed `<input>`. Only the model's (redacted) fields appear. When `values` is
+ * supplied (an edit form) each control is prefilled. When `onSubmit` is supplied
+ * (the hydrated client) the form submits through it; otherwise it falls back to
+ * a native POST to `action`.
  */
-export function FormView({ model, action }: FormViewProps): JSX.Element {
+export function FormView({ model, action, values, onSubmit, submitting, statusNode }: FormViewProps): JSX.Element {
   const formAction = action ?? `/app/${model.entity}`;
   return (
-    <form className="ce-form" data-entity={model.entity} data-mode={model.mode} method="post" action={formAction}>
+    <form
+      className="ce-form"
+      data-entity={model.entity}
+      data-mode={model.mode}
+      method="post"
+      action={formAction}
+      {...(onSubmit !== undefined ? { onSubmit } : {})}
+    >
       <h2 className="ce-form-title">{model.title}</h2>
       {model.fields.map((field) => {
         const controlId = `field-${field.field}`;
@@ -202,15 +229,16 @@ export function FormView({ model, action }: FormViewProps): JSX.Element {
               {field.label}
               {field.required ? <span className="ce-required" aria-hidden="true"> *</span> : null}
             </label>
-            {renderControl(field, controlId, enumRule)}
+            {renderControl(field, controlId, enumRule, values?.[field.field])}
           </div>
         );
       })}
       <div className="ce-form-actions">
-        <button type="submit" disabled={model.fields.every((f) => f.readOnly)}>
+        <button type="submit" disabled={submitting === true || model.fields.every((f) => f.readOnly)}>
           {model.mode === "create" ? "Create" : "Save"}
         </button>
       </div>
+      {statusNode !== undefined ? <div className="ce-form-status" role="status">{statusNode}</div> : null}
     </form>
   );
 }
@@ -219,10 +247,17 @@ function renderControl(
   field: FormFieldModel,
   controlId: string,
   enumRule: { kind: "enum"; values: readonly string[] } | undefined,
+  prefill: unknown,
 ): JSX.Element {
   if (field.type === "enum" && enumRule !== undefined) {
     return (
-      <select id={controlId} name={field.field} disabled={field.readOnly} required={field.required} defaultValue="">
+      <select
+        id={controlId}
+        name={field.field}
+        disabled={field.readOnly}
+        required={field.required}
+        defaultValue={prefill !== undefined ? prefillString(prefill) : ""}
+      >
         <option value="" disabled>
           Select…
         </option>
@@ -235,10 +270,26 @@ function renderControl(
     );
   }
   if (field.type === "long_text" || field.type === "json") {
-    return <textarea id={controlId} name={field.field} disabled={field.readOnly} required={field.required} />;
+    return (
+      <textarea
+        id={controlId}
+        name={field.field}
+        disabled={field.readOnly}
+        required={field.required}
+        defaultValue={prefillString(prefill)}
+      />
+    );
   }
   if (field.type === "boolean") {
-    return <input id={controlId} name={field.field} type="checkbox" disabled={field.readOnly} />;
+    return (
+      <input
+        id={controlId}
+        name={field.field}
+        type="checkbox"
+        disabled={field.readOnly}
+        defaultChecked={prefill === true || prefill === "true"}
+      />
+    );
   }
   return (
     <input
@@ -247,6 +298,7 @@ function renderControl(
       type={inputTypeFor(field.type)}
       disabled={field.readOnly}
       required={field.required}
+      defaultValue={prefillString(prefill)}
     />
   );
 }

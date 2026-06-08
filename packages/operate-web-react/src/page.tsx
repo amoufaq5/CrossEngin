@@ -1,9 +1,21 @@
-import type { TableModel } from "@crossengin/operate-web";
-import { useState, type JSX } from "react";
+import type { FormModel, TableModel } from "@crossengin/operate-web";
+import { useState, type FormEvent, type JSX } from "react";
 
 import { AppShell, DetailView, FormView, TableView } from "./components.js";
-import { buildListQueryUrl } from "./page-state.js";
+import {
+  buildListQueryUrl,
+  coerceFormValues,
+  defaultWriteFetcher,
+  submitDelete,
+  submitFormWrite,
+  type WriteFetcher,
+} from "./page-state.js";
 import type { WebPageState } from "./page-state.js";
+
+/** Navigates the browser to a URL; the default `onNavigate` for the write sections. */
+const defaultNavigate = (url: string): void => {
+  if (typeof window !== "undefined") window.location.assign(url);
+};
 
 /** The shape of a `/ui/:entity` JSON page the client refetches on sort/paginate. */
 interface ListJsonPage {
@@ -133,10 +145,138 @@ function TableSection({
   );
 }
 
+interface FormSectionProps {
+  readonly form: FormModel;
+  /** Present for an edit form (PATCH target); absent → create (POST). */
+  readonly entityId?: string;
+  readonly values?: Readonly<Record<string, unknown>>;
+  readonly basePath: string;
+  /** Test seams: default to the global fetch + browser navigation. */
+  readonly writeFetcher?: WriteFetcher;
+  readonly onNavigate?: (url: string) => void;
+}
+
+/**
+ * A stateful form: renders the same `FormView` markup the SSR produced, but on
+ * submit collects the field values (`FormData` → typed payload via
+ * `coerceFormValues`), POSTs (create) / PATCHes (edit) the P3.8 `/ui/:entity`
+ * write route, and on success navigates to the record's detail page. A 4xx
+ * surfaces the server's problem `detail` (e.g. a write-mask 422) inline; the
+ * server stays the source of truth for RBAC + the write mask.
+ */
+function FormSection({
+  form,
+  entityId,
+  values,
+  basePath,
+  writeFetcher = defaultWriteFetcher,
+  onNavigate = defaultNavigate,
+}: FormSectionProps): JSX.Element {
+  const [submitting, setSubmitting] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const raw: Record<string, string | boolean> = {};
+    const data = new FormData(event.currentTarget);
+    for (const [key, value] of data.entries()) {
+      raw[key] = typeof value === "string" ? value : "";
+    }
+    // Unchecked checkboxes are absent from FormData; coerceFormValues defaults them to false.
+    setSubmitting(true);
+    setStatus(null);
+    try {
+      const result = await submitFormWrite({
+        entity: form.entity,
+        ...(entityId !== undefined ? { entityId } : {}),
+        payload: coerceFormValues(form, raw),
+        fetcher: writeFetcher,
+      });
+      if (result.ok) {
+        const id = entityId ?? (typeof result.record?.["id"] === "string" ? (result.record["id"] as string) : null);
+        onNavigate(id !== null ? `${basePath}/${form.entity}/${id}` : `${basePath}/${form.entity}`);
+        return;
+      }
+      setStatus(result.detail ?? `write failed (${result.status.toString()})`);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <FormView
+      model={form}
+      {...(values !== undefined ? { values } : {})}
+      submitting={submitting}
+      onSubmit={(e) => void handleSubmit(e)}
+      {...(status !== null ? { statusNode: status } : {})}
+    />
+  );
+}
+
+interface DetailWriteProps {
+  readonly state: Extract<WebPageState, { kind: "detail" }>;
+  readonly writeFetcher?: WriteFetcher;
+  readonly onNavigate?: (url: string) => void;
+}
+
+/**
+ * A `DetailView` plus write affordances: an Edit link (when the caller may
+ * PATCH) and a Delete button (when the caller may DELETE) — both gated by the
+ * server-computed `canEdit`/`canDelete` flags, so an unauthorized caller never
+ * even sees the control (the server still enforces RBAC on the request). Delete
+ * navigates back to the entity table on success.
+ */
+function DetailSection({ state, writeFetcher = defaultWriteFetcher, onNavigate = defaultNavigate }: DetailWriteProps): JSX.Element {
+  const [deleting, setDeleting] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const entity = state.detail.entity;
+  const id = typeof state.record["id"] === "string" ? (state.record["id"] as string) : "";
+
+  async function handleDelete(): Promise<void> {
+    if (id.length === 0) return;
+    setDeleting(true);
+    setStatus(null);
+    try {
+      const result = await submitDelete(entity, id, writeFetcher);
+      if (result.ok) {
+        onNavigate(`${state.basePath}/${entity}`);
+        return;
+      }
+      setStatus(result.detail ?? `delete failed (${result.status.toString()})`);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="ce-detail-interactive">
+      <DetailView model={state.detail} record={state.record} />
+      <div className="ce-detail-actions" role="group" aria-label="Record actions">
+        {state.canEdit && id.length > 0 ? (
+          <a className="ce-action-edit" data-action="edit" href={`${state.basePath}/${entity}/${id}/edit`}>
+            Edit
+          </a>
+        ) : null}
+        {state.canDelete && id.length > 0 ? (
+          <button type="button" data-action="delete" disabled={deleting} onClick={() => void handleDelete()}>
+            Delete
+          </button>
+        ) : null}
+      </div>
+      {status !== null ? <div className="ce-detail-status" role="status">{status}</div> : null}
+    </div>
+  );
+}
+
 export interface PageRootProps {
   readonly state: WebPageState;
   /** Test seam threaded to the interactive table. */
   readonly fetcher?: ListPageFetcher;
+  /** Test seam threaded to the write sections (form submit / detail delete). */
+  readonly writeFetcher?: WriteFetcher;
+  /** Test seam for navigation after a successful write. */
+  readonly onNavigate?: (url: string) => void;
 }
 
 /**
@@ -147,7 +287,7 @@ export interface PageRootProps {
  * a read-only surface needs). Rendering one component on both sides guarantees
  * the markup matches so `hydrateRoot` attaches cleanly.
  */
-export function PageRoot({ state, fetcher }: PageRootProps): JSX.Element {
+export function PageRoot({ state, fetcher, writeFetcher, onNavigate }: PageRootProps): JSX.Element {
   switch (state.kind) {
     case "app":
       return <AppShell app={state.app} basePath={state.basePath} />;
@@ -166,13 +306,24 @@ export function PageRoot({ state, fetcher }: PageRootProps): JSX.Element {
     case "detail":
       return (
         <AppShell app={state.app} basePath={state.basePath}>
-          <DetailView model={state.detail} record={state.record} />
+          <DetailSection
+            state={state}
+            {...(writeFetcher !== undefined ? { writeFetcher } : {})}
+            {...(onNavigate !== undefined ? { onNavigate } : {})}
+          />
         </AppShell>
       );
     case "form":
       return (
         <AppShell app={state.app} basePath={state.basePath}>
-          <FormView model={state.form} />
+          <FormSection
+            form={state.form}
+            {...(state.entityId !== undefined ? { entityId: state.entityId } : {})}
+            {...(state.values !== undefined ? { values: state.values } : {})}
+            basePath={state.basePath}
+            {...(writeFetcher !== undefined ? { writeFetcher } : {})}
+            {...(onNavigate !== undefined ? { onNavigate } : {})}
+          />
         </AppShell>
       );
   }
