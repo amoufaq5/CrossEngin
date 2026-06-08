@@ -136,6 +136,12 @@ importers:
 
   apps/operate-web:
     dependencies:
+      '@crossengin/api-gateway-runtime':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway-runtime
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

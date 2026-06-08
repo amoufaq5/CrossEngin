@@ -5,6 +5,16 @@ export interface WebServeOptions {
   readonly pack: string | null;
   readonly manifestPath: string | null;
   readonly apiKeys: readonly string[];
+  /** JWKS public keys as `kid:base64` (repeatable). */
+  readonly jwksKeys: readonly string[];
+  /** Path to a JWKS JSON document (an alternative key source). */
+  readonly jwksFile: string | null;
+  /** Remote JWKS endpoint URL (caching, rotation-aware). */
+  readonly jwksUrl: string | null;
+  /** Expected JWT issuer (required when a JWKS is configured). */
+  readonly jwtIssuer: string | null;
+  /** Expected JWT audience (required when a JWKS is configured). */
+  readonly jwtAudience: string | null;
   readonly help: boolean;
   readonly version: boolean;
 }
@@ -33,6 +43,11 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
   let pack: string | null = null;
   let manifestPath: string | null = null;
   const apiKeys: string[] = [];
+  const jwksKeys: string[] = [];
+  let jwksFile: string | null = null;
+  let jwksUrl: string | null = null;
+  let jwtIssuer: string | null = null;
+  let jwtAudience: string | null = null;
   let help = false;
   let version = false;
 
@@ -60,6 +75,21 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
     } else if (arg === "--api-key" || arg.startsWith("--api-key=")) {
       apiKeys.push(takeValue(arg, next, "--api-key"));
       i += consumed();
+    } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
+      jwksKeys.push(takeValue(arg, next, "--jwks-key"));
+      i += consumed();
+    } else if (arg === "--jwks-file" || arg.startsWith("--jwks-file=")) {
+      jwksFile = takeValue(arg, next, "--jwks-file");
+      i += consumed();
+    } else if (arg === "--jwks-url" || arg.startsWith("--jwks-url=")) {
+      jwksUrl = takeValue(arg, next, "--jwks-url");
+      i += consumed();
+    } else if (arg === "--jwt-issuer" || arg.startsWith("--jwt-issuer=")) {
+      jwtIssuer = takeValue(arg, next, "--jwt-issuer");
+      i += consumed();
+    } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
+      jwtAudience = takeValue(arg, next, "--jwt-audience");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -72,9 +102,19 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
     if (pack !== null && manifestPath !== null) {
       throw new CliUsageError("--pack and --manifest are mutually exclusive");
     }
+    const jwksConfigured = jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null;
+    if (jwksConfigured && (jwtIssuer === null || jwtAudience === null)) {
+      throw new CliUsageError("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
+    }
+    if (jwksKeys.length > 0 && jwksFile !== null) {
+      throw new CliUsageError("--jwks-key and --jwks-file are mutually exclusive");
+    }
+    if (jwksUrl !== null && (jwksKeys.length > 0 || jwksFile !== null)) {
+      throw new CliUsageError("--jwks-url and --jwks-key/--jwks-file are mutually exclusive");
+    }
   }
 
-  return { port, pack, manifestPath, apiKeys, help, version };
+  return { port, pack, manifestPath, apiKeys, jwksKeys, jwksFile, jwksUrl, jwtIssuer, jwtAudience, help, version };
 }
 
 export const helpText = `operate-web — serve a resolved CrossEngin manifest as redaction-aware UI view models
@@ -90,10 +130,19 @@ Manifest source (exactly one):
 Options:
   --port <n>           Port to listen on (default 8788)
   --api-key <spec>     API key binding key:role:tenant (repeatable)
+  --jwks-key <spec>    JWKS public key kid:base64 (repeatable)
+  --jwks-file <file>   Path to a JWKS JSON document
+  --jwks-url <url>     Remote JWKS endpoint (caching, rotation-aware)
+  --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
+  --jwt-audience <aud> Expected JWT audience (required with a JWKS)
   --help, -h           Show this help
   --version, -v        Print version
 
-Routes (all GET, JSON; auth via x-api-key or Authorization: Bearer <key>):
+Auth: dev API keys (--api-key) and production JWTs (--jwks-* + --jwt-*) coexist.
+A verified Bearer JWT resolves a viewer from its claims (scopes -> roles, sub ->
+uuid, tenant from the tenant_id claim or the x-tenant-id header).
+
+Routes (all GET, JSON; auth via x-api-key or Authorization: Bearer <key|jwt>):
   /ui/app              The app view model (title + per-entity nav)
   /ui/:entity          { table, page: { data, nextCursor } } — model + data page
   /ui/:entity/new      { form } — the create form model

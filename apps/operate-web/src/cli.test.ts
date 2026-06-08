@@ -30,4 +30,58 @@ describe("parseWebArgs", () => {
     expect(() => parseWebArgs(["--pack", "x", "--what"])).toThrow(CliUsageError);
     expect(() => parseWebArgs(["--pack", "x", "--port", "70000"])).toThrow(CliUsageError);
   });
+
+  it("parses JWKS + JWT flags", () => {
+    const opts = parseWebArgs([
+      "--pack",
+      "erp-retail",
+      "--jwks-key",
+      "k1:AAAA",
+      "--jwks-key=k2:BBBB",
+      "--jwt-issuer",
+      "https://idp/",
+      "--jwt-audience=https://api/",
+    ]);
+    expect(opts.jwksKeys).toEqual(["k1:AAAA", "k2:BBBB"]);
+    expect(opts.jwtIssuer).toBe("https://idp/");
+    expect(opts.jwtAudience).toBe("https://api/");
+  });
+
+  it("requires issuer + audience when a JWKS is configured", () => {
+    expect(() => parseWebArgs(["--pack", "x", "--jwks-key", "k1:AAAA"])).toThrow(CliUsageError);
+    expect(() => parseWebArgs(["--pack", "x", "--jwks-url", "https://idp/jwks", "--jwt-issuer", "i"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  it("rejects conflicting JWKS sources", () => {
+    expect(() =>
+      parseWebArgs([
+        "--pack",
+        "x",
+        "--jwks-key",
+        "k1:AAAA",
+        "--jwks-file",
+        "f.json",
+        "--jwt-issuer",
+        "i",
+        "--jwt-audience",
+        "a",
+      ]),
+    ).toThrow(CliUsageError);
+    expect(() =>
+      parseWebArgs([
+        "--pack",
+        "x",
+        "--jwks-url",
+        "https://idp/jwks",
+        "--jwks-key",
+        "k1:AAAA",
+        "--jwt-issuer",
+        "i",
+        "--jwt-audience",
+        "a",
+      ]),
+    ).toThrow(CliUsageError);
+  });
 });

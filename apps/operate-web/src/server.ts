@@ -19,20 +19,27 @@ import {
 } from "@crossengin/operate-web";
 
 import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type RawWebResponse } from "./http.js";
-import { ApiKeyRegistry, type WebViewer } from "./principals.js";
+import { ApiKeyRegistry, WebPrincipalResolver, type JwtVerifyConfig, type WebViewer } from "./principals.js";
+
+/** Anything that resolves a request to a viewer (an `ApiKeyRegistry` or a `WebPrincipalResolver`). */
+export interface WebViewerResolver {
+  resolve(req: RawWebRequest): WebViewer | null | Promise<WebViewer | null>;
+}
 
 export interface OperateWebServerOptions {
   readonly manifest: Manifest;
   readonly store?: EntityStore;
-  readonly apiKeys: ApiKeyRegistry;
+  /** Resolves each request to a viewer (api-key and/or JWT); null → 401. */
+  readonly resolver: WebViewerResolver;
   readonly compileOptions?: CompileOptions;
 }
 
 /**
  * The framework-neutral serving core: authenticates each request against the
- * API-key registry, then serves the redaction-aware view models (and the data
- * behind them) as JSON. Every model + every data row is compiled / redacted for
- * the *caller*, so the JSON never carries a field the viewer can't read.
+ * principal resolver (API keys + optional JWT), then serves the redaction-aware
+ * view models (and the data behind them) as JSON. Every model + every data row
+ * is compiled / redacted for the *caller*, so the JSON never carries a field the
+ * viewer can't read.
  *
  * Routes:
  *   GET /ui/app              -> WebAppModel
@@ -43,14 +50,14 @@ export interface OperateWebServerOptions {
 export class OperateWebServer {
   private readonly manifest: Manifest;
   private readonly store: EntityStore;
-  private readonly apiKeys: ApiKeyRegistry;
+  private readonly resolver: WebViewerResolver;
   private readonly compileOptions: CompileOptions;
   private readonly entityNames: ReadonlySet<string>;
 
   constructor(options: OperateWebServerOptions) {
     this.manifest = options.manifest;
     this.store = options.store ?? new InMemoryEntityStore();
-    this.apiKeys = options.apiKeys;
+    this.resolver = options.resolver;
     this.compileOptions = options.compileOptions ?? {};
     this.entityNames = new Set((options.manifest.entities ?? []).map((e) => e.name));
   }
@@ -64,9 +71,9 @@ export class OperateWebServer {
     if (req.method.toUpperCase() !== "GET") {
       return problemResponse(405, "Method not allowed", `unsupported method ${req.method}`);
     }
-    const viewer = this.apiKeys.resolve(req);
+    const viewer = await this.resolver.resolve(req);
     if (viewer === null) {
-      return problemResponse(401, "Unauthorized", "missing or unknown API key");
+      return problemResponse(401, "Unauthorized", "missing or unknown credential");
     }
 
     const { path, query } = splitTarget(req.url);
@@ -144,17 +151,29 @@ export class OperateWebServer {
   }
 }
 
-/** Composes a manifest + store + API keys into a ready `OperateWebServer`. */
+/**
+ * Composes a manifest + store + API keys (+ optional JWT/JWKS) into a ready
+ * `OperateWebServer`. API-key and JWT auth coexist behind one
+ * `WebPrincipalResolver`: a registered key wins, else a Bearer EdDSA JWT is
+ * verified against the JWKS and its claims become the viewer.
+ */
 export function buildOperateWebServer(options: {
   readonly manifest: Manifest;
   readonly store?: EntityStore;
   readonly apiKeySpecs: readonly { key: string; role: string; tenantId: string }[];
+  readonly jwt?: JwtVerifyConfig;
   readonly compileOptions?: CompileOptions;
+  readonly now?: () => Date;
 }): OperateWebServer {
+  const resolver = new WebPrincipalResolver({
+    apiKeys: new ApiKeyRegistry(options.apiKeySpecs),
+    ...(options.jwt !== undefined ? { jwt: options.jwt } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+  });
   return new OperateWebServer({
     manifest: options.manifest,
     ...(options.store !== undefined ? { store: options.store } : {}),
-    apiKeys: new ApiKeyRegistry(options.apiKeySpecs),
+    resolver,
     ...(options.compileOptions !== undefined ? { compileOptions: options.compileOptions } : {}),
   });
 }

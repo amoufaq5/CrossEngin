@@ -1,8 +1,55 @@
+import { generateEd25519Keypair } from "@crossengin/crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { serve, type RunningServer } from "./node.js";
+import type { WebServeOptions } from "./cli.js";
+import { buildJwtConfigFromOptions, serve, type RunningServer } from "./node.js";
 
 const TENANT = "t1";
+
+function baseOptions(overrides: Partial<WebServeOptions>): WebServeOptions {
+  return {
+    port: 0,
+    pack: "erp-retail",
+    manifestPath: null,
+    apiKeys: [],
+    jwksKeys: [],
+    jwksFile: null,
+    jwksUrl: null,
+    jwtIssuer: null,
+    jwtAudience: null,
+    help: false,
+    version: false,
+    ...overrides,
+  };
+}
+
+describe("buildJwtConfigFromOptions", () => {
+  it("returns null when no JWKS source is configured", async () => {
+    expect(await buildJwtConfigFromOptions(baseOptions({}))).toBeNull();
+  });
+
+  it("builds an in-memory provider from --jwks-key + issuer/audience", async () => {
+    const kp = generateEd25519Keypair();
+    const cfg = await buildJwtConfigFromOptions(
+      baseOptions({
+        jwksKeys: [`k1:${kp.publicKeyBase64}`],
+        jwtIssuer: "https://idp/",
+        jwtAudience: "https://api/",
+      }),
+    );
+    expect(cfg).not.toBeNull();
+    expect(cfg!.issuer).toBe("https://idp/");
+    expect(await cfg!.jwksProvider.getPublicKeyForKid("k1")).toBe(kp.publicKeyBase64);
+  });
+
+  it("builds a remote provider from --jwks-url", async () => {
+    const cfg = await buildJwtConfigFromOptions(
+      baseOptions({ jwksUrl: "https://idp/jwks", jwtIssuer: "https://idp/", jwtAudience: "https://api/" }),
+    );
+    expect(cfg).not.toBeNull();
+    expect(cfg!.audience).toBe("https://api/");
+  });
+});
 
 let running: RunningServer;
 let base: string;
@@ -13,6 +60,11 @@ beforeAll(async () => {
     pack: "erp-retail",
     manifestPath: null,
     apiKeys: ["mgr:store_manager:t1", "csh:cashier:t1"],
+    jwksKeys: [],
+    jwksFile: null,
+    jwksUrl: null,
+    jwtIssuer: null,
+    jwtAudience: null,
     help: false,
     version: false,
   });

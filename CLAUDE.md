@@ -39,7 +39,21 @@ serving the models + redacted data as JSON (`/ui/app`, `/ui/:entity`,
 wired through the auth `computeClassifiedFieldRedaction` (read → column/field
 inclusion) + `validateClassifiedWriteMask` (write → form `readOnly`), so a
 cashier's compiled view omits `Product.unit_cost` while a manager's includes
-it — the UI never even describes a field the caller can't see. P2.44 (ADR-0152)
+it — the UI never even describes a field the caller can't see. **P3.2 (ADR-0154)
+brought `apps/operate-web` to operate-server serving parity** — an edge/Workers
+fetch adapter (`fetchToRaw`/`rawToFetchResponse`/`createFetchHandler`/
+`buildEdgeFetchHandler`/`asModuleWorker`, so the renderer runs on Cloudflare
+Workers / any WinterCG runtime) plus production JWT/JWKS auth, both over the same
+`OperateWebServer.dispatch` core. A new `WebPrincipalResolver` resolves a request
+to a viewer (a registered API key wins, else a verified EdDSA Bearer JWT via
+`@crossengin/api-gateway-runtime`'s `verifyBearerJwt`), mapping JWT scopes → the
+compiler's `ViewerContext.roles` (`scopesToRoles`: `roles` array → `scope` string
+→ `scp` array → `[]` fail-closed), `sub` → a UUID, tenant from the `tenant_id`
+claim else the `x-tenant-id` header. `jwks.ts` (in-memory + caching/rotating
+remote provider) is lifted from operate-server; CLI gains
+`--jwks-key`/`--jwks-file`/`--jwks-url` + `--jwt-issuer`/`--jwt-audience`, threaded
+through Node `serve()` and the edge handler; dev API keys and prod JWTs coexist.
+P2.44 (ADR-0152)
 fixed the `kernel-pg` `diffSchema` normalization (TIMESTAMPTZ↔timestamp with
 time zone type aliasing, `::type`-cast-insensitive default comparison,
 unique-constraint backing-index recognition) so the P2.36 schema-drift gate now
@@ -1714,12 +1728,38 @@ re-exporting everything.
   node (createNodeRequestListener + serve() → a close handle,
   exposing the in-memory store so a boot script can seed rows),
   bin (parse → serve → log the listen URL → graceful shutdown).
-  Framework-neutral JSON only (no client framework); JWT/edge auth
-  + the Postgres entity stores + mutation routing are deferred
-  behind the same seams. A real loopback test boots serve() for a
+  Framework-neutral JSON only (no client framework). A real loopback
+  test boots serve() for a
   200 and proves an unprivileged caller's /ui/:entity/:id JSON
   omits the classified column while a privileged caller's includes
-  it; all other logic is offline-tested.
+  it; all other logic is offline-tested. **P3.2 (ADR-0154) brought
+  it to operate-server parity** — an edge/Workers fetch adapter +
+  JWT/JWKS auth, both over the same OperateWebServer.dispatch core.
+  edge (fetchToRaw(Request) → RawWebRequest [GET-only, no body;
+  client IP from cf-connecting-ip] + rawToFetchResponse → a real
+  Response + createFetchHandler / buildEdgeFetchHandler [in-memory
+  store default, scheme https] + asModuleWorker {fetch} — tested
+  against genuine new Request/Response undici globals, same
+  per-caller redaction). jwks (lifted from operate-server:
+  buildJwksProvider in-memory + RemoteJwksProvider caching/rotation/
+  resilient + parseJwksDocument / base64UrlToBase64 +
+  JwksRefreshPoller). principals gained the JWT path: dispatch now
+  resolves through a WebViewerResolver, and WebPrincipalResolver
+  tries the ApiKeyRegistry first (a registered key wins) else
+  verifies a 3-part Bearer JWT via @crossengin/api-gateway-runtime's
+  verifyBearerJwt (EdDSA sig + iss/aud/exp/nbf) and maps the claims
+  to a WebViewer — scopesToRoles (roles array → scope string → scp
+  array → [] fail-closed) feeds the compiler's ViewerContext.roles,
+  sub → subjectToUuid, tenant from the tenant_id claim else the
+  x-tenant-id header. CLI gained --jwks-key/--jwks-file/--jwks-url +
+  --jwt-issuer/--jwt-audience (issuer+audience required with a JWKS,
+  sources mutually exclusive); serve()'s buildJwtConfigFromOptions
+  assembles the JwtVerifyConfig threaded through both Node + edge.
+  Dev API keys + prod JWTs coexist. Tests mint real Ed25519 JWTs
+  (generateEd25519Keypair + signEd25519): scope store_manager → sees
+  unit_cost, cashier → redacted, unknown-kid/wrong-issuer/expired/
+  bad-sig → 401. The Postgres entity stores + mutation routing stay
+  the follow-ups.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,

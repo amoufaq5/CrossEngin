@@ -3,9 +3,39 @@ import { readFile } from "node:fs/promises";
 
 import type { WebServeOptions } from "./cli.js";
 import type { RawWebRequest } from "./http.js";
+import { RemoteJwksProvider, buildJwksProvider, parseJwksDocument } from "./jwks.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
-import { parseApiKeySpec } from "./principals.js";
+import { parseApiKeySpec, parseJwksKeySpec, type JwksKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { OperateWebServer, buildOperateWebServer } from "./server.js";
+
+/**
+ * Assembles a `JwtVerifyConfig` from the parsed CLI options, or null when no
+ * JWKS source is configured. A JWKS is built from one of `--jwks-key` (inline),
+ * `--jwks-file` (a JWKS JSON document), or `--jwks-url` (a caching remote
+ * provider). `--jwt-issuer` / `--jwt-audience` are required (the CLI parser
+ * already enforces it).
+ */
+export async function buildJwtConfigFromOptions(options: WebServeOptions): Promise<JwtVerifyConfig | null> {
+  const hasInline = options.jwksKeys.length > 0;
+  const hasFile = options.jwksFile !== null;
+  const hasUrl = options.jwksUrl !== null;
+  if (!hasInline && !hasFile && !hasUrl) return null;
+  if (options.jwtIssuer === null || options.jwtAudience === null) {
+    throw new Error("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
+  }
+  if (hasUrl) {
+    const provider = new RemoteJwksProvider({ url: options.jwksUrl! });
+    return { jwksProvider: provider, issuer: options.jwtIssuer, audience: options.jwtAudience };
+  }
+  let keys: JwksKeySpec[];
+  if (hasFile) {
+    const parsed = parseJwksDocument(JSON.parse(await readFile(options.jwksFile!, "utf8")) as unknown);
+    keys = [...parsed.entries()].map(([kid, publicKeyBase64]) => ({ kid, publicKeyBase64 }));
+  } else {
+    keys = options.jwksKeys.map(parseJwksKeySpec);
+  }
+  return { jwksProvider: buildJwksProvider(keys), issuer: options.jwtIssuer, audience: options.jwtAudience };
+}
 
 /** The slice of Node's `IncomingMessage` the adapter reads. */
 export interface NodeReqLike {
@@ -77,7 +107,8 @@ export async function serve(options: WebServeOptions): Promise<RunningServer> {
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
   const apiKeySpecs = options.apiKeys.map(parseApiKeySpec);
-  const webServer = buildOperateWebServer({ manifest, apiKeySpecs });
+  const jwt = await buildJwtConfigFromOptions(options);
+  const webServer = buildOperateWebServer({ manifest, apiKeySpecs, ...(jwt !== null ? { jwt } : {}) });
   const listener = createNodeRequestListener(webServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
