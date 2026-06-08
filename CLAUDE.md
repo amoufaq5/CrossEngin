@@ -22,8 +22,8 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2** landed: **63 packages + 4 apps, 125
-meta-schema tables, 6,809 offline tests + 39 gated real-Postgres
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2 + P3.3** landed: **64 packages + 4 apps, 125
+meta-schema tables, 6,827 offline tests + 39 gated real-Postgres
 integration tests (17 worker + 22 operate-server) + four CI gates
 (schema-drift + incident-drift + PHI-encryption + gateway-execution), all
 genuinely green against a live Postgres** — no type errors. **P2.45 (ADR-0153)
@@ -76,14 +76,23 @@ claim else the `x-tenant-id` header. `jwks.ts` (in-memory + caching/rotating
 remote provider) is lifted from operate-server; CLI gains
 `--jwks-key`/`--jwks-file`/`--jwks-url` + `--jwt-issuer`/`--jwt-audience`, threaded
 through Node `serve()` and the edge handler; dev API keys and prod JWTs coexist.
+**P3.3 (ADR-0155) added the first real frontend** — `@crossengin/operate-web-react`
+(the 64th package): SSR-only React 18 components (`AppShell`/`TableView`/
+`DetailView`/`FormView` + a `renderPage` `renderToStaticMarkup` wrapper) typed by
+the operate-web model types, and additive `text/html` routes on `apps/operate-web`
+(`/app`, `/app/:entity`, `/app/:entity/:id`, `/app/:entity/new`) that server-render
+those components per caller over the same compile + redaction + store as the JSON
+`/ui/...` routes. Tests are hermetic (react-dom/server, no jsdom/bundler); a
+`store_manager`'s `/app` HTML shows `unit_cost` and a `cashier`'s omits it. Client
+hydration + a bundler are the deferred follow-up (no bundler in the CI test path).
 P2.44 (ADR-0152)
 fixed the `kernel-pg` `diffSchema` normalization (TIMESTAMPTZ↔timestamp with
 time zone type aliasing, `::type`-cast-insensitive default comparison,
 unique-constraint backing-index recognition) so the P2.36 schema-drift gate now
 reports `(no drift)` on the freshly-bootstrapped meta schema. (Earlier
 per-increment lines below say "60"/"61"/"62 packages" — those are point-in-time
-snapshots; the live count is 63 after `operate-web` landed in P3.1 (it was 62 after `incident-response-pg` in
-P2.31.)
+snapshots; the live count is 64 after `operate-web-react` landed in P3.3
+(63 after `operate-web` in P3.1; 62 after `incident-response-pg` in P2.31).)
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
 `@crossengin/workflow-worker` runs the workflow runtime as a worker
