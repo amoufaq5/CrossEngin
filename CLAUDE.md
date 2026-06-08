@@ -1286,6 +1286,19 @@ re-exporting everything.
   META_RATE_LIMIT_DECISIONS; listRecentExecutions /
   bulkVerify paginate over META_GATEWAY_PIPELINE_EXECUTIONS;
   summarize computes pass/deny/error counts + p50/p95 latency).
+  P2.42 (ADR-0151) added verify-runner (the framework-neutral
+  runVerifyExecutions over a structural ExecutionVerifySource
+  [GatewayReplayer satisfies it] — bulkVerify sweep, exit 1 on any
+  drifted execution; parseExecutionsArgs + summarizeExecutionReports
+  + formatExecutionVerifyReport) + a bin/crossengin-gateway-pg.ts
+  (executions verify|summary — opens a conn, runs the sweep, exits the
+  code) so CI can gate gateway request-audit integrity. NOTE: the gated
+  operate-server path doesn't yet persist its PipelineExecutions
+  (GatewayRuntime returns the execution on HandleResult; dispatch
+  discards it — no execution store wired into buildOperateGateway), so
+  the gate verifies an empty table (exit 0) today and becomes
+  non-vacuous the moment a PostgresPipelineExecutionStore is wired into
+  the serving path.
 - **`api-gateway-runtime`** — HTTP gateway middleware
   (fourth impure package). 9 modules: redaction
   (ResponseRedactionSpec + RedactionRegistry/MapRedactionRegistry
@@ -2049,11 +2062,15 @@ provisioned `meta` schema — exits 1 on any added/removed/modified
 table, column, index, policy, or RLS toggle vs `META_TABLES`; runs
 before the suites so it gates the bootstrap baseline, not test
 pollution), then the gated suites under `CROSSENGIN_PG_TEST=1`, then
-two more gates — an **incident-drift gate** (`workflow-worker
+three more gates — an **incident-drift gate** (`workflow-worker
 incidents verify` over a wide window, exits 1 on any drifted incident
-timeline) and a **PHI at-rest encryption gate** (`crossengin-pg
+timeline), a **PHI at-rest encryption gate** (`crossengin-pg
 encrypt --verify` over `meta` + `public`, exits 1 on any plaintext PHI
-column / missing pgcrypto), all three failing the build).
+column / missing pgcrypto), and a **gateway-execution drift gate**
+(`crossengin-gateway-pg executions verify --since 2000-01-01`, exits 1
+on any drifted persisted PipelineExecution; verifies an empty table
+clean today since operate-server doesn't yet persist executions, P2.42
+/ ADR-0151), all failing the build).
 `scripts/emit-bootstrap.mjs`
 emits the meta-schema DDL the setup script applies. (Production uses
 the `pg_uuidv7` extension; the test shim is `gen_random_uuid()`.)

@@ -96,3 +96,18 @@ jobs:
         run: |
           node packages/kernel-pg/dist/bin/crossengin-pg.js encrypt --verify --schema=meta
           node packages/kernel-pg/dist/bin/crossengin-pg.js encrypt --verify --schema=public
+      - name: Gateway execution drift gate
+        # `GatewayReplayer.bulkVerify` reads every persisted PipelineExecution in
+        # meta.gateway_pipeline_executions and runs the pure shape checks (stages
+        # out of order, stage repeated, final stage/outcome mismatch, pass with
+        # 4xx/5xx, deny without 4xx/5xx, terminating outcome not last, duration
+        # inconsistent, rate-limit-decision orphaned). `executions verify` EXITS 1
+        # if ANY execution drifted, failing the job. NOTE (ADR-0151): the gated
+        # operate-server path does not yet persist its executions (GatewayRuntime
+        # returns the PipelineExecution on HandleResult, but operate-server's
+        # dispatch discards it — no execution store is wired into
+        # buildOperateGateway). So today this gate verifies an empty table (exit 0)
+        # — it is self-policing the *moment* any consumer wires a
+        # PostgresPipelineExecutionStore into the serving path. Run after the gated
+        # suites so it sees whatever they populate.
+        run: node packages/api-gateway-pg/dist/bin/crossengin-gateway-pg.js executions verify --since 2000-01-01
