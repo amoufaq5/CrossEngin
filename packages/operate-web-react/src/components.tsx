@@ -1,7 +1,9 @@
 import type {
+  CalendarModel,
   DetailModel,
   FormFieldModel,
   FormModel,
+  KanbanModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -110,6 +112,125 @@ export function TableView({ model, rows, basePath = "/app" }: TableViewProps): J
           })}
         </tbody>
       </table>
+    </section>
+  );
+}
+
+export interface KanbanViewProps {
+  readonly model: KanbanModel;
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  /** Base path used to link each card to its detail surface (default `/app`). */
+  readonly basePath?: string;
+}
+
+/**
+ * Renders a `KanbanModel` + a page of records into a board: one column per
+ * declared state, each holding the cards whose `stateField` value matches. A
+ * card shows only the model's (already redacted) `cardFields`, and links to the
+ * record's detail. Records whose state matches no column are dropped (the board
+ * shows the declared lanes only).
+ */
+export function KanbanView({ model, rows, basePath = "/app" }: KanbanViewProps): JSX.Element {
+  return (
+    <section className="ce-kanban" data-entity={model.entity} data-state-field={model.stateField}>
+      <h2 className="ce-kanban-title">{model.title}</h2>
+      <div className="ce-kanban-board">
+        {model.columns.map((col) => {
+          const cards = rows.filter((r) => displayValue(r[model.stateField]) === col.state);
+          return (
+            <div
+              key={col.state}
+              className="ce-kanban-column"
+              data-state={col.state}
+              {...(col.color !== undefined ? { style: { borderTopColor: col.color } } : {})}
+            >
+              <h3 className="ce-kanban-column-title">
+                {col.label}
+                <span className="ce-kanban-count"> ({String(cards.length)}{col.wipLimit !== undefined ? `/${String(col.wipLimit)}` : ""})</span>
+              </h3>
+              <ul className="ce-kanban-cards">
+                {cards.map((row, index) => {
+                  const id = displayValue(row["id"]);
+                  return (
+                    <li key={id.length > 0 ? id : `card-${String(index)}`} className="ce-kanban-card" data-id={id}>
+                      {id.length > 0 ? (
+                        <a href={`${basePath}/${model.entity}/${id}`}>
+                          <KanbanCardFields model={model} row={row} />
+                        </a>
+                      ) : (
+                        <KanbanCardFields model={model} row={row} />
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function KanbanCardFields({
+  model,
+  row,
+}: {
+  readonly model: KanbanModel;
+  readonly row: Readonly<Record<string, unknown>>;
+}): JSX.Element {
+  return (
+    <dl className="ce-kanban-card-fields">
+      {model.cardFields.map((field) => (
+        <div key={field.field} className="ce-kanban-card-field" data-field={field.field}>
+          <dt>{field.label}</dt>
+          <dd>{displayValue(row[field.field])}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export interface CalendarViewProps {
+  readonly model: CalendarModel;
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  /** Base path used to link each event to its detail surface (default `/app`). */
+  readonly basePath?: string;
+}
+
+/**
+ * Renders a `CalendarModel` + a page of records into an agenda list: one entry
+ * per record, ordered by its `startField`, showing the title + start (+ end /
+ * color when the model carries those — redacted-aware, so an axis the viewer
+ * can't read is simply absent). A full calendar grid is a later refinement; the
+ * agenda is the framework-neutral SSR baseline.
+ */
+export function CalendarView({ model, rows, basePath = "/app" }: CalendarViewProps): JSX.Element {
+  const events = [...rows].sort((a, b) =>
+    displayValue(a[model.startField]).localeCompare(displayValue(b[model.startField])),
+  );
+  return (
+    <section className="ce-calendar" data-entity={model.entity} data-default-view={model.defaultView}>
+      <h2 className="ce-calendar-title">{model.title}</h2>
+      <ul className="ce-calendar-agenda">
+        {events.map((row, index) => {
+          const id = displayValue(row["id"]);
+          const title = displayValue(row[model.titleField]);
+          const start = displayValue(row[model.startField]);
+          const end = model.endField !== undefined ? displayValue(row[model.endField]) : "";
+          const color = model.colorField !== undefined ? displayValue(row[model.colorField]) : "";
+          return (
+            <li key={id.length > 0 ? id : `event-${String(index)}`} className="ce-calendar-event" data-id={id}>
+              <time className="ce-calendar-start" dateTime={start}>{start}</time>
+              {end.length > 0 ? <time className="ce-calendar-end" dateTime={end}>{end}</time> : null}
+              {color.length > 0 ? <span className="ce-calendar-color" data-color={color} /> : null}
+              <span className="ce-calendar-event-title">
+                {id.length > 0 ? <a href={`${basePath}/${model.entity}/${id}`}>{title}</a> : title}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }

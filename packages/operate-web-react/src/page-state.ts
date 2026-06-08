@@ -1,6 +1,8 @@
 import type {
+  CalendarModel,
   DetailModel,
   FormModel,
+  KanbanModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -44,6 +46,20 @@ export type WebPageState =
       readonly entityId?: string;
       /** Prefill values for an edit form (the redacted record). */
       readonly values?: Readonly<Record<string, unknown>>;
+    }
+  | {
+      readonly kind: "kanban";
+      readonly app: WebAppModel;
+      readonly kanban: KanbanModel;
+      readonly rows: readonly Readonly<Record<string, unknown>>[];
+      readonly basePath: string;
+    }
+  | {
+      readonly kind: "calendar";
+      readonly app: WebAppModel;
+      readonly calendar: CalendarModel;
+      readonly rows: readonly Readonly<Record<string, unknown>>[];
+      readonly basePath: string;
     };
 
 /** The global the SSR assigns the serialized state to (read by the client entry). */

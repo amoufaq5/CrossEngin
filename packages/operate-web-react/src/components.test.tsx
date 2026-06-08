@@ -1,13 +1,15 @@
 import type {
+  CalendarModel,
   DetailModel,
   FormModel,
+  KanbanModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { AppShell, DetailView, FormView, TableView, displayValue } from "./components.js";
+import { AppShell, CalendarView, DetailView, FormView, KanbanView, TableView, displayValue } from "./components.js";
 
 const APP_MODEL: WebAppModel = {
   title: "Acme Operate",
@@ -152,5 +154,80 @@ describe("FormView", () => {
     expect(html).toContain("discontinued");
     expect(html).toContain("disabled");
     expect(html).toContain('action="/app/Product"');
+  });
+});
+
+const KANBAN_MODEL: KanbanModel = {
+  entity: "SalesOrder",
+  title: "Order board",
+  stateField: "state",
+  columns: [
+    { state: "cart", label: "Cart" },
+    { state: "placed", label: "Placed", color: "#0a0", wipLimit: 10 },
+  ],
+  cardFields: [
+    { field: "order_number", label: "Order #", type: "text" },
+    { field: "total", label: "Total", type: "decimal" },
+  ],
+  allowedTransitions: ["place"],
+};
+
+const CALENDAR_MODEL: CalendarModel = {
+  entity: "SalesOrder",
+  title: "Order calendar",
+  startField: "placed_at",
+  titleField: "order_number",
+  colorField: "state",
+  defaultView: "month",
+};
+
+describe("KanbanView", () => {
+  const rows = [
+    { id: "o1", state: "cart", order_number: "SO-1", total: 10 },
+    { id: "o2", state: "placed", order_number: "SO-2", total: 20 },
+    { id: "o3", state: "archived", order_number: "SO-3", total: 30 },
+  ];
+
+  it("groups rows into the declared columns and shows only card fields", () => {
+    const html = renderToStaticMarkup(<KanbanView model={KANBAN_MODEL} rows={rows} />);
+    expect(html).toContain('data-state="cart"');
+    expect(html).toContain('data-state="placed"');
+    // SO-1 in cart, SO-2 in placed, SO-3 (archived) dropped (no matching column)
+    expect(html).toContain("SO-1");
+    expect(html).toContain("SO-2");
+    expect(html).not.toContain("SO-3");
+    // card links to detail
+    expect(html).toContain("/app/SalesOrder/o1");
+    // the wip limit shows on the placed column count
+    expect(html).toContain("/10");
+  });
+
+  it("renders only the model's card fields (a redacted field never appears)", () => {
+    // a model whose cardFields omit `total` (as if redacted) never emits its value
+    const redactedModel: KanbanModel = { ...KANBAN_MODEL, cardFields: [{ field: "order_number", label: "Order #", type: "text" }] };
+    const html = renderToStaticMarkup(<KanbanView model={redactedModel} rows={rows} />);
+    expect(html).toContain("SO-1");
+    expect(html).not.toContain('data-field="total"');
+  });
+});
+
+describe("CalendarView", () => {
+  const rows = [
+    { id: "o2", order_number: "SO-2", placed_at: "2026-02-01", state: "placed" },
+    { id: "o1", order_number: "SO-1", placed_at: "2026-01-01", state: "cart" },
+  ];
+
+  it("renders an agenda ordered by start, with title links", () => {
+    const html = renderToStaticMarkup(<CalendarView model={CALENDAR_MODEL} rows={rows} />);
+    // ordered by placed_at ascending: SO-1 (Jan) before SO-2 (Feb)
+    expect(html.indexOf("SO-1")).toBeLessThan(html.indexOf("SO-2"));
+    expect(html).toContain('dateTime="2026-01-01"');
+    expect(html).toContain("/app/SalesOrder/o1");
+  });
+
+  it("omits the color swatch when the model carries no colorField", () => {
+    const noColor: CalendarModel = { entity: "SalesOrder", title: "Cal", startField: "placed_at", titleField: "order_number", defaultView: "week" };
+    const html = renderToStaticMarkup(<CalendarView model={noColor} rows={rows} />);
+    expect(html).not.toContain("ce-calendar-color");
   });
 });

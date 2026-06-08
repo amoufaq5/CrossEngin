@@ -1,8 +1,10 @@
 import { renderHydratablePage } from "@crossengin/operate-web-react";
 import type { WebPageState } from "@crossengin/operate-web-react";
 import type {
+  CalendarModel,
   DetailModel,
   FormModel,
+  KanbanModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -45,6 +47,30 @@ export function renderTablePage(
   return pageFor(
     { kind: "table", app, table, rows, nextCursor, basePath: APP_BASE_PATH },
     `${table.title} — ${app.title}`,
+  );
+}
+
+/** Renders a kanban board (model + a redacted data page) to a hydratable HTML page. */
+export function renderKanbanPage(
+  app: WebAppModel,
+  kanban: KanbanModel,
+  rows: readonly Readonly<Record<string, unknown>>[],
+): RawWebResponse {
+  return pageFor(
+    { kind: "kanban", app, kanban, rows, basePath: APP_BASE_PATH },
+    `${kanban.title} — ${app.title}`,
+  );
+}
+
+/** Renders a calendar (model + a redacted data page) to a hydratable HTML page. */
+export function renderCalendarPage(
+  app: WebAppModel,
+  calendar: CalendarModel,
+  rows: readonly Readonly<Record<string, unknown>>[],
+): RawWebResponse {
+  return pageFor(
+    { kind: "calendar", app, calendar, rows, basePath: APP_BASE_PATH },
+    `${calendar.title} — ${app.title}`,
   );
 }
 

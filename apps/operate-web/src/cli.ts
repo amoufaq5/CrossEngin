@@ -185,6 +185,8 @@ Routes (all GET; auth via x-api-key or Authorization: Bearer <key|jwt>):
   SSR React HTML pages (hydrated by /assets/operate-web-client.js) —
     /app                 the app shell + nav
     /app/:entity         the table page (sort + paginate)
+    /app/:entity/kanban  the kanban board page (when a kanban view is declared)
+    /app/:entity/calendar the calendar agenda page (when a calendar view is declared)
     /app/:entity/new     the create form page (submits POST /ui/:entity)
     /app/:entity/:id     the detail page (Edit / Delete when authorized)
     /app/:entity/:id/edit the edit form page (submits PATCH /ui/:entity/:id)

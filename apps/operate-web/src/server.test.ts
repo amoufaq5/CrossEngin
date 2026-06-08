@@ -311,6 +311,47 @@ describe("DELETE /ui/:entity/:id — delete (RBAC)", () => {
   });
 });
 
+function htmlBody(res: RawWebResponse): string {
+  return new TextDecoder().decode(res.body!);
+}
+
+describe("GET /app/:entity/kanban — SSR board page", () => {
+  it("renders the board HTML with the seeded card; a manager sees unit_cost, a cashier doesn't", async () => {
+    const server = await makeServerWithViews();
+    const mgr = await server.dispatch(req("/app/Product/kanban", "mgr"));
+    expect(mgr.status).toBe(200);
+    expect(mgr.headers["content-type"]).toContain("text/html");
+    const mgrHtml = htmlBody(mgr);
+    expect(mgrHtml).toContain("ce-kanban");
+    expect(mgrHtml).toContain('data-state="active"');
+    expect(mgrHtml).toContain("4.2"); // unit_cost on the card
+
+    const csh = htmlBody(await server.dispatch(req("/app/Product/kanban", "csh")));
+    expect(csh).toContain("ce-kanban");
+    expect(csh).not.toContain("4.2");
+  });
+
+  it("404s an entity with no kanban view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/app/SalesOrder/kanban", "mgr"))).status).toBe(404);
+  });
+});
+
+describe("GET /app/:entity/calendar — SSR agenda page", () => {
+  it("renders the calendar HTML for a declared view", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/app/SalesOrder/calendar", "mgr"));
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(htmlBody(res)).toContain("ce-calendar");
+  });
+
+  it("404s an entity with no calendar view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/app/Product/calendar", "mgr"))).status).toBe(404);
+  });
+});
+
 describe("write method guards", () => {
   it("405s an unsupported method", async () => {
     const server = await makeServer();

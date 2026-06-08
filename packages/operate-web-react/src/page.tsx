@@ -1,7 +1,7 @@
 import type { FormModel, TableModel } from "@crossengin/operate-web";
 import { useState, type FormEvent, type JSX } from "react";
 
-import { AppShell, DetailView, FormView, TableView } from "./components.js";
+import { AppShell, CalendarView, DetailView, FormView, KanbanView, TableView } from "./components.js";
 import {
   buildListQueryUrl,
   coerceFormValues,
@@ -324,6 +324,18 @@ export function PageRoot({ state, fetcher, writeFetcher, onNavigate }: PageRootP
             {...(writeFetcher !== undefined ? { writeFetcher } : {})}
             {...(onNavigate !== undefined ? { onNavigate } : {})}
           />
+        </AppShell>
+      );
+    case "kanban":
+      return (
+        <AppShell app={state.app} basePath={state.basePath}>
+          <KanbanView model={state.kanban} rows={state.rows} basePath={state.basePath} />
+        </AppShell>
+      );
+    case "calendar":
+      return (
+        <AppShell app={state.app} basePath={state.basePath}>
+          <CalendarView model={state.calendar} rows={state.rows} basePath={state.basePath} />
         </AppShell>
       );
   }
