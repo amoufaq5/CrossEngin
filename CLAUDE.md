@@ -537,7 +537,21 @@ api-gateway-pg's bin. The persistence ↔ read+verify symmetry now holds
 for all three audit tables (`meta.incidents`,
 `meta.gateway_pipeline_executions`, `meta.slo_enforcement_actions`). No
 new META_ tables; `query.ts` is offline-tested with a fake source (+18
-tests). **P2.14 (ADR-0118) added a projection
+tests). **P2.49 (ADR-0161) extended the `crossengin-slo` read API with a
+fourth `slo latency` command** — the M8.7 latency verdict snapshots in
+`meta.slo_latency_evaluations` (`slle_` ids, worst_percentile /
+sample_count / breaches JSONB) had no operator read surface. P2.49 adds a
+`PostgresSloLatencyEvaluationStore.listSince(since, limit?)` windowed read
+(the parity sibling of the P2.46 enforcement-action `listSince`), widens
+`SloQuerySource` with `listLatencyEvaluations`, and adds a `latency`
+branch to `parseSloArgs` / `runSloQuery` (+ `formatSloLatency`), so
+`crossengin-slo slo latency [--since <iso>] [--limit N] [--format json]`
+lists recent latency evaluations (id, surface, worst_percentile,
+sample_count, breach count, evaluated_at) — always exit 0 (a read, not a
+gate; `verify` keeps the only non-zero exit). `actions`/`summary`/`verify`
+unchanged; the bin wires the latency store into the same
+`StoreSloQuerySource`. No new META_ tables; +8 offline tests. **P2.14
+(ADR-0118) added a projection
 drift-sweep worker mode** — a structural `DriftResyncer` (satisfied by
 `WorkflowReplayer`) + `DriftSweepWorker` that periodically re-projects
 a bounded batch of instances from the canonical event log and
@@ -2110,6 +2124,15 @@ re-exporting everything.
   enforcement audit is operable from a shell and CI-gateable. The bin
   shifted rootDir to . (dist/src/index.js + dist/bin/crossengin-slo.js;
   main/types/exports → dist/src/…), mirroring api-gateway-pg's bin.
+  P2.49 (ADR-0161) added a fourth `slo latency` command — `runSloQuery` /
+  `parseSloArgs` gained a `latency` branch over a new `SloQuerySource.
+  listLatencyEvaluations` (satisfied by a new
+  `PostgresSloLatencyEvaluationStore.listSince` windowed read — the parity
+  sibling of the enforcement-action `listSince`) + `formatSloLatency`, so
+  `slo latency [--since] [--limit] [--format json]` lists recent
+  `meta.slo_latency_evaluations` snapshots (id, surface, worst_percentile,
+  sample_count, breach count, evaluated_at); always exit 0 (a read, not a
+  gate). `actions`/`summary`/`verify` unchanged; +8 offline tests.
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
 - **`rate-limiting`** — unified rate-limit + quota contracts. 6

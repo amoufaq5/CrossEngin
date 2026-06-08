@@ -3,11 +3,15 @@
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 
 import { PostgresSloEnforcementActionStore } from "../src/enforcement-action-store.js";
+import { PostgresSloLatencyEvaluationStore } from "../src/latency-evaluation-store.js";
 import {
   verifyEnforcementHistory,
   type DriftIssue,
 } from "../src/replayer.js";
-import type { SloEnforcementActionRecord } from "../src/records.js";
+import type {
+  SloEnforcementActionRecord,
+  SloLatencyEvaluationRecord,
+} from "../src/records.js";
 import {
   CliUsageError,
   parseSloArgs,
@@ -26,12 +30,13 @@ function printHelp(): void {
       "  slo actions    List recent SLO enforcement actions",
       "  slo summary    Roll up enforcement decisions (opened/ongoing/recovered/paged)",
       "  slo verify     Verify enforcement history; exit 1 on drift",
+      "  slo latency    List recent SLO latency evaluations",
       "  version        Print the CLI version",
       "  help           Show this help text",
       "",
       "Flags (slo):",
-      "  --since <iso>        Only consider actions at/after this timestamp",
-      "  --limit <n>          Cap the number of actions read (default 1000)",
+      "  --since <iso>        Only consider rows at/after this timestamp",
+      "  --limit <n>          Cap the number of rows read (default 1000)",
       "  --format human|json  Output format (default human)",
       "",
       "Environment:",
@@ -43,9 +48,14 @@ function printHelp(): void {
 
 class StoreSloQuerySource implements SloQuerySource {
   private readonly store: PostgresSloEnforcementActionStore;
+  private readonly latencyStore: PostgresSloLatencyEvaluationStore;
 
-  constructor(store: PostgresSloEnforcementActionStore) {
+  constructor(
+    store: PostgresSloEnforcementActionStore,
+    latencyStore: PostgresSloLatencyEvaluationStore,
+  ) {
     this.store = store;
+    this.latencyStore = latencyStore;
   }
 
   private async load(opts: {
@@ -72,6 +82,14 @@ class StoreSloQuerySource implements SloQuerySource {
     const actions = await this.load(opts);
     return verifyEnforcementHistory(actions);
   }
+
+  async listLatencyEvaluations(opts: {
+    readonly since?: Date;
+    readonly limit?: number;
+  }): Promise<readonly SloLatencyEvaluationRecord[]> {
+    const since = opts.since ?? new Date(0);
+    return this.latencyStore.listSince(since, opts.limit ?? 1000);
+  }
 }
 
 async function runSlo(argv: readonly string[]): Promise<number> {
@@ -83,7 +101,8 @@ async function runSlo(argv: readonly string[]): Promise<number> {
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {
     const store = new PostgresSloEnforcementActionStore(conn);
-    const source = new StoreSloQuerySource(store);
+    const latencyStore = new PostgresSloLatencyEvaluationStore(conn);
+    const source = new StoreSloQuerySource(store, latencyStore);
     const result = await runSloQuery(options, source, (line) => {
       process.stdout.write(line + "\n");
     });

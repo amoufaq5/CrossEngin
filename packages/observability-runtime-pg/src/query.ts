@@ -1,11 +1,14 @@
-import type { SloEnforcementActionRecord } from "./records.js";
+import type {
+  SloEnforcementActionRecord,
+  SloLatencyEvaluationRecord,
+} from "./records.js";
 import {
   summarizeEnforcement,
   type DriftIssue,
   type EnforcementSummary,
 } from "./replayer.js";
 
-export type SloCommand = "actions" | "summary" | "verify";
+export type SloCommand = "actions" | "summary" | "verify" | "latency";
 export type OutputFormat = "human" | "json";
 
 /** The resolved options an `slo` command runs with (a CLI parser produces these). */
@@ -32,6 +35,10 @@ export interface SloQuerySource {
     readonly since?: Date;
     readonly limit?: number;
   }): Promise<readonly DriftIssue[]>;
+  listLatencyEvaluations(opts: {
+    readonly since?: Date;
+    readonly limit?: number;
+  }): Promise<readonly SloLatencyEvaluationRecord[]>;
 }
 
 export interface RunSloResult {
@@ -77,6 +84,22 @@ export function formatSloVerify(
   return [head, ...lines].join("\n");
 }
 
+function latencyLine(e: SloLatencyEvaluationRecord): string {
+  const pct = e.worstPercentile ?? "-";
+  const breached = e.breached ? `BREACH(${e.breaches.length.toString()})` : "ok";
+  return `${e.evaluationId}  ${e.surface.padEnd(20)}  pct=${pct.padEnd(3)}  samples=${e.sampleCount.toString().padEnd(6)}  ${breached}  ${e.evaluatedAt}`;
+}
+
+/** Human-readable rendering of a latency-evaluation list. */
+export function formatSloLatency(
+  evaluations: readonly SloLatencyEvaluationRecord[],
+  heading: string,
+): string {
+  if (evaluations.length === 0) return `${heading}: none`;
+  const lines = evaluations.map(latencyLine);
+  return [`${heading} (${evaluations.length.toString()}):`, ...lines].join("\n");
+}
+
 function buildOpts(options: SloCliOptions): { since?: Date; limit?: number } {
   const opts: { since?: Date; limit?: number } = {};
   if (options.since !== null) opts.since = new Date(options.since);
@@ -110,6 +133,11 @@ export async function runSloQuery(
     const actions = await source.listActions(opts);
     const summary = summarizeEnforcement(actions);
     out(json ? JSON.stringify(summary, null, 2) : formatSloSummary(summary, `enforcement summary ${window}`));
+    return { exitCode: 0 };
+  }
+  if (options.command === "latency") {
+    const evaluations = await source.listLatencyEvaluations(opts);
+    out(json ? JSON.stringify(evaluations, null, 2) : formatSloLatency(evaluations, `latency evaluations ${window}`));
     return { exitCode: 0 };
   }
   // verify
@@ -151,7 +179,7 @@ function parseIntFlag(value: string | null, name: string): number | null {
 }
 
 /**
- * Parses the `slo <actions|summary|verify>` argv tail into resolved
+ * Parses the `slo <actions|summary|verify|latency>` argv tail into resolved
  * {@link SloCliOptions}. `argv` is everything after the subcommand word (so
  * `argv[0]` is the command). Throws {@link CliUsageError} on misuse.
  */
@@ -162,8 +190,15 @@ export function parseSloArgs(argv: readonly string[]): SloCliOptions {
   if (help && word === undefined) {
     return { command: "verify", since: null, limit: null, format: "human", help: true };
   }
-  if (word !== "actions" && word !== "summary" && word !== "verify") {
-    throw new CliUsageError(`unknown slo command '${word ?? ""}' (expected actions|summary|verify)`);
+  if (
+    word !== "actions" &&
+    word !== "summary" &&
+    word !== "verify" &&
+    word !== "latency"
+  ) {
+    throw new CliUsageError(
+      `unknown slo command '${word ?? ""}' (expected actions|summary|verify|latency)`,
+    );
   }
   const formatRaw = flagValue(argv, "format") ?? "human";
   if (formatRaw !== "human" && formatRaw !== "json") {

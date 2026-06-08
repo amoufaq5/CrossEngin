@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { SloEnforcementActionRecord } from "./records.js";
+import type {
+  SloEnforcementActionRecord,
+  SloLatencyEvaluationRecord,
+} from "./records.js";
 import { verifyEnforcementHistory, type DriftIssue } from "./replayer.js";
 import {
   CliUsageError,
@@ -37,8 +40,32 @@ function action(
   };
 }
 
+let latCounter = 0;
+function latencyEval(
+  overrides: Partial<SloLatencyEvaluationRecord> = {},
+): SloLatencyEvaluationRecord {
+  latCounter += 1;
+  return {
+    evaluationId: `slle_${latCounter.toString().padStart(8, "0")}`,
+    tenantId: null,
+    sloId: "catalog-latency",
+    surface: "GET /v1/catalog",
+    breached: false,
+    worstSeverity: null,
+    worstThresholdId: null,
+    worstPercentile: null,
+    sampleCount: 100,
+    breaches: [],
+    evaluatedAt: iso(0),
+    ...overrides,
+  };
+}
+
 class FakeSource implements SloQuerySource {
-  constructor(private readonly actions: readonly SloEnforcementActionRecord[]) {}
+  constructor(
+    private readonly actions: readonly SloEnforcementActionRecord[],
+    private readonly latency: readonly SloLatencyEvaluationRecord[] = [],
+  ) {}
 
   listActions(): Promise<readonly SloEnforcementActionRecord[]> {
     return Promise.resolve(this.actions);
@@ -46,6 +73,10 @@ class FakeSource implements SloQuerySource {
 
   verifyActions(): Promise<readonly DriftIssue[]> {
     return Promise.resolve(verifyEnforcementHistory(this.actions));
+  }
+
+  listLatencyEvaluations(): Promise<readonly SloLatencyEvaluationRecord[]> {
+    return Promise.resolve(this.latency);
   }
 }
 
@@ -74,9 +105,18 @@ describe("parseSloArgs", () => {
     expect(opts.format).toBe("json");
   });
 
-  it("accepts summary + verify", () => {
+  it("accepts summary + verify + latency", () => {
     expect(parseSloArgs(["summary"]).command).toBe("summary");
     expect(parseSloArgs(["verify"]).command).toBe("verify");
+    expect(parseSloArgs(["latency"]).command).toBe("latency");
+  });
+
+  it("parses latency with since + limit + format", () => {
+    const opts = parseSloArgs(["latency", "--since", "2026-01-01T00:00:00Z", "--limit", "25", "--format", "json"]);
+    expect(opts.command).toBe("latency");
+    expect(opts.since).toBe("2026-01-01T00:00:00Z");
+    expect(opts.limit).toBe(25);
+    expect(opts.format).toBe("json");
   });
 
   it("supports inline --flag=value", () => {
@@ -207,5 +247,43 @@ describe("runSloQuery verify", () => {
     const { out } = capture();
     const result = await runSloQuery(options({ command: "verify" }), new FakeSource([]), out);
     expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("runSloQuery latency", () => {
+  it("lists latency evaluations in human format and exits 0", async () => {
+    const evals = [
+      latencyEval({ surface: "GET /v1/catalog", sampleCount: 142 }),
+      latencyEval({
+        surface: "POST /v1/orders",
+        breached: true,
+        worstPercentile: "p95",
+        breaches: [{ percentile: "p95", observedMs: 800 }],
+      }),
+    ];
+    const { out, lines } = capture();
+    const result = await runSloQuery(options({ command: "latency" }), new FakeSource([], evals), out);
+    expect(result.exitCode).toBe(0);
+    const text = lines.join("\n");
+    expect(text).toContain("GET /v1/catalog");
+    expect(text).toContain("POST /v1/orders");
+    expect(text).toContain("BREACH(1)");
+    expect(text).toContain("pct=p95");
+  });
+
+  it("emits json when --format json", async () => {
+    const evals = [latencyEval({ surface: "GET /v1/catalog" })];
+    const { out, lines } = capture();
+    await runSloQuery(options({ command: "latency", format: "json" }), new FakeSource([], evals), out);
+    const parsed = JSON.parse(lines[0]!) as Array<{ surface: string }>;
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.surface).toBe("GET /v1/catalog");
+  });
+
+  it("renders 'none' for an empty latency list", async () => {
+    const { out, lines } = capture();
+    await runSloQuery(options({ command: "latency" }), new FakeSource([], []), out);
+    expect(lines.join("\n")).toContain("none");
   });
 });
