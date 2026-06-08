@@ -138,6 +138,19 @@ export const KanbanColumnModelSchema = z.object({
 });
 export type KanbanColumnModel = z.infer<typeof KanbanColumnModelSchema>;
 
+/**
+ * A workflow transition a card may fire by being dragged between columns —
+ * resolved from the entity's `entityLifecycle` + RBAC-gated for the viewer.
+ * `fromStates` is the set of states the transition is valid from; `toState` the
+ * column it lands in.
+ */
+export const KanbanTransitionModelSchema = z.object({
+  name: z.string().min(1),
+  toState: z.string().min(1),
+  fromStates: z.array(z.string().min(1)),
+});
+export type KanbanTransitionModel = z.infer<typeof KanbanTransitionModelSchema>;
+
 export const KanbanModelSchema = z.object({
   entity: z.string().min(1),
   title: z.string().min(1),
@@ -146,8 +159,10 @@ export const KanbanModelSchema = z.object({
   columns: z.array(KanbanColumnModelSchema).min(1),
   /** The fields shown on each card — redaction-filtered for the viewer. */
   cardFields: z.array(CardFieldModelSchema),
-  /** A workflow-transition allow-list a frontend may offer on drag (names only). */
+  /** A workflow-transition allow-list a frontend may offer on drag (raw names from the view). */
   allowedTransitions: z.array(z.string().min(1)),
+  /** Resolved + RBAC-gated transitions (name + from/to states) the viewer may fire by dragging a card. */
+  transitions: z.array(KanbanTransitionModelSchema),
   /** An optional secondary grouping field (omitted when the viewer can't read it). */
   groupBy: z.string().min(1).optional(),
 });

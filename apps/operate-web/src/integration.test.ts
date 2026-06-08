@@ -186,6 +186,18 @@ suite("operate-web integration (real Postgres)", () => {
     expect((await server.dispatch(req(`/ui/Product/${id}`, "mgr-a"))).status).toBe(404);
   });
 
+  it("fires a workflow transition over real PG (place: cart -> placed, RBAC + from-state)", async () => {
+    await store.create(tenantA, "SalesOrder", { id: "so-tx", state: "cart", order_number: "SO-TX", currency: "AED" });
+    // place is granted to sellers (incl. store_manager); cart -> placed
+    const placed = await server.dispatch(writeReq("POST", "/ui/SalesOrder/so-tx/transition", "mgr-a", { transition: "place" }));
+    expect(placed.status).toBe(200);
+    expect((body(placed.body)["record"] as Record<string, unknown>)["state"]).toBe("placed");
+    // fulfill from placed is managers-only and valid from placed -> 200; a cashier is 403
+    expect((await server.dispatch(writeReq("POST", "/ui/SalesOrder/so-tx/transition", "csh-a", { transition: "fulfill" }))).status).toBe(403);
+    // an invalid from-state (cancel is fine from placed, but mark_returned needs fulfilled) -> 409
+    expect((await server.dispatch(writeReq("POST", "/ui/SalesOrder/so-tx/transition", "mgr-a", { transition: "mark_returned" }))).status).toBe(409);
+  });
+
   it("serves a kanban board over real PG, redacting unit_cost from a cashier's cards + data", async () => {
     await store.create(tenantA, "Product", product({ id: "p-kan", sku: "KAN-1" }));
 

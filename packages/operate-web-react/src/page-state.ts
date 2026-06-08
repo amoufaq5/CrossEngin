@@ -3,6 +3,7 @@ import type {
   DetailModel,
   FormModel,
   KanbanModel,
+  KanbanTransitionModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -217,4 +218,36 @@ export async function submitFormWrite(args: {
 /** Orchestrates a DELETE write through a `WriteFetcher`. */
 export async function submitDelete(entity: string, id: string, fetcher: WriteFetcher): Promise<WriteResult> {
   return fetcher("DELETE", buildWriteUrl(entity, id), null);
+}
+
+/** Builds the `/ui/:entity/:id/transition` URL the kanban board posts a transition to. */
+export function buildTransitionUrl(entity: string, id: string): string {
+  return `${buildWriteUrl(entity, id)}/transition`;
+}
+
+/**
+ * Resolves which kanban transition fires when a card in `fromState` is dropped on
+ * the `toState` column: the transition whose `toState` matches the target column
+ * and whose `fromStates` includes the card's current state. Returns the
+ * transition name, or `null` when no declared transition bridges those states
+ * (the drop is a no-op). Pure — the drag UI calls it on drop.
+ */
+export function planCardTransition(
+  transitions: readonly KanbanTransitionModel[],
+  fromState: string,
+  toState: string,
+): string | null {
+  if (fromState === toState) return null;
+  const match = transitions.find((t) => t.toState === toState && t.fromStates.includes(fromState));
+  return match?.name ?? null;
+}
+
+/** Orchestrates a transition write (POST /ui/:entity/:id/transition {transition}) through a `WriteFetcher`. */
+export async function submitTransition(
+  entity: string,
+  id: string,
+  transition: string,
+  fetcher: WriteFetcher,
+): Promise<WriteResult> {
+  return fetcher("POST", buildTransitionUrl(entity, id), { transition });
 }

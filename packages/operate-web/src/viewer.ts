@@ -86,6 +86,22 @@ export class EntityFieldResolver {
   }
 
   /**
+   * Checks whether the viewer may fire a named `entityLifecycle` transition via
+   * the manifest's per-transition RBAC grant. Returns the decision (`allowed` +
+   * a `reason` on denial), fail-closed for an unrecognized viewer.
+   */
+  canTransition(name: string): { readonly allowed: boolean; readonly reason?: string } {
+    const decision = rbacCheck({
+      principal: this.principal,
+      permissions: { [this.entityName]: this.perms },
+      roles: this.roleDefs,
+      entity: this.entityName,
+      operation: { kind: "transition", name },
+    });
+    return decision.allowed ? { allowed: true } : { allowed: false, reason: decision.reason };
+  }
+
+  /**
    * Resolves access for the given fields in one pass. A field with no `read`
    * grant and no sensitive classification is readable; a sensitive field with no
    * explicit grant defaults to redacted unless the viewer holds a privileged

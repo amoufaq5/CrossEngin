@@ -1,5 +1,5 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { listConfigForEntity } from "@crossengin/operate-runtime";
+import { listConfigForEntity, manifestRouteSpecs, type TransitionSpec } from "@crossengin/operate-runtime";
 import type { Entity, Field, FieldType } from "@crossengin/types/meta-schema";
 
 import {
@@ -17,6 +17,7 @@ import {
   type FormValidation,
   type KanbanColumnModel,
   type KanbanModel,
+  type KanbanTransitionModel,
   type MapLayerModel,
   type MapModel,
   type RowActionModel,
@@ -397,6 +398,8 @@ export function compileKanbanModel(
 
   const cardFields = cardFieldModels(entity, view.cardFields, access);
   const groupByReadable = view.groupBy !== undefined && access.get(view.groupBy)?.read !== false;
+  const allowedTransitions = [...(view.allowedTransitions ?? [])];
+  const transitions = resolveKanbanTransitions(manifest, entity, viewer, allowedTransitions, options);
 
   return {
     entity: entityName,
@@ -404,9 +407,46 @@ export function compileKanbanModel(
     stateField: view.stateField,
     columns,
     cardFields,
-    allowedTransitions: [...(view.allowedTransitions ?? [])],
+    allowedTransitions,
+    transitions,
     ...(groupByReadable ? { groupBy: view.groupBy! } : {}),
   };
+}
+
+/** The entity's `entityLifecycle` transition specs (via the canonical operate-runtime route specs). */
+function entityTransitionSpecs(manifest: Manifest, entityName: string): readonly TransitionSpec[] {
+  const out: TransitionSpec[] = [];
+  for (const spec of manifestRouteSpecs(manifest)) {
+    if (spec.entity === entityName && spec.action === "transition" && spec.transition !== undefined) {
+      out.push(spec.transition);
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolves a kanban view's `allowedTransitions` (names) against the entity's
+ * lifecycle, RBAC-gated for the viewer: only a transition the viewer may fire
+ * (its per-transition grant) AND whose `toState` matches a declared column lands
+ * in the model, so the board only offers a drag the server would authorize.
+ */
+function resolveKanbanTransitions(
+  manifest: Manifest,
+  entity: Entity,
+  viewer: ViewerContext,
+  allowedTransitions: readonly string[],
+  options: CompileOptions,
+): KanbanTransitionModel[] {
+  if (allowedTransitions.length === 0) return [];
+  const allowed = new Set(allowedTransitions);
+  const resolver = new EntityFieldResolver(manifest, entity.name, viewer, options);
+  const out: KanbanTransitionModel[] = [];
+  for (const spec of entityTransitionSpecs(manifest, entity.name)) {
+    if (!allowed.has(spec.name)) continue;
+    if (!resolver.canTransition(spec.name).allowed) continue;
+    out.push({ name: spec.name, toState: spec.toState, fromStates: [...spec.fromStates] });
+  }
+  return out;
 }
 
 /**

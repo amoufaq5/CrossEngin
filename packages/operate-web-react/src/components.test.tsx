@@ -170,6 +170,7 @@ const KANBAN_MODEL: KanbanModel = {
     { field: "total", label: "Total", type: "decimal" },
   ],
   allowedTransitions: ["place"],
+  transitions: [{ name: "place", toState: "placed", fromStates: ["cart"] }],
 };
 
 const CALENDAR_MODEL: CalendarModel = {

@@ -4,12 +4,15 @@ import { describe, expect, it } from "vitest";
 import {
   PAGE_STATE_GLOBAL,
   buildListQueryUrl,
+  buildTransitionUrl,
   buildWriteUrl,
   coerceFormValues,
   parsePageState,
+  planCardTransition,
   serializePageState,
   submitDelete,
   submitFormWrite,
+  submitTransition,
   type WebPageState,
   type WriteFetcher,
   type WriteResult,
@@ -205,5 +208,33 @@ describe("submitFormWrite / submitDelete", () => {
     const { calls, fetcher } = recordingFetcher({ ok: true, status: 204 });
     await submitDelete("Product", "p1", fetcher);
     expect(calls[0]).toEqual({ method: "DELETE", url: "/ui/Product/p1", payload: null });
+  });
+
+  it("submitTransition POSTs the transition name to the transition URL", async () => {
+    const { calls, fetcher } = recordingFetcher({ ok: true, status: 200, record: { id: "o1", state: "placed" } });
+    await submitTransition("SalesOrder", "o1", "place", fetcher);
+    expect(calls[0]).toEqual({ method: "POST", url: "/ui/SalesOrder/o1/transition", payload: { transition: "place" } });
+  });
+});
+
+describe("buildTransitionUrl / planCardTransition", () => {
+  const transitions = [
+    { name: "place", toState: "placed", fromStates: ["cart"] },
+    { name: "fulfill", toState: "fulfilled", fromStates: ["placed"] },
+    { name: "cancel", toState: "cancelled", fromStates: ["cart", "placed"] },
+  ];
+
+  it("builds the transition URL", () => {
+    expect(buildTransitionUrl("SalesOrder", "o1")).toBe("/ui/SalesOrder/o1/transition");
+  });
+
+  it("resolves the bridging transition for a drop, or null", () => {
+    expect(planCardTransition(transitions, "cart", "placed")).toBe("place");
+    expect(planCardTransition(transitions, "placed", "fulfilled")).toBe("fulfill");
+    expect(planCardTransition(transitions, "placed", "cancelled")).toBe("cancel");
+    // no transition from cart directly to fulfilled
+    expect(planCardTransition(transitions, "cart", "fulfilled")).toBeNull();
+    // dropping on the same column is a no-op
+    expect(planCardTransition(transitions, "cart", "cart")).toBeNull();
   });
 });

@@ -2,9 +2,11 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   InMemoryEntityStore,
   listConfigForEntity,
+  manifestRouteSpecs,
   parseFields,
   parseListQuery,
   type EntityStore,
+  type TransitionSpec,
 } from "@crossengin/operate-runtime";
 import {
   EntityFieldResolver,
@@ -73,6 +75,7 @@ export interface OperateWebServerOptions {
  *   GET    /ui/:entity/new      -> { form }
  *   GET    /ui/:entity/:id      -> { detail, record }
  *   POST   /ui/:entity          -> 201 { record } (RBAC create + write-mask)
+ *   POST   /ui/:entity/:id/transition -> 200 { record } ({transition}; RBAC + from-state 409)
  *   PATCH  /ui/:entity/:id      -> 200 { record } (RBAC update + write-mask)
  *   DELETE /ui/:entity/:id      -> 204 (RBAC delete)
  *
@@ -152,9 +155,12 @@ export class OperateWebServer {
     query: Record<string, string | string[]>,
     body: Uint8Array | null,
   ): RawWebResponse | Promise<RawWebResponse> {
-    // Mutations: POST /ui/:entity (create), PATCH/DELETE /ui/:entity/:id.
+    // Mutations: POST /ui/:entity (create) or /ui/:entity/:id/transition, PATCH/DELETE /ui/:entity/:id.
     if (method === "POST") {
       if (rest.length === 1) return this.serveCreate(rest[0]!, viewer, viewerCtx, body);
+      if (rest.length === 3 && rest[2] === "transition") {
+        return this.serveTransition(rest[0]!, rest[1]!, viewer, viewerCtx, body);
+      }
       return problemResponse(404, "Not found", `cannot POST ${path}`);
     }
     if (method === "PATCH") {
@@ -327,6 +333,57 @@ export class OperateWebServer {
     const removed = await this.store.remove(viewer.tenantId, entity, id);
     if (!removed) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
     return { status: 204, headers: {}, body: null };
+  }
+
+  /** The entity's `entityLifecycle` transition spec by name (via operate-runtime's route specs). */
+  private transitionSpec(entity: string, name: string): TransitionSpec | null {
+    for (const spec of manifestRouteSpecs(this.manifest)) {
+      if (spec.entity === entity && spec.action === "transition" && spec.transition?.name === name) {
+        return spec.transition;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Fires a workflow transition on a record: POST /ui/:entity/:id/transition with
+   * `{ transition: <name> }`. Authorized by the per-transition RBAC grant (403),
+   * validated against the lifecycle's from-states (409 on an invalid current
+   * state), then applied as a `stateField -> toState` update. The redacted record
+   * is returned. 404 when the named transition isn't declared for the entity.
+   */
+  private async serveTransition(
+    entity: string,
+    id: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    body: Uint8Array | null,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const parsed = this.parseRecordBody(body);
+    if ("error" in parsed) return parsed.error;
+    const name = parsed.record["transition"];
+    if (typeof name !== "string" || name.length === 0) {
+      return problemResponse(400, "Bad request", "body must carry a 'transition' name");
+    }
+    const spec = this.transitionSpec(entity, name);
+    if (spec === null) return problemResponse(404, "Not found", `no transition '${name}' for '${entity}'`);
+    const resolver = this.resolverFor(entity, viewerCtx);
+    const decision = resolver.canTransition(name);
+    if (!decision.allowed) {
+      return problemResponse(403, "Forbidden", decision.reason ?? `cannot fire '${name}'`);
+    }
+    const record = await this.store.get(viewer.tenantId, entity, id);
+    if (record === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    const current = record[spec.stateField];
+    if (typeof current === "string" && !spec.fromStates.includes(current)) {
+      return problemResponse(409, "Conflict", `'${name}' cannot fire from '${current}'`);
+    }
+    const updated = await this.store.update(viewer.tenantId, entity, id, { [spec.stateField]: spec.toState });
+    if (updated === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    const access = this.accessFor(entity, viewerCtx);
+    return jsonResponse(200, { record: redactRecord(updated, access) });
   }
 
   private async serveTable(

@@ -381,6 +381,44 @@ describe("GET /app/:entity/calendar — SSR agenda page", () => {
   });
 });
 
+describe("POST /ui/:entity/:id/transition — workflow transition (RBAC + from-state)", () => {
+  async function seedOrder(server: OperateWebServer): Promise<void> {
+    await server.entityStore.create(TENANT, "SalesOrder", { id: "o1", state: "cart", order_number: "SO-1", currency: "AED" });
+  }
+
+  it("a cashier fires place (cart -> placed), authorized by the transition grant", async () => {
+    const server = await makeServer();
+    await seedOrder(server);
+    const res = await server.dispatch(writeReq("POST", "/ui/SalesOrder/o1/transition", "csh", { transition: "place" }));
+    expect(res.status).toBe(200);
+    expect(body(res).record.state).toBe("placed");
+  });
+
+  it("a cashier cannot fire fulfill (managers only) — 403", async () => {
+    const server = await makeServer();
+    await seedOrder(server);
+    expect((await server.dispatch(writeReq("POST", "/ui/SalesOrder/o1/transition", "csh", { transition: "fulfill" }))).status).toBe(403);
+  });
+
+  it("409s an invalid from-state (fulfill requires placed, the order is in cart)", async () => {
+    const server = await makeServer();
+    await seedOrder(server);
+    expect((await server.dispatch(writeReq("POST", "/ui/SalesOrder/o1/transition", "mgr", { transition: "fulfill" }))).status).toBe(409);
+  });
+
+  it("404s an unknown transition name", async () => {
+    const server = await makeServer();
+    await seedOrder(server);
+    expect((await server.dispatch(writeReq("POST", "/ui/SalesOrder/o1/transition", "mgr", { transition: "teleport" }))).status).toBe(404);
+  });
+
+  it("400s a body without a transition name", async () => {
+    const server = await makeServer();
+    await seedOrder(server);
+    expect((await server.dispatch(writeReq("POST", "/ui/SalesOrder/o1/transition", "mgr", {}))).status).toBe(400);
+  });
+});
+
 describe("write method guards", () => {
   it("405s an unsupported method", async () => {
     const server = await makeServer();

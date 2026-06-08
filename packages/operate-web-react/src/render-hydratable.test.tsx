@@ -103,6 +103,49 @@ describe("detail write affordances (canEdit / canDelete)", () => {
   });
 });
 
+describe("kanban section (interactive board)", () => {
+  const KANBAN = {
+    entity: "SalesOrder",
+    title: "Order board",
+    stateField: "state",
+    columns: [
+      { state: "cart", label: "Cart" },
+      { state: "placed", label: "Placed" },
+    ],
+    cardFields: [{ field: "order_number", label: "Order #", type: "text" as const }],
+    allowedTransitions: ["place"],
+    transitions: [{ name: "place", toState: "placed", fromStates: ["cart"] }],
+  };
+
+  it("renders draggable cards when the model carries transitions", () => {
+    const state: WebPageState = {
+      kind: "kanban",
+      app: APP,
+      kanban: KANBAN,
+      rows: [{ id: "o1", state: "cart", order_number: "SO-1" }],
+      basePath: "/app",
+    };
+    const html = renderHydratablePage(state);
+    expect(html).toContain('data-interactive="true"');
+    expect(html).toContain('data-state="cart"');
+    expect(html).toContain("SO-1");
+    expect(html).toContain('draggable="true"');
+  });
+
+  it("renders a static board (no draggable) when there are no transitions", () => {
+    const state: WebPageState = {
+      kind: "kanban",
+      app: APP,
+      kanban: { ...KANBAN, allowedTransitions: [], transitions: [] },
+      rows: [{ id: "o1", state: "cart", order_number: "SO-1" }],
+      basePath: "/app",
+    };
+    const html = renderHydratablePage(state);
+    expect(html).toContain('data-interactive="false"');
+    expect(html).not.toContain('draggable="true"');
+  });
+});
+
 describe("form section (create vs edit prefill)", () => {
   const FORM = {
     entity: "Product",

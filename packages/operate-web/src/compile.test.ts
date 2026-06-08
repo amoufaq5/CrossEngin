@@ -242,6 +242,43 @@ describe("compileKanbanModel", () => {
   });
 });
 
+const SALES_ORDER_KANBAN = {
+  orderBoard: {
+    kind: "kanban",
+    entity: "SalesOrder",
+    stateField: "state",
+    columns: [
+      { state: "cart", label: { en: "Cart" } },
+      { state: "placed", label: { en: "Placed" } },
+      { state: "fulfilled", label: { en: "Fulfilled" } },
+    ],
+    cardFields: ["order_number"],
+    allowedTransitions: ["place", "fulfill"],
+  },
+};
+
+describe("compileKanbanModel — RBAC-gated transitions", () => {
+  const m = withViews(retail, SALES_ORDER_KANBAN);
+
+  it("resolves allowed transitions to {name,toState,fromStates}, gated by the viewer's grants", () => {
+    // place is granted to SELLERS (incl cashier); fulfill only to MANAGERS
+    const mgr = compileKanbanModel(m, "SalesOrder", MANAGER);
+    expect(mgr!.transitions.map((t) => t.name).sort()).toEqual(["fulfill", "place"]);
+    const place = mgr!.transitions.find((t) => t.name === "place");
+    expect(place?.toState).toBe("placed");
+    expect(place?.fromStates).toContain("cart");
+
+    const csh = compileKanbanModel(m, "SalesOrder", CASHIER);
+    // a cashier may place but not fulfill
+    expect(csh!.transitions.map((t) => t.name)).toEqual(["place"]);
+  });
+
+  it("an empty allowedTransitions list yields no transitions", () => {
+    const board = compileKanbanModel(withViews(retail, PRODUCT_KANBAN), "Product", MANAGER);
+    expect(board!.transitions).toEqual([]);
+  });
+});
+
 describe("compileCalendarModel", () => {
   const m = withViews(retail, SALES_ORDER_CALENDAR);
 

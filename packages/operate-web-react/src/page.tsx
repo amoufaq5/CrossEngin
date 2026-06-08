@@ -1,13 +1,15 @@
-import type { FormModel, TableModel } from "@crossengin/operate-web";
-import { useState, type FormEvent, type JSX } from "react";
+import type { FormModel, KanbanModel, TableModel } from "@crossengin/operate-web";
+import { useState, type DragEvent, type FormEvent, type JSX } from "react";
 
-import { AppShell, CalendarView, DetailView, FormView, KanbanView, TableView } from "./components.js";
+import { AppShell, CalendarView, DetailView, FormView, TableView, displayValue } from "./components.js";
 import {
   buildListQueryUrl,
   coerceFormValues,
   defaultWriteFetcher,
+  planCardTransition,
   submitDelete,
   submitFormWrite,
+  submitTransition,
   type WriteFetcher,
 } from "./page-state.js";
 import type { WebPageState } from "./page-state.js";
@@ -269,6 +271,111 @@ function DetailSection({ state, writeFetcher = defaultWriteFetcher, onNavigate =
   );
 }
 
+interface KanbanSectionProps {
+  readonly model: KanbanModel;
+  readonly initialRows: readonly Readonly<Record<string, unknown>>[];
+  readonly basePath: string;
+  readonly writeFetcher?: WriteFetcher;
+}
+
+/**
+ * A stateful kanban board: renders one column per declared state with the cards
+ * whose `stateField` matches, and — when the model carries RBAC-gated
+ * `transitions` — makes the cards draggable. Dropping a card on a column resolves
+ * the bridging transition (`planCardTransition`), POSTs it
+ * (`/ui/:entity/:id/transition`), and on success moves the card into the target
+ * column in local state (no reload). A drop with no valid transition, or a server
+ * 4xx (RBAC 403 / from-state 409), surfaces inline and leaves the card put. The
+ * SSR renders the same markup so hydration matches; live drag is a manual smoke.
+ */
+function KanbanSection({ model, initialRows, basePath, writeFetcher = defaultWriteFetcher }: KanbanSectionProps): JSX.Element {
+  const [rows, setRows] = useState<readonly Readonly<Record<string, unknown>>[]>(initialRows);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const draggable = model.transitions.length > 0;
+
+  function onDragStart(id: string): void {
+    setDragId(id);
+  }
+
+  async function onDropColumn(toState: string): Promise<void> {
+    const id = dragId;
+    setDragId(null);
+    if (id === null || busy) return;
+    const card = rows.find((r) => displayValue(r["id"]) === id);
+    if (card === undefined) return;
+    const fromState = displayValue(card[model.stateField]);
+    const name = planCardTransition(model.transitions, fromState, toState);
+    if (name === null) {
+      setStatus(`no transition from ${fromState} to ${toState}`);
+      return;
+    }
+    setBusy(true);
+    setStatus(null);
+    try {
+      const result = await submitTransition(model.entity, id, name, writeFetcher);
+      if (result.ok) {
+        setRows((rs) => rs.map((r) => (displayValue(r["id"]) === id ? { ...r, [model.stateField]: toState } : r)));
+        return;
+      }
+      setStatus(result.detail ?? `transition failed (${result.status.toString()})`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="ce-kanban" data-entity={model.entity} data-state-field={model.stateField} data-interactive={draggable ? "true" : "false"}>
+      <h2 className="ce-kanban-title">{model.title}</h2>
+      <div className="ce-kanban-board">
+        {model.columns.map((col) => {
+          const cards = rows.filter((r) => displayValue(r[model.stateField]) === col.state);
+          return (
+            <div
+              key={col.state}
+              className="ce-kanban-column"
+              data-state={col.state}
+              onDragOver={draggable ? (e: DragEvent) => e.preventDefault() : undefined}
+              onDrop={draggable ? () => void onDropColumn(col.state) : undefined}
+            >
+              <h3 className="ce-kanban-column-title">
+                {col.label}
+                <span className="ce-kanban-count"> ({String(cards.length)}{col.wipLimit !== undefined ? `/${String(col.wipLimit)}` : ""})</span>
+              </h3>
+              <ul className="ce-kanban-cards">
+                {cards.map((row, index) => {
+                  const id = displayValue(row["id"]);
+                  return (
+                    <li
+                      key={id.length > 0 ? id : `card-${String(index)}`}
+                      className="ce-kanban-card"
+                      data-id={id}
+                      draggable={draggable && id.length > 0}
+                      onDragStart={draggable ? () => onDragStart(id) : undefined}
+                    >
+                      <dl className="ce-kanban-card-fields">
+                        {model.cardFields.map((field) => (
+                          <div key={field.field} className="ce-kanban-card-field" data-field={field.field}>
+                            <dt>{field.label}</dt>
+                            <dd>{displayValue(row[field.field])}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                      {id.length > 0 ? <a className="ce-kanban-card-link" href={`${basePath}/${model.entity}/${id}`}>Open</a> : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+      {status !== null ? <div className="ce-kanban-status" role="status">{status}</div> : null}
+    </section>
+  );
+}
+
 export interface PageRootProps {
   readonly state: WebPageState;
   /** Test seam threaded to the interactive table. */
@@ -329,7 +436,12 @@ export function PageRoot({ state, fetcher, writeFetcher, onNavigate }: PageRootP
     case "kanban":
       return (
         <AppShell app={state.app} basePath={state.basePath}>
-          <KanbanView model={state.kanban} rows={state.rows} basePath={state.basePath} />
+          <KanbanSection
+            model={state.kanban}
+            initialRows={state.rows}
+            basePath={state.basePath}
+            {...(writeFetcher !== undefined ? { writeFetcher } : {})}
+          />
         </AppShell>
       );
     case "calendar":
