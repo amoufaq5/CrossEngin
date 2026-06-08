@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@crossengin/api-gateway": "workspace:*",
+    "@crossengin/api-gateway-pg": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
     "@crossengin/incident-response": "workspace:*",
     "@crossengin/incident-response-pg": "workspace:*",

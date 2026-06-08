@@ -1,5 +1,6 @@
-import type { ForwardedProto } from "@crossengin/api-gateway";
+import type { ForwardedProto, PipelineExecution } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
+import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import { buildOperateGateway, type EntityStore, type OperateServer } from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, type RawHttpRequest, type RawHttpResponse } from "./http.js";
@@ -11,11 +12,30 @@ function defaultRequestId(): string {
   return `req_${Date.now().toString(36)}${requestCounter.toString(36).padStart(4, "0")}`;
 }
 
+/**
+ * A structural sink for the per-request `PipelineExecution` the gateway produces.
+ * `OperateHttpServer.dispatchWithMatch` records each served request's execution
+ * here after building the response — making the gateway request-audit trail
+ * durable (e.g. to `meta.gateway_pipeline_executions` via
+ * `PostgresPipelineExecutionStore`). The `GatewayRuntime` only *returns* the
+ * execution on its `HandleResult`; this is the seam the serving binary uses to
+ * persist it (P2.45 / ADR-0153). A record failure must never break the served
+ * response, so the dispatcher routes it through `onExecutionSinkError` and
+ * continues.
+ */
+export interface ExecutionSink {
+  record(execution: PipelineExecution): Promise<void>;
+}
+
 export interface OperateHttpServerOptions {
   readonly gateway: OperateServer;
   readonly defaultScheme?: ForwardedProto;
   readonly idGenerator?: () => string;
   readonly now?: () => Date;
+  /** Optional durable sink for each request's `PipelineExecution`. */
+  readonly executionSink?: ExecutionSink;
+  /** Routes a sink failure (never breaks the response); defaults to stderr. */
+  readonly onExecutionSinkError?: (err: unknown) => void;
 }
 
 const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allowed";
@@ -32,12 +52,21 @@ export class OperateHttpServer {
   private readonly scheme: ForwardedProto;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
+  private readonly executionSink: ExecutionSink | null;
+  private readonly onExecutionSinkError: (err: unknown) => void;
 
   constructor(opts: OperateHttpServerOptions) {
     this.gateway = opts.gateway;
     this.scheme = opts.defaultScheme ?? "http";
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
+    this.executionSink = opts.executionSink ?? null;
+    this.onExecutionSinkError =
+      opts.onExecutionSinkError ??
+      ((err) =>
+        process.stderr.write(
+          `[operate-server] execution sink error: ${err instanceof Error ? err.message : String(err)}\n`,
+        ));
   }
 
   async dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> {
@@ -73,6 +102,13 @@ export class OperateHttpServer {
       receivedAt: this.now().toISOString(),
     });
     const { response, execution } = await this.gateway.runtime.handleRequest(incoming);
+    if (this.executionSink !== null) {
+      try {
+        await this.executionSink.record(execution);
+      } catch (err) {
+        this.onExecutionSinkError(err);
+      }
+    }
     return {
       response: { status: response.status, headers: { ...response.headers }, body: response.bodyBytes },
       matchedOperationId: execution.routeOperationId,
@@ -107,6 +143,16 @@ export interface BuildOperateHttpServerOptions {
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
+  /** Optional durable sink for each request's `PipelineExecution`. */
+  readonly executionSink?: ExecutionSink;
+  readonly onExecutionSinkError?: (err: unknown) => void;
+  /**
+   * Optional rate-limit checker (defaults to the gateway's in-memory checker).
+   * A Postgres-backed checker persists its decisions to
+   * `meta.rate_limit_decisions`, which keeps a persisted execution's
+   * `rateLimitDecisionId` resolvable to a real row.
+   */
+  readonly rateLimitChecker?: RateLimitChecker;
 }
 
 export interface BuiltOperateHttpServer {
@@ -134,12 +180,15 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
         }
       : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
+    ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
   });
   const httpServer = new OperateHttpServer({
     gateway,
     ...(options.defaultScheme !== undefined ? { defaultScheme: options.defaultScheme } : {}),
     ...(options.idGenerator !== undefined ? { idGenerator: options.idGenerator } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.executionSink !== undefined ? { executionSink: options.executionSink } : {}),
+    ...(options.onExecutionSinkError !== undefined ? { onExecutionSinkError: options.onExecutionSinkError } : {}),
   });
   return { httpServer, gateway };
 }

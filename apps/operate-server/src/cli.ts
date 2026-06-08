@@ -18,6 +18,7 @@ export interface ServeOptions {
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
   readonly defaultScheme: "http" | "https";
+  readonly persistExecutions: boolean;
   readonly slo: boolean;
   readonly sloPersist: boolean;
   readonly sloActor: string | null;
@@ -54,6 +55,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let store: StoreKind = "memory";
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
+  let persistExecutions = false;
   const apiKeys: string[] = [];
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
@@ -131,6 +133,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
       jwtAudience = takeValue(arg, next, "--jwt-audience");
       i += consumed();
+    } else if (arg === "--persist-executions") {
+      persistExecutions = true;
     } else if (arg === "--slo") {
       slo = true;
     } else if (arg === "--slo-persist") {
@@ -188,6 +192,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwtIssuer,
     jwtAudience,
     defaultScheme,
+    persistExecutions,
     slo,
     sloPersist,
     sloActor,
@@ -218,6 +223,10 @@ Options:
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)
+  --persist-executions Record each request's PipelineExecution to
+                       meta.gateway_pipeline_executions (needs Postgres via the
+                       standard PG* env vars; makes the gateway-execution drift
+                       gate non-vacuous)
   --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable)
   --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
   --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys

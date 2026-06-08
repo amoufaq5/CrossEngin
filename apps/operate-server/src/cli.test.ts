@@ -42,6 +42,11 @@ describe("parseServeArgs", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--slo-interval-ms", "500"])).toThrow(CliUsageError);
   });
 
+  it("parses --persist-executions (default off)", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).persistExecutions).toBe(false);
+    expect(parseServeArgs(["--pack", "erp-core", "--persist-executions"]).persistExecutions).toBe(true);
+  });
+
   it("rejects an invalid --slo-latency-budget", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--slo-latency-budget", "fast"]),

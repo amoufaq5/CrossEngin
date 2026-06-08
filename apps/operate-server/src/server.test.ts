@@ -1,10 +1,11 @@
+import type { PipelineExecution } from "@crossengin/api-gateway";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
-import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import { OperateHttpServer, buildOperateHttpServer, type ExecutionSink } from "./server.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const manifest = await loadBuiltinPack("erp-retail");
@@ -139,5 +140,68 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
     const secondBody = parse(second.body);
     expect((secondBody["data"] as unknown[]).length).toBe(1);
     expect((secondBody["page"] as { nextCursor: string | null }).nextCursor).toBeNull();
+  });
+});
+
+class CapturingExecutionSink implements ExecutionSink {
+  readonly recorded: PipelineExecution[] = [];
+  async record(execution: PipelineExecution): Promise<void> {
+    this.recorded.push(execution);
+  }
+}
+
+describe("OperateHttpServer — execution sink wiring (P2.45)", () => {
+  function makeServerWithSink(sink: ExecutionSink, onError?: (err: unknown) => void): OperateHttpServer {
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+      executionSink: sink,
+      ...(onError !== undefined ? { onExecutionSinkError: onError } : {}),
+    });
+    return httpServer;
+  }
+
+  it("records one PipelineExecution per dispatched request", async () => {
+    const sink = new CapturingExecutionSink();
+    const server = makeServerWithSink(sink);
+
+    const { raw, bytes } = jsonBody("POST", "/v1/products", "key-manager", PRODUCT);
+    await server.dispatch(raw, bytes);
+    await server.dispatch(req("GET", "/v1/products", "key-manager"), null);
+
+    expect(sink.recorded).toHaveLength(2);
+    expect(sink.recorded[0]?.finalStage).toBe("emit_audit");
+    expect(typeof sink.recorded[0]?.requestId).toBe("string");
+    expect(sink.recorded[1]?.routeOperationId).toBe("product.list");
+  });
+
+  it("records the execution even for a denied (401) request", async () => {
+    const sink = new CapturingExecutionSink();
+    const server = makeServerWithSink(sink);
+    await server.dispatch(req("GET", "/v1/products", "key-nobody"), null);
+    expect(sink.recorded).toHaveLength(1);
+    expect(sink.recorded[0]?.finalOutcome).toBe("deny");
+  });
+
+  it("does not record on an unknown method (405 short-circuits before the gateway)", async () => {
+    const sink = new CapturingExecutionSink();
+    const server = makeServerWithSink(sink);
+    const res = await server.dispatch(req("BREW", "/v1/products", "key-manager"), null);
+    expect(res.status).toBe(405);
+    expect(sink.recorded).toHaveLength(0);
+  });
+
+  it("a sink failure is routed to onExecutionSinkError and never breaks the response", async () => {
+    const errors: unknown[] = [];
+    const failingSink: ExecutionSink = {
+      record: () => Promise.reject(new Error("sink down")),
+    };
+    const server = makeServerWithSink(failingSink, (err) => errors.push(err));
+    const res = await server.dispatch(req("GET", "/v1/products", "key-manager"), null);
+    expect(res.status).toBe(200);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toBe("sink down");
   });
 });

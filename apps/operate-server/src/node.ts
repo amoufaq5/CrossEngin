@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
+import { PostgresPipelineExecutionStore, PostgresRateLimitChecker } from "@crossengin/api-gateway-pg";
 import {
   PostgresIncidentReplayer,
   PostgresIncidentSink,
@@ -203,12 +204,38 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const store = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
+
+  // Optional gateway request-audit persistence (P2.45 / ADR-0153): record each
+  // request's PipelineExecution to meta.gateway_pipeline_executions via the
+  // shared @crossengin/api-gateway-pg store, over a dedicated connection. This
+  // makes the P2.42 gateway-execution drift gate non-vacuous (it now verifies
+  // real persisted executions, not an empty table). A record failure is logged
+  // and never breaks the served response (the OperateHttpServer dispatcher
+  // catches it).
+  let executionConn: PgConnection | null = null;
+  if (options.persistExecutions) {
+    executionConn = createNodePgConnection(parsePgEnvConfig());
+  }
+  const executionSink =
+    executionConn !== null ? new PostgresPipelineExecutionStore(executionConn) : null;
+  // When executions are persisted, also persist rate-limit decisions so a
+  // persisted execution's rateLimitDecisionId resolves to a real
+  // meta.rate_limit_decisions row (else the gateway-execution drift gate would
+  // flag rate_limit_decision_not_found). The in-memory default emits an
+  // ephemeral decision id that the gate can't resolve.
+  const rateLimitChecker =
+    executionConn !== null
+      ? new PostgresRateLimitChecker({ conn: executionConn, limit: 10_000, windowSeconds: 60 })
+      : null;
+
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
     apiKeys,
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
+    ...(executionSink !== null ? { executionSink } : {}),
+    ...(rateLimitChecker !== null ? { rateLimitChecker } : {}),
   });
   poller?.start();
 
@@ -279,9 +306,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         poller?.stop();
         sloMonitor?.stop();
         server.close((err) => {
-          void (incidentConn !== null ? incidentConn.close() : Promise.resolve()).then(() =>
-            err ? reject(err) : resolve(),
-          );
+          void Promise.all([
+            incidentConn !== null ? incidentConn.close() : Promise.resolve(),
+            executionConn !== null ? executionConn.close() : Promise.resolve(),
+          ]).then(() => (err ? reject(err) : resolve()));
         });
       }),
   };

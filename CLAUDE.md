@@ -1377,13 +1377,16 @@ re-exporting everything.
   drifted execution; parseExecutionsArgs + summarizeExecutionReports
   + formatExecutionVerifyReport) + a bin/crossengin-gateway-pg.ts
   (executions verify|summary — opens a conn, runs the sweep, exits the
-  code) so CI can gate gateway request-audit integrity. NOTE: the gated
-  operate-server path doesn't yet persist its PipelineExecutions
-  (GatewayRuntime returns the execution on HandleResult; dispatch
-  discards it — no execution store wired into buildOperateGateway), so
-  the gate verifies an empty table (exit 0) today and becomes
-  non-vacuous the moment a PostgresPipelineExecutionStore is wired into
-  the serving path.
+  code) so CI can gate gateway request-audit integrity. P2.45 (ADR-0153)
+  made the gate non-vacuous: `apps/operate-server --persist-executions`
+  now wires a `PostgresPipelineExecutionStore` (as a structural
+  `ExecutionSink` on `OperateHttpServer`) + a `PostgresRateLimitChecker`
+  into the serving path, so every served request records its
+  `PipelineExecution` (and a backing rate-limit-decision row) to
+  `meta.gateway_pipeline_executions` / `meta.rate_limit_decisions`; the
+  gate then verifies real persisted executions and reports no drift
+  (still exit 0 on an empty table for deployments that don't enable
+  persistence).
 - **`api-gateway-runtime`** — HTTP gateway middleware
   (fourth impure package). 9 modules: redaction
   (ResponseRedactionSpec + RedactionRegistry/MapRedactionRegistry
@@ -1590,6 +1593,20 @@ re-exporting everything.
   the burn; `serve()` builds the per-manifest engine under `--slo` (and threads
   the incident-sink conn into it under `--slo-persist` so the full audit trail —
   incident + enforcement actions + breach snapshots — is durable under one flag).
+  P2.45 (ADR-0153) persisted gateway request audit: a structural `ExecutionSink`
+  (`{record(execution)}`, satisfied by `@crossengin/api-gateway-pg`'s
+  `PostgresPipelineExecutionStore`) on `OperateHttpServer` — `dispatchWithMatch`
+  awaits it after building each response (a record failure is logged via
+  `onExecutionSinkError`, never breaks the response). `serve()` under
+  `--persist-executions` opens a dedicated conn, builds the store as the sink +
+  a `PostgresRateLimitChecker` (so a persisted execution's `rateLimitDecisionId`
+  resolves to a real `meta.rate_limit_decisions` row — the replayer's
+  `rate_limit_decision_not_found` check), records every served request's
+  `PipelineExecution` to `meta.gateway_pipeline_executions`, and closes the conn
+  on shutdown. This makes the P2.42 gateway-execution drift gate non-vacuous —
+  it now audits real persisted executions instead of an empty table. A gated
+  integration test drives create/list/RBAC-deny/auth-fail through the gateway
+  and proves `GatewayReplayer.bulkVerify` finds the rows with zero drift.
 - **`apps/workflow-worker`** — Phase 3 P2.3: the runnable
   distributed-worker binary (third app under `apps/`, after
   `architect-cli` + `operate-server`). 4 src modules + a bin: cli
