@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { type Manifest, validateManifest } from "@crossengin/kernel/manifest";
 import { CollisionError, PackParameterError, UnknownPackError } from "./errors.js";
 import { pack as part11Pack } from "./packs/21-cfr-part-11/pack.js";
 import { pack as hipaaPack } from "./packs/hipaa/pack.js";
@@ -292,7 +292,6 @@ describe("resolveCompliancePacks — end-to-end with validateManifest", () => {
     const augmented = await resolveCompliancePacks(m, {
       registry: registryFrom({ "21-cfr-part-11": part11Pack }),
     });
-    const { validateManifest } = await import("@crossengin/kernel/manifest");
     expect(() => validateManifest(augmented)).not.toThrow();
   });
 });
@@ -465,7 +464,6 @@ describe("resolveCompliancePacks — v1 showcase packs", () => {
       },
     };
     const augmented = await resolveCompliancePacks(m, { registry: v1Registry });
-    const { validateManifest } = await import("@crossengin/kernel/manifest");
     expect(() => validateManifest(augmented)).not.toThrow();
   });
 });
