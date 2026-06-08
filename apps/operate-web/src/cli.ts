@@ -152,12 +152,20 @@ Auth: dev API keys (--api-key) and production JWTs (--jwks-* + --jwt-*) coexist.
 A verified Bearer JWT resolves a viewer from its claims (scopes -> roles, sub ->
 uuid, tenant from the tenant_id claim or the x-tenant-id header).
 
-Routes (all GET, JSON; auth via x-api-key or Authorization: Bearer <key|jwt>):
-  /ui/app              The app view model (title + per-entity nav)
-  /ui/:entity          { table, page: { data, nextCursor } } — model + data page
-  /ui/:entity/new      { form } — the create form model
-  /ui/:entity/:id      { detail, record } — record view + the record
+Routes (all GET; auth via x-api-key or Authorization: Bearer <key|jwt>):
+  JSON view-model API —
+    /ui/app              The app view model (title + per-entity nav)
+    /ui/:entity          { table, page: { data, nextCursor } } — model + data page
+    /ui/:entity/new      { form } — the create form model
+    /ui/:entity/:id      { detail, record } — record view + the record
+  SSR React HTML pages (hydrated by /assets/operate-web-client.js) —
+    /app                 the app shell + nav
+    /app/:entity         the table page
+    /app/:entity/new     the create form page
+    /app/:entity/:id     the detail page
+  /assets/operate-web-client.js   the hydration bundle (built via build:client)
 
-Every model + every data row is compiled / redacted for the caller's role, so a
-field the viewer can't read never appears in the JSON.
+Every model, data row, and embedded hydration state is compiled / redacted for
+the caller's role, so a field the viewer can't read never appears — in the JSON,
+the server-rendered HTML, or the client bundle's state.
 `;

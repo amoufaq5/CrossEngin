@@ -209,3 +209,5 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 123 | 0154 | 3,000 | Drafted alongside the operate-web edge/Workers adapter + JWT/JWKS auth (Phase 3 P3.2) |
 | 124 | 0155 | 3,000 | Drafted alongside the operate-web React component renderer — SSR (Phase 3 P3.3) |
 | 125 | 0156 | 3,000 | Drafted alongside operate-web client hydration + esbuild bundler (Phase 3 P3.4) |
+| 126 | 0157 | 2,500 | Drafted alongside the SLO enforcement read API + crossengin-slo CLI (Phase 3 P2.46) |
+| 127 | 0158 | 2,000 | Drafted alongside the operate-web background JWKS refresh poller (Phase 3 P3.5) |
