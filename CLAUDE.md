@@ -38,6 +38,18 @@ adapter (`fetchToRaw`/`rawToFetchResponse`/`asModuleWorker` over the same
 `dispatch`) + JWT/JWKS auth (verified Bearer → `ViewerContext.roles` via
 `scopesToRoles`, in-memory + remote caching JWKS), so the UI view-model API runs
 on Node and any Fetch/WinterCG runtime with dev API-key + prod JWT auth.
+**P3.3 (ADR-0155) shipped the first UI runtime:** `@crossengin/operate-web-react`
+(the 64th package, first React dep — `react`/`react-dom` `^18.3.1`) — a
+presentational, SSR-only React component renderer over the operate-web view
+models (`AppShell`/`TableView`/`DetailView`/`FormView` + `renderPage` over
+`react-dom/server`'s `renderToStaticMarkup`), and `apps/operate-web` gained
+additive `text/html` routes (`/app`, `/app/:entity`, `/app/:entity/:id`,
+`/app/:entity/new`) that server-render those components for the caller, reusing
+the same per-caller compile + redaction + store as the JSON `/ui/...` routes.
+Tests stay hermetic (react-dom/server, no jsdom/bundler) and prove redaction is
+structural in the markup — a cashier's rendered detail omits `Product.unit_cost`,
+a manager's includes it; the retail pack renders end-to-end. Client-side
+hydration + a bundler are the explicit deferred follow-up.
 **Phase 3 P3 (ADR-0080) has begun:** P3.1 added `@crossengin/operate-web` — a
 framework-neutral, redaction-aware view-model renderer (pure
 `compileWebApp`/`compileTableModel`/`compileDetailModel`/`compileFormModel`
@@ -1770,7 +1782,20 @@ re-exporting everything.
   (generateEd25519Keypair + signEd25519): scope store_manager → sees
   unit_cost, cashier → redacted, unknown-kid/wrong-issuer/expired/
   bad-sig → 401. The Postgres entity stores + mutation routing stay
-  the follow-ups.
+  the follow-ups. **P3.3 (ADR-0155) added SSR HTML routes** —
+  `html.ts` (`renderAppPage`/`renderTablePage`/`renderDetailPage`/
+  `renderFormPage` + `htmlResponse`) server-renders the
+  `@crossengin/operate-web-react` components to `text/html` pages via
+  `renderToStaticMarkup`. `dispatch` is split into `dispatchUi` (the
+  unchanged `/ui/...` JSON routes) + `dispatchApp` (`/app`,
+  `/app/:entity`, `/app/:entity/:id`, `/app/:entity/new` → HTML); the
+  HTML serve methods reuse the exact same per-caller compile +
+  redactRecord + store reads as their JSON siblings (no auth/redaction/
+  pagination duplicated). A loopback test boots `serve()` and proves
+  `GET /app/Product/p1` as a `store_manager` returns 200 `text/html`
+  containing the classified `unit_cost`, a `cashier`'s omits it, and an
+  unauthenticated `/app` is 401. The app gained a dep on
+  `@crossengin/operate-web-react`.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -2020,6 +2045,29 @@ re-exporting everything.
   field is included readOnly; labels humanize the snake_case name
   when no view supplies one). Pure rendering over existing
   stores — no new META_ tables.
+- **`operate-web-react`** — Phase 3 P3.3: a React component
+  renderer over the operate-web view models — the **first package
+  with a runtime UI-framework dependency** (`react` + `react-dom`
+  `^18.3.1`), SSR-only + hermetic. 2 modules: components (presentational,
+  pure `.tsx` typed by the operate-web model types — `AppShell`
+  [chrome + per-entity nav from a `WebAppModel`], `TableView`
+  [`TableModel` + rows → a semantic `<table>`; only the model's
+  redacted columns appear], `DetailView` [`DetailModel` + record →
+  sections/`<dl>`], `FormView` [`FormModel` → a `<form>`,
+  `readOnly`→disabled / required marked / enum→select], +
+  `displayValue`), render (`renderPage(node, {title?, lang?})` wraps
+  `react-dom/server`'s `renderToStaticMarkup` in a self-contained
+  `<!doctype html>` + `<title>` + tiny inline CSS document — no
+  client bundle). JSX is kept local: `tsconfig` adds `jsx: react-jsx`
+  + `jsxImportSource: react`, `vitest.config` mergeConfigs the shared
+  preset with `esbuild: { jsx: automatic, jsxImportSource: react }` so
+  vitest transforms `.tsx` with no bundler (the shared base config is
+  untouched). Tests render via `react-dom/server` (no jsdom/DOM/bundler)
+  and prove redaction is structural in the markup — a model compiled
+  for an unprivileged viewer drops the classified column/field, so it
+  never appears; the real retail pack renders end-to-end. Client-side
+  hydration + a bundler are the explicit deferred follow-up. No new
+  META_ tables.
 - **`i18n`** — locales, ICU MessageFormat, CLDR plurals, bundle,
   resolution, calendar, tenant config.
 - **`notifications`** — 6 channels × 18 providers, 5 content

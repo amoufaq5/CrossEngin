@@ -1,4 +1,5 @@
 export * from "./http.js";
+export * from "./html.js";
 export * from "./principals.js";
 export * from "./jwks.js";
 export * from "./manifest-source.js";

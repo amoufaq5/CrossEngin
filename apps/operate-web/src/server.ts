@@ -18,6 +18,12 @@ import {
   type ViewerContext,
 } from "@crossengin/operate-web";
 
+import {
+  renderAppPage,
+  renderDetailPage,
+  renderFormPage,
+  renderTablePage,
+} from "./html.js";
 import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type RawWebResponse } from "./http.js";
 import { ApiKeyRegistry, WebPrincipalResolver, type JwtVerifyConfig, type WebViewer } from "./principals.js";
 
@@ -78,13 +84,26 @@ export class OperateWebServer {
 
     const { path, query } = splitTarget(req.url);
     const segments = path.split("/").filter((s) => s.length > 0);
-    // expect: ui / <rest...>
-    if (segments[0] !== "ui") {
-      return problemResponse(404, "Not found", `no route for ${path}`);
-    }
-    const rest = segments.slice(1);
     const viewerCtx: ViewerContext = { roles: viewer.roles };
 
+    // `/ui/...` serves JSON view models; `/app/...` server-renders the same
+    // models (already compiled + redacted for this caller) as HTML pages.
+    if (segments[0] === "ui") {
+      return this.dispatchUi(segments.slice(1), path, viewer, viewerCtx, query);
+    }
+    if (segments[0] === "app") {
+      return this.dispatchApp(segments.slice(1), path, viewer, viewerCtx, query);
+    }
+    return problemResponse(404, "Not found", `no route for ${path}`);
+  }
+
+  private dispatchUi(
+    rest: readonly string[],
+    path: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): RawWebResponse | Promise<RawWebResponse> {
     if (rest.length === 1 && rest[0] === "app") {
       return jsonResponse(200, compileWebApp(this.manifest, viewerCtx));
     }
@@ -96,6 +115,28 @@ export class OperateWebServer {
     }
     if (rest.length === 2) {
       return this.serveDetail(rest[0]!, rest[1]!, viewer, viewerCtx);
+    }
+    return problemResponse(404, "Not found", `no route for ${path}`);
+  }
+
+  private dispatchApp(
+    rest: readonly string[],
+    path: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): RawWebResponse | Promise<RawWebResponse> {
+    if (rest.length === 0) {
+      return renderAppPage(compileWebApp(this.manifest, viewerCtx));
+    }
+    if (rest.length === 1) {
+      return this.serveTableHtml(rest[0]!, viewer, viewerCtx, query);
+    }
+    if (rest.length === 2 && rest[1] === "new") {
+      return this.serveFormHtml(rest[0]!, viewerCtx);
+    }
+    if (rest.length === 2) {
+      return this.serveDetailHtml(rest[0]!, rest[1]!, viewer, viewerCtx);
     }
     return problemResponse(404, "Not found", `no route for ${path}`);
   }
@@ -148,6 +189,50 @@ export class OperateWebServer {
     if (miss !== null) return miss;
     const form = compileFormModel(this.manifest, entity, viewerCtx, "create", this.compileOptions);
     return jsonResponse(200, { form });
+  }
+
+  private async serveTableHtml(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const app = compileWebApp(this.manifest, viewerCtx);
+    const table = compileTableModel(this.manifest, entity, viewerCtx, this.compileOptions);
+    const config = listConfigForEntity(this.manifest, entity);
+    const fields = parseFields(query);
+    const listQuery = { ...parseListQuery(query, config), ...(fields !== null ? { fields } : {}) };
+    const page = await this.store.listPage(viewer.tenantId, entity, listQuery);
+    const access = this.accessFor(entity, viewerCtx);
+    const data = page.records.map((r) => redactRecord(r, access));
+    return renderTablePage(app, table, data);
+  }
+
+  private async serveDetailHtml(
+    entity: string,
+    id: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const record = await this.store.get(viewer.tenantId, entity, id);
+    if (record === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    const access = this.accessFor(entity, viewerCtx);
+    const redacted = redactRecord(record, access);
+    const app = compileWebApp(this.manifest, viewerCtx);
+    const detail = compileDetailModel(this.manifest, entity, viewerCtx, redacted, this.compileOptions);
+    return renderDetailPage(app, detail, redacted);
+  }
+
+  private serveFormHtml(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const app = compileWebApp(this.manifest, viewerCtx);
+    const form = compileFormModel(this.manifest, entity, viewerCtx, "create", this.compileOptions);
+    return renderFormPage(app, form);
   }
 }
 
