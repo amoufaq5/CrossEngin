@@ -1,6 +1,11 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
+import type { Manifest } from "@crossengin/kernel/manifest";
+import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
+import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+
 import type { WebServeOptions } from "./cli.js";
 import type { RawWebRequest } from "./http.js";
 import {
@@ -99,6 +104,29 @@ export async function buildJwtConfigFromOptions(options: WebServeOptions): Promi
   return (await resolveJwtConfig(options)).config;
 }
 
+/**
+ * Resolves the CLI's `--store` into an `EntityStore` (+ the backing connection
+ * to close on shutdown, null for the in-memory store). `pg` is the JSONB
+ * document store over `meta.operate_entity_records`; `pg-columns` provisions the
+ * typed per-entity tables (and transparently encrypts PHI columns) via
+ * `ensureSchema`. Mirrors `apps/operate-server`'s `resolveStore`, so the UI
+ * view-model routes read the same persisted data the serving API writes.
+ */
+export async function resolveWebStore(
+  options: WebServeOptions,
+  manifest: Manifest,
+): Promise<{ store: EntityStore; conn: PgConnection | null }> {
+  if (options.store === "memory") return { store: new InMemoryEntityStore(), conn: null };
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
+  if (options.store === "pg-columns") {
+    const store = new ColumnMappedEntityStore(conn, manifest, schemaOpt);
+    await store.ensureSchema();
+    return { store, conn };
+  }
+  return { store: new PostgresEntityStore(conn, schemaOpt), conn };
+}
+
 /** The slice of Node's `IncomingMessage` the adapter reads. */
 export interface NodeReqLike {
   readonly method?: string | undefined;
@@ -159,8 +187,8 @@ export interface RunningServer {
 
 /**
  * Boots the web server from `WebServeOptions`: loads + resolves the manifest
- * (pack or file), builds the in-memory store, wires the API keys, and starts
- * listening. When a remote `--jwks-url` provider is configured with
+ * (pack or file), builds the entity store (in-memory or Postgres), wires the API
+ * keys, and starts listening. When a remote `--jwks-url` provider is configured with
  * `--jwks-refresh-ms`, a `JwksRefreshPoller` is started after the server is
  * listening and stopped in the returned close handle. Returns a handle for
  * graceful shutdown (and the `OperateWebServer` so a caller can seed the
@@ -173,7 +201,8 @@ export async function serve(options: WebServeOptions, deps: ServeJwtDeps = {}): 
       : await loadBuiltinPack(options.pack ?? "");
   const apiKeySpecs = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options, deps);
-  const webServer = buildOperateWebServer({ manifest, apiKeySpecs, ...(jwt !== null ? { jwt } : {}) });
+  const { store, conn } = await resolveWebStore(options, manifest);
+  const webServer = buildOperateWebServer({ manifest, store, apiKeySpecs, ...(jwt !== null ? { jwt } : {}) });
   const listener = createNodeRequestListener(webServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -189,7 +218,17 @@ export async function serve(options: WebServeOptions, deps: ServeJwtDeps = {}): 
     close: () =>
       new Promise<void>((resolve, reject) => {
         poller?.stop();
-        server.close((err) => (err ? reject(err) : resolve()));
+        server.close((err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          if (conn !== null) {
+            void conn.close().then(resolve, reject);
+          } else {
+            resolve();
+          }
+        });
       }),
   };
 }

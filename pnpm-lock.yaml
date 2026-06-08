@@ -145,9 +145,15 @@ importers:
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../../packages/kernel-pg
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../../packages/operate-runtime
+      '@crossengin/operate-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/operate-runtime-pg
       '@crossengin/operate-web':
         specifier: workspace:*
         version: link:../../packages/operate-web

@@ -71,12 +71,14 @@ jobs:
         # don't migrate the meta schema, so any drift here is a real
         # meta-schema-vs-applier divergence, not test pollution.
         run: node packages/kernel-pg/dist/bin/crossengin-pg.js drift
-      - name: Gated integration tests (workflow-worker + operate-server)
+      - name: Gated integration tests (workflow-worker + operate-server + operate-web)
         # CROSSENGIN_PG_TEST=1 (env above) un-skips the gated suites; the offline
-        # tests in these apps run too and stay green.
+        # tests in these apps run too and stay green. operate-web's gated suite
+        # (P3.7) drives the /ui/... view-model routes over a PostgresEntityStore.
         run: |
           pnpm --filter @crossengin/workflow-worker-app test
           pnpm --filter @crossengin/operate-server test
+          pnpm --filter @crossengin/operate-web-app test
       - name: Incident timeline drift gate
         # The gated suites above declare/escalate/resolve/ack/mitigate real
         # incidents in meta.incidents. `incidents verify` runs the timeline drift

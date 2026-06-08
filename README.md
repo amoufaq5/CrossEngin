@@ -1,7 +1,7 @@
 # CrossEngin
 
 > **Status — Phase 3 in progress.** 64 packages + 4 apps, 125
-> meta-schema tables, **6,911 offline tests + 39 gated real-Postgres
+> meta-schema tables, **6,911 offline tests + 44 gated real-Postgres
 > integration tests + five CI gates** (schema-drift · incident-drift ·
 > PHI-encryption · gateway-execution · slo-enforcement-drift), all green,
 > zero type errors. Phase 2
@@ -10,7 +10,7 @@
 > workflow worker (`workflow-worker` + `apps/workflow-worker`), and the
 > redaction-aware UI layer (`operate-web` + `operate-web-react` +
 > `apps/operate-web` — view models → SSR React → hydrated pages), all proven
-> end-to-end against real Postgres. ADRs 0001–0162 are drafted in
+> end-to-end against real Postgres. ADRs 0001–0163 are drafted in
 > `docs/adr/`. Resuming work? Read **[CLAUDE.md](CLAUDE.md)** — the
 > concise state snapshot.
 
@@ -109,7 +109,7 @@ Four runnable binaries under `apps/` (each `src/*` + a `bin/`):
 | **`architect-cli`** | `crossengin` | author manifests — `init` / `validate` / `diff` / `patch` / `hash` / `apply` / `chat` (talks to Claude, tool dispatch, write proposals, `--persist` audit) |
 | **`operate-server`** | `operate-server` | serve a manifest as a multi-tenant HTTP API (Node + edge/Workers), three `EntityStore`s (memory / pg JSONB / pg-columns typed+encrypted), API-key + JWT/JWKS auth — see [its README](apps/operate-server/README.md) |
 | **`workflow-worker`** | `workflow-worker` | advance deferred workflow progression (8 modes: tick · claim · retry · timeout · execute · reap · resync · all) over the PG event log, with heartbeats + stale-worker incidents — see [its README](apps/workflow-worker/README.md) |
-| **`operate-web`** | `operate-web` | serve a manifest as a redaction-aware UI — view models as JSON (`/ui/...`) + SSR React HTML pages (`/app/...`) with client hydration, API-key + JWT/JWKS auth, Node + edge/Workers |
+| **`operate-web`** | `operate-web` | serve a manifest as a redaction-aware UI — view models as JSON (`/ui/...`, incl. kanban + calendar) + SSR React HTML pages (`/app/...`) with client hydration, three `EntityStore`s (memory / pg / pg-columns), API-key + JWT/JWKS auth, Node + edge/Workers |
 
 ## Meta-schema — the integration point
 
@@ -125,7 +125,7 @@ updating `meta-schema.test.ts` (count, sorted names, column checks).
 
 ```
 CrossEngin/
-├── docs/             vision + ADRs 0001-0162  (CC BY 4.0)
+├── docs/             vision + ADRs 0001-0163  (CC BY 4.0)
 │   ├── vision.md
 │   └── adr/          docs/adr/index.md is the running index
 ├── apps/             4 runnable binaries  (architect-cli, operate-server, workflow-worker, operate-web)
@@ -140,7 +140,7 @@ CrossEngin/
 
 - **Human contributor?** Start with **[`docs/vision.md`](docs/vision.md)**
   (the north star), then **[`docs/adr/index.md`](docs/adr/index.md)** (the
-  index of 162 architecture decisions). Individual ADRs live at
+  index of 163 architecture decisions). Individual ADRs live at
   `docs/adr/NNNN-<slug>.md`, following
   **[`0000-template.md`](docs/adr/0000-template.md)**.
 - **AI assistant resuming work?** Start with **[CLAUDE.md](CLAUDE.md)** —
@@ -166,9 +166,9 @@ migration pending).
 
 ### Real-Postgres integration tests (gated)
 
-The 24 integration tests in `apps/workflow-worker` + `apps/operate-server`
-are skipped unless `CROSSENGIN_PG_TEST=1` (so the offline suite stays
-hermetic). Provision a throwaway database + run them:
+The 44 integration tests in `apps/workflow-worker` + `apps/operate-server`
++ `apps/operate-web` are skipped unless `CROSSENGIN_PG_TEST=1` (so the
+offline suite stays hermetic). Provision a throwaway database + run them:
 
 ```bash
 pnpm -r build
@@ -176,7 +176,7 @@ PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres PGDATABASE=crossengin_test 
   bash scripts/setup-integration-db.sh
 CROSSENGIN_PG_TEST=1 PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres \
   PGDATABASE=crossengin_test PGSSLMODE=disable \
-  pnpm --filter @crossengin/workflow-worker-app test   # and --filter @crossengin/operate-server
+  pnpm --filter @crossengin/workflow-worker-app test   # and operate-server, operate-web
 ```
 
 `.github/workflows/ci.yml` runs both — an offline job and a `postgres:16`

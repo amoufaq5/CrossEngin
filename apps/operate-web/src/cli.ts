@@ -1,10 +1,16 @@
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 
+export type WebStoreKind = "memory" | "pg" | "pg-columns";
+
 export interface WebServeOptions {
   readonly port: number;
   readonly pack: string | null;
   readonly manifestPath: string | null;
   readonly apiKeys: readonly string[];
+  /** Entity store backing the view-model data routes. */
+  readonly store: WebStoreKind;
+  /** Postgres schema for the entity store (pg → meta, pg-columns → public when null). */
+  readonly schema: string | null;
   /** JWKS public keys as `kid:base64` (repeatable). */
   readonly jwksKeys: readonly string[];
   /** Path to a JWKS JSON document (an alternative key source). */
@@ -45,6 +51,8 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
   let pack: string | null = null;
   let manifestPath: string | null = null;
   const apiKeys: string[] = [];
+  let store: WebStoreKind = "memory";
+  let schema: string | null = null;
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
   let jwksUrl: string | null = null;
@@ -77,6 +85,16 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
       i += consumed();
     } else if (arg === "--api-key" || arg.startsWith("--api-key=")) {
       apiKeys.push(takeValue(arg, next, "--api-key"));
+      i += consumed();
+    } else if (arg === "--store" || arg.startsWith("--store=")) {
+      const raw = takeValue(arg, next, "--store");
+      if (raw !== "memory" && raw !== "pg" && raw !== "pg-columns") {
+        throw new CliUsageError(`invalid --store: ${raw} (memory|pg|pg-columns)`);
+      }
+      store = raw;
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
       i += consumed();
     } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
       jwksKeys.push(takeValue(arg, next, "--jwks-key"));
@@ -123,7 +141,7 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
     }
   }
 
-  return { port, pack, manifestPath, apiKeys, jwksKeys, jwksFile, jwksUrl, jwksRefreshMs, jwtIssuer, jwtAudience, help, version };
+  return { port, pack, manifestPath, apiKeys, store, schema, jwksKeys, jwksFile, jwksUrl, jwksRefreshMs, jwtIssuer, jwtAudience, help, version };
 }
 
 export const helpText = `operate-web — serve a resolved CrossEngin manifest as redaction-aware UI view models
@@ -139,6 +157,10 @@ Manifest source (exactly one):
 Options:
   --port <n>           Port to listen on (default 8788)
   --api-key <spec>     API key binding key:role:tenant (repeatable)
+  --store <kind>       Entity store: memory | pg (JSONB) | pg-columns (typed
+                       per-entity tables) (default memory)
+  --schema <name>      Postgres schema for the entity store (default meta;
+                       public for pg-columns)
   --jwks-key <spec>    JWKS public key kid:base64 (repeatable)
   --jwks-file <file>   Path to a JWKS JSON document
   --jwks-url <url>     Remote JWKS endpoint (caching, rotation-aware)

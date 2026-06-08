@@ -215,3 +215,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 129 | 0159 | 2,500 | Drafted alongside the operate-server slo operator subcommand (Phase 3 P2.47) |
 | 130 | 0161 | 2,000 | Drafted alongside SLO latency-evaluation read coverage in crossengin-slo (Phase 3 P2.49) |
 | 131 | 0162 | 3,000 | Drafted alongside operate-web kanban + calendar view models (Phase 3 P3.6) |
+| 132 | 0163 | 3,000 | Drafted alongside operate-web Postgres entity store + gated integration test (Phase 3 P3.7) |
