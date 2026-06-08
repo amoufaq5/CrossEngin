@@ -27,7 +27,7 @@ import {
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 import {
   OperateSloMonitor,
-  buildServingLatencyEngine,
+  buildServingLatencyEngineForManifest,
   buildServingSloEngineForManifest,
 } from "./slo-incidents.js";
 
@@ -235,12 +235,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {}),
       ...(incidentConn !== null ? { conn: incidentConn } : {}),
     });
-    // Aggregate latency engine (P2.38) — fires a `performance` incident through
-    // the same shared sink on a p95-budget breach. Single-surface for now;
-    // per-route latency SLOs are a deferred follow-up.
-    const latencyEngine = buildServingLatencyEngine({
+    // Per-route latency engine over the compiled manifest (P2.41) — one latency
+    // SLO per (method, operationId), so a slow route declares its own
+    // `performance` incident through the same shared sink rather than diluting a
+    // global p95. Wrapped with the persistent decoration (M8.7) when
+    // --slo-persist is set so every per-route latency decision also writes to
+    // meta.slo_enforcement_actions / meta.slo_latency_evaluations.
+    const latencyEngine = buildServingLatencyEngineForManifest({
+      manifest,
       ...(options.sloActor !== null ? { systemActorUserId: options.sloActor } : {}),
       ...(options.sloLatencyBudget !== null ? { p95Budget: options.sloLatencyBudget } : {}),
+      ...(incidentConn !== null ? { conn: incidentConn } : {}),
     });
     sloMonitor = new OperateSloMonitor({
       engine,

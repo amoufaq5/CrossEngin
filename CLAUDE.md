@@ -399,6 +399,24 @@ The sweep return became a `ServingDecision[]` with a `signal:
 keeps enabling **both** engines. A gated test bursts 25× `(200, 2000ms)`
 → a declared `performance` incident lands in `meta.incidents` via the
 same shared sink and reads back via the same shared replayer.
+**P2.41 (ADR-0150) made serving latency per-route** — mirroring P2.37
+for the latency signal: `buildServingLatencyEngineForManifest({manifest,
+p95Budget?, …, conn?})` registers **one latency SLO per (method,
+operationId)** (`<method>-<surface>-latency` id, `performance`
+category), so a slow `POST /v1/orders` declares its own incident rather
+than diluting a global p95. It honors `conn` via the M8.7
+`buildPersistentLatencySloEngine` wrapper (which already existed) so
+per-route latency decisions persist to `meta.slo_enforcement_actions` +
+`meta.slo_latency_evaluations`. `LatencyEngineLike.evaluate` was widened
+to allow an async result (matching the persistent wrapper, like
+`SloEngineLike`), and `OperateSloMonitor.sweep` now awaits it. `serve()`
+under `--slo` switched the latency engine from the aggregate
+`buildServingLatencyEngine` (kept for back-compat) to the per-manifest
+builder; `recordRequest(status, latencyMs, surface)` already threads the
+matched route surface into **both** engines. Only manifest-derived
+routes are covered (a 404/405 has no surface). Offline tests:
+per-route registration count, single-route latency-breach isolation,
+and availability + per-route latency composing in one monitor.
 **P2.14 (ADR-0118) added a projection
 drift-sweep worker mode** — a structural `DriftResyncer` (satisfied by
 `WorkflowReplayer`) + `DriftSweepWorker` that periodically re-projects

@@ -9,11 +9,16 @@ import {
   type Clock,
   type EnforcementDecision,
   type LatencyEnforcementDecision,
+  type LatencyRegistration,
+  type LatencySloEngineOptions,
   type RequestOutcome,
   type SloEnforcementEngineOptions,
   type SloRegistration,
 } from "@crossengin/observability-runtime";
-import { buildPersistentSloEnforcementEngine } from "@crossengin/observability-runtime-pg";
+import {
+  buildPersistentLatencySloEngine,
+  buildPersistentSloEnforcementEngine,
+} from "@crossengin/observability-runtime-pg";
 import { manifestRouteSpecs, type RouteSpec } from "@crossengin/operate-runtime";
 
 /** A system actor id (UUID) used as the default SLO incident declarer. */
@@ -40,10 +45,16 @@ export interface SloEngineLike {
   evaluate(now?: Date): readonly EnforcementDecision[] | Promise<readonly EnforcementDecision[]>;
 }
 
-/** The structural slice of `LatencySloEngine` the monitor drives (injectable for tests). */
+/**
+ * The structural slice of `LatencySloEngine` the monitor drives (injectable for
+ * tests). `evaluate` may be sync (the in-process `LatencySloEngine`) or async
+ * (the persistent wrapper from `@crossengin/observability-runtime-pg`, which
+ * writes a latency evaluation snapshot per `breach_opened` + an enforcement
+ * action per decision); `sweep` always awaits.
+ */
 export interface LatencyEngineLike {
   recordOutcome(outcome: RequestOutcome): void;
-  evaluate(now?: Date): readonly LatencyEnforcementDecision[];
+  evaluate(now?: Date): readonly LatencyEnforcementDecision[] | Promise<readonly LatencyEnforcementDecision[]>;
 }
 
 /** A single route exposed by a compiled manifest: a (method, operationId) pair. */
@@ -63,9 +74,14 @@ export function routesForManifest(manifest: Manifest): readonly ServingRoute[] {
   return specs.map((spec) => ({ method: spec.method, surface: spec.operationId }));
 }
 
-/** Composes the per-route SLO id from a (method, surface) pair. */
+/** Composes the per-route availability SLO id from a (method, surface) pair. */
 export function perRouteSloId(method: string, surface: string): string {
   return `${method}-${surface}-availability`;
+}
+
+/** Composes the per-route latency SLO id from a (method, surface) pair. */
+export function perRouteLatencySloId(method: string, surface: string): string {
+  return `${method}-${surface}-latency`;
 }
 
 /** The default aggregate surface used when no per-route surface is passed. */
@@ -226,6 +242,61 @@ export function buildServingLatencyEngine(
   });
 }
 
+export interface BuildServingLatencyEngineForManifestOptions {
+  readonly manifest: Manifest;
+  /** p95 budget string applied to every per-route latency SLO ("300ms", "5s", …). */
+  readonly p95Budget?: string;
+  /** A UUID system actor for the declared incidents / kill switches. */
+  readonly systemActorUserId?: string;
+  readonly alertPolicy?: AlertPolicy;
+  readonly clock?: Clock;
+  /**
+   * When set, the returned engine is wrapped by `buildPersistentLatencySloEngine`
+   * (from `@crossengin/observability-runtime-pg`, M8.7): every `evaluate()` writes
+   * a latency-signal enforcement action per decision to
+   * `meta.slo_enforcement_actions` and a latency evaluation snapshot per
+   * `breach_opened` to `meta.slo_latency_evaluations`, applied across every
+   * per-route registration. With no conn, returns the in-process engine.
+   */
+  readonly conn?: PgConnection;
+}
+
+/**
+ * Builds a latency SLO engine with **one latency SLO per (method, operationId)**
+ * the manifest exposes — so a slow `POST /v1/orders` declares its own
+ * `performance` incident rather than diluting a global p95. Mirrors
+ * `buildServingSloEngineForManifest`: routes the gateway doesn't expose get no
+ * SLO; only routes derived from `manifestRouteSpecs` (CRUD + lifecycle
+ * transitions) are covered. With `conn`, the engine is wrapped by
+ * `buildPersistentLatencySloEngine` so per-route latency decisions persist too.
+ */
+export function buildServingLatencyEngineForManifest(
+  options: BuildServingLatencyEngineForManifestOptions,
+): LatencyEngineLike {
+  const actor = options.systemActorUserId ?? DEFAULT_SLO_ACTOR;
+  const budget = options.p95Budget ?? DEFAULT_SERVING_LATENCY_BUDGET;
+  parseLatencyBudgetMs(budget);
+  const alertPolicy: AlertPolicy = options.alertPolicy ?? defaultAlertPolicy();
+  const routes = routesForManifest(options.manifest);
+  const registrations: LatencyRegistration[] = routes.map((route) => ({
+    slo: {
+      id: perRouteLatencySloId(route.method, route.surface),
+      surface: route.surface,
+      targets: [{ kind: "latency", p95: budget, window: "30d" }],
+    },
+    category: "performance",
+  }));
+  const engineOptions: LatencySloEngineOptions = {
+    alertPolicy,
+    systemActorUserId: actor,
+    declaredBy: actor,
+    registrations,
+    ...(options.clock !== undefined ? { clock: options.clock } : {}),
+  };
+  if (options.conn === undefined) return new LatencySloEngine(engineOptions);
+  return buildPersistentLatencySloEngine(options.conn, engineOptions);
+}
+
 const DEFAULT_SCHEDULER: SloScheduler = {
   setInterval(handler, ms) {
     const h = setInterval(handler, ms);
@@ -331,7 +402,9 @@ export class OperateSloMonitor {
     }
 
     if (this.latencyEngine !== null) {
-      for (const decision of this.latencyEngine.evaluate(now)) {
+      // The latency engine's evaluate may be sync (in-process) or async
+      // (persistent wrapper from observability-runtime-pg) — await either.
+      for (const decision of await this.latencyEngine.evaluate(now)) {
         surfaced.push({ signal: "latency", decision });
         await this.applyLatency(decision);
       }

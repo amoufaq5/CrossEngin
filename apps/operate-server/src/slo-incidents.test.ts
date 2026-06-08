@@ -12,8 +12,10 @@ import { loadBuiltinPack } from "./manifest-source.js";
 import {
   OperateSloMonitor,
   buildServingLatencyEngine,
+  buildServingLatencyEngineForManifest,
   buildServingSloEngine,
   buildServingSloEngineForManifest,
+  perRouteLatencySloId,
   perRouteSloId,
   routesForManifest,
   type IncidentPersistSink,
@@ -463,6 +465,103 @@ describe("OperateSloMonitor.recordRequest — per-route surface", () => {
     monitor.recordRequest(503, 2, "product.list");
     expect(outcomes[0]?.surface).toBe("agg");
     expect(outcomes[1]?.surface).toBe("product.list");
+  });
+});
+
+describe("perRouteLatencySloId", () => {
+  it("composes a stable latency id from method + surface", () => {
+    expect(perRouteLatencySloId("GET", "product.list")).toBe("GET-product.list-latency");
+    expect(perRouteLatencySloId("POST", "salesOrder.place")).toBe("POST-salesOrder.place-latency");
+  });
+});
+
+describe("buildServingLatencyEngineForManifest", () => {
+  it("registers one latency SLO per manifest route", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = buildServingLatencyEngineForManifest({ manifest: retailManifest, clock, p95Budget: "300ms" });
+    const routes = routesForManifest(retailManifest);
+    expect(routes.length).toBeGreaterThan(5);
+
+    // Interleave the samples (all routes recorded at each tick) so none age out
+    // of the rolling latency window before evaluate — one breach per route then
+    // proves each route has its own registration.
+    for (let i = 0; i < 25; i += 1) {
+      for (const route of routes) {
+        engine.recordOutcome({
+          surface: route.surface,
+          outcome: "ok",
+          at: clock.now().toISOString(),
+          latencyMs: 2_000,
+        });
+      }
+      clock.advance(1_000);
+    }
+    const decisions = await engine.evaluate(clock.now());
+    const opened = decisions.filter((d) => d.kind === "breach_opened");
+    expect(opened).toHaveLength(routes.length);
+    const openedIds = opened.map((d) => d.sloId).sort();
+    const expectedIds = routes.map((r) => perRouteLatencySloId(r.method, r.surface)).sort();
+    expect(openedIds).toEqual(expectedIds);
+  });
+
+  it("rejects an invalid budget string", () => {
+    expect(() => buildServingLatencyEngineForManifest({ manifest: retailManifest, p95Budget: "fast" })).toThrow();
+  });
+
+  it("a 2000ms burst on one route declares one performance incident on that route's id; a fast route stays clean", async () => {
+    const clock = new FixedClock(BASE);
+    const availabilityEngine: SloEngineLike = { recordOutcome: () => {}, evaluate: () => [] };
+    const latencyEngine = buildServingLatencyEngineForManifest({
+      manifest: retailManifest,
+      clock,
+      p95Budget: "300ms",
+    });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({ engine: availabilityEngine, latencyEngine, sink, clock });
+
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(200, 2_000, "product.list");
+      monitor.recordRequest(200, 20, "product.read");
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    const openedLatency = decisions.filter((s) => s.signal === "latency" && s.decision.kind === "breach_opened");
+    expect(openedLatency).toHaveLength(1);
+    expect(openedLatency[0]?.decision.kind === "breach_opened" && openedLatency[0].decision.sloId).toBe(
+      "GET-product.list-latency",
+    );
+    expect(sink.recorded).toHaveLength(1);
+    expect(sink.recorded[0]?.status).toBe("declared");
+    expect(sink.recorded[0]?.category).toBe("performance");
+  });
+
+  it("composes with a per-route availability engine in one monitor", async () => {
+    const clock = new FixedClock(BASE);
+    const availabilityEngine = buildServingSloEngineForManifest({ manifest: retailManifest, clock });
+    const latencyEngine = buildServingLatencyEngineForManifest({
+      manifest: retailManifest,
+      clock,
+      p95Budget: "300ms",
+    });
+    const sink = new FakeSink();
+    const monitor = new OperateSloMonitor({ engine: availabilityEngine, latencyEngine, sink, clock });
+
+    // product.list is slow-but-ok (latency breach only); product.create errors
+    // (availability breach only).
+    for (let i = 0; i < 25; i += 1) {
+      monitor.recordRequest(200, 2_000, "product.list");
+      monitor.recordRequest(503, 5, "product.create");
+      clock.advance(1_000);
+    }
+    const decisions = await monitor.sweep(clock.now());
+    const latency = decisions.find((s) => s.signal === "latency" && s.decision.kind === "breach_opened");
+    const availability = decisions.find((s) => s.signal === "availability" && s.decision.kind === "breach_opened");
+    expect(latency?.decision.kind === "breach_opened" && latency.decision.sloId).toBe("GET-product.list-latency");
+    expect(availability?.decision.kind === "breach_opened" && availability.decision.sloId).toBe(
+      "POST-product.create-availability",
+    );
+    const categories = sink.recorded.map((r) => r.category).sort();
+    expect(categories).toEqual(["availability", "performance"]);
   });
 });
 
