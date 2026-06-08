@@ -22,12 +22,23 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1** landed: **63 packages + 4 apps, 125
-meta-schema tables, 6,764 offline tests + 37 gated real-Postgres
-integration tests (17 worker + 20 operate-server) + four CI gates
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2** landed: **63 packages + 4 apps, 125
+meta-schema tables, 6,809 offline tests + 39 gated real-Postgres
+integration tests (17 worker + 22 operate-server) + four CI gates
 (schema-drift + incident-drift + PHI-encryption + gateway-execution), all
-genuinely green against a live Postgres** — no type errors. **Phase 3 P3
-(ADR-0080) has begun:** P3.1 added `@crossengin/operate-web` — a
+genuinely green against a live Postgres** — no type errors. **P2.45 (ADR-0153)
+made the gateway-execution gate non-vacuous:** `apps/operate-server` now
+persists each request's `PipelineExecution` to `meta.gateway_pipeline_executions`
+(+ rate-limit decisions, so the replayer's FK checks hold) under
+`--persist-executions` via an `ExecutionSink` seam on `OperateHttpServer`
+wrapping `api-gateway-pg`'s `PostgresPipelineExecutionStore` — the P2.42 gate now
+audits real persisted executions (verified: `4 clean, 0 drifted`). **P3.2
+(ADR-0154) brought `apps/operate-web` to serving parity:** an edge/Workers fetch
+adapter (`fetchToRaw`/`rawToFetchResponse`/`asModuleWorker` over the same
+`dispatch`) + JWT/JWKS auth (verified Bearer → `ViewerContext.roles` via
+`scopesToRoles`, in-memory + remote caching JWKS), so the UI view-model API runs
+on Node and any Fetch/WinterCG runtime with dev API-key + prod JWT auth.
+**Phase 3 P3 (ADR-0080) has begun:** P3.1 added `@crossengin/operate-web` — a
 framework-neutral, redaction-aware view-model renderer (pure
 `compileWebApp`/`compileTableModel`/`compileDetailModel`/`compileFormModel`
 over the manifest's `views`, falling back to `listConfigForEntity` +

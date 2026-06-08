@@ -205,3 +205,5 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 119 | 0151 | 2,500 | Drafted alongside the gateway execution drift CI gate (Phase 3 P2.42) |
 | 120 | 0152 | 2,500 | Drafted alongside the diffSchema normalization fix — TIMESTAMPTZ/defaults/unique-index (Phase 3 P2.44) |
 | 121 | 0080 | 4,500 | Drafted alongside `@crossengin/operate-web` + `apps/operate-web` — the view-model renderer + serving shell (Phase 3 P3.1); ADRs 0081–0085 remain reserved for P4–P8 |
+| 122 | 0153 | 2,500 | Drafted alongside serving pipeline-execution persistence — the gateway gate goes non-vacuous (Phase 3 P2.45) |
+| 123 | 0154 | 3,000 | Drafted alongside the operate-web edge/Workers adapter + JWT/JWKS auth (Phase 3 P3.2) |
