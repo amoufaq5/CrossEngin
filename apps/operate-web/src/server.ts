@@ -12,6 +12,7 @@ import {
   compileDetailModel,
   compileFormModel,
   compileKanbanModel,
+  compileMapModel,
   compileTableModel,
   compileWebApp,
   entityFields,
@@ -34,7 +35,7 @@ import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type Ra
 import { ApiKeyRegistry, WebPrincipalResolver, type JwtVerifyConfig, type WebViewer } from "./principals.js";
 
 /** The second path segment after `/ui/:entity/` that names a GET sub-route, not a record id. */
-const UI_SUBROUTES = new Set(["new", "kanban", "calendar"]);
+const UI_SUBROUTES = new Set(["new", "kanban", "calendar", "map"]);
 
 /** Anything that resolves a request to a viewer (an `ApiKeyRegistry` or a `WebPrincipalResolver`). */
 export interface WebViewerResolver {
@@ -68,6 +69,7 @@ export interface OperateWebServerOptions {
  *   GET    /ui/:entity          -> { table, page: { data, nextCursor } }
  *   GET    /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
  *   GET    /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
+ *   GET    /ui/:entity/map      -> { map, page: { data, nextCursor } } (404 if no map view)
  *   GET    /ui/:entity/new      -> { form }
  *   GET    /ui/:entity/:id      -> { detail, record }
  *   POST   /ui/:entity          -> 201 { record } (RBAC create + write-mask)
@@ -180,6 +182,9 @@ export class OperateWebServer {
     }
     if (rest.length === 2 && rest[1] === "calendar") {
       return this.serveCalendar(rest[0]!, viewer, viewerCtx, query);
+    }
+    if (rest.length === 2 && rest[1] === "map") {
+      return this.serveMap(rest[0]!, viewer, viewerCtx, query);
     }
     if (rest.length === 2 && rest[1] === "new") {
       return this.serveForm(rest[0]!, viewerCtx);
@@ -374,6 +379,23 @@ export class OperateWebServer {
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
     return jsonResponse(200, { calendar, page: { data, nextCursor: page.nextCursor } });
+  }
+
+  private async serveMap(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const map = compileMapModel(this.manifest, entity, viewerCtx, this.compileOptions);
+    if (map === null) return problemResponse(404, "Not found", `no map view for '${entity}'`);
+    const config = listConfigForEntity(this.manifest, entity);
+    const page = await this.store.listPage(viewer.tenantId, entity, parseListQuery(query, config));
+    const access = this.accessFor(entity, viewerCtx);
+    const data = page.records.map((r) => redactRecord(r, access));
+    return jsonResponse(200, { map, page: { data, nextCursor: page.nextCursor } });
   }
 
   private async serveDetail(

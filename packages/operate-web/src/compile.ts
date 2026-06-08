@@ -17,6 +17,8 @@ import {
   type FormValidation,
   type KanbanColumnModel,
   type KanbanModel,
+  type MapLayerModel,
+  type MapModel,
   type RowActionModel,
   type TableModel,
   type TableSort,
@@ -138,6 +140,23 @@ interface CalendarViewLike {
   readonly defaultView?: CalendarDefaultView;
 }
 
+/** The structural shape of a manifest `map` view (the views-package MapView as JSON data). */
+interface MapViewLike {
+  readonly kind: "map";
+  readonly entity: string;
+  readonly label?: Readonly<Record<string, string>>;
+  readonly geoField: string;
+  readonly markerColorField?: string;
+  readonly markerLabelField?: string;
+  readonly defaultZoom?: number;
+  readonly layers: ReadonlyArray<{
+    id: string;
+    label?: Readonly<Record<string, string>>;
+    kind: "markers" | "heatmap" | "polygons" | "cluster";
+  }>;
+  readonly bounds?: { south: number; west: number; north: number; east: number };
+}
+
 function findKanbanView(manifest: Manifest, entity: string): KanbanViewLike | undefined {
   const view = viewsFor(manifest).find((v) => v.kind === "kanban" && v.entity === entity);
   return view as unknown as KanbanViewLike | undefined;
@@ -146,6 +165,11 @@ function findKanbanView(manifest: Manifest, entity: string): KanbanViewLike | un
 function findCalendarView(manifest: Manifest, entity: string): CalendarViewLike | undefined {
   const view = viewsFor(manifest).find((v) => v.kind === "calendar" && v.entity === entity);
   return view as unknown as CalendarViewLike | undefined;
+}
+
+function findMapView(manifest: Manifest, entity: string): MapViewLike | undefined {
+  const view = viewsFor(manifest).find((v) => v.kind === "map" && v.entity === entity);
+  return view as unknown as MapViewLike | undefined;
 }
 
 function readableAccess(
@@ -421,19 +445,61 @@ export function compileCalendarModel(
 }
 
 /**
+ * Compiles an entity's `MapModel` for a viewer, or `null` when the entity has no
+ * `map` view (no fallback — a map needs a declared geo field). Redaction-aware +
+ * fail-closed: if the `geoField` is unreadable the whole map is withheld (`null`,
+ * since the marker *position* would leak), an unreadable `markerColorField` /
+ * `markerLabelField` is omitted, and `defaultZoom` / `layers` / `bounds` are
+ * carried through (layer labels humanized).
+ */
+export function compileMapModel(
+  manifest: Manifest,
+  entityName: string,
+  viewer: ViewerContext,
+  options: CompileOptions = {},
+): MapModel | null {
+  const entity = entityByName(manifest, entityName);
+  if (entity === undefined) throw new Error(`unknown entity '${entityName}'`);
+  const view = findMapView(manifest, entityName);
+  if (view === undefined) return null;
+  const access = readableAccess(manifest, entity, viewer, options);
+  if (access.get(view.geoField)?.read === false) return null;
+
+  const colorReadable = view.markerColorField !== undefined && access.get(view.markerColorField)?.read !== false;
+  const labelReadable = view.markerLabelField !== undefined && access.get(view.markerLabelField)?.read !== false;
+  const layers: MapLayerModel[] = view.layers.map((l) => ({
+    id: l.id,
+    label: labelOr(l.label, l.id),
+    kind: l.kind,
+  }));
+
+  return {
+    entity: entityName,
+    title: labelOr(view.label, entityTitle(entityName)),
+    geoField: view.geoField,
+    ...(colorReadable ? { markerColorField: view.markerColorField! } : {}),
+    ...(labelReadable ? { markerLabelField: view.markerLabelField! } : {}),
+    defaultZoom: view.defaultZoom ?? 10,
+    layers,
+    ...(view.bounds !== undefined ? { bounds: view.bounds } : {}),
+  };
+}
+
+/**
  * Compiles the top-level `WebAppModel` for a viewer: the app title + one
  * `EntityNav` per manifest entity (with its table path + available view kinds).
  * The `table`/`detail`/`form` surfaces always exist (via fallbacks); `kanban` /
- * `calendar` appear only when the entity declares such a view *and* it compiles
- * for this viewer (so a board withheld for redaction never shows in the nav).
- * Entities are listed in manifest order.
+ * `calendar` / `map` appear only when the entity declares such a view *and* it
+ * compiles for this viewer (so a view withheld for redaction never shows in the
+ * nav). Entities are listed in manifest order.
  */
 export function compileWebApp(manifest: Manifest, viewer: ViewerContext): WebAppModel {
   const nav: EntityNav[] = [];
   for (const entity of manifest.entities ?? []) {
-    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar"> = ["table", "detail", "form"];
+    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar" | "map"> = ["table", "detail", "form"];
     if (compileKanbanModel(manifest, entity.name, viewer) !== null) views.push("kanban");
     if (compileCalendarModel(manifest, entity.name, viewer) !== null) views.push("calendar");
+    if (compileMapModel(manifest, entity.name, viewer) !== null) views.push("map");
     nav.push({
       entity: entity.name,
       label: labelOr(findView(manifest, entity.name, "list")?.label, entityTitle(entity.name)),

@@ -171,13 +171,46 @@ export const CalendarModelSchema = z.object({
 });
 export type CalendarModel = z.infer<typeof CalendarModelSchema>;
 
+export const MAP_LAYER_KINDS = ["markers", "heatmap", "polygons", "cluster"] as const;
+export type MapLayerKind = (typeof MAP_LAYER_KINDS)[number];
+
+export const MapLayerModelSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  kind: z.enum(MAP_LAYER_KINDS),
+});
+export type MapLayerModel = z.infer<typeof MapLayerModelSchema>;
+
+export const MapBoundsModelSchema = z.object({
+  south: z.number(),
+  west: z.number(),
+  north: z.number(),
+  east: z.number(),
+});
+export type MapBoundsModel = z.infer<typeof MapBoundsModelSchema>;
+
+export const MapModelSchema = z.object({
+  entity: z.string().min(1),
+  title: z.string().min(1),
+  /** The geo field whose value places a marker. */
+  geoField: z.string().min(1),
+  /** A field whose value drives marker color (omitted when unreadable / absent). */
+  markerColorField: z.string().min(1).optional(),
+  /** A field whose value labels a marker (omitted when unreadable / absent). */
+  markerLabelField: z.string().min(1).optional(),
+  defaultZoom: z.number().int().min(1).max(20),
+  layers: z.array(MapLayerModelSchema).min(1),
+  bounds: MapBoundsModelSchema.optional(),
+});
+export type MapModel = z.infer<typeof MapModelSchema>;
+
 export const EntityNavSchema = z.object({
   entity: z.string().min(1),
   label: z.string().min(1),
   /** Path to the entity's list/table surface, e.g. `/ui/Product`. */
   path: z.string().min(1),
   /** The view kinds available for the entity, derived from the manifest + fallbacks. */
-  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar"])),
+  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar", "map"])),
 });
 export type EntityNav = z.infer<typeof EntityNavSchema>;
 

@@ -156,6 +156,15 @@ const withBoard = {
       titleField: "order_number",
       defaultView: "month",
     },
+    productMap: {
+      kind: "map",
+      entity: "Product",
+      geoField: "sku",
+      markerColorField: "unit_cost",
+      markerLabelField: "name",
+      defaultZoom: 6,
+      layers: [{ id: "all", label: { en: "All" }, kind: "markers" }],
+    },
   },
 } as unknown as Manifest;
 
@@ -314,6 +323,26 @@ describe("DELETE /ui/:entity/:id — delete (RBAC)", () => {
 function htmlBody(res: RawWebResponse): string {
   return new TextDecoder().decode(res.body!);
 }
+
+describe("GET /ui/:entity/map — map model + data page", () => {
+  it("serves the map model; a manager's markerColorField is unit_cost, a cashier's is omitted", async () => {
+    const server = await makeServerWithViews();
+    const mgr = body(await server.dispatch(req("/ui/Product/map", "mgr")));
+    expect(mgr.map.geoField).toBe("sku");
+    expect(mgr.map.markerColorField).toBe("unit_cost");
+    expect(mgr.map.layers[0].kind).toBe("markers");
+    expect(mgr.page.data[0].unit_cost).toBe(4.2);
+
+    const csh = body(await server.dispatch(req("/ui/Product/map", "csh")));
+    expect("markerColorField" in csh.map).toBe(false);
+    expect("unit_cost" in csh.page.data[0]).toBe(false);
+  });
+
+  it("404s an entity with no map view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/ui/SalesOrder/map", "mgr"))).status).toBe(404);
+  });
+});
 
 describe("GET /app/:entity/kanban — SSR board page", () => {
   it("renders the board HTML with the seeded card; a manager sees unit_cost, a cashier doesn't", async () => {

@@ -9,6 +9,7 @@ import {
   compileDetailModel,
   compileFormModel,
   compileKanbanModel,
+  compileMapModel,
   compileTableModel,
   compileWebApp,
   entityTitle,
@@ -20,6 +21,7 @@ import {
   DetailModelSchema,
   FormModelSchema,
   KanbanModelSchema,
+  MapModelSchema,
   TableModelSchema,
   WebAppModelSchema,
 } from "./model.js";
@@ -274,6 +276,78 @@ describe("compileCalendarModel", () => {
   });
 });
 
+const STORE_MAP = {
+  storeMap: {
+    kind: "map",
+    entity: "Store",
+    label: { en: "Store map" },
+    geoField: "region",
+    markerColorField: "status",
+    markerLabelField: "code",
+    defaultZoom: 8,
+    layers: [
+      { id: "all", label: { en: "All stores" }, kind: "markers" },
+      { id: "heat", label: { en: "Density" }, kind: "heatmap" },
+    ],
+    bounds: { south: 24, west: 51, north: 26, east: 56 },
+  },
+};
+
+describe("compileMapModel", () => {
+  const m = withViews(retail, STORE_MAP);
+
+  it("returns null when the entity has no map view", () => {
+    expect(compileMapModel(retail, "Store", MANAGER)).toBeNull();
+  });
+
+  it("compiles a schema-valid map with geo + marker fields, layers, bounds", () => {
+    const map = compileMapModel(m, "Store", MANAGER);
+    expect(map).not.toBeNull();
+    expect(() => MapModelSchema.parse(map)).not.toThrow();
+    expect(map!.geoField).toBe("region");
+    expect(map!.markerColorField).toBe("status");
+    expect(map!.markerLabelField).toBe("code");
+    expect(map!.defaultZoom).toBe(8);
+    expect(map!.layers.map((l) => l.kind)).toEqual(["markers", "heatmap"]);
+    expect(map!.layers[0]!.label).toBe("All stores");
+    expect(map!.bounds).toEqual({ south: 24, west: 51, north: 26, east: 56 });
+  });
+
+  it("withholds the whole map (null) when the geo field is unreadable — fail-closed", () => {
+    // a Product map whose geoField is the commercial_sensitive unit_cost
+    const leaky = withViews(retail, {
+      productMap: {
+        kind: "map",
+        entity: "Product",
+        geoField: "unit_cost",
+        defaultZoom: 5,
+        layers: [{ id: "all", label: { en: "All" }, kind: "markers" }],
+      },
+    });
+    expect(compileMapModel(leaky, "Product", MANAGER)).not.toBeNull();
+    expect(compileMapModel(leaky, "Product", CASHIER)).toBeNull();
+  });
+
+  it("omits an unreadable markerColorField but keeps the map", () => {
+    const sensitiveColor = withViews(retail, {
+      productMap: {
+        kind: "map",
+        entity: "Product",
+        geoField: "sku",
+        markerColorField: "unit_cost",
+        defaultZoom: 5,
+        layers: [{ id: "all", label: { en: "All" }, kind: "markers" }],
+      },
+    });
+    expect(compileMapModel(sensitiveColor, "Product", MANAGER)!.markerColorField).toBe("unit_cost");
+    expect(compileMapModel(sensitiveColor, "Product", CASHIER)!.markerColorField).toBeUndefined();
+  });
+
+  it("throws on an unknown entity", () => {
+    expect(() => compileMapModel(m, "Nope", MANAGER)).toThrow(/unknown entity/);
+  });
+});
+
 describe("compileWebApp — kanban/calendar nav exposure", () => {
   it("adds kanban to the entity's nav when a board compiles for the viewer", () => {
     const app = compileWebApp(withViews(retail, PRODUCT_KANBAN), MANAGER);
@@ -291,5 +365,10 @@ describe("compileWebApp — kanban/calendar nav exposure", () => {
   it("adds calendar to the entity's nav when a calendar compiles", () => {
     const app = compileWebApp(withViews(retail, SALES_ORDER_CALENDAR), MANAGER);
     expect(app.nav.find((n) => n.entity === "SalesOrder")?.views).toContain("calendar");
+  });
+
+  it("adds map to the entity's nav when a map compiles", () => {
+    const app = compileWebApp(withViews(retail, STORE_MAP), MANAGER);
+    expect(app.nav.find((n) => n.entity === "Store")?.views).toContain("map");
   });
 });
