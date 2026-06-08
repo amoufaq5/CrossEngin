@@ -55,6 +55,15 @@ function req(url: string, key: string): RawWebRequest {
   return { method: "GET", url, headers: { "x-api-key": key } };
 }
 
+function writeReq(method: string, url: string, key: string, payload?: unknown): RawWebRequest {
+  return {
+    method,
+    url,
+    headers: { "x-api-key": key, "content-type": "application/json" },
+    body: payload === undefined ? null : new TextEncoder().encode(JSON.stringify(payload)),
+  };
+}
+
 function body(bytes: Uint8Array | null): Record<string, unknown> {
   return JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())) as Record<string, unknown>;
 }
@@ -89,6 +98,7 @@ suite("operate-web integration (real Postgres)", () => {
       { key: "mgr-a", role: "store_manager", tenantId: tenantA },
       { key: "csh-a", role: "cashier", tenantId: tenantA },
       { key: "mgr-b", role: "store_manager", tenantId: tenantB },
+      { key: "adm-a", role: "retail_admin", tenantId: tenantA },
     ];
     server = buildOperateWebServer({ manifest: retail, store, apiKeySpecs });
     boardServer = buildOperateWebServer({ manifest: withBoard, store, apiKeySpecs });
@@ -147,6 +157,33 @@ suite("operate-web integration (real Postgres)", () => {
       (await pager.dispatch(req(`/ui/Product?limit=2&cursor=${encodeURIComponent(cursor!)}`, "pg"))).body,
     );
     expect((second["page"] as { data: unknown[] }).data.length).toBe(1);
+  });
+
+  it("runs the write path end-to-end over real PG (create → update → delete, RBAC + write-mask)", async () => {
+    // create (manager) then read back from PG
+    const created = await server.dispatch(
+      writeReq("POST", "/ui/Product", "mgr-a", product({ sku: "WR-1", unit_cost: 3.3 })),
+    );
+    expect(created.status).toBe(201);
+    const id = (body(created.body)["record"] as Record<string, unknown>)["id"] as string;
+    const readBack = body((await server.dispatch(req(`/ui/Product/${id}`, "mgr-a"))).body);
+    expect((readBack["record"] as Record<string, unknown>)["sku"]).toBe("WR-1");
+
+    // cashier cannot write the commercial_sensitive unit_cost (422 write-mask)
+    const blocked = await server.dispatch(
+      writeReq("POST", "/ui/Product", "csh-a", { sku: "WR-2", unit_cost: 9 }),
+    );
+    expect(blocked.status).toBe(403); // cashier has no Product create grant at all
+
+    // update (manager)
+    const updated = await server.dispatch(writeReq("PATCH", `/ui/Product/${id}`, "mgr-a", { unit_price: 7.7 }));
+    expect(updated.status).toBe(200);
+    expect((body(updated.body)["record"] as Record<string, unknown>)["unit_price"]).toBe(7.7);
+
+    // delete is admin-only: manager 403, admin 204, then gone
+    expect((await server.dispatch(writeReq("DELETE", `/ui/Product/${id}`, "mgr-a"))).status).toBe(403);
+    expect((await server.dispatch(writeReq("DELETE", `/ui/Product/${id}`, "adm-a"))).status).toBe(204);
+    expect((await server.dispatch(req(`/ui/Product/${id}`, "mgr-a"))).status).toBe(404);
   });
 
   it("serves a kanban board over real PG, redacting unit_cost from a cashier's cards + data", async () => {

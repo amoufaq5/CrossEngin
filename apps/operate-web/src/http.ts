@@ -3,6 +3,8 @@ export interface RawWebRequest {
   readonly method: string;
   readonly url: string;
   readonly headers: Record<string, string | string[] | undefined>;
+  /** The raw request body (writes only; GET routes ignore it). */
+  readonly body?: Uint8Array | null;
 }
 
 export interface RawWebResponse {

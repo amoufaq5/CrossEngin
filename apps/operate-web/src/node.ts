@@ -127,11 +127,28 @@ export async function resolveWebStore(
   return { store: new PostgresEntityStore(conn, schemaOpt), conn };
 }
 
-/** The slice of Node's `IncomingMessage` the adapter reads. */
-export interface NodeReqLike {
+/** The slice of Node's `IncomingMessage` the adapter reads (it is also an async-iterable of body chunks). */
+export interface NodeReqLike extends AsyncIterable<Uint8Array | string> {
   readonly method?: string | undefined;
   readonly url?: string | undefined;
   readonly headers: Record<string, string | string[] | undefined>;
+}
+
+/** Collects a Node request stream into a single `Uint8Array` (null for an empty body). */
+async function collectBody(req: NodeReqLike): Promise<Uint8Array | null> {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
+  }
+  if (chunks.length === 0) return null;
+  const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
 }
 
 /** The slice of Node's `ServerResponse` the adapter writes. */
@@ -151,10 +168,13 @@ export function createNodeRequestListener(
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   return async (req, res) => {
     try {
+      const method = req.method ?? "GET";
+      const body = method === "GET" || method === "HEAD" ? null : await collectBody(req);
       const raw: RawWebRequest = {
-        method: req.method ?? "GET",
+        method,
         url: req.url ?? "/",
         headers: req.headers,
+        body,
       };
       const response = await server.dispatch(raw);
       res.writeHead(response.status, response.headers);

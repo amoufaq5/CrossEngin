@@ -33,8 +33,8 @@ async function seededStore(): Promise<InMemoryEntityStore> {
 }
 
 describe("fetchToRaw / rawToFetchResponse", () => {
-  it("maps a Fetch Request → RawWebRequest with coalesced headers", () => {
-    const raw = fetchToRaw(new Request("https://app.example/ui/app", { headers: { "x-api-key": "mgr" } }));
+  it("maps a Fetch Request → RawWebRequest with coalesced headers", async () => {
+    const raw = await fetchToRaw(new Request("https://app.example/ui/app", { headers: { "x-api-key": "mgr" } }));
     expect(raw.method).toBe("GET");
     expect(raw.url).toBe("https://app.example/ui/app");
     expect(raw.headers["x-api-key"]).toBe("mgr");

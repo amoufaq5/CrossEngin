@@ -8,17 +8,21 @@ import { OperateWebServer, buildOperateWebServer } from "./server.js";
 /**
  * Maps a Fetch API `Request` (Cloudflare Workers / edge runtimes / `undici`)
  * into the framework-neutral `RawWebRequest` the `OperateWebServer.dispatch`
- * core consumes. The view-model routes are read-only (GET), so no body is read;
- * the client IP rides on the `cf-connecting-ip` (or `x-forwarded-for`) header,
- * preserved for callers that key off it. Repeated headers collapse to the last
- * value (Fetch's `Headers.forEach` already coalesces).
+ * core consumes. For a write method (POST/PATCH/DELETE) the body is read into a
+ * `Uint8Array`; GET/HEAD carry no body. The client IP rides on the
+ * `cf-connecting-ip` (or `x-forwarded-for`) header, preserved for callers that
+ * key off it. Repeated headers collapse to the last value (Fetch's
+ * `Headers.forEach` already coalesces).
  */
-export function fetchToRaw(request: Request): RawWebRequest {
+export async function fetchToRaw(request: Request): Promise<RawWebRequest> {
   const headers: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     headers[key] = value;
   });
-  return { method: request.method, url: request.url, headers };
+  const method = request.method.toUpperCase();
+  const body =
+    method === "GET" || method === "HEAD" ? null : new Uint8Array(await request.arrayBuffer());
+  return { method: request.method, url: request.url, headers, body };
 }
 
 /** Maps a `RawWebResponse` back into a Fetch API `Response`. */
@@ -35,7 +39,7 @@ export type FetchHandler = (request: Request) => Promise<Response>;
  */
 export function createFetchHandler(server: OperateWebServer): FetchHandler {
   return async (request: Request): Promise<Response> => {
-    const response = await server.dispatch(fetchToRaw(request));
+    const response = await server.dispatch(await fetchToRaw(request));
     return rawToFetchResponse(response);
   };
 }

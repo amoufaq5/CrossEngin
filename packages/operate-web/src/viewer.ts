@@ -1,8 +1,10 @@
 import {
   computeClassifiedFieldRedaction,
+  rbacCheck,
   validateClassifiedWriteMask,
   type ClassifiedField,
   type EntityPermissions,
+  type OperationName,
   type Principal,
   type RoleDefinition,
   type RoleName,
@@ -43,6 +45,7 @@ const ANONYMOUS_ROLE = "__anonymous__";
  * unknown role can never throw — it simply yields no grants (fail-closed).
  */
 export class EntityFieldResolver {
+  private readonly entityName: string;
   private readonly perms: EntityPermissions;
   private readonly roleDefs: ReadonlyMap<RoleName, RoleDefinition>;
   private readonly principal: Principal;
@@ -54,6 +57,7 @@ export class EntityFieldResolver {
     viewer: ViewerContext,
     options: CompileOptions = {},
   ) {
+    this.entityName = entityName;
     this.perms = manifest.permissions?.[entityName] ?? {};
     const roleDefs = new Map<RoleName, RoleDefinition>(Object.entries(manifest.roles ?? {}));
     // Register the fail-closed sentinel so `resolveEffectiveRoles` never throws
@@ -62,6 +66,23 @@ export class EntityFieldResolver {
     this.roleDefs = roleDefs;
     this.policy = options.policyForEntity?.(entityName);
     this.principal = buildPrincipal(viewer.roles, this.roleDefs);
+  }
+
+  /**
+   * Checks whether the viewer may perform an entity-level mutation
+   * (`create`/`update`/`delete`) via the manifest's RBAC grants. Returns the
+   * decision (`allowed` + a `reason` on denial), fail-closed for an
+   * unrecognized viewer (the anonymous sentinel holds no grants).
+   */
+  canPerform(operation: OperationName): { readonly allowed: boolean; readonly reason?: string } {
+    const decision = rbacCheck({
+      principal: this.principal,
+      permissions: { [this.entityName]: this.perms },
+      roles: this.roleDefs,
+      entity: this.entityName,
+      operation,
+    });
+    return decision.allowed ? { allowed: true } : { allowed: false, reason: decision.reason };
   }
 
   /**
@@ -149,4 +170,26 @@ export function redactRecord(
     if (a === undefined || a.read) out[key] = value;
   }
   return out;
+}
+
+/**
+ * Returns the keys of a write payload the viewer is NOT allowed to set — a
+ * manifest field whose `write` access is false (read-only-to-them, or a
+ * classified field they can't write). `id` is always permitted (it identifies
+ * the row, not a writable attribute). A key that is not a manifest field (absent
+ * from the access map) is also rejected, so a caller can't smuggle an arbitrary
+ * column past the write mask. An empty result means the payload is fully
+ * writable by the viewer.
+ */
+export function unwritableFields(
+  record: Readonly<Record<string, unknown>>,
+  access: ReadonlyMap<string, FieldAccess>,
+): string[] {
+  const blocked: string[] = [];
+  for (const key of Object.keys(record)) {
+    if (key === "id") continue;
+    const a = access.get(key);
+    if (a === undefined || !a.write) blocked.push(key);
+  }
+  return blocked;
 }

@@ -33,12 +33,22 @@ async function makeServer(): Promise<OperateWebServer> {
     apiKeySpecs: [
       { key: "mgr", role: "store_manager", tenantId: TENANT },
       { key: "csh", role: "cashier", tenantId: TENANT },
+      { key: "adm", role: "retail_admin", tenantId: TENANT },
     ],
   });
 }
 
 function req(url: string, key?: string): RawWebRequest {
   return { method: "GET", url, headers: key !== undefined ? { "x-api-key": key } : {} };
+}
+
+function writeReq(method: string, url: string, key: string, payload?: unknown): RawWebRequest {
+  return {
+    method,
+    url,
+    headers: { "x-api-key": key, "content-type": "application/json" },
+    body: payload === undefined ? null : new TextEncoder().encode(JSON.stringify(payload)),
+  };
 }
 
 function body(res: RawWebResponse): any {
@@ -51,9 +61,9 @@ describe("OperateWebServer.dispatch — auth", () => {
     expect((await server.dispatch(req("/ui/app"))).status).toBe(401);
   });
 
-  it("405s a non-GET", async () => {
+  it("405s an unsupported method (only GET/POST/PATCH/DELETE are routed)", async () => {
     const server = await makeServer();
-    const res = await server.dispatch({ method: "POST", url: "/ui/app", headers: { "x-api-key": "mgr" } });
+    const res = await server.dispatch({ method: "PUT", url: "/ui/Product", headers: { "x-api-key": "mgr" } });
     expect(res.status).toBe(405);
   });
 
@@ -208,5 +218,113 @@ describe("GET /ui/:entity/calendar — calendar model + data page", () => {
   it("404s an entity with no calendar view", async () => {
     const server = await makeServerWithViews();
     expect((await server.dispatch(req("/ui/Product/calendar", "mgr"))).status).toBe(404);
+  });
+});
+
+describe("POST /ui/:entity — create (RBAC + write-mask)", () => {
+  it("a manager creates a Product (201) and the redacted record carries unit_cost", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(
+      writeReq("POST", "/ui/Product", "mgr", { id: "new1", sku: "NEW-1", name: "New", category: "home", unit_price: 5, unit_cost: 2, status: "active" }),
+    );
+    expect(res.status).toBe(201);
+    expect(body(res).record.unit_cost).toBe(2);
+    // round-trips through the store
+    expect((await server.dispatch(req("/ui/Product/new1", "mgr"))).status).toBe(200);
+  });
+
+  it("a cashier cannot create a Product (403 — no create grant)", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(writeReq("POST", "/ui/Product", "csh", { sku: "X", name: "Y" }));
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a payload with a field the viewer can't write (422)", async () => {
+    // SalesOrder create is allowed for a cashier, but customer_email (pii) has no
+    // write grant → the write mask blocks it.
+    const server = await makeServer();
+    const blocked = await server.dispatch(
+      writeReq("POST", "/ui/SalesOrder", "csh", { order_number: "SO-1", customer_email: "a@b.com" }),
+    );
+    expect(blocked.status).toBe(422);
+    expect(body(blocked).detail).toContain("customer_email");
+
+    const ok = await server.dispatch(writeReq("POST", "/ui/SalesOrder", "csh", { order_number: "SO-2" }));
+    expect(ok.status).toBe(201);
+  });
+
+  it("rejects an unknown field not in the manifest (422)", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(writeReq("POST", "/ui/Product", "mgr", { sku: "Z", bogus: 1 }));
+    expect(res.status).toBe(422);
+    expect(body(res).detail).toContain("bogus");
+  });
+
+  it("400s a missing / invalid JSON body", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("POST", "/ui/Product", "mgr"))).status).toBe(400);
+    const bad: RawWebRequest = { method: "POST", url: "/ui/Product", headers: { "x-api-key": "mgr" }, body: new TextEncoder().encode("{not json") };
+    expect((await server.dispatch(bad)).status).toBe(400);
+  });
+});
+
+describe("PATCH /ui/:entity/:id — update (RBAC + write-mask)", () => {
+  it("a manager patches a field (200)", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(writeReq("PATCH", "/ui/Product/p1", "mgr", { unit_price: 12.5 }));
+    expect(res.status).toBe(200);
+    expect(body(res).record.unit_price).toBe(12.5);
+  });
+
+  it("a cashier cannot patch a Product (403)", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("PATCH", "/ui/Product/p1", "csh", { unit_price: 1 }))).status).toBe(403);
+  });
+
+  it("404s a missing record", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("PATCH", "/ui/Product/nope", "mgr", { unit_price: 1 }))).status).toBe(404);
+  });
+
+  it("does not treat a reserved sub-route word as a record id", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("PATCH", "/ui/Product/new", "mgr", { unit_price: 1 }))).status).toBe(404);
+  });
+});
+
+describe("DELETE /ui/:entity/:id — delete (RBAC)", () => {
+  it("an admin deletes a record (204), then it is gone (404)", async () => {
+    const server = await makeServer();
+    const del = await server.dispatch(writeReq("DELETE", "/ui/Product/p1", "adm"));
+    expect(del.status).toBe(204);
+    expect((await server.dispatch(req("/ui/Product/p1", "adm"))).status).toBe(404);
+  });
+
+  it("a manager cannot delete (403 — delete is admin-only)", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("DELETE", "/ui/Product/p1", "mgr"))).status).toBe(403);
+  });
+
+  it("404s deleting a missing record (as admin)", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("DELETE", "/ui/Product/nope", "adm"))).status).toBe(404);
+  });
+});
+
+describe("write method guards", () => {
+  it("405s an unsupported method", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("PUT", "/ui/Product", "mgr", {}))).status).toBe(405);
+  });
+
+  it("405s a write to an /app/* HTML page", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(writeReq("POST", "/app/Product", "mgr", {}))).status).toBe(405);
+  });
+
+  it("401s a write without a credential", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch({ method: "POST", url: "/ui/Product", headers: {}, body: new TextEncoder().encode("{}") });
+    expect(res.status).toBe(401);
   });
 });

@@ -16,6 +16,7 @@ import {
   compileWebApp,
   entityFields,
   redactRecord,
+  unwritableFields,
   type CompileOptions,
   type ViewerContext,
 } from "@crossengin/operate-web";
@@ -29,6 +30,9 @@ import {
 } from "./html.js";
 import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type RawWebResponse } from "./http.js";
 import { ApiKeyRegistry, WebPrincipalResolver, type JwtVerifyConfig, type WebViewer } from "./principals.js";
+
+/** The second path segment after `/ui/:entity/` that names a GET sub-route, not a record id. */
+const UI_SUBROUTES = new Set(["new", "kanban", "calendar"]);
 
 /** Anything that resolves a request to a viewer (an `ApiKeyRegistry` or a `WebPrincipalResolver`). */
 export interface WebViewerResolver {
@@ -58,12 +62,19 @@ export interface OperateWebServerOptions {
  * viewer can't read.
  *
  * Routes:
- *   GET /ui/app              -> WebAppModel
- *   GET /ui/:entity          -> { table, page: { data, nextCursor } }
- *   GET /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
- *   GET /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
- *   GET /ui/:entity/new      -> { form }
- *   GET /ui/:entity/:id      -> { detail, record }
+ *   GET    /ui/app              -> WebAppModel
+ *   GET    /ui/:entity          -> { table, page: { data, nextCursor } }
+ *   GET    /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
+ *   GET    /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
+ *   GET    /ui/:entity/new      -> { form }
+ *   GET    /ui/:entity/:id      -> { detail, record }
+ *   POST   /ui/:entity          -> 201 { record } (RBAC create + write-mask)
+ *   PATCH  /ui/:entity/:id      -> 200 { record } (RBAC update + write-mask)
+ *   DELETE /ui/:entity/:id      -> 204 (RBAC delete)
+ *
+ * Writes enforce the manifest RBAC grant (403) and the per-field write mask (422
+ * on any field the viewer can't set); the returned record is redacted for the
+ * caller. `/app/*` HTML pages stay read-only (GET).
  */
 export class OperateWebServer {
   private readonly manifest: Manifest;
@@ -88,18 +99,20 @@ export class OperateWebServer {
   }
 
   async dispatch(req: RawWebRequest): Promise<RawWebResponse> {
-    if (req.method.toUpperCase() !== "GET") {
-      return problemResponse(405, "Method not allowed", `unsupported method ${req.method}`);
-    }
+    const method = req.method.toUpperCase();
+    const { path: rawPath } = splitTarget(req.url);
 
     // The hydration bundle is a public static asset (it carries no per-caller
     // data — every model + row is redacted *before* it's embedded in the page),
-    // so it is served before auth.
-    const { path: rawPath } = splitTarget(req.url);
-    if (rawPath === CLIENT_BUNDLE_PATH) {
+    // so it is served before auth (GET only).
+    if (method === "GET" && rawPath === CLIENT_BUNDLE_PATH) {
       return this.bundleLoader !== undefined
         ? serveClientBundle(this.bundleLoader)
         : serveClientBundle();
+    }
+
+    if (method !== "GET" && method !== "POST" && method !== "PATCH" && method !== "DELETE") {
+      return problemResponse(405, "Method not allowed", `unsupported method ${req.method}`);
     }
 
     const viewer = await this.resolver.resolve(req);
@@ -111,24 +124,49 @@ export class OperateWebServer {
     const segments = path.split("/").filter((s) => s.length > 0);
     const viewerCtx: ViewerContext = { roles: viewer.roles };
 
-    // `/ui/...` serves JSON view models; `/app/...` server-renders the same
-    // models (already compiled + redacted for this caller) as HTML pages.
+    // `/ui/...` serves JSON view models (GET) + entity mutations
+    // (POST/PATCH/DELETE); `/app/...` server-renders the same models as HTML
+    // pages (GET only — the write path is the JSON API).
     if (segments[0] === "ui") {
-      return this.dispatchUi(segments.slice(1), path, viewer, viewerCtx, query);
+      return this.dispatchUi(method, segments.slice(1), path, viewer, viewerCtx, query, req.body ?? null);
     }
     if (segments[0] === "app") {
+      if (method !== "GET") {
+        return problemResponse(405, "Method not allowed", "/app/* pages are read-only; use the /ui JSON API to mutate");
+      }
       return this.dispatchApp(segments.slice(1), path, viewer, viewerCtx, query);
     }
     return problemResponse(404, "Not found", `no route for ${path}`);
   }
 
   private dispatchUi(
+    method: string,
     rest: readonly string[],
     path: string,
     viewer: WebViewer,
     viewerCtx: ViewerContext,
     query: Record<string, string | string[]>,
+    body: Uint8Array | null,
   ): RawWebResponse | Promise<RawWebResponse> {
+    // Mutations: POST /ui/:entity (create), PATCH/DELETE /ui/:entity/:id.
+    if (method === "POST") {
+      if (rest.length === 1) return this.serveCreate(rest[0]!, viewer, viewerCtx, body);
+      return problemResponse(404, "Not found", `cannot POST ${path}`);
+    }
+    if (method === "PATCH") {
+      if (rest.length === 2 && !UI_SUBROUTES.has(rest[1]!)) {
+        return this.serveUpdate(rest[0]!, rest[1]!, viewer, viewerCtx, body);
+      }
+      return problemResponse(404, "Not found", `cannot PATCH ${path}`);
+    }
+    if (method === "DELETE") {
+      if (rest.length === 2 && !UI_SUBROUTES.has(rest[1]!)) {
+        return this.serveDelete(rest[0]!, rest[1]!, viewer);
+      }
+      return problemResponse(404, "Not found", `cannot DELETE ${path}`);
+    }
+
+    // Reads (GET).
     if (rest.length === 1 && rest[0] === "app") {
       return jsonResponse(200, compileWebApp(this.manifest, viewerCtx));
     }
@@ -176,9 +214,103 @@ export class OperateWebServer {
     return this.entityNames.has(entity) ? null : problemResponse(404, "Not found", `unknown entity '${entity}'`);
   }
 
+  private resolverFor(entity: string, viewerCtx: ViewerContext): EntityFieldResolver {
+    return new EntityFieldResolver(this.manifest, entity, viewerCtx, this.compileOptions);
+  }
+
   private accessFor(entity: string, viewerCtx: ViewerContext): ReadonlyMap<string, { read: boolean; write: boolean }> {
     const ent = (this.manifest.entities ?? []).find((e) => e.name === entity)!;
-    return new EntityFieldResolver(this.manifest, entity, viewerCtx, this.compileOptions).resolve(entityFields(ent));
+    return this.resolverFor(entity, viewerCtx).resolve(entityFields(ent));
+  }
+
+  /** Parses a JSON request body into a record, or returns a 400 problem response. */
+  private parseRecordBody(body: Uint8Array | null): { record: Record<string, unknown> } | { error: RawWebResponse } {
+    if (body === null || body.byteLength === 0) {
+      return { error: problemResponse(400, "Bad request", "a JSON request body is required") };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(body));
+    } catch {
+      return { error: problemResponse(400, "Bad request", "request body is not valid JSON") };
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { error: problemResponse(400, "Bad request", "request body must be a JSON object") };
+    }
+    return { record: parsed as Record<string, unknown> };
+  }
+
+  /**
+   * Enforces the write path for `entity`: the entity-level RBAC grant for
+   * `operation` (403 on denial) + the per-field write mask (422 listing any
+   * fields the viewer can't set). Returns the access map for the response
+   * redaction on success, or a problem response to short-circuit.
+   */
+  private authorizeWrite(
+    entity: string,
+    viewerCtx: ViewerContext,
+    operation: "create" | "update",
+    record: Record<string, unknown>,
+  ): { access: ReadonlyMap<string, { read: boolean; write: boolean }> } | { error: RawWebResponse } {
+    const resolver = this.resolverFor(entity, viewerCtx);
+    const decision = resolver.canPerform(operation);
+    if (!decision.allowed) {
+      return { error: problemResponse(403, "Forbidden", decision.reason ?? `cannot ${operation} ${entity}`) };
+    }
+    const ent = (this.manifest.entities ?? []).find((e) => e.name === entity)!;
+    const access = resolver.resolve(entityFields(ent));
+    const blocked = unwritableFields(record, access);
+    if (blocked.length > 0) {
+      return { error: problemResponse(422, "Unprocessable entity", `cannot write field(s): ${blocked.join(", ")}`) };
+    }
+    return { access };
+  }
+
+  private async serveCreate(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    body: Uint8Array | null,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const parsed = this.parseRecordBody(body);
+    if ("error" in parsed) return parsed.error;
+    const authz = this.authorizeWrite(entity, viewerCtx, "create", parsed.record);
+    if ("error" in authz) return authz.error;
+    const created = await this.store.create(viewer.tenantId, entity, parsed.record);
+    return jsonResponse(201, { record: redactRecord(created, authz.access) });
+  }
+
+  private async serveUpdate(
+    entity: string,
+    id: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    body: Uint8Array | null,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const parsed = this.parseRecordBody(body);
+    if ("error" in parsed) return parsed.error;
+    const authz = this.authorizeWrite(entity, viewerCtx, "update", parsed.record);
+    if ("error" in authz) return authz.error;
+    const updated = await this.store.update(viewer.tenantId, entity, id, parsed.record);
+    if (updated === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    return jsonResponse(200, { record: redactRecord(updated, authz.access) });
+  }
+
+  private async serveDelete(entity: string, id: string, viewer: WebViewer): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const resolver = this.resolverFor(entity, { roles: viewer.roles });
+    const decision = resolver.canPerform("delete");
+    if (!decision.allowed) {
+      return problemResponse(403, "Forbidden", decision.reason ?? `cannot delete ${entity}`);
+    }
+    const removed = await this.store.remove(viewer.tenantId, entity, id);
+    if (!removed) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    return { status: 204, headers: {}, body: null };
   }
 
   private async serveTable(

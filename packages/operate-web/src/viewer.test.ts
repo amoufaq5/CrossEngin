@@ -4,7 +4,7 @@ import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { EntityFieldResolver, entityFields, redactRecord } from "./viewer.js";
+import { EntityFieldResolver, entityFields, redactRecord, unwritableFields } from "./viewer.js";
 
 const registry: ManifestRegistry = {
   async getManifest(id: string): Promise<Manifest | null> {
@@ -55,6 +55,53 @@ describe("EntityFieldResolver — classification redaction bridge", () => {
     const cashier = new EntityFieldResolver(retail, "Product", { roles: ["cashier"] });
     const cashierAccess = cashier.resolve(entityFields(productEntity()));
     expect(cashierAccess.get("unit_cost")?.write).toBe(false);
+  });
+});
+
+describe("EntityFieldResolver.canPerform — entity-level RBAC", () => {
+  it("a store_manager may create/update Product but not delete (admin-only)", () => {
+    const r = new EntityFieldResolver(retail, "Product", { roles: ["store_manager"] });
+    expect(r.canPerform("create").allowed).toBe(true);
+    expect(r.canPerform("update").allowed).toBe(true);
+    expect(r.canPerform("delete").allowed).toBe(false);
+  });
+
+  it("a cashier may not create a Product (no grant), with a reason", () => {
+    const r = new EntityFieldResolver(retail, "Product", { roles: ["cashier"] });
+    const decision = r.canPerform("create");
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBeDefined();
+  });
+
+  it("a retail_admin may delete a Product", () => {
+    const r = new EntityFieldResolver(retail, "Product", { roles: ["retail_admin"] });
+    expect(r.canPerform("delete").allowed).toBe(true);
+  });
+
+  it("an unknown role is fail-closed", () => {
+    const r = new EntityFieldResolver(retail, "Product", { roles: ["nope"] });
+    expect(r.canPerform("create").allowed).toBe(false);
+  });
+});
+
+describe("unwritableFields", () => {
+  const access = new Map([
+    ["unit_cost", { read: false, write: false }],
+    ["sku", { read: true, write: true }],
+    ["name", { read: true, write: false }],
+  ]);
+
+  it("returns the keys the viewer cannot write, ignoring id", () => {
+    expect(unwritableFields({ id: "p1", sku: "A", unit_cost: 1 }, access)).toEqual(["unit_cost"]);
+    expect(unwritableFields({ name: "X" }, access)).toEqual(["name"]);
+  });
+
+  it("rejects a key absent from the access map (not a manifest field)", () => {
+    expect(unwritableFields({ sku: "A", bogus: 1 }, access)).toEqual(["bogus"]);
+  });
+
+  it("returns empty when every field is writable", () => {
+    expect(unwritableFields({ id: "p1", sku: "A" }, access)).toEqual([]);
   });
 });
 
