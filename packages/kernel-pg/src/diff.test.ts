@@ -225,6 +225,100 @@ describe("diffSchema", () => {
     const diff = diffSchema([targetTenants], live);
     expect(diff.hasDrift).toBe(false);
   });
+
+  it("treats SQL type aliases as equal (TIMESTAMPTZ ↔ timestamp with time zone, etc.)", () => {
+    const target: TableDefinition = {
+      schema: "meta",
+      name: "t",
+      columns: [
+        { name: "ts", type: "TIMESTAMPTZ", notNull: true },
+        { name: "n", type: "NUMERIC(12, 4)" },
+        { name: "s", type: "VARCHAR(255)" },
+        { name: "b", type: "BOOLEAN" },
+      ],
+    };
+    const live = liveSchema([
+      liveTable("t", [
+        { name: "ts", dataType: "timestamp with time zone", isNullable: false, defaultExpr: null },
+        { name: "n", dataType: "numeric(12,4)", isNullable: true, defaultExpr: null },
+        { name: "s", dataType: "character varying(255)", isNullable: true, defaultExpr: null },
+        { name: "b", dataType: "boolean", isNullable: true, defaultExpr: null },
+      ]),
+    ]);
+    expect(diffSchema([target], live).hasDrift).toBe(false);
+  });
+
+  it("ignores Postgres ::type casts on defaults", () => {
+    const target: TableDefinition = {
+      schema: "meta",
+      name: "t",
+      columns: [
+        { name: "status", type: "TEXT", notNull: true, default: "'active'" },
+        { name: "tags", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+        { name: "ts", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+      ],
+    };
+    const live = liveSchema([
+      liveTable("t", [
+        { name: "status", dataType: "text", isNullable: false, defaultExpr: "'active'::text" },
+        { name: "tags", dataType: "jsonb", isNullable: false, defaultExpr: "'[]'::jsonb" },
+        { name: "ts", dataType: "timestamp with time zone", isNullable: false, defaultExpr: "now()" },
+      ]),
+    ]);
+    expect(diffSchema([target], live).hasDrift).toBe(false);
+  });
+
+  it("does not flag unique-constraint backing indexes as removed", () => {
+    const target: TableDefinition = {
+      schema: "meta",
+      name: "users",
+      columns: [
+        { name: "id", type: "UUID", notNull: true, primaryKey: true },
+        { name: "email", type: "TEXT", notNull: true, unique: true },
+        { name: "external_id", type: "TEXT", notNull: true, unique: { constraintName: "users_external_id_key" } },
+        { name: "tenant_id", type: "UUID", notNull: true },
+      ],
+      uniqueConstraints: [{ name: "users_tenant_email_key", columns: ["tenant_id", "email"] }],
+    };
+    const live = liveSchema([
+      liveTable("users", [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "email", dataType: "text", isNullable: false, defaultExpr: null },
+        { name: "external_id", dataType: "text", isNullable: false, defaultExpr: null },
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+      ], {
+        indexes: [
+          { name: "users_pkey", columns: ["id"], unique: true, primary: true },
+          { name: "users_email_key", columns: ["email"], unique: true, primary: false },
+          { name: "users_external_id_key", columns: ["external_id"], unique: true, primary: false },
+          { name: "users_tenant_email_key", columns: ["tenant_id", "email"], unique: true, primary: false },
+        ],
+      }),
+    ]);
+    const diff = diffSchema([target], live);
+    expect(diff.hasDrift).toBe(false);
+  });
+
+  it("flags a declared unique constraint whose backing index is missing live", () => {
+    const target: TableDefinition = {
+      schema: "meta",
+      name: "users",
+      columns: [
+        { name: "id", type: "UUID", notNull: true, primaryKey: true },
+        { name: "email", type: "TEXT", notNull: true, unique: true },
+      ],
+    };
+    const live = liveSchema([
+      liveTable("users", [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "email", dataType: "text", isNullable: false, defaultExpr: null },
+      ], {
+        indexes: [{ name: "users_pkey", columns: ["id"], unique: true, primary: true }],
+      }),
+    ]);
+    const diff = diffSchema([target], live);
+    expect(diff.modifiedTables[0]?.addedIndexes).toContain("users_email_key");
+  });
 });
 
 describe("formatSchemaDiff", () => {

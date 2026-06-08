@@ -22,15 +22,15 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43** landed: **62 packages + 3 apps, 125
-meta-schema tables, 6,696 offline tests + 37 gated real-Postgres
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44** landed: **62 packages + 3 apps, 125
+meta-schema tables, 6,700 offline tests + 37 gated real-Postgres
 integration tests (17 worker + 20 operate-server) + four CI gates
-(schema-drift + incident-drift + PHI-encryption + gateway-execution)**, all green, no type errors.
-**Known issue:** the P2.36 `crossengin-pg drift` gate currently reports
-pre-existing introspection-normalization false positives (TIMESTAMPTZ type
-spelling, enum-column defaults, unique-constraint-vs-index names) across all
-tables — the `kernel-pg` `diffSchema`/introspection needs a normalization fix
-before that gate is truly green. Top follow-up. (Earlier
+(schema-drift + incident-drift + PHI-encryption + gateway-execution), all
+genuinely green against a live Postgres** — no type errors. P2.44 (ADR-0152)
+fixed the `kernel-pg` `diffSchema` normalization (TIMESTAMPTZ↔timestamp with
+time zone type aliasing, `::type`-cast-insensitive default comparison,
+unique-constraint backing-index recognition) so the P2.36 schema-drift gate now
+reports `(no drift)` on the freshly-bootstrapped meta schema. (Earlier
 per-increment lines below say "60"/"61 packages" — those are point-in-time
 snapshots; the live count is 62 after `incident-response-pg` landed in
 P2.31.)
@@ -1194,7 +1194,11 @@ re-exporting everything.
   CREATE privilege checks), applier (advisory-lock-gated, per-
   statement transactions, halt-on-first-failure, hash-based
   skip), introspection (pg_catalog queries + pure parsers), diff
-  (pure `diffSchema` vs `META_TABLES`), encryption (the M7.7
+  (pure `diffSchema` vs `META_TABLES`; P2.44/ADR-0152 normalizes SQL type
+  aliases [TIMESTAMPTZ↔timestamp with time zone, VARCHAR↔character varying,
+  …], strips `::type` casts from default comparison, and recognizes
+  unique-constraint backing indexes so the schema-drift gate is false-
+  positive-free), encryption (the M7.7
   `encrypt=at_rest` hint applier: `parseColumnDirectives`,
   `introspectEncryptedColumns` via `col_description`,
   `ensurePgcryptoExtension`, `pgpSymEncrypt/DecryptExpr` builders,

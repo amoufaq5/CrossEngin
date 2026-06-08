@@ -203,3 +203,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 117 | 0149 | 2,500 | Drafted alongside incident KPI metric snapshots (Phase 3 P2.40) |
 | 118 | 0150 | 2,500 | Drafted alongside per-route serving latency SLOs (Phase 3 P2.41) |
 | 119 | 0151 | 2,500 | Drafted alongside the gateway execution drift CI gate (Phase 3 P2.42) |
+| 120 | 0152 | 2,500 | Drafted alongside the diffSchema normalization fix — TIMESTAMPTZ/defaults/unique-index (Phase 3 P2.44) |

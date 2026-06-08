@@ -31,13 +31,55 @@ export interface SchemaDiff {
   readonly hasDrift: boolean;
 }
 
+/**
+ * Maps the SQL type spellings `META_TABLES` declares (e.g. `TIMESTAMPTZ`, `UUID`,
+ * `VARCHAR(255)`) to the canonical form `pg_catalog.format_type` reports on the
+ * live schema (`timestamp with time zone`, `uuid`, `character varying(255)`), so
+ * semantically-identical types don't read as drift. Lowercases, collapses
+ * whitespace, and normalizes spacing inside a precision (`numeric(12, 4)` →
+ * `numeric(12,4)`).
+ */
+const TYPE_ALIASES: Readonly<Record<string, string>> = {
+  timestamptz: "timestamp with time zone",
+  timestamp: "timestamp without time zone",
+  timetz: "time with time zone",
+  time: "time without time zone",
+  int: "integer",
+  int4: "integer",
+  int8: "bigint",
+  int2: "smallint",
+  bool: "boolean",
+  varchar: "character varying",
+  char: "character",
+  bpchar: "character",
+  decimal: "numeric",
+  float4: "real",
+  float8: "double precision",
+};
+
 function normalizeType(value: string): string {
-  return value.replace(/\s+/g, " ").trim().toLowerCase();
+  const collapsed = value.replace(/\s+/g, " ").trim().toLowerCase().replace(/\s*,\s*/g, ",");
+  const parenIdx = collapsed.indexOf("(");
+  const base = parenIdx === -1 ? collapsed : collapsed.slice(0, parenIdx);
+  const rest = parenIdx === -1 ? "" : collapsed.slice(parenIdx);
+  const alias = TYPE_ALIASES[base];
+  return alias === undefined ? collapsed : alias + rest;
+}
+
+/**
+ * Strips Postgres `::type` casts from a default expression. The catalog renders
+ * string-literal / enum defaults with an explicit cast (`'active'` → `'active'::text`,
+ * `'sev3'` → `'sev3'::"Severity"`, `'[]'::jsonb` either way) that `META_TABLES`
+ * declares without; stripping both sides makes the comparison cast-insensitive.
+ */
+function stripCasts(value: string): string {
+  return value.replace(/::(?:"[^"]+"|[a-z_][a-z0-9_ ]*(?:\([0-9, ]*\))?)/g, "");
 }
 
 function normalizeDefault(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
-  const trimmed = value.replace(/\s+/g, " ").trim().toLowerCase();
+  const lowered = value.replace(/\s+/g, " ").trim().toLowerCase();
+  const trimmed = stripCasts(lowered).replace(/\s+/g, " ").trim();
   return trimmed.length === 0 ? null : trimmed;
 }
 
@@ -97,15 +139,38 @@ function diffOneTable(target: TableDefinition, live: LiveTable): TableDiff {
 
   const liveIndexes = new Map(live.indexes.map((i) => [i.name, i] as const));
   const targetIndexes = new Map((target.indexes ?? []).map((i) => [i.name, i] as const));
+  // Unique constraints (table-level `uniqueConstraints` + column-level `unique`)
+  // are declared as constraints, not as explicit `indexes`, but Postgres backs
+  // each with an index that introspection returns. Treat those backing indexes
+  // as expected (a column `unique: true` is auto-named `<table>_<col>_key`).
+  const expectedUniqueNames = new Set<string>();
+  const singleColUnique = new Set<string>();
+  for (const uc of target.uniqueConstraints ?? []) expectedUniqueNames.add(uc.name);
+  for (const col of target.columns) {
+    if (col.unique === true) {
+      expectedUniqueNames.add(`${target.name}_${col.name}_key`);
+      singleColUnique.add(col.name);
+    } else if (typeof col.unique === "object" && col.unique !== null) {
+      expectedUniqueNames.add(col.unique.constraintName);
+    }
+  }
   const addedIndexes: string[] = [];
   const removedIndexes: string[] = [];
   for (const name of targetIndexes.keys()) {
     if (!liveIndexes.has(name)) addedIndexes.push(name);
   }
+  // A declared unique constraint whose backing index is missing live is drift too.
+  for (const name of expectedUniqueNames) {
+    if (!liveIndexes.has(name)) addedIndexes.push(name);
+  }
   for (const idx of liveIndexes.values()) {
-    if (!targetIndexes.has(idx.name) && !idx.primary) {
-      removedIndexes.push(idx.name);
-    }
+    if (idx.primary) continue;
+    if (targetIndexes.has(idx.name)) continue;
+    if (expectedUniqueNames.has(idx.name)) continue;
+    // Fallback: a live unique index over exactly a `unique: true` column is
+    // expected even if Postgres truncated/renamed its auto-generated name.
+    if (idx.unique && idx.columns.length === 1 && singleColUnique.has(idx.columns[0] ?? "")) continue;
+    removedIndexes.push(idx.name);
   }
 
   const livePolicies = new Map(live.policies.map((p) => [p.name, p] as const));
