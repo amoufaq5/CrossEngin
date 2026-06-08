@@ -8,6 +8,7 @@ describe("parseWebArgs", () => {
     expect(opts.pack).toBe("erp-retail");
     expect(opts.port).toBe(8788);
     expect(opts.manifestPath).toBeNull();
+    expect(opts.jwksRefreshMs).toBeNull();
   });
 
   it("supports inline --flag=value and repeated --api-key", () => {
@@ -45,6 +46,37 @@ describe("parseWebArgs", () => {
     expect(opts.jwksKeys).toEqual(["k1:AAAA", "k2:BBBB"]);
     expect(opts.jwtIssuer).toBe("https://idp/");
     expect(opts.jwtAudience).toBe("https://api/");
+  });
+
+  it("parses --jwks-refresh-ms (space + inline forms)", () => {
+    const spaced = parseWebArgs([
+      "--pack",
+      "erp-retail",
+      "--jwks-url",
+      "https://idp/jwks",
+      "--jwks-refresh-ms",
+      "60000",
+      "--jwt-issuer",
+      "https://idp/",
+      "--jwt-audience",
+      "https://api/",
+    ]);
+    expect(spaced.jwksRefreshMs).toBe(60000);
+    const inline = parseWebArgs([
+      "--pack",
+      "erp-retail",
+      "--jwks-url=https://idp/jwks",
+      "--jwks-refresh-ms=1000",
+      "--jwt-issuer=https://idp/",
+      "--jwt-audience=https://api/",
+    ]);
+    expect(inline.jwksRefreshMs).toBe(1000);
+  });
+
+  it("rejects --jwks-refresh-ms below 1000 or non-integer", () => {
+    expect(() => parseWebArgs(["--pack", "x", "--jwks-refresh-ms", "999"])).toThrow(CliUsageError);
+    expect(() => parseWebArgs(["--pack", "x", "--jwks-refresh-ms", "1.5"])).toThrow(CliUsageError);
+    expect(() => parseWebArgs(["--pack", "x", "--jwks-refresh-ms", "abc"])).toThrow(CliUsageError);
   });
 
   it("requires issuer + audience when a JWKS is configured", () => {

@@ -110,6 +110,14 @@ client.js`) — esbuild is kept entirely off the `pnpm -r build` / vitest path
 static asset) by both the Node + edge handlers, 503-with-a-`build:client`-notice
 when unbuilt. Live `hydrateRoot` DOM behavior is a manual browser smoke (per the
 ADR); form mutations + full client-side routing stay deferred.
+**P3.5 (ADR-0158) wired the background JWKS refresh poller into `apps/operate-web`:**
+the `JwksRefreshPoller` lifted in P3.2 was never started, so a remote `--jwks-url`
+provider refreshed only lazily; now `--jwks-refresh-ms <n>` (>=1000) builds a poller
+(`node.ts`'s `buildJwtConfigFromOptions` became `resolveJwtConfig` returning
+`{config, poller}`) that `serve()` starts after listening + stops on close — the UI
+view-model API keeps an IdP's JWKS warm exactly as operate-server does (P1.20 /
+ADR-0100); the edge handler runs no poller (no long-lived process) and refreshes
+lazily. A `{fetch?, scheduler?}` test seam keeps the poller test hermetic.
 P2.44 (ADR-0152)
 fixed the `kernel-pg` `diffSchema` normalization (TIMESTAMPTZ↔timestamp with
 time zone type aliasing, `::type`-cast-insensitive default comparison,
@@ -1869,7 +1877,19 @@ re-exporting everything.
   data is `\u`-escaped (can't break out), and that a cashier's embedded
   state omits the classified column. Live `hydrateRoot` DOM behavior is a
   manual browser smoke documented in the ADR. Form mutations + full
-  client-side routing stay deferred.
+  client-side routing stay deferred. **P3.5 (ADR-0158) started the
+  background JWKS poller** — the `jwks.ts` lifted in P3.2 already carried
+  the `JwksRefreshPoller` class, but `serve()` never started it, so a
+  remote `--jwks-url` provider refreshed only lazily. `cli.ts` gained
+  `--jwks-refresh-ms <n>` (integer, >=1000, default null), and `node.ts`
+  refactored `buildJwtConfigFromOptions` → `resolveJwtConfig` (returns
+  `{config, poller}`): for a remote URL + interval it builds a
+  `JwksRefreshPoller`, which `serve()` `start()`s after listening +
+  `stop()`s in the close handle (the edge handler runs no poller — no
+  long-lived process — and refreshes lazily). A `ServeJwtDeps`
+  ({fetch?, scheduler?}) test seam drives the poller hermetically (fake
+  scheduler + stub fetch, no network/real timers). Mirrors
+  operate-server's P1.20 (ADR-0100); no new packages/tables.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,

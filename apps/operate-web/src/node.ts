@@ -3,29 +3,78 @@ import { readFile } from "node:fs/promises";
 
 import type { WebServeOptions } from "./cli.js";
 import type { RawWebRequest } from "./http.js";
-import { RemoteJwksProvider, buildJwksProvider, parseJwksDocument } from "./jwks.js";
+import {
+  JwksRefreshPoller,
+  RemoteJwksProvider,
+  buildJwksProvider,
+  parseJwksDocument,
+  type FetchLike,
+  type IntervalScheduler,
+} from "./jwks.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import { parseApiKeySpec, parseJwksKeySpec, type JwksKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { OperateWebServer, buildOperateWebServer } from "./server.js";
 
 /**
- * Assembles a `JwtVerifyConfig` from the parsed CLI options, or null when no
- * JWKS source is configured. A JWKS is built from one of `--jwks-key` (inline),
- * `--jwks-file` (a JWKS JSON document), or `--jwks-url` (a caching remote
- * provider). `--jwt-issuer` / `--jwt-audience` are required (the CLI parser
- * already enforces it).
+ * Injectable seams for `resolveJwtConfig` / `serve`, so a test can drive the
+ * background JWKS poller hermetically — a fake `scheduler` (no real timers) and
+ * a stub `fetch` (no network) for the remote provider. Production passes
+ * neither, so the global `fetch` + the default unref'd interval are used.
  */
-export async function buildJwtConfigFromOptions(options: WebServeOptions): Promise<JwtVerifyConfig | null> {
+export interface ServeJwtDeps {
+  readonly fetch?: FetchLike;
+  readonly scheduler?: IntervalScheduler;
+}
+
+/**
+ * The outcome of resolving the CLI's JWKS options: a `JwtVerifyConfig` (or null
+ * when no JWKS source is configured) plus an optional background
+ * `JwksRefreshPoller` — present only for a remote `--jwks-url` provider when
+ * `--jwks-refresh-ms` is set. The caller starts the poller after the server is
+ * listening and stops it on shutdown.
+ */
+export interface ResolvedJwtConfig {
+  readonly config: JwtVerifyConfig | null;
+  readonly poller: JwksRefreshPoller | null;
+}
+
+/**
+ * Resolves the CLI's JWKS options into a `JwtVerifyConfig` (or null when no
+ * JWKS source is configured) plus an optional background poller. A JWKS is
+ * built from one of `--jwks-key` (inline), `--jwks-file` (a JWKS JSON
+ * document), or `--jwks-url` (a caching remote provider). `--jwt-issuer` /
+ * `--jwt-audience` are required (the CLI parser already enforces it). For a
+ * remote provider with `--jwks-refresh-ms`, a `JwksRefreshPoller` is returned
+ * so requests never pay the fetch latency (mirrors `apps/operate-server`'s
+ * P1.20 background refresh); lazy refresh on an unknown `kid` remains the
+ * fallback. The edge handler doesn't run a poller (no long-lived process) —
+ * the remote provider still refreshes lazily there.
+ */
+export async function resolveJwtConfig(options: WebServeOptions, deps: ServeJwtDeps = {}): Promise<ResolvedJwtConfig> {
   const hasInline = options.jwksKeys.length > 0;
   const hasFile = options.jwksFile !== null;
   const hasUrl = options.jwksUrl !== null;
-  if (!hasInline && !hasFile && !hasUrl) return null;
+  if (!hasInline && !hasFile && !hasUrl) return { config: null, poller: null };
   if (options.jwtIssuer === null || options.jwtAudience === null) {
     throw new Error("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
   if (hasUrl) {
-    const provider = new RemoteJwksProvider({ url: options.jwksUrl! });
-    return { jwksProvider: provider, issuer: options.jwtIssuer, audience: options.jwtAudience };
+    const provider = new RemoteJwksProvider({
+      url: options.jwksUrl!,
+      ...(deps.fetch !== undefined ? { fetch: deps.fetch } : {}),
+    });
+    const poller =
+      options.jwksRefreshMs !== null
+        ? new JwksRefreshPoller({
+            provider,
+            intervalMs: options.jwksRefreshMs,
+            ...(deps.scheduler !== undefined ? { scheduler: deps.scheduler } : {}),
+          })
+        : null;
+    return {
+      config: { jwksProvider: provider, issuer: options.jwtIssuer, audience: options.jwtAudience },
+      poller,
+    };
   }
   let keys: JwksKeySpec[];
   if (hasFile) {
@@ -34,7 +83,20 @@ export async function buildJwtConfigFromOptions(options: WebServeOptions): Promi
   } else {
     keys = options.jwksKeys.map(parseJwksKeySpec);
   }
-  return { jwksProvider: buildJwksProvider(keys), issuer: options.jwtIssuer, audience: options.jwtAudience };
+  return {
+    config: { jwksProvider: buildJwksProvider(keys), issuer: options.jwtIssuer, audience: options.jwtAudience },
+    poller: null,
+  };
+}
+
+/**
+ * Assembles a `JwtVerifyConfig` from the parsed CLI options, or null when no
+ * JWKS source is configured. A thin wrapper over `resolveJwtConfig` for the
+ * edge handler, which has no long-lived process to run a background poller in;
+ * the remote provider still refreshes lazily on an unknown `kid`.
+ */
+export async function buildJwtConfigFromOptions(options: WebServeOptions): Promise<JwtVerifyConfig | null> {
+  return (await resolveJwtConfig(options)).config;
 }
 
 /** The slice of Node's `IncomingMessage` the adapter reads. */
@@ -98,22 +160,26 @@ export interface RunningServer {
 /**
  * Boots the web server from `WebServeOptions`: loads + resolves the manifest
  * (pack or file), builds the in-memory store, wires the API keys, and starts
- * listening. Returns a handle for graceful shutdown (and the `OperateWebServer`
- * so a caller can seed the in-memory store).
+ * listening. When a remote `--jwks-url` provider is configured with
+ * `--jwks-refresh-ms`, a `JwksRefreshPoller` is started after the server is
+ * listening and stopped in the returned close handle. Returns a handle for
+ * graceful shutdown (and the `OperateWebServer` so a caller can seed the
+ * in-memory store). `deps` is a test-only seam for hermetic poller wiring.
  */
-export async function serve(options: WebServeOptions): Promise<RunningServer> {
+export async function serve(options: WebServeOptions, deps: ServeJwtDeps = {}): Promise<RunningServer> {
   const manifest =
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
   const apiKeySpecs = options.apiKeys.map(parseApiKeySpec);
-  const jwt = await buildJwtConfigFromOptions(options);
+  const { config: jwt, poller } = await resolveJwtConfig(options, deps);
   const webServer = buildOperateWebServer({ manifest, apiKeySpecs, ...(jwt !== null ? { jwt } : {}) });
   const listener = createNodeRequestListener(webServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });
   await new Promise<void>((resolve) => server.listen(options.port, resolve));
+  poller?.start();
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : options.port;
   return {
@@ -122,6 +188,7 @@ export async function serve(options: WebServeOptions): Promise<RunningServer> {
     webServer,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        poller?.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

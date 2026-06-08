@@ -11,6 +11,8 @@ export interface WebServeOptions {
   readonly jwksFile: string | null;
   /** Remote JWKS endpoint URL (caching, rotation-aware). */
   readonly jwksUrl: string | null;
+  /** Background JWKS refresh interval in ms (with --jwks-url; >= 1000). */
+  readonly jwksRefreshMs: number | null;
   /** Expected JWT issuer (required when a JWKS is configured). */
   readonly jwtIssuer: string | null;
   /** Expected JWT audience (required when a JWKS is configured). */
@@ -46,6 +48,7 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
   let jwksUrl: string | null = null;
+  let jwksRefreshMs: number | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
   let help = false;
@@ -84,6 +87,12 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
     } else if (arg === "--jwks-url" || arg.startsWith("--jwks-url=")) {
       jwksUrl = takeValue(arg, next, "--jwks-url");
       i += consumed();
+    } else if (arg === "--jwks-refresh-ms" || arg.startsWith("--jwks-refresh-ms=")) {
+      const raw = takeValue(arg, next, "--jwks-refresh-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --jwks-refresh-ms: ${raw} (>= 1000)`);
+      jwksRefreshMs = n;
+      i += consumed();
     } else if (arg === "--jwt-issuer" || arg.startsWith("--jwt-issuer=")) {
       jwtIssuer = takeValue(arg, next, "--jwt-issuer");
       i += consumed();
@@ -114,7 +123,7 @@ export function parseWebArgs(argv: readonly string[]): WebServeOptions {
     }
   }
 
-  return { port, pack, manifestPath, apiKeys, jwksKeys, jwksFile, jwksUrl, jwtIssuer, jwtAudience, help, version };
+  return { port, pack, manifestPath, apiKeys, jwksKeys, jwksFile, jwksUrl, jwksRefreshMs, jwtIssuer, jwtAudience, help, version };
 }
 
 export const helpText = `operate-web — serve a resolved CrossEngin manifest as redaction-aware UI view models
@@ -133,6 +142,7 @@ Options:
   --jwks-key <spec>    JWKS public key kid:base64 (repeatable)
   --jwks-file <file>   Path to a JWKS JSON document
   --jwks-url <url>     Remote JWKS endpoint (caching, rotation-aware)
+  --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
   --help, -h           Show this help

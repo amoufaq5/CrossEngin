@@ -2,7 +2,8 @@ import { generateEd25519Keypair } from "@crossengin/crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { WebServeOptions } from "./cli.js";
-import { buildJwtConfigFromOptions, serve, type RunningServer } from "./node.js";
+import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
+import { buildJwtConfigFromOptions, resolveJwtConfig, serve, type RunningServer } from "./node.js";
 
 const TENANT = "t1";
 
@@ -15,12 +16,35 @@ function baseOptions(overrides: Partial<WebServeOptions>): WebServeOptions {
     jwksKeys: [],
     jwksFile: null,
     jwksUrl: null,
+    jwksRefreshMs: null,
     jwtIssuer: null,
     jwtAudience: null,
     help: false,
     version: false,
     ...overrides,
   };
+}
+
+/** A deterministic scheduler that records every set/clear so a test can fire ticks by hand. */
+class FakeScheduler implements IntervalScheduler {
+  handlers = new Map<IntervalHandle, () => void>();
+  cleared: IntervalHandle[] = [];
+  private next = 0;
+  setInterval(handler: () => void, _ms: number): IntervalHandle {
+    const h = ++this.next;
+    this.handlers.set(h, handler);
+    return h;
+  }
+  clearInterval(handle: IntervalHandle): void {
+    this.cleared.push(handle);
+    this.handlers.delete(handle);
+  }
+  get scheduled(): number {
+    return this.handlers.size + this.cleared.length;
+  }
+  fireAll(): void {
+    for (const handler of this.handlers.values()) handler();
+  }
 }
 
 describe("buildJwtConfigFromOptions", () => {
@@ -51,6 +75,52 @@ describe("buildJwtConfigFromOptions", () => {
   });
 });
 
+describe("resolveJwtConfig — background JWKS poller", () => {
+  // A stub fetch that returns an empty JWKS document — hermetic, no network.
+  const stubFetch = async (): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ keys: [] }),
+  });
+
+  it("does not build a poller without a remote URL or without --jwks-refresh-ms", async () => {
+    const noUrl = await resolveJwtConfig(
+      baseOptions({ jwksKeys: ["k1:AAAA"], jwtIssuer: "i", jwtAudience: "a", jwksRefreshMs: 60000 }),
+    );
+    expect(noUrl.poller).toBeNull();
+    const noInterval = await resolveJwtConfig(
+      baseOptions({ jwksUrl: "https://idp/jwks", jwtIssuer: "i", jwtAudience: "a" }),
+    );
+    expect(noInterval.config).not.toBeNull();
+    expect(noInterval.poller).toBeNull();
+  });
+
+  it("builds a poller for a remote URL + --jwks-refresh-ms and refreshes on start + tick", async () => {
+    const scheduler = new FakeScheduler();
+    let refreshes = 0;
+    const fetch = async (): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> => {
+      refreshes += 1;
+      return stubFetch();
+    };
+    const { config, poller } = await resolveJwtConfig(
+      baseOptions({ jwksUrl: "https://idp/jwks", jwtIssuer: "i", jwtAudience: "a", jwksRefreshMs: 60000 }),
+      { fetch, scheduler },
+    );
+    expect(config).not.toBeNull();
+    expect(poller).not.toBeNull();
+    poller!.start();
+    // refreshOnStart fires one immediate tick; the interval fires more.
+    await Promise.resolve();
+    expect(scheduler.handlers.size).toBe(1);
+    scheduler.fireAll();
+    await Promise.resolve();
+    expect(refreshes).toBeGreaterThanOrEqual(2);
+    poller!.stop();
+    expect(scheduler.cleared.length).toBe(1);
+    expect(scheduler.handlers.size).toBe(0);
+  });
+});
+
 let running: RunningServer;
 let base: string;
 
@@ -63,6 +133,7 @@ beforeAll(async () => {
     jwksKeys: [],
     jwksFile: null,
     jwksUrl: null,
+    jwksRefreshMs: null,
     jwtIssuer: null,
     jwtAudience: null,
     help: false,
@@ -103,5 +174,31 @@ describe("operate-web serve() loopback", () => {
     const csh = await (await fetch(`${base}/ui/Product/p1`, { headers: { "x-api-key": "csh" } })).json();
     expect((mgr as { record: { unit_cost?: number } }).record.unit_cost).toBe(4.2);
     expect("unit_cost" in (csh as { record: Record<string, unknown> }).record).toBe(false);
+  });
+});
+
+describe("operate-web serve() starts + stops the JWKS poller", () => {
+  it("starts the poller after listening (remote URL + interval) and stops it on close", async () => {
+    const scheduler = new FakeScheduler();
+    const fetch = async (): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ keys: [] }),
+    });
+    const handle = await serve(
+      baseOptions({
+        jwksUrl: "https://idp/jwks",
+        jwtIssuer: "https://idp/",
+        jwtAudience: "https://api/",
+        jwksRefreshMs: 60000,
+      }),
+      { fetch, scheduler },
+    );
+    // The poller was started (its interval handler is registered).
+    expect(scheduler.handlers.size).toBe(1);
+    await handle.close();
+    // close() stopped the poller (the interval was cleared).
+    expect(scheduler.cleared.length).toBe(1);
+    expect(scheduler.handlers.size).toBe(0);
   });
 });
