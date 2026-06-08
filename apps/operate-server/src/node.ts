@@ -10,6 +10,15 @@ import {
   type IncidentsCliOptions,
 } from "@crossengin/incident-response-pg";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  PostgresSloEnforcementActionStore,
+  runSloQuery,
+  verifyEnforcementHistory,
+  type DriftIssue,
+  type SloCliOptions,
+  type SloEnforcementActionRecord,
+  type SloQuerySource,
+} from "@crossengin/observability-runtime-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
 import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
@@ -136,6 +145,69 @@ export async function executeIncidents(
     }
     const replayer = new PostgresIncidentReplayer(conn, schemaOpt);
     const { exitCode } = await runIncidents(options, replayer, out);
+    return exitCode;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * The structural SLO read surface, built over a
+ * `PostgresSloEnforcementActionStore`: `--since` reads the windowed
+ * `listSince`, else recent rows via `listRecent`; `verifyActions` runs the pure
+ * `verifyEnforcementHistory` over the loaded batch. Mirrors the
+ * `crossengin-slo` bin's `StoreSloQuerySource`.
+ */
+class StoreSloQuerySource implements SloQuerySource {
+  private readonly store: PostgresSloEnforcementActionStore;
+
+  constructor(store: PostgresSloEnforcementActionStore) {
+    this.store = store;
+  }
+
+  private async load(opts: {
+    readonly since?: Date;
+    readonly limit?: number;
+  }): Promise<readonly SloEnforcementActionRecord[]> {
+    if (opts.since !== undefined) return this.store.listSince(opts.since, opts.limit ?? 1000);
+    return this.store.listRecent(opts.limit ?? 100);
+  }
+
+  async listActions(opts: {
+    readonly since?: Date;
+    readonly limit?: number;
+  }): Promise<readonly SloEnforcementActionRecord[]> {
+    return this.load(opts);
+  }
+
+  async verifyActions(opts: {
+    readonly since?: Date;
+    readonly limit?: number;
+  }): Promise<readonly DriftIssue[]> {
+    return verifyEnforcementHistory(await this.load(opts));
+  }
+}
+
+/**
+ * Runs a one-shot `slo` query against the SLO enforcement audit tables: opens a
+ * Postgres connection from the `PG*` env vars, builds the same
+ * `StoreSloQuerySource` (`PostgresSloEnforcementActionStore` +
+ * `verifyEnforcementHistory`) the `crossengin-slo` bin builds, dispatches the
+ * parsed command through `runSloQuery`, closes the connection in a `finally`,
+ * and returns the exit code (`verify` returns 1 on drift). Mirrors
+ * `executeIncidents` so an operator can read/verify the
+ * `meta.slo_enforcement_actions` table — populated by operate-server's own
+ * `--slo --slo-persist` loop — from the serving binary, without the standalone
+ * `crossengin-slo` tool.
+ */
+export async function executeSlo(
+  options: SloCliOptions,
+  out: (line: string) => void = (line) => void process.stdout.write(`${line}\n`),
+): Promise<number> {
+  const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const source = new StoreSloQuerySource(new PostgresSloEnforcementActionStore(conn));
+    const { exitCode } = await runSloQuery(options, source, out);
     return exitCode;
   } finally {
     await conn.close();

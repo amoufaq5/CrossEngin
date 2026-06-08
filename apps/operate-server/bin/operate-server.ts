@@ -2,7 +2,8 @@
 
 import { CliUsageError, helpText, parseServeArgs } from "../src/cli.js";
 import { incidentsHelpText, parseIncidentsArgs } from "../src/incidents-cli.js";
-import { executeIncidents, serve } from "../src/node.js";
+import { parseSloArgs, sloHelpText } from "../src/slo-cli.js";
+import { executeIncidents, executeSlo, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -24,12 +25,34 @@ async function runIncidentsCommand(argv: readonly string[]): Promise<number> {
   return executeIncidents(options);
 }
 
+async function runSloCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseSloArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${sloHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(sloHelpText);
+    return 0;
+  }
+  return executeSlo(options);
+}
+
 async function main(): Promise<number> {
-  // Subcommand: `operate-server incidents <open|period|verify|metrics|ack|mitigate>`
-  // is a one-shot query against meta.incidents (it exits); everything else is the
+  // Subcommands: `operate-server incidents <...>` queries meta.incidents and
+  // `operate-server slo <actions|summary|verify>` queries the SLO enforcement
+  // tables — each a one-shot query that exits; everything else is the
   // long-running serve loop. Mirrors the workflow-worker bin split.
   if (process.argv[2] === "incidents") {
     return runIncidentsCommand(process.argv.slice(3));
+  }
+  if (process.argv[2] === "slo") {
+    return runSloCommand(process.argv.slice(3));
   }
 
   let options;

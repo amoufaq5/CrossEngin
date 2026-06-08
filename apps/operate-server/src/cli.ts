@@ -211,6 +211,9 @@ Usage:
   operate-server incidents <open|period|verify|metrics|ack|mitigate> [opts]
                        Query/transition the meta.incidents audit table (populated
                        by --slo); see \`operate-server incidents --help\`.
+  operate-server slo <actions|summary|verify> [opts]
+                       Read/verify the SLO enforcement audit tables (populated by
+                       --slo --slo-persist); see \`operate-server slo --help\`.
 
 Manifest source (exactly one):
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
