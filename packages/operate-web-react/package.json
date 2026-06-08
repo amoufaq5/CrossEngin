@@ -10,7 +10,9 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./client": "./src/client.tsx",
+    "./package.json": "./package.json"
   },
   "files": ["dist", "src"],
   "scripts": {

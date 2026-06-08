@@ -83,8 +83,22 @@ the operate-web model types, and additive `text/html` routes on `apps/operate-we
 (`/app`, `/app/:entity`, `/app/:entity/:id`, `/app/:entity/new`) that server-render
 those components per caller over the same compile + redaction + store as the JSON
 `/ui/...` routes. Tests are hermetic (react-dom/server, no jsdom/bundler); a
-`store_manager`'s `/app` HTML shows `unit_cost` and a `cashier`'s omits it. Client
-hydration + a bundler are the deferred follow-up (no bundler in the CI test path).
+`store_manager`'s `/app` HTML shows `unit_cost` and a `cashier`'s omits it.
+**P3.4 (ADR-0156) made the SSR pages interactive** — a client entry
+(`operate-web-react`'s `client.tsx`) `hydrateRoot`s the *same* `PageRoot`
+component tree against the server markup, reading an XSS-safe embedded
+`window.__OPERATE_WEB_STATE__` blob (the already-redacted models + data the SSR
+rendered — `serializePageState` escapes `<`/`>`/U+2028/U+2029 to `\u`-forms so a
+`</script>` in the data can't break out, and the client never receives a hidden
+field either). Table sort + pagination now refetch the existing read-only
+`/ui/:entity` JSON (no new server routes, no full reload). `apps/operate-web`
+bundles the client with **esbuild** in a separate `build:client` script
+(`platform: browser`, IIFE, minified → ~146 KiB at `dist/assets/operate-web-
+client.js`) — esbuild is kept entirely off the `pnpm -r build` / vitest path
+(hermetic); the `/assets/operate-web-client.js` route is served (pre-auth, public
+static asset) by both the Node + edge handlers, 503-with-a-`build:client`-notice
+when unbuilt. Live `hydrateRoot` DOM behavior is a manual browser smoke (per the
+ADR); form mutations + full client-side routing stay deferred.
 P2.44 (ADR-0152)
 fixed the `kernel-pg` `diffSchema` normalization (TIMESTAMPTZ↔timestamp with
 time zone type aliasing, `::type`-cast-insensitive default comparison,
@@ -1804,7 +1818,30 @@ re-exporting everything.
   `GET /app/Product/p1` as a `store_manager` returns 200 `text/html`
   containing the classified `unit_cost`, a `cashier`'s omits it, and an
   unauthenticated `/app` is 401. The app gained a dep on
-  `@crossengin/operate-web-react`.
+  `@crossengin/operate-web-react`. **P3.4 (ADR-0156) made the `/app/*`
+  pages interactive** — they now emit hydratable HTML (`html.ts` builds a
+  `WebPageState` + calls `renderHydratablePage`, so each page carries
+  `<div id="root">` + an XSS-safe `window.__OPERATE_WEB_STATE__` script +
+  a deferred `<script src=/assets/operate-web-client.js>`; the embedded
+  state is the *same* redacted models + data the SSR rendered, so the
+  client never sees a hidden field). A new `assets.ts`
+  (`serveClientBundle`) serves `GET /assets/operate-web-client.js` from
+  `dist/assets/` as `application/javascript` (or a helpful 503 + a
+  `build:client` notice when unbuilt), routed in `dispatch` **before
+  auth** (public static asset, no per-caller data) so both the Node
+  listener + the edge handler serve it for free; the loader is injectable
+  (`bundleLoader` option). The bundle is built by a separate
+  `build:client` npm script (`scripts/build-client.mjs` → esbuild bundles
+  `operate-web-react/client` for the browser, `platform: browser`,
+  `format: iife`, minified, ~146 KiB) — **never** a `pnpm -r build` /
+  vitest dependency, keeping esbuild off the hermetic test path. `esbuild`
+  is a devDependency. Tests are hermetic: `serveClientBundle` is unit-
+  tested with stub loaders, the over-HTTP tests assert the `#root` +
+  embedded-state script + client `<script src>`, that a `</script>` in the
+  data is `\u`-escaped (can't break out), and that a cashier's embedded
+  state omits the classified column. Live `hydrateRoot` DOM behavior is a
+  manual browser smoke documented in the ADR. Form mutations + full
+  client-side routing stay deferred.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -2074,9 +2111,23 @@ re-exporting everything.
   untouched). Tests render via `react-dom/server` (no jsdom/DOM/bundler)
   and prove redaction is structural in the markup — a model compiled
   for an unprivileged viewer drops the classified column/field, so it
-  never appears; the real retail pack renders end-to-end. Client-side
-  hydration + a bundler are the explicit deferred follow-up. No new
-  META_ tables.
+  never appears; the real retail pack renders end-to-end. **P3.4
+  (ADR-0156) made the SSR pages interactive** with a client entry +
+  hydration: `page-state.ts` (pure, DOM-free, unit-tested) defines the
+  serializable `WebPageState` (app|table|detail|form, carrying the
+  already-redacted models + data) with `serializePageState` (XSS-safe —
+  `<`/`>`/U+2028/U+2029 → `\u`-escapes, still valid JSON) /
+  `parsePageState` + `buildListQueryUrl`; `page.tsx` (`PageRoot`) is the
+  single component the SSR renders AND the client hydrates (its table
+  branch wraps `TableView` in a stateful `TableSection` with sort-toggle
+  + Prev/Next pagination that `fetch` the existing `/ui/:entity` JSON);
+  `render.tsx` gains `renderHydratablePage(state)` (`renderToString` into
+  `<div id="root">` + an embedded `window.__OPERATE_WEB_STATE__` script +
+  a deferred `<script src=/assets/operate-web-client.js>`); `client.tsx`
+  (the browser entry, never on the Node/vitest path — only the bundler +
+  browser load it; exposed via the `./client` package export) reads the
+  global + `hydrateRoot`s `PageRoot` into `#root`. `tsconfig` adds `DOM`
+  to `lib` for the client. No new META_ tables.
 - **`i18n`** — locales, ICU MessageFormat, CLDR plurals, bundle,
   resolution, calendar, tenant config.
 - **`notifications`** — 6 channels × 18 providers, 5 content

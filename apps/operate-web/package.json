@@ -15,9 +15,10 @@
   "bin": {
     "operate-web": "./dist/bin/operate-web.js"
   },
-  "files": ["dist", "src", "bin"],
+  "files": ["dist", "src", "bin", "scripts"],
   "scripts": {
     "build": "tsc",
+    "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -40,6 +41,7 @@
     "@crossengin/config": "workspace:*",
     "@crossengin/testing": "workspace:*",
     "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

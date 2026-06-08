@@ -1,5 +1,9 @@
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup, renderToString } from "react-dom/server";
 import type { ReactNode } from "react";
+
+import { PageRoot } from "./page.js";
+import { PAGE_STATE_GLOBAL, serializePageState } from "./page-state.js";
+import type { WebPageState } from "./page-state.js";
 
 /**
  * A minimal inline stylesheet so the server-rendered pages are legible without
@@ -56,4 +60,41 @@ function escapeHtml(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+export interface RenderHydratablePageOptions extends RenderPageOptions {
+  /** URL of the client bundle to load (default `/assets/operate-web-client.js`). */
+  readonly clientScriptSrc?: string;
+}
+
+/**
+ * Server-renders a `WebPageState` to a *hydratable* HTML document: the React
+ * tree (`PageRoot`) goes inside `<div id="root">…</div>` via `renderToString`
+ * (which emits the hydration markers `hydrateRoot` needs to attach without a
+ * mismatch), the same state is embedded as an XSS-safe inline `<script>` global
+ * (`serializePageState` neutralizes any `</script>` in the data), and a deferred
+ * `<script src>` loads the client bundle. The embedded state is the *exact*
+ * already-redacted models + data the SSR rendered — so the client never receives
+ * a field the caller couldn't see either.
+ */
+export function renderHydratablePage(
+  state: WebPageState,
+  options: RenderHydratablePageOptions = {},
+): string {
+  const title = options.title ?? "CrossEngin Operate";
+  const lang = options.lang ?? "en";
+  const clientSrc = options.clientScriptSrc ?? "/assets/operate-web-client.js";
+  const body = renderToString(<PageRoot state={state} />);
+  const serialized = serializePageState(state);
+  const head =
+    `<meta charset="utf-8"/>` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1"/>` +
+    `<title>${escapeHtml(title)}</title>` +
+    `<style>${BASE_STYLES}</style>`;
+  const stateScript = `<script>window.${PAGE_STATE_GLOBAL} = ${serialized};</script>`;
+  const clientScript = `<script src="${escapeHtml(clientSrc)}" defer></script>`;
+  return (
+    `<!doctype html><html lang="${escapeHtml(lang)}"><head>${head}</head>` +
+    `<body><div id="root">${body}</div>${stateScript}${clientScript}</body></html>`
+  );
 }

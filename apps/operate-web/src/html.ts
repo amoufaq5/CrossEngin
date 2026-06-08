@@ -1,10 +1,5 @@
-import {
-  AppShell,
-  DetailView,
-  FormView,
-  TableView,
-  renderPage,
-} from "@crossengin/operate-web-react";
+import { renderHydratablePage } from "@crossengin/operate-web-react";
+import type { WebPageState } from "@crossengin/operate-web-react";
 import type {
   DetailModel,
   FormModel,
@@ -13,6 +8,9 @@ import type {
 } from "@crossengin/operate-web";
 
 import type { RawWebResponse } from "./http.js";
+
+/** The base path the SSR'd pages + the hydrated client build their links under. */
+const APP_BASE_PATH = "/app";
 
 /** Wraps a server-rendered HTML string into a `text/html` `RawWebResponse`. */
 export function htmlResponse(status: number, html: string): RawWebResponse {
@@ -27,43 +25,45 @@ export function htmlResponse(status: number, html: string): RawWebResponse {
   };
 }
 
-/** Renders the app shell (chrome + per-entity nav) to a full HTML page. */
-export function renderAppPage(app: WebAppModel): RawWebResponse {
-  const html = renderPage(AppShell({ app }), { title: app.title });
-  return htmlResponse(200, html);
+/** Renders a `WebPageState` to a hydratable HTML page (`#root` + state + client). */
+function pageFor(state: WebPageState, title: string): RawWebResponse {
+  return htmlResponse(200, renderHydratablePage(state, { title }));
 }
 
-/** Renders an entity table (model + a redacted data page) to a full HTML page. */
+/** Renders the app shell (chrome + per-entity nav) to a hydratable HTML page. */
+export function renderAppPage(app: WebAppModel): RawWebResponse {
+  return pageFor({ kind: "app", app, basePath: APP_BASE_PATH }, app.title);
+}
+
+/** Renders an entity table (model + a redacted data page) to a hydratable HTML page. */
 export function renderTablePage(
   app: WebAppModel,
   table: TableModel,
   rows: readonly Readonly<Record<string, unknown>>[],
+  nextCursor: string | null = null,
 ): RawWebResponse {
-  const html = renderPage(
-    AppShell({ app, children: TableView({ model: table, rows }) }),
-    { title: `${table.title} — ${app.title}` },
+  return pageFor(
+    { kind: "table", app, table, rows, nextCursor, basePath: APP_BASE_PATH },
+    `${table.title} — ${app.title}`,
   );
-  return htmlResponse(200, html);
 }
 
-/** Renders a record detail (model + the redacted record) to a full HTML page. */
+/** Renders a record detail (model + the redacted record) to a hydratable HTML page. */
 export function renderDetailPage(
   app: WebAppModel,
   detail: DetailModel,
   record: Readonly<Record<string, unknown>>,
 ): RawWebResponse {
-  const html = renderPage(
-    AppShell({ app, children: DetailView({ model: detail, record }) }),
-    { title: `${detail.title} — ${app.title}` },
+  return pageFor(
+    { kind: "detail", app, detail, record, basePath: APP_BASE_PATH },
+    `${detail.title} — ${app.title}`,
   );
-  return htmlResponse(200, html);
 }
 
-/** Renders a create form to a full HTML page. */
+/** Renders a create form to a hydratable HTML page. */
 export function renderFormPage(app: WebAppModel, form: FormModel): RawWebResponse {
-  const html = renderPage(
-    AppShell({ app, children: FormView({ model: form }) }),
-    { title: `${form.title} — ${app.title}` },
+  return pageFor(
+    { kind: "form", app, form, basePath: APP_BASE_PATH },
+    `${form.title} — ${app.title}`,
   );
-  return htmlResponse(200, html);
 }

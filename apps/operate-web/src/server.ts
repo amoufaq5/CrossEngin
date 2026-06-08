@@ -18,6 +18,7 @@ import {
   type ViewerContext,
 } from "@crossengin/operate-web";
 
+import { CLIENT_BUNDLE_PATH, serveClientBundle, type BundleLoader } from "./assets.js";
 import {
   renderAppPage,
   renderDetailPage,
@@ -38,6 +39,13 @@ export interface OperateWebServerOptions {
   /** Resolves each request to a viewer (api-key and/or JWT); null → 401. */
   readonly resolver: WebViewerResolver;
   readonly compileOptions?: CompileOptions;
+  /**
+   * Loads the client hydration bundle for `GET /assets/operate-web-client.js`.
+   * Defaults to reading it from disk; injectable so a test can stub it (or an
+   * edge runtime can serve an embedded bundle). When the load returns null the
+   * route 503s with a "run build:client" notice.
+   */
+  readonly bundleLoader?: BundleLoader;
 }
 
 /**
@@ -59,6 +67,7 @@ export class OperateWebServer {
   private readonly resolver: WebViewerResolver;
   private readonly compileOptions: CompileOptions;
   private readonly entityNames: ReadonlySet<string>;
+  private readonly bundleLoader: BundleLoader | undefined;
 
   constructor(options: OperateWebServerOptions) {
     this.manifest = options.manifest;
@@ -66,6 +75,7 @@ export class OperateWebServer {
     this.resolver = options.resolver;
     this.compileOptions = options.compileOptions ?? {};
     this.entityNames = new Set((options.manifest.entities ?? []).map((e) => e.name));
+    this.bundleLoader = options.bundleLoader;
   }
 
   /** Exposes the store so a boot script can seed records for the in-memory case. */
@@ -77,6 +87,17 @@ export class OperateWebServer {
     if (req.method.toUpperCase() !== "GET") {
       return problemResponse(405, "Method not allowed", `unsupported method ${req.method}`);
     }
+
+    // The hydration bundle is a public static asset (it carries no per-caller
+    // data — every model + row is redacted *before* it's embedded in the page),
+    // so it is served before auth.
+    const { path: rawPath } = splitTarget(req.url);
+    if (rawPath === CLIENT_BUNDLE_PATH) {
+      return this.bundleLoader !== undefined
+        ? serveClientBundle(this.bundleLoader)
+        : serveClientBundle();
+    }
+
     const viewer = await this.resolver.resolve(req);
     if (viewer === null) {
       return problemResponse(401, "Unauthorized", "missing or unknown credential");
@@ -207,7 +228,7 @@ export class OperateWebServer {
     const page = await this.store.listPage(viewer.tenantId, entity, listQuery);
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
-    return renderTablePage(app, table, data);
+    return renderTablePage(app, table, data, page.nextCursor);
   }
 
   private async serveDetailHtml(
@@ -249,6 +270,7 @@ export function buildOperateWebServer(options: {
   readonly jwt?: JwtVerifyConfig;
   readonly compileOptions?: CompileOptions;
   readonly now?: () => Date;
+  readonly bundleLoader?: BundleLoader;
 }): OperateWebServer {
   const resolver = new WebPrincipalResolver({
     apiKeys: new ApiKeyRegistry(options.apiKeySpecs),
@@ -260,5 +282,6 @@ export function buildOperateWebServer(options: {
     ...(options.store !== undefined ? { store: options.store } : {}),
     resolver,
     ...(options.compileOptions !== undefined ? { compileOptions: options.compileOptions } : {}),
+    ...(options.bundleLoader !== undefined ? { bundleLoader: options.bundleLoader } : {}),
   });
 }

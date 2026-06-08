@@ -85,4 +85,58 @@ describe("operate-web SSR HTML routes", () => {
     expect(html).toContain("<form");
     expect(html).toContain('data-entity="Product"');
   });
+
+  it("emits the hydration scaffold: #root, embedded state, and the client script", async () => {
+    const res = await fetch(`${base}/app/Product`, { headers: { "x-api-key": "mgr" } });
+    const html = await res.text();
+    expect(html).toContain('<div id="root">');
+    expect(html).toContain("window.__OPERATE_WEB_STATE__ =");
+    expect(html).toContain('<script src="/assets/operate-web-client.js" defer></script>');
+    // the embedded state carries the table + the seeded row for client hydration
+    expect(html).toContain('"kind":"table"');
+    expect(html).toContain("ABC-1");
+  });
+
+  it("the embedded redacted state for a cashier omits the classified column", async () => {
+    const mgrHtml = await (await fetch(`${base}/app/Product/p1`, { headers: { "x-api-key": "mgr" } })).text();
+    const cshHtml = await (await fetch(`${base}/app/Product/p1`, { headers: { "x-api-key": "csh" } })).text();
+    // the embedded state mirrors the visible markup: the manager's blob has the
+    // classified value, the cashier's does not (redaction baked into the state)
+    expect(mgrHtml).toContain('"unit_cost"');
+    expect(mgrHtml).toContain("4.2");
+    expect(cshHtml).not.toContain('"unit_cost"');
+    expect(cshHtml).not.toContain("4.2");
+  });
+
+  it("escapes a </script> in the data so the embedded state can't break out", async () => {
+    await running.webServer.entityStore.create(TENANT, "Product", {
+      id: "xss",
+      sku: "</script><script>alert(1)</script>",
+      name: "Evil",
+      category: "home",
+      unit_price: 1,
+      unit_cost: 1,
+      status: "active",
+    });
+    const html = await (await fetch(`${base}/app/Product/xss`, { headers: { "x-api-key": "mgr" } })).text();
+    // every real </script> is one of ours (the state script + the client script);
+    // the data's </script> never appears literally — it's \u-escaped in the blob.
+    const closes = html.match(/<\/script>/g) ?? [];
+    expect(closes.length).toBe(2);
+    expect(html).toContain("\\u003c/script\\u003e");
+  });
+
+  it("serves a helpful 503 for the client bundle when it isn't built", async () => {
+    // the loopback server is built with the default loader; in the test
+    // environment the on-disk bundle may or may not exist. Either way the route
+    // resolves to JS (200) or a helpful notice (503) — never a 404/500.
+    const res = await fetch(`${base}/assets/operate-web-client.js`);
+    expect([200, 503]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.headers.get("content-type")).toContain("javascript");
+    } else {
+      const body = await res.json();
+      expect(body.detail).toContain("build:client");
+    }
+  });
 });
