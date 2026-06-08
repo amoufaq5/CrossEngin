@@ -72,6 +72,24 @@ export class PostgresSloEnforcementActionStore {
     return result.rows.map((row) => rowToRecord(row));
   }
 
+  async listSince(
+    since: Date,
+    limit = 1000,
+  ): Promise<readonly SloEnforcementActionRecord[]> {
+    if (limit <= 0) throw new Error("limit must be positive");
+    const result = await this.conn.query<Record<string, unknown>>(
+      `SELECT action_id, tenant_id, slo_id, surface, signal, decision, severity,
+              incident_id, kill_switch_id, flag_id, paged, page_channel_count,
+              threshold_id, occurred_at
+       FROM ${SCHEMA}.${TABLE}
+       WHERE occurred_at >= $1
+       ORDER BY occurred_at DESC
+       LIMIT $2`,
+      [since.toISOString(), limit],
+    );
+    return result.rows.map((row) => rowToRecord(row));
+  }
+
   async countSince(since: Date): Promise<number> {
     const result = await this.conn.query<{ count: string }>(
       `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE occurred_at >= $1`,

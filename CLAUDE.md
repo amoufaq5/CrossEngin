@@ -506,7 +506,24 @@ matched route surface into **both** engines. Only manifest-derived
 routes are covered (a 404/405 has no surface). Offline tests:
 per-route registration count, single-route latency-breach isolation,
 and availability + per-route latency composing in one monitor.
-**P2.14 (ADR-0118) added a projection
+**P2.46 (ADR-0157) gave the SLO enforcement tables an operator
+read+verify surface** — `@crossengin/observability-runtime-pg` gained a
+framework-neutral `query.ts` (`parseSloArgs` + `runSloQuery` over a
+structural `SloQuerySource` the existing store/replayer satisfy:
+`actions` lists recent enforcement actions, `summary` is the
+`summarizeEnforcement` rollup, `verify` runs `verifyEnforcementHistory`
+over the window and **exits 1 on any drift** — the CI-gate contract,
+like `crossengin-gateway-pg executions verify`) plus a
+`PostgresSloEnforcementActionStore.listSince` windowed read and a
+`bin/crossengin-slo.ts` (`slo actions|summary|verify [--since] [--limit]
+[--format json]` — opens a conn, builds a `StoreSloQuerySource` adapter,
+runs the query, exits the code). The package shifted `rootDir` to `.`
+(`dist/src/index.js` + `dist/bin/crossengin-slo.js`), mirroring
+api-gateway-pg's bin. The persistence ↔ read+verify symmetry now holds
+for all three audit tables (`meta.incidents`,
+`meta.gateway_pipeline_executions`, `meta.slo_enforcement_actions`). No
+new META_ tables; `query.ts` is offline-tested with a fake source (+18
+tests). **P2.14 (ADR-0118) added a projection
 drift-sweep worker mode** — a structural `DriftResyncer` (satisfied by
 `WorkflowReplayer`) + `DriftSweepWorker` that periodically re-projects
 a bounded batch of instances from the canonical event log and
@@ -2020,7 +2037,7 @@ re-exporting everything.
   No new META_ tables — emits records typed by existing
   contracts.
 - **`observability-runtime-pg`** — Postgres persistence for the
-  SLO enforcement loop (availability + latency). 7 modules:
+  SLO enforcement loop (availability + latency). 8 modules:
   records (SloEvaluationRecord + SloEnforcementActionRecord +
   SloLatencyEvaluationRecord zod schemas + sloe_/sloa_/slle_ id
   generators + pure projectors evaluationRecordFromVerdict /
@@ -2043,6 +2060,18 @@ re-exporting everything.
   META_ tables: meta.slo_evaluations + meta.slo_enforcement_actions
   (+ signal column) + meta.slo_latency_evaluations
   (platform-or-tenant RLS, append-only, sloe_/sloa_/slle_ ids).
+  P2.46 (ADR-0157) added query (the framework-neutral runner:
+  parseSloArgs + runSloQuery over a structural SloQuerySource —
+  actions list / summary rollup / verify; verify exits 1 on any
+  enforcement-history drift, the CI-gate contract; formatSloActions /
+  formatSloSummary / formatSloVerify; offline-tested with a fake
+  source) + PostgresSloEnforcementActionStore.listSince (windowed read)
+  + a bin/crossengin-slo.ts (slo actions|summary|verify — opens a conn,
+  builds a StoreSloQuerySource adapter over the store +
+  verifyEnforcementHistory, runs the query, exits the code), so the SLO
+  enforcement audit is operable from a shell and CI-gateable. The bin
+  shifted rootDir to . (dist/src/index.js + dist/bin/crossengin-slo.js;
+  main/types/exports → dist/src/…), mirroring api-gateway-pg's bin.
 - **`integrations`** — integration call audit, idempotency at the
   integration boundary, HMAC signatures, retry policy.
 - **`rate-limiting`** — unified rate-limit + quota contracts. 6

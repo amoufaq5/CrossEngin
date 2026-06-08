@@ -5,3 +5,4 @@ export * from "./enforcement-action-store.js";
 export * from "./persisting-engine.js";
 export * from "./latency-persisting-engine.js";
 export * from "./replayer.js";
+export * from "./query.js";
