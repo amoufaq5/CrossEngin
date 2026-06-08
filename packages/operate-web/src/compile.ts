@@ -3,6 +3,9 @@ import { listConfigForEntity } from "@crossengin/operate-runtime";
 import type { Entity, Field, FieldType } from "@crossengin/types/meta-schema";
 
 import {
+  type CalendarDefaultView,
+  type CalendarModel,
+  type CardFieldModel,
   type ColumnModel,
   type DetailModel,
   type DetailSectionModel,
@@ -12,6 +15,8 @@ import {
   type FormMode,
   type FormModel,
   type FormValidation,
+  type KanbanColumnModel,
+  type KanbanModel,
   type RowActionModel,
   type TableModel,
   type TableSort,
@@ -102,6 +107,45 @@ function viewsFor(manifest: Manifest): readonly ViewLike[] {
 
 function findView(manifest: Manifest, entity: string, kind: string): ViewLike | undefined {
   return viewsFor(manifest).find((v) => v.kind === kind && v.entity === entity);
+}
+
+/** The structural shape of a manifest `kanban` view (the views-package KanbanView as JSON data). */
+interface KanbanViewLike {
+  readonly kind: "kanban";
+  readonly entity: string;
+  readonly label?: Readonly<Record<string, string>>;
+  readonly stateField: string;
+  readonly columns: ReadonlyArray<{
+    state: string;
+    label?: Readonly<Record<string, string>>;
+    color?: string;
+    wipLimit?: number;
+  }>;
+  readonly cardFields: readonly string[];
+  readonly allowedTransitions?: readonly string[];
+  readonly groupBy?: string;
+}
+
+/** The structural shape of a manifest `calendar` view (the views-package CalendarView as JSON data). */
+interface CalendarViewLike {
+  readonly kind: "calendar";
+  readonly entity: string;
+  readonly label?: Readonly<Record<string, string>>;
+  readonly startField: string;
+  readonly endField?: string;
+  readonly titleField: string;
+  readonly colorField?: string;
+  readonly defaultView?: CalendarDefaultView;
+}
+
+function findKanbanView(manifest: Manifest, entity: string): KanbanViewLike | undefined {
+  const view = viewsFor(manifest).find((v) => v.kind === "kanban" && v.entity === entity);
+  return view as unknown as KanbanViewLike | undefined;
+}
+
+function findCalendarView(manifest: Manifest, entity: string): CalendarViewLike | undefined {
+  const view = viewsFor(manifest).find((v) => v.kind === "calendar" && v.entity === entity);
+  return view as unknown as CalendarViewLike | undefined;
 }
 
 function readableAccess(
@@ -284,16 +328,112 @@ export function compileFormModel(
   };
 }
 
+function cardFieldModels(
+  entity: Entity,
+  fieldNames: readonly string[],
+  access: ReadonlyMap<string, FieldAccess>,
+): CardFieldModel[] {
+  const out: CardFieldModel[] = [];
+  for (const fieldName of fieldNames) {
+    if (access.get(fieldName)?.read === false) continue;
+    const field = fieldByName(entity, fieldName);
+    if (field === undefined) continue;
+    out.push({ field: fieldName, label: humanize(fieldName), type: webFieldType(field.type) });
+  }
+  return out;
+}
+
+/**
+ * Compiles an entity's `KanbanModel` for a viewer, or `null` when the entity has
+ * no `kanban` view (there is no sensible fallback — a board needs a declared
+ * state field). Redaction-aware: a card field the viewer can't read is dropped,
+ * an unreadable `groupBy` is omitted, and — fail-closed — if the *state field
+ * itself* is unreadable the whole board is withheld (returns `null`), since the
+ * grouping axis would otherwise leak which column each record sits in.
+ */
+export function compileKanbanModel(
+  manifest: Manifest,
+  entityName: string,
+  viewer: ViewerContext,
+  options: CompileOptions = {},
+): KanbanModel | null {
+  const entity = entityByName(manifest, entityName);
+  if (entity === undefined) throw new Error(`unknown entity '${entityName}'`);
+  const view = findKanbanView(manifest, entityName);
+  if (view === undefined) return null;
+  const access = readableAccess(manifest, entity, viewer, options);
+  if (access.get(view.stateField)?.read === false) return null;
+
+  const columns: KanbanColumnModel[] = view.columns.map((c) => ({
+    state: c.state,
+    label: labelOr(c.label, c.state),
+    ...(c.color !== undefined ? { color: c.color } : {}),
+    ...(c.wipLimit !== undefined ? { wipLimit: c.wipLimit } : {}),
+  }));
+
+  const cardFields = cardFieldModels(entity, view.cardFields, access);
+  const groupByReadable = view.groupBy !== undefined && access.get(view.groupBy)?.read !== false;
+
+  return {
+    entity: entityName,
+    title: labelOr(view.label, entityTitle(entityName)),
+    stateField: view.stateField,
+    columns,
+    cardFields,
+    allowedTransitions: [...(view.allowedTransitions ?? [])],
+    ...(groupByReadable ? { groupBy: view.groupBy! } : {}),
+  };
+}
+
+/**
+ * Compiles an entity's `CalendarModel` for a viewer, or `null` when the entity
+ * has no `calendar` view (a calendar needs a declared start + title field).
+ * Redaction-aware: an unreadable `endField` / `colorField` is omitted, and —
+ * fail-closed — if the `startField` or `titleField` is unreadable the calendar
+ * is withheld (returns `null`).
+ */
+export function compileCalendarModel(
+  manifest: Manifest,
+  entityName: string,
+  viewer: ViewerContext,
+  options: CompileOptions = {},
+): CalendarModel | null {
+  const entity = entityByName(manifest, entityName);
+  if (entity === undefined) throw new Error(`unknown entity '${entityName}'`);
+  const view = findCalendarView(manifest, entityName);
+  if (view === undefined) return null;
+  const access = readableAccess(manifest, entity, viewer, options);
+  if (access.get(view.startField)?.read === false) return null;
+  if (access.get(view.titleField)?.read === false) return null;
+
+  const endReadable = view.endField !== undefined && access.get(view.endField)?.read !== false;
+  const colorReadable = view.colorField !== undefined && access.get(view.colorField)?.read !== false;
+
+  return {
+    entity: entityName,
+    title: labelOr(view.label, entityTitle(entityName)),
+    startField: view.startField,
+    ...(endReadable ? { endField: view.endField! } : {}),
+    titleField: view.titleField,
+    ...(colorReadable ? { colorField: view.colorField! } : {}),
+    defaultView: view.defaultView ?? "week",
+  };
+}
+
 /**
  * Compiles the top-level `WebAppModel` for a viewer: the app title + one
  * `EntityNav` per manifest entity (with its table path + available view kinds).
+ * The `table`/`detail`/`form` surfaces always exist (via fallbacks); `kanban` /
+ * `calendar` appear only when the entity declares such a view *and* it compiles
+ * for this viewer (so a board withheld for redaction never shows in the nav).
  * Entities are listed in manifest order.
  */
 export function compileWebApp(manifest: Manifest, viewer: ViewerContext): WebAppModel {
-  void viewer;
   const nav: EntityNav[] = [];
   for (const entity of manifest.entities ?? []) {
-    const views: Array<"table" | "detail" | "form"> = ["table", "detail", "form"];
+    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar"> = ["table", "detail", "form"];
+    if (compileKanbanModel(manifest, entity.name, viewer) !== null) views.push("kanban");
+    if (compileCalendarModel(manifest, entity.name, viewer) !== null) views.push("calendar");
     nav.push({
       entity: entity.name,
       label: labelOr(findView(manifest, entity.name, "list")?.label, entityTitle(entity.name)),

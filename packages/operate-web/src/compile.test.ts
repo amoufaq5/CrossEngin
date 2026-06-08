@@ -5,8 +5,10 @@ import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { describe, expect, it } from "vitest";
 
 import {
+  compileCalendarModel,
   compileDetailModel,
   compileFormModel,
+  compileKanbanModel,
   compileTableModel,
   compileWebApp,
   entityTitle,
@@ -14,8 +16,10 @@ import {
   webFieldType,
 } from "./compile.js";
 import {
+  CalendarModelSchema,
   DetailModelSchema,
   FormModelSchema,
+  KanbanModelSchema,
   TableModelSchema,
   WebAppModelSchema,
 } from "./model.js";
@@ -145,5 +149,147 @@ describe("compileWebApp", () => {
     expect(app.nav.map((n) => n.entity)).toContain("Product");
     expect(app.nav.find((n) => n.entity === "Product")?.path).toBe("/ui/Product");
     expect(app.title.length).toBeGreaterThan(0);
+  });
+
+  it("lists only table/detail/form when no kanban/calendar view is declared", () => {
+    const app = compileWebApp(retail, MANAGER);
+    expect(app.nav.find((n) => n.entity === "Product")?.views).toEqual(["table", "detail", "form"]);
+  });
+});
+
+/** Augments a resolved manifest with extra view declarations (the packs ship only ListViews). */
+function withViews(base: Manifest, views: Record<string, unknown>): Manifest {
+  return { ...base, views: { ...(base.views ?? {}), ...views } } as unknown as Manifest;
+}
+
+const PRODUCT_KANBAN = {
+  productBoard: {
+    kind: "kanban",
+    entity: "Product",
+    label: { en: "Product board" },
+    stateField: "status",
+    columns: [
+      { state: "active", label: { en: "Active" }, color: "#0a0", wipLimit: 50 },
+      { state: "discontinued", label: { en: "Discontinued" } },
+    ],
+    cardFields: ["sku", "name", "unit_price", "unit_cost"],
+    allowedTransitions: [],
+    groupBy: "category",
+  },
+};
+
+const SALES_ORDER_CALENDAR = {
+  orderCalendar: {
+    kind: "calendar",
+    entity: "SalesOrder",
+    label: { en: "Order calendar" },
+    startField: "placed_at",
+    titleField: "order_number",
+    colorField: "state",
+    defaultView: "month",
+  },
+};
+
+describe("compileKanbanModel", () => {
+  const m = withViews(retail, PRODUCT_KANBAN);
+
+  it("returns null when the entity has no kanban view (no fallback)", () => {
+    expect(compileKanbanModel(retail, "Product", MANAGER)).toBeNull();
+  });
+
+  it("compiles a schema-valid board with columns + state field", () => {
+    const board = compileKanbanModel(m, "Product", MANAGER);
+    expect(board).not.toBeNull();
+    expect(() => KanbanModelSchema.parse(board)).not.toThrow();
+    expect(board!.stateField).toBe("status");
+    expect(board!.columns.map((c) => c.state)).toEqual(["active", "discontinued"]);
+    expect(board!.columns[0]).toMatchObject({ label: "Active", color: "#0a0", wipLimit: 50 });
+    expect(board!.groupBy).toBe("category");
+  });
+
+  it("a manager's card fields include the classified unit_cost", () => {
+    const board = compileKanbanModel(m, "Product", MANAGER);
+    expect(board!.cardFields.map((f) => f.field)).toContain("unit_cost");
+  });
+
+  it("a cashier's card fields OMIT unit_cost (redaction), keeping the board", () => {
+    const board = compileKanbanModel(m, "Product", CASHIER);
+    expect(board).not.toBeNull();
+    expect(board!.cardFields.map((f) => f.field)).not.toContain("unit_cost");
+    expect(board!.cardFields.map((f) => f.field)).toContain("sku");
+  });
+
+  it("withholds the whole board (null) when the state field itself is unreadable — fail-closed", () => {
+    const leaky = withViews(retail, {
+      productBoard: { ...PRODUCT_KANBAN.productBoard, stateField: "unit_cost" },
+    });
+    expect(compileKanbanModel(leaky, "Product", MANAGER)).not.toBeNull();
+    expect(compileKanbanModel(leaky, "Product", CASHIER)).toBeNull();
+  });
+
+  it("omits an unreadable groupBy field", () => {
+    const grouped = withViews(retail, {
+      productBoard: { ...PRODUCT_KANBAN.productBoard, groupBy: "unit_cost" },
+    });
+    expect(compileKanbanModel(grouped, "Product", MANAGER)!.groupBy).toBe("unit_cost");
+    expect(compileKanbanModel(grouped, "Product", CASHIER)!.groupBy).toBeUndefined();
+  });
+
+  it("throws on an unknown entity", () => {
+    expect(() => compileKanbanModel(m, "Nope", MANAGER)).toThrow(/unknown entity/);
+  });
+});
+
+describe("compileCalendarModel", () => {
+  const m = withViews(retail, SALES_ORDER_CALENDAR);
+
+  it("returns null when the entity has no calendar view", () => {
+    expect(compileCalendarModel(retail, "SalesOrder", MANAGER)).toBeNull();
+  });
+
+  it("compiles a schema-valid calendar with start/title/color + default view", () => {
+    const cal = compileCalendarModel(m, "SalesOrder", MANAGER);
+    expect(cal).not.toBeNull();
+    expect(() => CalendarModelSchema.parse(cal)).not.toThrow();
+    expect(cal!.startField).toBe("placed_at");
+    expect(cal!.titleField).toBe("order_number");
+    expect(cal!.colorField).toBe("state");
+    expect(cal!.defaultView).toBe("month");
+  });
+
+  it("omits an unreadable colorField but keeps the calendar", () => {
+    const piiColor = withViews(retail, {
+      orderCalendar: { ...SALES_ORDER_CALENDAR.orderCalendar, colorField: "customer_email" },
+    });
+    const cal = compileCalendarModel(piiColor, "SalesOrder", CASHIER);
+    expect(cal).not.toBeNull();
+    expect(cal!.colorField).toBeUndefined();
+  });
+
+  it("withholds the calendar (null) when the title field is unreadable — fail-closed", () => {
+    const leaky = withViews(retail, {
+      orderCalendar: { ...SALES_ORDER_CALENDAR.orderCalendar, titleField: "customer_email" },
+    });
+    expect(compileCalendarModel(leaky, "SalesOrder", CASHIER)).toBeNull();
+  });
+});
+
+describe("compileWebApp — kanban/calendar nav exposure", () => {
+  it("adds kanban to the entity's nav when a board compiles for the viewer", () => {
+    const app = compileWebApp(withViews(retail, PRODUCT_KANBAN), MANAGER);
+    expect(app.nav.find((n) => n.entity === "Product")?.views).toContain("kanban");
+  });
+
+  it("drops kanban from the nav when the board is withheld for redaction", () => {
+    const leaky = withViews(retail, {
+      productBoard: { ...PRODUCT_KANBAN.productBoard, stateField: "unit_cost" },
+    });
+    expect(compileWebApp(leaky, MANAGER).nav.find((n) => n.entity === "Product")?.views).toContain("kanban");
+    expect(compileWebApp(leaky, CASHIER).nav.find((n) => n.entity === "Product")?.views).not.toContain("kanban");
+  });
+
+  it("adds calendar to the entity's nav when a calendar compiles", () => {
+    const app = compileWebApp(withViews(retail, SALES_ORDER_CALENDAR), MANAGER);
+    expect(app.nav.find((n) => n.entity === "SalesOrder")?.views).toContain("calendar");
   });
 });

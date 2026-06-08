@@ -122,13 +122,62 @@ export const FormModelSchema = z.object({
 });
 export type FormModel = z.infer<typeof FormModelSchema>;
 
+/** A display field on a kanban card or a calendar event (no value — pure layout intent). */
+export const CardFieldModelSchema = z.object({
+  field: z.string().min(1),
+  label: z.string().min(1),
+  type: WebFieldTypeSchema,
+});
+export type CardFieldModel = z.infer<typeof CardFieldModelSchema>;
+
+export const KanbanColumnModelSchema = z.object({
+  state: z.string().min(1),
+  label: z.string().min(1),
+  color: z.string().min(1).optional(),
+  wipLimit: z.number().int().positive().optional(),
+});
+export type KanbanColumnModel = z.infer<typeof KanbanColumnModelSchema>;
+
+export const KanbanModelSchema = z.object({
+  entity: z.string().min(1),
+  title: z.string().min(1),
+  /** The enum/status field whose value places a card in a column. */
+  stateField: z.string().min(1),
+  columns: z.array(KanbanColumnModelSchema).min(1),
+  /** The fields shown on each card — redaction-filtered for the viewer. */
+  cardFields: z.array(CardFieldModelSchema),
+  /** A workflow-transition allow-list a frontend may offer on drag (names only). */
+  allowedTransitions: z.array(z.string().min(1)),
+  /** An optional secondary grouping field (omitted when the viewer can't read it). */
+  groupBy: z.string().min(1).optional(),
+});
+export type KanbanModel = z.infer<typeof KanbanModelSchema>;
+
+export const CALENDAR_DEFAULT_VIEWS = ["day", "week", "month", "agenda"] as const;
+export type CalendarDefaultView = (typeof CALENDAR_DEFAULT_VIEWS)[number];
+
+export const CalendarModelSchema = z.object({
+  entity: z.string().min(1),
+  title: z.string().min(1),
+  /** The field carrying an event's start instant. */
+  startField: z.string().min(1),
+  /** The field carrying an event's end instant (omitted when unreadable / absent). */
+  endField: z.string().min(1).optional(),
+  /** The field rendered as the event's label. */
+  titleField: z.string().min(1),
+  /** A field whose value drives event color (omitted when unreadable / absent). */
+  colorField: z.string().min(1).optional(),
+  defaultView: z.enum(CALENDAR_DEFAULT_VIEWS),
+});
+export type CalendarModel = z.infer<typeof CalendarModelSchema>;
+
 export const EntityNavSchema = z.object({
   entity: z.string().min(1),
   label: z.string().min(1),
   /** Path to the entity's list/table surface, e.g. `/ui/Product`. */
   path: z.string().min(1),
   /** The view kinds available for the entity, derived from the manifest + fallbacks. */
-  views: z.array(z.enum(["table", "detail", "form"])),
+  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar"])),
 });
 export type EntityNav = z.infer<typeof EntityNavSchema>;
 

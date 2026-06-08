@@ -8,8 +8,10 @@ import {
 } from "@crossengin/operate-runtime";
 import {
   EntityFieldResolver,
+  compileCalendarModel,
   compileDetailModel,
   compileFormModel,
+  compileKanbanModel,
   compileTableModel,
   compileWebApp,
   entityFields,
@@ -58,6 +60,8 @@ export interface OperateWebServerOptions {
  * Routes:
  *   GET /ui/app              -> WebAppModel
  *   GET /ui/:entity          -> { table, page: { data, nextCursor } }
+ *   GET /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
+ *   GET /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
  *   GET /ui/:entity/new      -> { form }
  *   GET /ui/:entity/:id      -> { detail, record }
  */
@@ -131,6 +135,12 @@ export class OperateWebServer {
     if (rest.length === 1) {
       return this.serveTable(rest[0]!, viewer, viewerCtx, query);
     }
+    if (rest.length === 2 && rest[1] === "kanban") {
+      return this.serveKanban(rest[0]!, viewer, viewerCtx, query);
+    }
+    if (rest.length === 2 && rest[1] === "calendar") {
+      return this.serveCalendar(rest[0]!, viewer, viewerCtx, query);
+    }
     if (rest.length === 2 && rest[1] === "new") {
       return this.serveForm(rest[0]!, viewerCtx);
     }
@@ -187,6 +197,40 @@ export class OperateWebServer {
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
     return jsonResponse(200, { table, page: { data, nextCursor: page.nextCursor } });
+  }
+
+  private async serveKanban(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const kanban = compileKanbanModel(this.manifest, entity, viewerCtx, this.compileOptions);
+    if (kanban === null) return problemResponse(404, "Not found", `no kanban view for '${entity}'`);
+    const config = listConfigForEntity(this.manifest, entity);
+    const page = await this.store.listPage(viewer.tenantId, entity, parseListQuery(query, config));
+    const access = this.accessFor(entity, viewerCtx);
+    const data = page.records.map((r) => redactRecord(r, access));
+    return jsonResponse(200, { kanban, page: { data, nextCursor: page.nextCursor } });
+  }
+
+  private async serveCalendar(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const calendar = compileCalendarModel(this.manifest, entity, viewerCtx, this.compileOptions);
+    if (calendar === null) return problemResponse(404, "Not found", `no calendar view for '${entity}'`);
+    const config = listConfigForEntity(this.manifest, entity);
+    const page = await this.store.listPage(viewer.tenantId, entity, parseListQuery(query, config));
+    const access = this.accessFor(entity, viewerCtx);
+    const data = page.records.map((r) => redactRecord(r, access));
+    return jsonResponse(200, { calendar, page: { data, nextCursor: page.nextCursor } });
   }
 
   private async serveDetail(

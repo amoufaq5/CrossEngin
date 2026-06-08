@@ -123,3 +123,90 @@ describe("GET /ui/:entity/new — form", () => {
     expect(csh.form.fields.map((f: { field: string }) => f.field)).not.toContain("unit_cost");
   });
 });
+
+const withBoard = {
+  ...retail,
+  views: {
+    ...(retail.views ?? {}),
+    productBoard: {
+      kind: "kanban",
+      entity: "Product",
+      stateField: "status",
+      columns: [
+        { state: "active", label: { en: "Active" } },
+        { state: "discontinued", label: { en: "Discontinued" } },
+      ],
+      cardFields: ["sku", "name", "unit_cost"],
+      allowedTransitions: [],
+    },
+    orderCalendar: {
+      kind: "calendar",
+      entity: "SalesOrder",
+      startField: "placed_at",
+      titleField: "order_number",
+      defaultView: "month",
+    },
+  },
+} as unknown as Manifest;
+
+async function makeServerWithViews(): Promise<OperateWebServer> {
+  const store = new InMemoryEntityStore();
+  await store.create(TENANT, "Product", {
+    id: "p1",
+    sku: "ABC-1",
+    name: "Widget",
+    category: "home",
+    unit_price: 9.99,
+    unit_cost: 4.2,
+    status: "active",
+  });
+  return buildOperateWebServer({
+    manifest: withBoard,
+    store,
+    apiKeySpecs: [
+      { key: "mgr", role: "store_manager", tenantId: TENANT },
+      { key: "csh", role: "cashier", tenantId: TENANT },
+    ],
+  });
+}
+
+describe("GET /ui/:entity/kanban — board + redacted card fields", () => {
+  it("404s when the manifest declares no kanban view for the entity", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(req("/ui/Product/kanban", "mgr"))).status).toBe(404);
+  });
+
+  it("serves the board model + a data page; a manager's cards include unit_cost", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/ui/Product/kanban", "mgr"));
+    expect(res.status).toBe(200);
+    const out = body(res);
+    expect(out.kanban.stateField).toBe("status");
+    expect(out.kanban.columns.map((c: { state: string }) => c.state)).toEqual(["active", "discontinued"]);
+    expect(out.kanban.cardFields.map((f: { field: string }) => f.field)).toContain("unit_cost");
+    expect(out.page.data[0].unit_cost).toBe(4.2);
+  });
+
+  it("a cashier's board omits the classified unit_cost in both the card model and the data", async () => {
+    const server = await makeServerWithViews();
+    const out = body(await server.dispatch(req("/ui/Product/kanban", "csh")));
+    expect(out.kanban.cardFields.map((f: { field: string }) => f.field)).not.toContain("unit_cost");
+    expect("unit_cost" in out.page.data[0]).toBe(false);
+  });
+});
+
+describe("GET /ui/:entity/calendar — calendar model + data page", () => {
+  it("serves the calendar model for a declared view", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/ui/SalesOrder/calendar", "mgr"));
+    expect(res.status).toBe(200);
+    const out = body(res);
+    expect(out.calendar.startField).toBe("placed_at");
+    expect(out.calendar.titleField).toBe("order_number");
+  });
+
+  it("404s an entity with no calendar view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/ui/Product/calendar", "mgr"))).status).toBe(404);
+  });
+});
