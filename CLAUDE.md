@@ -22,11 +22,17 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2 + P3.3 + P3.4 + P2.46 + P3.5** landed: **64 packages + 4 apps, 125
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2 + P3.3 + P3.4 + P2.46 + P3.5 + P2.48** landed: **64 packages + 4 apps, 125
 meta-schema tables, 6,872 offline tests + 39 gated real-Postgres
-integration tests (17 worker + 22 operate-server) + four CI gates
-(schema-drift + incident-drift + PHI-encryption + gateway-execution), all
-genuinely green against a live Postgres** — no type errors. **P2.45 (ADR-0153)
+integration tests (17 worker + 22 operate-server) + five CI gates
+(schema-drift + incident-drift + PHI-encryption + gateway-execution +
+slo-enforcement-drift), all
+genuinely green against a live Postgres** — no type errors. **P2.48 (ADR-0160)
+added the SLO-enforcement-drift gate** — a `crossengin-slo slo verify` step in
+the `integration` job (after the gated suites populate
+`meta.slo_enforcement_actions` via `--slo-persist`) that exits 1 on any
+enforcement-history drift; verified against real persisted rows
+(`1 action, no drift`). **P2.45 (ADR-0153)
 made the gateway-execution gate non-vacuous:** `apps/operate-server` now
 persists each request's `PipelineExecution` to `meta.gateway_pipeline_executions`
 (+ rate-limit decisions, so the replayer's FK checks hold) under
@@ -2441,15 +2447,18 @@ provisioned `meta` schema — exits 1 on any added/removed/modified
 table, column, index, policy, or RLS toggle vs `META_TABLES`; runs
 before the suites so it gates the bootstrap baseline, not test
 pollution), then the gated suites under `CROSSENGIN_PG_TEST=1`, then
-three more gates — an **incident-drift gate** (`workflow-worker
+four more gates — an **incident-drift gate** (`workflow-worker
 incidents verify` over a wide window, exits 1 on any drifted incident
 timeline), a **PHI at-rest encryption gate** (`crossengin-pg
 encrypt --verify` over `meta` + `public`, exits 1 on any plaintext PHI
-column / missing pgcrypto), and a **gateway-execution drift gate**
+column / missing pgcrypto), a **gateway-execution drift gate**
 (`crossengin-gateway-pg executions verify --since 2000-01-01`, exits 1
-on any drifted persisted PipelineExecution; verifies an empty table
-clean today since operate-server doesn't yet persist executions, P2.42
-/ ADR-0151), all failing the build).
+on any drifted persisted PipelineExecution; non-vacuous since P2.45 —
+operate-server's gated suite persists executions under
+`--persist-executions`), and an **SLO-enforcement-drift gate**
+(`crossengin-slo slo verify --since 2000-01-01`, exits 1 on any drifted
+enforcement history; the operate-server `--slo-persist` suite populates
+`meta.slo_enforcement_actions`, P2.48 / ADR-0160), all failing the build).
 `scripts/emit-bootstrap.mjs`
 emits the meta-schema DDL the setup script applies. (Production uses
 the `pg_uuidv7` extension; the test shim is `gen_random_uuid()`.)

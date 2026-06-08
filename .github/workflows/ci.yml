@@ -102,12 +102,16 @@ jobs:
         # out of order, stage repeated, final stage/outcome mismatch, pass with
         # 4xx/5xx, deny without 4xx/5xx, terminating outcome not last, duration
         # inconsistent, rate-limit-decision orphaned). `executions verify` EXITS 1
-        # if ANY execution drifted, failing the job. NOTE (ADR-0151): the gated
-        # operate-server path does not yet persist its executions (GatewayRuntime
-        # returns the PipelineExecution on HandleResult, but operate-server's
-        # dispatch discards it — no execution store is wired into
-        # buildOperateGateway). So today this gate verifies an empty table (exit 0)
-        # — it is self-policing the *moment* any consumer wires a
-        # PostgresPipelineExecutionStore into the serving path. Run after the gated
-        # suites so it sees whatever they populate.
+        # if ANY execution drifted, failing the job. Non-vacuous since P2.45
+        # (ADR-0153): the operate-server gated suite runs with --persist-executions,
+        # so this audits REAL persisted executions (+ their rate-limit decisions).
+        # Run after the gated suites so it sees what they populated.
         run: node packages/api-gateway-pg/dist/bin/crossengin-gateway-pg.js executions verify --since 2000-01-01
+      - name: SLO enforcement drift gate
+        # The operate-server gated SLO suite (--slo-persist, P2.33) writes
+        # enforcement actions + evaluation snapshots to meta.slo_enforcement_actions
+        # / meta.slo_evaluations via the persistent SLO engine. `slo verify` runs
+        # verifyEnforcementHistory over a wide window and EXITS 1 on any drift
+        # (ongoing/recovered-without-open, duplicate-open, paged-without-channels,
+        # kill-switch-without-flag). An empty table verifies clean (exit 0).
+        run: node packages/observability-runtime-pg/dist/bin/crossengin-slo.js slo verify --since 2000-01-01
