@@ -208,3 +208,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 122 | 0153 | 2,500 | Drafted alongside serving pipeline-execution persistence — the gateway gate goes non-vacuous (Phase 3 P2.45) |
 | 123 | 0154 | 3,000 | Drafted alongside the operate-web edge/Workers adapter + JWT/JWKS auth (Phase 3 P3.2) |
 | 124 | 0155 | 3,000 | Drafted alongside the operate-web React component renderer — SSR (Phase 3 P3.3) |
+| 125 | 0156 | 3,000 | Drafted alongside operate-web client hydration + esbuild bundler (Phase 3 P3.4) |
