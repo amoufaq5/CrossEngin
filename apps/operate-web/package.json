@@ -1,0 +1,43 @@
+{
+  "name": "@crossengin/operate-web-app",
+  "version": "0.0.0",
+  "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "operate-web": "./dist/bin/operate-web.js"
+  },
+  "files": ["dist", "src", "bin"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@crossengin/kernel": "workspace:*",
+    "@crossengin/operate-runtime": "workspace:*",
+    "@crossengin/operate-web": "workspace:*",
+    "@crossengin/pack-erp-core": "workspace:*",
+    "@crossengin/pack-erp-grocery": "workspace:*",
+    "@crossengin/pack-erp-healthcare": "workspace:*",
+    "@crossengin/pack-erp-retail": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@crossengin/config": "workspace:*",
+    "@crossengin/testing": "workspace:*",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

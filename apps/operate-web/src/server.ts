@@ -1,0 +1,160 @@
+import type { Manifest } from "@crossengin/kernel/manifest";
+import {
+  InMemoryEntityStore,
+  listConfigForEntity,
+  parseFields,
+  parseListQuery,
+  type EntityStore,
+} from "@crossengin/operate-runtime";
+import {
+  EntityFieldResolver,
+  compileDetailModel,
+  compileFormModel,
+  compileTableModel,
+  compileWebApp,
+  entityFields,
+  redactRecord,
+  type CompileOptions,
+  type ViewerContext,
+} from "@crossengin/operate-web";
+
+import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type RawWebResponse } from "./http.js";
+import { ApiKeyRegistry, type WebViewer } from "./principals.js";
+
+export interface OperateWebServerOptions {
+  readonly manifest: Manifest;
+  readonly store?: EntityStore;
+  readonly apiKeys: ApiKeyRegistry;
+  readonly compileOptions?: CompileOptions;
+}
+
+/**
+ * The framework-neutral serving core: authenticates each request against the
+ * API-key registry, then serves the redaction-aware view models (and the data
+ * behind them) as JSON. Every model + every data row is compiled / redacted for
+ * the *caller*, so the JSON never carries a field the viewer can't read.
+ *
+ * Routes:
+ *   GET /ui/app              -> WebAppModel
+ *   GET /ui/:entity          -> { table, page: { data, nextCursor } }
+ *   GET /ui/:entity/new      -> { form }
+ *   GET /ui/:entity/:id      -> { detail, record }
+ */
+export class OperateWebServer {
+  private readonly manifest: Manifest;
+  private readonly store: EntityStore;
+  private readonly apiKeys: ApiKeyRegistry;
+  private readonly compileOptions: CompileOptions;
+  private readonly entityNames: ReadonlySet<string>;
+
+  constructor(options: OperateWebServerOptions) {
+    this.manifest = options.manifest;
+    this.store = options.store ?? new InMemoryEntityStore();
+    this.apiKeys = options.apiKeys;
+    this.compileOptions = options.compileOptions ?? {};
+    this.entityNames = new Set((options.manifest.entities ?? []).map((e) => e.name));
+  }
+
+  /** Exposes the store so a boot script can seed records for the in-memory case. */
+  get entityStore(): EntityStore {
+    return this.store;
+  }
+
+  async dispatch(req: RawWebRequest): Promise<RawWebResponse> {
+    if (req.method.toUpperCase() !== "GET") {
+      return problemResponse(405, "Method not allowed", `unsupported method ${req.method}`);
+    }
+    const viewer = this.apiKeys.resolve(req);
+    if (viewer === null) {
+      return problemResponse(401, "Unauthorized", "missing or unknown API key");
+    }
+
+    const { path, query } = splitTarget(req.url);
+    const segments = path.split("/").filter((s) => s.length > 0);
+    // expect: ui / <rest...>
+    if (segments[0] !== "ui") {
+      return problemResponse(404, "Not found", `no route for ${path}`);
+    }
+    const rest = segments.slice(1);
+    const viewerCtx: ViewerContext = { roles: viewer.roles };
+
+    if (rest.length === 1 && rest[0] === "app") {
+      return jsonResponse(200, compileWebApp(this.manifest, viewerCtx));
+    }
+    if (rest.length === 1) {
+      return this.serveTable(rest[0]!, viewer, viewerCtx, query);
+    }
+    if (rest.length === 2 && rest[1] === "new") {
+      return this.serveForm(rest[0]!, viewerCtx);
+    }
+    if (rest.length === 2) {
+      return this.serveDetail(rest[0]!, rest[1]!, viewer, viewerCtx);
+    }
+    return problemResponse(404, "Not found", `no route for ${path}`);
+  }
+
+  private unknownEntity(entity: string): RawWebResponse | null {
+    return this.entityNames.has(entity) ? null : problemResponse(404, "Not found", `unknown entity '${entity}'`);
+  }
+
+  private accessFor(entity: string, viewerCtx: ViewerContext): ReadonlyMap<string, { read: boolean; write: boolean }> {
+    const ent = (this.manifest.entities ?? []).find((e) => e.name === entity)!;
+    return new EntityFieldResolver(this.manifest, entity, viewerCtx, this.compileOptions).resolve(entityFields(ent));
+  }
+
+  private async serveTable(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const table = compileTableModel(this.manifest, entity, viewerCtx, this.compileOptions);
+    const config = listConfigForEntity(this.manifest, entity);
+    const fields = parseFields(query);
+    const listQuery = { ...parseListQuery(query, config), ...(fields !== null ? { fields } : {}) };
+    const page = await this.store.listPage(viewer.tenantId, entity, listQuery);
+    const access = this.accessFor(entity, viewerCtx);
+    const data = page.records.map((r) => redactRecord(r, access));
+    return jsonResponse(200, { table, page: { data, nextCursor: page.nextCursor } });
+  }
+
+  private async serveDetail(
+    entity: string,
+    id: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const record = await this.store.get(viewer.tenantId, entity, id);
+    if (record === null) return problemResponse(404, "Not found", `no ${entity} record '${id}'`);
+    const access = this.accessFor(entity, viewerCtx);
+    const redacted = redactRecord(record, access);
+    const detail = compileDetailModel(this.manifest, entity, viewerCtx, redacted, this.compileOptions);
+    return jsonResponse(200, { detail, record: redacted });
+  }
+
+  private serveForm(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const form = compileFormModel(this.manifest, entity, viewerCtx, "create", this.compileOptions);
+    return jsonResponse(200, { form });
+  }
+}
+
+/** Composes a manifest + store + API keys into a ready `OperateWebServer`. */
+export function buildOperateWebServer(options: {
+  readonly manifest: Manifest;
+  readonly store?: EntityStore;
+  readonly apiKeySpecs: readonly { key: string; role: string; tenantId: string }[];
+  readonly compileOptions?: CompileOptions;
+}): OperateWebServer {
+  return new OperateWebServer({
+    manifest: options.manifest,
+    ...(options.store !== undefined ? { store: options.store } : {}),
+    apiKeys: new ApiKeyRegistry(options.apiKeySpecs),
+    ...(options.compileOptions !== undefined ? { compileOptions: options.compileOptions } : {}),
+  });
+}

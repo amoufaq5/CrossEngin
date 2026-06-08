@@ -431,7 +431,33 @@ schema change); `--mode resync` + `--resync-interval-ms` (default
 300000) + `--resync-max` (500), **opt-in, not in `all`** (heavy
 re-projection). The worker now has eight modes (tick · claim · retry ·
 timeout · execute · reap · resync · all). **The P2 distributed-worker
-arc is complete.** P1 added
+arc is complete.** **P3.1 (ADR-0080) opened the P3 renderer arc** —
+`@crossengin/operate-web`, a framework-neutral, redaction-aware
+view-model compiler over a resolved manifest's `views` (the 63rd
+package), plus `apps/operate-web`, a runnable Node `http` shell that
+serves those models + the data behind them as JSON per caller (the
+4th app). The compiler is pure (zod descriptor schemas + pure
+functions, no React/DOM): `compileWebApp` / `compileTableModel` /
+`compileDetailModel` / `compileFormModel` derive a `TableModel` from
+the entity's `ListView` (else every field), a `DetailModel` from the
+`RecordView` (else one all-readable-fields section), and a `FormModel`
+from the `FormView` (else every writable field) — and **every model is
+redaction-aware from day one**: an `EntityFieldResolver` reuses the
+auth `computeClassifiedFieldRedaction` (read → field inclusion) +
+`validateClassifiedWriteMask` (write → form `readOnly`), so a field the
+viewer can't read is dropped from the model entirely and a
+readable-but-not-writable field is marked `readOnly`. The serving shell
+authenticates `key:role:tenant` API keys (fail-closed → 401) and routes
+`GET /ui/app` / `/ui/:entity` / `/ui/:entity/new` / `/ui/:entity/:id`,
+compiling the model + redacting the data row for the caller so the JSON
+never carries a hidden field. No new META_ tables (pure rendering over
+existing stores). A `store_manager` sees `Product.unit_cost`; a
+`cashier` doesn't — proved on the table, detail, form, and a real
+loopback. The built-in packs declare only `ListView`s, so the
+detail/form fall back to `listConfigForEntity` + all-readable-fields;
+the compiler works with or without explicit views. JWT/edge auth, the
+Postgres entity stores, mutation routing, and the richer view kinds
+(kanban / calendar / dashboard) stay the follow-ups. P1 added
 `@crossengin/operate-runtime` — the serving keystone that
 composes a resolved manifest into a live multi-tenant API. A
 `manifest → routes → handlers` compiler derives a `RouteSpec` per
@@ -1635,6 +1661,35 @@ re-exporting everything.
   All logic offline-tested. An ops guide (README.md) documents the 8 modes,
   flags, claim/lease model, and the heartbeat → detect → plan → page →
   run → persist → escalate → re-page → resolve flow.
+- **`apps/operate-web`** — Phase 3 P3.1: the runnable view-model
+  serving shell (4th app under `apps/`, after `architect-cli` +
+  `operate-server` + `workflow-worker`). A thin Node `http` shell
+  over `@crossengin/operate-web` that serves the redaction-aware
+  view models + the data behind them as JSON, per caller. 6 src
+  modules + a bin: http (RawWebRequest/RawWebResponse +
+  splitTarget + jsonResponse / problemResponse), principals
+  (parseApiKeySpec key:role:tenant + ApiKeyRegistry — resolves an
+  x-api-key / Authorization: Bearer token to a WebViewer {roles,
+  tenantId}, fail-closed → 401), manifest-source (the same
+  loadBuiltinPack lineage-resolver + loadManifestFromJson as
+  operate-server), server (OperateWebServer.dispatch routes GET
+  /ui/app → WebAppModel, /ui/:entity → {table, page:{data,
+  nextCursor}}, /ui/:entity/new → {form}, /ui/:entity/:id →
+  {detail, record} — every model compiled + every data row
+  redacted for the caller via the operate-web compiler +
+  redactRecord, so the JSON never carries a hidden field; the data
+  comes from an injected EntityStore, default
+  InMemoryEntityStore), cli (parseWebArgs: --pack | --manifest
+  exactly one, --port, repeatable --api-key, --help/--version),
+  node (createNodeRequestListener + serve() → a close handle,
+  exposing the in-memory store so a boot script can seed rows),
+  bin (parse → serve → log the listen URL → graceful shutdown).
+  Framework-neutral JSON only (no client framework); JWT/edge auth
+  + the Postgres entity stores + mutation routing are deferred
+  behind the same seams. A real loopback test boots serve() for a
+  200 and proves an unprivileged caller's /ui/:entity/:id JSON
+  omits the classified column while a privileged caller's includes
+  it; all other logic is offline-tested.
 - **`workflow-runtime`** — in-process event-sourced workflow
   executor (third impure package). 7 modules: clock (Clock +
   IdGenerator interfaces, SystemClock + FixedClock,
@@ -1862,6 +1917,28 @@ re-exporting everything.
   embeddings, reindex.
 - **`views`** — frontend renderer types (columns, views, theme,
   i18n, permissions, widgets).
+- **`operate-web`** — Phase 3 P3.1: a framework-neutral,
+  redaction-aware view-model compiler over a resolved manifest's
+  `views`. 3 modules: model (serializable zod descriptors —
+  WebAppModel / TableModel / DetailModel / FormModel +
+  ColumnModel / FieldModel / WebFieldType, all plain data so a
+  model JSON-serializes to any frontend, no React/DOM dep),
+  viewer (ViewerContext {roles} + EntityFieldResolver — builds an
+  auth Principal from the viewer's roles, registers a
+  `__anonymous__` sentinel so resolveEffectiveRoles never throws
+  on an unknown role, and reuses computeClassifiedFieldRedaction
+  [read → field inclusion] + validateClassifiedWriteMask [write →
+  form readOnly] parameterized by an optional SensitiveFieldPolicy;
+  fail-closed; redactRecord strips read-forbidden fields from a
+  data row keeping id), compile (compileWebApp /
+  compileTableModel / compileDetailModel / compileFormModel:
+  table columns from the ListView else every field, detail from
+  the RecordView sections else one all-readable-fields section,
+  form from the FormView else every writable field; every model
+  drops fields the viewer can't read, a readable-but-not-writable
+  field is included readOnly; labels humanize the snake_case name
+  when no view supplies one). Pure rendering over existing
+  stores — no new META_ tables.
 - **`i18n`** — locales, ICU MessageFormat, CLDR plurals, bundle,
   resolution, calendar, tenant config.
 - **`notifications`** — 6 channels × 18 providers, 5 content
