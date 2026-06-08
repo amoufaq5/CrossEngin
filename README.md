@@ -2,11 +2,14 @@
 
 > **Status — Phase 3 in progress.** 64 packages + 4 apps, 125
 > meta-schema tables, **6,849 offline tests + 39 gated real-Postgres
-> integration tests**, all green, zero type errors. Phase 2 (the four
-> runtime pillars) is complete; Phase 3 has shipped the serving keystone
-> (`operate-runtime` + `apps/operate-server`) and the distributed
-> workflow worker (`workflow-worker` + `apps/workflow-worker`), both
-> proven end-to-end against real Postgres. ADRs 0001–0126 are drafted in
+> integration tests + four CI gates** (schema-drift · incident-drift ·
+> PHI-encryption · gateway-execution), all green, zero type errors. Phase 2
+> (the four runtime pillars) is complete; Phase 3 has shipped the serving
+> keystone (`operate-runtime` + `apps/operate-server`), the distributed
+> workflow worker (`workflow-worker` + `apps/workflow-worker`), and the
+> redaction-aware UI layer (`operate-web` + `operate-web-react` +
+> `apps/operate-web` — view models → SSR React → hydrated pages), all proven
+> end-to-end against real Postgres. ADRs 0001–0156 are drafted in
 > `docs/adr/`. Resuming work? Read **[CLAUDE.md](CLAUDE.md)** — the
 > concise state snapshot.
 
@@ -23,7 +26,7 @@ education (**Educate**), NGOs (**Serve**), bespoke self-service apps
 
 ## Architecture in three layers
 
-1. **Kernel** (`packages/kernel`). The substrate: a **meta-schema** of 124
+1. **Kernel** (`packages/kernel`). The substrate: a **meta-schema** of 125
    platform-level Postgres tables, deterministic DDL emission, and
    manifest validate / diff / patch / topology / hash. `kernel-pg`
    executes that DDL against a real Postgres (advisory-lock-gated,
@@ -84,7 +87,8 @@ schemas are the source of truth; types derive via `z.infer`.
   `workflow-runtime-pg`, `workflow-worker`, `operate-runtime`,
   `operate-runtime-pg`.
 - **Reporting / search / UI / messaging.** `reporting`, `search`,
-  `views`, `i18n`, `notifications`.
+  `views`, `operate-web` (manifest → view-model compiler),
+  `operate-web-react` (SSR React renderer), `i18n`, `notifications`.
 - **Business operations.** `billing`, `finops`, `tenant-lifecycle`.
 - **Delivery infrastructure.** `deploy`, `dr`, `edge`, `active-active`,
   `pwa`.
@@ -97,18 +101,19 @@ schemas are the source of truth; types derive via `z.infer`.
 
 ## Apps
 
-Three runnable binaries under `apps/` (each `src/*` + a `bin/`):
+Four runnable binaries under `apps/` (each `src/*` + a `bin/`):
 
 | app | binary | role |
 |---|---|---|
 | **`architect-cli`** | `crossengin` | author manifests — `init` / `validate` / `diff` / `patch` / `hash` / `apply` / `chat` (talks to Claude, tool dispatch, write proposals, `--persist` audit) |
 | **`operate-server`** | `operate-server` | serve a manifest as a multi-tenant HTTP API (Node + edge/Workers), three `EntityStore`s (memory / pg JSONB / pg-columns typed+encrypted), API-key + JWT/JWKS auth — see [its README](apps/operate-server/README.md) |
 | **`workflow-worker`** | `workflow-worker` | advance deferred workflow progression (8 modes: tick · claim · retry · timeout · execute · reap · resync · all) over the PG event log, with heartbeats + stale-worker incidents — see [its README](apps/workflow-worker/README.md) |
+| **`operate-web`** | `operate-web` | serve a manifest as a redaction-aware UI — view models as JSON (`/ui/...`) + SSR React HTML pages (`/app/...`) with client hydration, API-key + JWT/JWKS auth, Node + edge/Workers |
 
 ## Meta-schema — the integration point
 
 `packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of
-124 platform-level Postgres tables. Every package that persists records
+125 platform-level Postgres tables. Every package that persists records
 wires its `META_*` table definitions there; the kernel emits DDL
 deterministically. The test suite enforces two invariants: every
 `tenant_id`-bearing table has RLS enabled, and every FK resolves to a
@@ -119,11 +124,11 @@ updating `meta-schema.test.ts` (count, sorted names, column checks).
 
 ```
 CrossEngin/
-├── docs/             vision + ADRs 0001-0126  (CC BY 4.0)
+├── docs/             vision + ADRs 0001-0156  (CC BY 4.0)
 │   ├── vision.md
 │   └── adr/          docs/adr/index.md is the running index
-├── apps/             3 runnable binaries  (architect-cli, operate-server, workflow-worker)
-├── packages/         61 workspace packages
+├── apps/             4 runnable binaries  (architect-cli, operate-server, workflow-worker, operate-web)
+├── packages/         64 workspace packages
 ├── scripts/          emit-bootstrap.mjs, setup-integration-db.sh
 ├── .github/workflows/  ci.yml  (build/typecheck/offline + Postgres integration)
 ├── CLAUDE.md         project state snapshot for AI assistants
@@ -134,7 +139,7 @@ CrossEngin/
 
 - **Human contributor?** Start with **[`docs/vision.md`](docs/vision.md)**
   (the north star), then **[`docs/adr/index.md`](docs/adr/index.md)** (the
-  index of 126 architecture decisions). Individual ADRs live at
+  index of 156 architecture decisions). Individual ADRs live at
   `docs/adr/NNNN-<slug>.md`, following
   **[`0000-template.md`](docs/adr/0000-template.md)**.
 - **AI assistant resuming work?** Start with **[CLAUDE.md](CLAUDE.md)** —
