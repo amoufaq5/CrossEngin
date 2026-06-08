@@ -44,11 +44,13 @@ Usage:
   operate-server slo actions  [--since <iso>] [--limit N] [--format human|json]
   operate-server slo summary  [--since <iso>] [--limit N] [--format human|json]
   operate-server slo verify   [--since <iso>] [--limit N] [--format human|json]
+  operate-server slo latency  [--since <iso>] [--limit N] [--format human|json]
 
 Commands:
   actions   List recent SLO enforcement actions (availability + latency signals)
   summary   Roll the actions up (total/opened/ongoing/recovered/paged)
   verify    Run the enforcement-history drift sweep; exits 1 if any drift
+  latency   List recent SLO latency evaluation snapshots
 
 Options:
   --since <iso>    Only consider actions at/after this ISO timestamp (else recent)

@@ -212,3 +212,5 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 126 | 0157 | 2,500 | Drafted alongside the SLO enforcement read API + crossengin-slo CLI (Phase 3 P2.46) |
 | 127 | 0158 | 2,000 | Drafted alongside the operate-web background JWKS refresh poller (Phase 3 P3.5) |
 | 128 | 0160 | 2,000 | Drafted alongside the SLO enforcement drift CI gate (Phase 3 P2.48) |
+| 129 | 0159 | 2,500 | Drafted alongside the operate-server slo operator subcommand (Phase 3 P2.47) |
+| 130 | 0161 | 2,000 | Drafted alongside SLO latency-evaluation read coverage in crossengin-slo (Phase 3 P2.49) |

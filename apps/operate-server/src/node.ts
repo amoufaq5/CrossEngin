@@ -12,11 +12,13 @@ import {
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import {
   PostgresSloEnforcementActionStore,
+  PostgresSloLatencyEvaluationStore,
   runSloQuery,
   verifyEnforcementHistory,
   type DriftIssue,
   type SloCliOptions,
   type SloEnforcementActionRecord,
+  type SloLatencyEvaluationRecord,
   type SloQuerySource,
 } from "@crossengin/observability-runtime-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -160,9 +162,14 @@ export async function executeIncidents(
  */
 class StoreSloQuerySource implements SloQuerySource {
   private readonly store: PostgresSloEnforcementActionStore;
+  private readonly latencyStore: PostgresSloLatencyEvaluationStore;
 
-  constructor(store: PostgresSloEnforcementActionStore) {
+  constructor(
+    store: PostgresSloEnforcementActionStore,
+    latencyStore: PostgresSloLatencyEvaluationStore,
+  ) {
     this.store = store;
+    this.latencyStore = latencyStore;
   }
 
   private async load(opts: {
@@ -186,6 +193,13 @@ class StoreSloQuerySource implements SloQuerySource {
   }): Promise<readonly DriftIssue[]> {
     return verifyEnforcementHistory(await this.load(opts));
   }
+
+  async listLatencyEvaluations(opts: {
+    readonly since?: Date;
+    readonly limit?: number;
+  }): Promise<readonly SloLatencyEvaluationRecord[]> {
+    return this.latencyStore.listSince(opts.since ?? new Date(0), opts.limit ?? 1000);
+  }
 }
 
 /**
@@ -206,7 +220,10 @@ export async function executeSlo(
 ): Promise<number> {
   const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
   try {
-    const source = new StoreSloQuerySource(new PostgresSloEnforcementActionStore(conn));
+    const source = new StoreSloQuerySource(
+      new PostgresSloEnforcementActionStore(conn),
+      new PostgresSloLatencyEvaluationStore(conn),
+    );
     const { exitCode } = await runSloQuery(options, source, out);
     return exitCode;
   } finally {
