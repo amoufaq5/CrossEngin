@@ -22,17 +22,30 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44** landed: **62 packages + 3 apps, 125
-meta-schema tables, 6,700 offline tests + 37 gated real-Postgres
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1** landed: **63 packages + 4 apps, 125
+meta-schema tables, 6,764 offline tests + 37 gated real-Postgres
 integration tests (17 worker + 20 operate-server) + four CI gates
 (schema-drift + incident-drift + PHI-encryption + gateway-execution), all
-genuinely green against a live Postgres** — no type errors. P2.44 (ADR-0152)
+genuinely green against a live Postgres** — no type errors. **Phase 3 P3
+(ADR-0080) has begun:** P3.1 added `@crossengin/operate-web` — a
+framework-neutral, redaction-aware view-model renderer (pure
+`compileWebApp`/`compileTableModel`/`compileDetailModel`/`compileFormModel`
+over the manifest's `views`, falling back to `listConfigForEntity` +
+all-readable-fields when a pack declares only `ListView`s; the compiled
+`WebAppModel`/`TableModel`/`DetailModel`/`FormModel` are plain serializable
+data, no React/DOM) plus `apps/operate-web` (the 4th app) — a Node HTTP shell
+serving the models + redacted data as JSON (`/ui/app`, `/ui/:entity`,
+`/ui/:entity/:id`, `/ui/:entity/new`) under api-key→role auth. Redaction is
+wired through the auth `computeClassifiedFieldRedaction` (read → column/field
+inclusion) + `validateClassifiedWriteMask` (write → form `readOnly`), so a
+cashier's compiled view omits `Product.unit_cost` while a manager's includes
+it — the UI never even describes a field the caller can't see. P2.44 (ADR-0152)
 fixed the `kernel-pg` `diffSchema` normalization (TIMESTAMPTZ↔timestamp with
 time zone type aliasing, `::type`-cast-insensitive default comparison,
 unique-constraint backing-index recognition) so the P2.36 schema-drift gate now
 reports `(no drift)` on the freshly-bootstrapped meta schema. (Earlier
-per-increment lines below say "60"/"61 packages" — those are point-in-time
-snapshots; the live count is 62 after `incident-response-pg` landed in
+per-increment lines below say "60"/"61"/"62 packages" — those are point-in-time
+snapshots; the live count is 63 after `operate-web` landed in P3.1 (it was 62 after `incident-response-pg` in
 P2.31.)
 **Phase 2 is complete; Phase 3 (ADR-0077) has begun.** **P2
 (ADR-0103) started the distributed-worker milestone** —
