@@ -9420,6 +9420,39 @@ export const META_WORKER_HEARTBEATS: TableDefinition = {
   ],
 };
 
+export const META_INCIDENT_METRIC_SNAPSHOTS: TableDefinition = {
+  schema: "meta",
+  name: "incident_metric_snapshots",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "snapshot_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "incident_metric_snapshots_snapshot_id_key" },
+      check: "snapshot_id ~ '^ims_[a-z0-9]{8,40}$'",
+    },
+    { name: "window_from", type: "TIMESTAMPTZ", notNull: true },
+    { name: "window_to", type: "TIMESTAMPTZ", notNull: true },
+    { name: "computed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "total", type: "INTEGER", notNull: true, check: "total >= 0" },
+    { name: "open", type: "INTEGER", notNull: true, check: "open >= 0" },
+    { name: "resolved", type: "INTEGER", notNull: true, check: "resolved >= 0" },
+    { name: "escalations", type: "INTEGER", notNull: true, check: "escalations >= 0" },
+    { name: "by_severity", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "open_by_severity", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "mttp", type: "JSONB" },
+    { name: "mtta", type: "JSONB" },
+    { name: "mttm", type: "JSONB" },
+    { name: "mttr", type: "JSONB" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_incident_metric_snapshots_computed", columns: ["computed_at"] },
+    { name: "idx_incident_metric_snapshots_window", columns: ["window_from", "window_to"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9545,4 +9578,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_SLO_LATENCY_EVALUATIONS,
   META_OPERATE_ENTITY_RECORDS,
   META_WORKER_HEARTBEATS,
+  META_INCIDENT_METRIC_SNAPSHOTS,
 ];

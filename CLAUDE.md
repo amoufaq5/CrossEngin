@@ -622,7 +622,26 @@ projection can't bypass redaction. `id` is always kept. **P1.22
 columns (needed for the keyset cursor), so unselected large/
 encrypted columns are never read/decrypted; the handler still
 re-projects to the exact set, and in-memory/JSONB ignore the hint
-(handler-level projection, still correct). **P2.39 (ADR-0148)
+(handler-level projection, still correct). **P2.40 (ADR-0149)
+persisted incident KPI snapshots for trend analysis** —
+`computeIncidentMetrics` (P2.23/0132 + P2.30/0139) folds the
+`meta.incidents` timeline into MTTP/MTTA/MTTM/MTTR + open/resolved/
+escalation gauges, but only on demand. P2.40 freezes those KPIs to a
+new platform-wide `meta.incident_metric_snapshots` table (#125, no RLS,
+`ims_` ids; window_from/to + computed_at, INTEGER total/open/resolved/
+escalations, JSONB by_severity/open_by_severity + a nullable JSONB
+column per MttrStats) via a new `PostgresIncidentMetricsStore` in
+`@crossengin/incident-response-pg`: `recordSnapshot(window, metrics)`
+INSERTs one window's verdict (each call mints a fresh id → the trend is
+append-only; a null MttrStat binds as SQL NULL, never the string
+"null"), `listSnapshots({from,to,limit})` reads a window newest-first,
+and the pure `incidentMetricsSnapshotRow` projector + `generateSnapshotId`
+(Crockford-base32, matching the table's check) round out the module. A
+gated operate-server test declares an incident, computes metrics over a
+window via the shared `PostgresIncidentReplayer`, records a snapshot, and
+reads it back. The schema-drift gate + `emit-bootstrap.mjs` pick the new
+table up from `META_TABLES` automatically; the recurring snapshot writer
+(a worker mode / CLI) is the deferred follow-on. **P2.39 (ADR-0148)
 deepened the encrypted-column read-fidelity coverage** in the
 column store — a gated real-Postgres test
 (`integration-columns-encrypted.test.ts`) drives `pgp_sym_encrypt`
@@ -1949,7 +1968,14 @@ re-exporting everything.
   formatIncidentMetrics), query (framework-neutral runIncidents /
   runIncidentWrite over structural IncidentQuerySource /
   IncidentWriteSink + formatIncidentList / formatVerifyReport +
-  IncidentsCliOptions). Deps: `incident-response` + `kernel-pg`. The
+  IncidentsCliOptions). P2.40 (ADR-0149) added metrics-store
+  (PostgresIncidentMetricsStore.recordSnapshot INSERTs one window's
+  computeIncidentMetrics verdict to the platform-wide
+  meta.incident_metric_snapshots table [#125, ims_ ids, the four MTTx
+  stats as nullable JSONB]; listSnapshots reads a window newest-first;
+  the pure incidentMetricsSnapshotRow projector + generateSnapshotId) —
+  a durable historical trend behind the on-demand metrics. Deps:
+  `incident-response` + `kernel-pg`. The
   workflow-worker app's `incidents` CLI + `--monitor` paths wire it in;
   any other `meta.incidents` consumer can reuse it.
 - **`forensics`** — hash-chained tamper-evident logs, evidence

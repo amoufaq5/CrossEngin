@@ -90,6 +90,7 @@ import {
   META_SDK_CLIENT_RELEASES,
   META_OPERATE_ENTITY_RECORDS,
   META_WORKER_HEARTBEATS,
+  META_INCIDENT_METRIC_SNAPSHOTS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_EVALUATIONS,
   META_SLO_LATENCY_EVALUATIONS,
@@ -122,8 +123,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 124 tables", () => {
-    expect(META_TABLES).toHaveLength(124);
+  it("contains 125 tables", () => {
+    expect(META_TABLES).toHaveLength(125);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -190,6 +191,7 @@ describe("META_TABLES", () => {
       "idempotency_records",
       "import_sources",
       "incident_communications",
+      "incident_metric_snapshots",
       "incident_postmortems",
       "incident_runbook_executions",
       "incidents",
@@ -1514,6 +1516,34 @@ describe("table column shapes", () => {
     expect(META_WORKER_HEARTBEATS.uniqueConstraints?.[0]?.columns).toEqual(["worker_id"]);
     const mode = META_WORKER_HEARTBEATS.columns.find((c) => c.name === "mode");
     expect(mode?.check).toContain("'all'");
+  });
+
+  it("META_INCIDENT_METRIC_SNAPSHOTS is a platform-wide (no-RLS) KPI snapshot table", () => {
+    const cols = META_INCIDENT_METRIC_SNAPSHOTS.columns.map((c) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining([
+        "snapshot_id",
+        "window_from",
+        "window_to",
+        "computed_at",
+        "total",
+        "open",
+        "resolved",
+        "escalations",
+        "by_severity",
+        "open_by_severity",
+        "mttp",
+        "mtta",
+        "mttm",
+        "mttr",
+      ]),
+    );
+    expect(META_INCIDENT_METRIC_SNAPSHOTS.rls).toBeUndefined();
+    const sid = META_INCIDENT_METRIC_SNAPSHOTS.columns.find((c) => c.name === "snapshot_id");
+    expect(sid?.check).toContain("ims_");
+    expect(sid?.unique?.constraintName).toBe("incident_metric_snapshots_snapshot_id_key");
+    const mttr = META_INCIDENT_METRIC_SNAPSHOTS.columns.find((c) => c.name === "mttr");
+    expect(mttr?.notNull).toBeUndefined();
   });
 
   it("META_WORKFLOW_INSTANCES carries timeout-sweep lease columns + index", () => {
