@@ -1,6 +1,6 @@
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
-import { PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+import { PostgresEntityStore, PostgresReportExecutor } from "@crossengin/operate-runtime-pg";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -114,6 +114,7 @@ suite("operate-web integration (real Postgres)", () => {
   let store: PostgresEntityStore;
   let server: OperateWebServer;
   let boardServer: OperateWebServer;
+  let sqlServer: OperateWebServer;
   let tenantA: string;
   let tenantB: string;
 
@@ -143,6 +144,16 @@ suite("operate-web integration (real Postgres)", () => {
     ];
     server = buildOperateWebServer({ manifest: retail, store, apiKeySpecs });
     boardServer = buildOperateWebServer({ manifest: withBoard, store, apiKeySpecs });
+    // P3.23: the same board manifest, but dashboard/pivot reports run via the
+    // SQL-pushdown executor (full-dataset GROUP BY in Postgres) instead of the
+    // bounded in-memory path.
+    const executor = new PostgresReportExecutor(conn);
+    sqlServer = buildOperateWebServer({
+      manifest: withBoard,
+      store,
+      apiKeySpecs,
+      reportExecutor: (r, t, c) => executor.execute(r, t, c),
+    });
   });
 
   afterAll(async () => {
@@ -285,5 +296,38 @@ suite("operate-web integration (real Postgres)", () => {
     const state = body((await boardServer.dispatch(req("/app/Product?__state=1", "mgr-a"))).body);
     expect(state["kind"]).toBe("table");
     expect((state["table"] as { entity: string }).entity).toBe("Product");
+  });
+
+  it("aggregates dashboard/pivot reports via SQL pushdown over the full dataset (P3.23)", async () => {
+    // A fresh tenant so the aggregates are exact (the store is shared across cases).
+    const tenant = await seedTenant();
+    const sql = buildOperateWebServer({
+      manifest: withBoard,
+      store,
+      apiKeySpecs: [{ key: "sql", role: "store_manager", tenantId: tenant }],
+      reportExecutor: (r, t, c) => new PostgresReportExecutor(conn).execute(r, t, c),
+    });
+    // 5 products: grocery/active ×2, grocery/discontinued ×1, home/active ×2.
+    const seeds = [
+      { sku: "G1", category: "grocery", status: "active", unit_price: 10 },
+      { sku: "G2", category: "grocery", status: "active", unit_price: 20 },
+      { sku: "G3", category: "grocery", status: "discontinued", unit_price: 30 },
+      { sku: "H1", category: "home", status: "active", unit_price: 40 },
+      { sku: "H2", category: "home", status: "active", unit_price: 50 },
+    ];
+    for (const s of seeds) await store.create(tenant, "Product", product(s));
+
+    // dashboard kpi = count over ALL 5 rows (SQL GROUP BY, not a bounded page)
+    const dash = body((await sql.dispatch(req("/ui/Product/dashboard", "sql"))).body);
+    expect((dash["widgetData"] as Array<{ value: number }>)[0]!.value).toBe(5);
+
+    // pivot category × status counts, computed by SQL
+    const pivot = body((await sql.dispatch(req("/ui/Product/pivot", "sql"))).body);
+    const cells = (pivot["data"] as { cells: Array<{ rowKey: string[]; colKey: string[]; values: Record<string, number> }> }).cells;
+    const at = (cat: string, st: string): number | undefined =>
+      cells.find((c) => c.rowKey[0] === cat && c.colKey[0] === st)?.values["n"];
+    expect(at("grocery", "active")).toBe(2);
+    expect(at("grocery", "discontinued")).toBe(1);
+    expect(at("home", "active")).toBe(2);
   });
 });
