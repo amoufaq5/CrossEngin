@@ -59,6 +59,14 @@ export interface OperateWebServerOptions {
   readonly resolver: WebViewerResolver;
   readonly compileOptions?: CompileOptions;
   /**
+   * Optional report executor (P3.22). When set, dashboard/pivot report data is
+   * computed through it (e.g. the SQL-pushdown `PostgresReportExecutor`, which
+   * aggregates the full dataset in Postgres) instead of the default bounded
+   * in-memory path (fetch ≤500 records + `executeReport`). Same
+   * `(report, tenantId, canRead) → ReportData | null` contract either way.
+   */
+  readonly reportExecutor?: ReportExecutor;
+  /**
    * Loads the client hydration bundle for `GET /assets/operate-web-client.js`.
    * Defaults to reading it from disk; injectable so a test can stub it (or an
    * edge runtime can serve an embedded bundle). When the load returns null the
@@ -66,6 +74,13 @@ export interface OperateWebServerOptions {
    */
   readonly bundleLoader?: BundleLoader;
 }
+
+/** A report executor: computes a report's data, gated by the field-readability predicate. */
+export type ReportExecutor = (
+  report: ReportSpec,
+  tenantId: string,
+  canRead: (field: string) => boolean,
+) => Promise<ReportData | null>;
 
 /**
  * The framework-neutral serving core: authenticates each request against the
@@ -100,12 +115,14 @@ export class OperateWebServer {
   private readonly compileOptions: CompileOptions;
   private readonly entityNames: ReadonlySet<string>;
   private readonly bundleLoader: BundleLoader | undefined;
+  private readonly reportExecutor: ReportExecutor | undefined;
 
   constructor(options: OperateWebServerOptions) {
     this.manifest = options.manifest;
     this.store = options.store ?? new InMemoryEntityStore();
     this.resolver = options.resolver;
     this.compileOptions = options.compileOptions ?? {};
+    this.reportExecutor = options.reportExecutor;
     this.entityNames = new Set((options.manifest.entities ?? []).map((e) => e.name));
     this.bundleLoader = options.bundleLoader;
   }
@@ -501,10 +518,15 @@ export class OperateWebServer {
   private async runReport(ref: string, viewer: WebViewer, viewerCtx: ViewerContext): Promise<ReportData | null> {
     const report = this.reportSpec(ref);
     if (report === null || !this.entityNames.has(report.entity)) return null;
-    const config = listConfigForEntity(this.manifest, report.entity);
-    const page = await this.store.listPage(viewer.tenantId, report.entity, parseListQuery({ limit: "500" }, config));
     const access = this.accessFor(report.entity, viewerCtx);
     const canRead = (field: string): boolean => access.get(field)?.read !== false;
+    // P3.22: when a report executor is wired (e.g. SQL pushdown), aggregate the
+    // full dataset through it; else the default bounded in-memory path.
+    if (this.reportExecutor !== undefined) {
+      return this.reportExecutor(report, viewer.tenantId, canRead);
+    }
+    const config = listConfigForEntity(this.manifest, report.entity);
+    const page = await this.store.listPage(viewer.tenantId, report.entity, parseListQuery({ limit: "500" }, config));
     return executeReport(report, page.records, canRead);
   }
 
@@ -729,6 +751,7 @@ export function buildOperateWebServer(options: {
   readonly compileOptions?: CompileOptions;
   readonly now?: () => Date;
   readonly bundleLoader?: BundleLoader;
+  readonly reportExecutor?: ReportExecutor;
 }): OperateWebServer {
   const resolver = new WebPrincipalResolver({
     apiKeys: new ApiKeyRegistry(options.apiKeySpecs),
@@ -741,5 +764,6 @@ export function buildOperateWebServer(options: {
     resolver,
     ...(options.compileOptions !== undefined ? { compileOptions: options.compileOptions } : {}),
     ...(options.bundleLoader !== undefined ? { bundleLoader: options.bundleLoader } : {}),
+    ...(options.reportExecutor !== undefined ? { reportExecutor: options.reportExecutor } : {}),
   });
 }

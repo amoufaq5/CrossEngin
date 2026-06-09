@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
-import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+import { ColumnMappedEntityStore, PostgresEntityStore, PostgresReportExecutor } from "@crossengin/operate-runtime-pg";
 
 import type { WebServeOptions } from "./cli.js";
 import type { RawWebRequest } from "./http.js";
@@ -222,7 +222,21 @@ export async function serve(options: WebServeOptions, deps: ServeJwtDeps = {}): 
   const apiKeySpecs = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options, deps);
   const { store, conn } = await resolveWebStore(options, manifest);
-  const webServer = buildOperateWebServer({ manifest, store, apiKeySpecs, ...(jwt !== null ? { jwt } : {}) });
+  // P3.22: with the JSONB document store, aggregate dashboard/pivot reports via
+  // SQL pushdown (full-dataset) instead of the bounded in-memory path. The
+  // pg-columns store uses typed per-entity tables (not operate_entity_records),
+  // so it keeps the in-memory report path.
+  const reportExecutor =
+    conn !== null && options.store === "pg"
+      ? new PostgresReportExecutor(conn, options.schema !== null ? { schema: options.schema } : {})
+      : null;
+  const webServer = buildOperateWebServer({
+    manifest,
+    store,
+    apiKeySpecs,
+    ...(jwt !== null ? { jwt } : {}),
+    ...(reportExecutor !== null ? { reportExecutor: (r, t, c) => reportExecutor.execute(r, t, c) } : {}),
+  });
   const listener = createNodeRequestListener(webServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);

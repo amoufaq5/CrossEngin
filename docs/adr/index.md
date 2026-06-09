@@ -229,3 +229,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 143 | 0174 | 2,500 | Drafted alongside operate-web route integration sweep over real Postgres (Phase 3 P3.19) |
 | 144 | 0175 | 2,500 | Drafted alongside operate-web SSR pages rendering executed report data (Phase 3 P3.20) |
 | 145 | 0176 | 2,500 | Drafted alongside pack-erp-retail authoring all 8 view kinds + reports/dashboards (Phase 3 P3.21) |
+| 146 | 0177 | 2,500 | Drafted alongside the report aggregation engine + SQL pushdown (Phase 3 P3.22) |

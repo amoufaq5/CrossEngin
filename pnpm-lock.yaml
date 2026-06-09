@@ -1235,6 +1235,9 @@ importers:
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../operate-runtime
+      '@crossengin/operate-web':
+        specifier: workspace:*
+        version: link:../operate-web
       '@crossengin/types':
         specifier: workspace:*
         version: link:../types
