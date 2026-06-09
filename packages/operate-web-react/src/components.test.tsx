@@ -308,3 +308,34 @@ describe("PivotView", () => {
     expect(html).toContain("Sales pivot");
   });
 });
+
+describe("DashboardView / PivotView — executed report data (P3.20)", () => {
+  it("renders a kpi widget's value when widgetData is supplied", () => {
+    const html = renderToStaticMarkup(
+      <DashboardView model={DASHBOARD_MODEL} widgetData={[{ kind: "kpi", name: "n", value: 42 }, null]} />,
+    );
+    expect(html).toContain("ce-report-kpi");
+    expect(html).toContain("42");
+    // the markdown widget (no data) still renders its body
+    expect(html).toContain("Hello team");
+  });
+
+  it("falls back to the report-id placeholder when no widgetData", () => {
+    const html = renderToStaticMarkup(<DashboardView model={DASHBOARD_MODEL} />);
+    expect(html).toContain('data-report="salesKpi"');
+    expect(html).not.toContain("ce-report-kpi");
+  });
+
+  it("renders pivot cells as a table when data is supplied", () => {
+    const data = {
+      kind: "pivot" as const,
+      rowFields: ["region"],
+      columnFields: ["status"],
+      cells: [{ rowKey: ["north"], colKey: ["open"], values: { n: 7 } }],
+    };
+    const html = renderToStaticMarkup(<PivotView model={PIVOT_MODEL} data={data} />);
+    expect(html).toContain("ce-report-pivot");
+    expect(html).toContain("north");
+    expect(html).toContain("n=7");
+  });
+});

@@ -7,6 +7,7 @@ import type {
   KanbanTransitionModel,
   MapModel,
   PivotModel,
+  ReportData,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -76,12 +77,16 @@ export type WebPageState =
       readonly kind: "dashboard";
       readonly app: WebAppModel;
       readonly dashboard: DashboardModel;
+      /** Executed report data per cell (P3.18), aligned to `dashboard.cells`; null for non-report widgets. */
+      readonly widgetData: readonly (ReportData | null)[];
       readonly basePath: string;
     }
   | {
       readonly kind: "pivot";
       readonly app: WebAppModel;
       readonly pivot: PivotModel;
+      /** The executed pivot report (P3.18), or null when unsupported / unreadable. */
+      readonly data: ReportData | null;
       readonly basePath: string;
     };
 

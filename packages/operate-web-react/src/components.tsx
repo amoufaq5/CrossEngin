@@ -7,6 +7,7 @@ import type {
   KanbanModel,
   MapModel,
   PivotModel,
+  ReportData,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -278,18 +279,66 @@ export function MapView({ model, rows, basePath = "/app" }: MapViewProps): JSX.E
   );
 }
 
+/** Renders executed report data (P3.18) inline in a widget / pivot. */
+export function ReportDataView({ data }: { readonly data: ReportData }): JSX.Element {
+  if (data.kind === "kpi") {
+    return (
+      <p className="ce-report-kpi" data-name={data.name}>
+        <span className="ce-kpi-value">{data.value === null ? "—" : displayValue(data.value)}</span>
+      </p>
+    );
+  }
+  if (data.kind === "tabular") {
+    return (
+      <table className="ce-report-tabular">
+        <thead>
+          <tr>{data.columns.map((c) => <th key={c} scope="col">{c}</th>)}</tr>
+        </thead>
+        <tbody>
+          {data.rows.map((row, i) => (
+            <tr key={`r${String(i)}`}>{data.columns.map((c) => <td key={c} data-field={c}>{displayValue(row[c])}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+  // pivot
+  return (
+    <table className="ce-report-pivot">
+      <thead>
+        <tr>
+          {data.rowFields.map((f) => <th key={`r-${f}`} scope="col">{f}</th>)}
+          {data.columnFields.map((f) => <th key={`c-${f}`} scope="col">{f}</th>)}
+          <th scope="col">values</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.cells.map((cell, i) => (
+          <tr key={`cell${String(i)}`}>
+            {cell.rowKey.map((v, j) => <td key={`rk${String(j)}`}>{v}</td>)}
+            {cell.colKey.map((v, j) => <td key={`ck${String(j)}`}>{v}</td>)}
+            <td>{Object.entries(cell.values).map(([k, v]) => `${k}=${v === null ? "—" : String(v)}`).join(", ")}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export interface DashboardViewProps {
   readonly model: DashboardModel;
+  /** Executed report data per cell (P3.18/P3.20), aligned to `model.cells`. */
+  readonly widgetData?: readonly (ReportData | null)[];
 }
 
 /**
- * Renders a `DashboardModel` as a 12-column CSS grid of widget placeholders.
- * Each cell is positioned from its `x/y/w/h`; a report-backed widget shows its
- * kind + report id (the data isn't executed server-side — report-data execution
- * is a deferred item), a markdown widget its body, a divider its label. Only the
+ * Renders a `DashboardModel` as a 12-column CSS grid of widgets. Each cell is
+ * positioned from its `x/y/w/h`; a report-backed widget renders its executed
+ * `widgetData` (kpi value / tabular table / pivot matrix) when present, else its
+ * kind + report id; a markdown widget its body, a divider its label. Only the
  * cells the viewer may see are present (the compiler dropped the rest).
  */
-export function DashboardView({ model }: DashboardViewProps): JSX.Element {
+export function DashboardView({ model, widgetData }: DashboardViewProps): JSX.Element {
   return (
     <section className="ce-dashboard" data-entity={model.entity} data-layout={model.layout}>
       <h2 className="ce-dashboard-title">{model.title}</h2>
@@ -297,26 +346,31 @@ export function DashboardView({ model }: DashboardViewProps): JSX.Element {
         className="ce-dashboard-grid"
         style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: "0.5rem" }}
       >
-        {model.cells.map((cell, index) => (
-          <div
-            key={`${String(cell.x)}-${String(cell.y)}-${String(index)}`}
-            className="ce-dashboard-cell"
-            data-widget={cell.widget.kind}
-            style={{
-              gridColumn: `${String(cell.x + 1)} / span ${String(cell.w)}`,
-              gridRow: `${String(cell.y + 1)} / span ${String(cell.h)}`,
-            }}
-          >
-            <div className="ce-widget" data-kind={cell.widget.kind}>
-              {cell.widget.title !== undefined ? <h3 className="ce-widget-title">{cell.widget.title}</h3> : null}
-              {cell.widget.report !== undefined ? (
-                <p className="ce-widget-report" data-report={cell.widget.report}>{`${cell.widget.kind}: ${cell.widget.report}`}</p>
-              ) : null}
-              {cell.widget.body !== undefined ? <div className="ce-widget-markdown">{cell.widget.body}</div> : null}
-              {cell.widget.label !== undefined ? <hr className="ce-widget-divider" aria-label={cell.widget.label} /> : null}
+        {model.cells.map((cell, index) => {
+          const data = widgetData?.[index] ?? null;
+          return (
+            <div
+              key={`${String(cell.x)}-${String(cell.y)}-${String(index)}`}
+              className="ce-dashboard-cell"
+              data-widget={cell.widget.kind}
+              style={{
+                gridColumn: `${String(cell.x + 1)} / span ${String(cell.w)}`,
+                gridRow: `${String(cell.y + 1)} / span ${String(cell.h)}`,
+              }}
+            >
+              <div className="ce-widget" data-kind={cell.widget.kind}>
+                {cell.widget.title !== undefined ? <h3 className="ce-widget-title">{cell.widget.title}</h3> : null}
+                {data !== null ? (
+                  <ReportDataView data={data} />
+                ) : cell.widget.report !== undefined ? (
+                  <p className="ce-widget-report" data-report={cell.widget.report}>{`${cell.widget.kind}: ${cell.widget.report}`}</p>
+                ) : null}
+                {cell.widget.body !== undefined ? <div className="ce-widget-markdown">{cell.widget.body}</div> : null}
+                {cell.widget.label !== undefined ? <hr className="ce-widget-divider" aria-label={cell.widget.label} /> : null}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -324,19 +378,22 @@ export function DashboardView({ model }: DashboardViewProps): JSX.Element {
 
 export interface PivotViewProps {
   readonly model: PivotModel;
+  /** The executed pivot report (P3.18/P3.20); when present its cells are rendered. */
+  readonly data?: ReportData | null;
 }
 
 /**
- * Renders a `PivotModel` as a placeholder referencing its report + reshape flag.
- * The pivot aggregation isn't executed server-side (report-data execution is a
- * deferred item); this is the SSR descriptor a client pivot table enhances.
+ * Renders a `PivotModel`: the report reference + reshape flag, plus the executed
+ * pivot cells (`data`) as a table when present. Without data (an unsupported /
+ * unreadable report) it's the descriptor a client pivot table enhances.
  */
-export function PivotView({ model }: PivotViewProps): JSX.Element {
+export function PivotView({ model, data }: PivotViewProps): JSX.Element {
   return (
     <section className="ce-pivot" data-entity={model.entity} data-report={model.reportRef} data-reshape={model.allowReshape ? "true" : "false"}>
       <h2 className="ce-pivot-title">{model.title}</h2>
       <p className="ce-pivot-report">{model.reportLabel ?? model.reportRef}</p>
       <p className="ce-pivot-reshape">{model.allowReshape ? "Reshape: allowed" : "Reshape: locked"}</p>
+      {data !== null && data !== undefined ? <ReportDataView data={data} /> : null}
     </section>
   );
 }

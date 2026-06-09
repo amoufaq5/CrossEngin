@@ -8,6 +8,7 @@ import type {
   KanbanModel,
   MapModel,
   PivotModel,
+  ReportData,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -103,19 +104,29 @@ export function renderMapPage(
   );
 }
 
-/** Renders a dashboard (the redacted layout + widget descriptors) to a hydratable HTML page. */
-export function renderDashboardPage(app: WebAppModel, dashboard: DashboardModel, stateOnly = false): RawWebResponse {
+/** Renders a dashboard (layout + executed report data per cell) to a hydratable HTML page. */
+export function renderDashboardPage(
+  app: WebAppModel,
+  dashboard: DashboardModel,
+  widgetData: readonly (ReportData | null)[],
+  stateOnly = false,
+): RawWebResponse {
   return pageFor(
-    { kind: "dashboard", app, dashboard, basePath: APP_BASE_PATH },
+    { kind: "dashboard", app, dashboard, widgetData, basePath: APP_BASE_PATH },
     `${dashboard.title} — ${app.title}`,
     stateOnly,
   );
 }
 
-/** Renders a pivot (the redacted report reference + reshape flag) to a hydratable HTML page. */
-export function renderPivotPage(app: WebAppModel, pivot: PivotModel, stateOnly = false): RawWebResponse {
+/** Renders a pivot (the report reference + reshape flag + executed pivot data) to a hydratable HTML page. */
+export function renderPivotPage(
+  app: WebAppModel,
+  pivot: PivotModel,
+  data: ReportData | null,
+  stateOnly = false,
+): RawWebResponse {
   return pageFor(
-    { kind: "pivot", app, pivot, basePath: APP_BASE_PATH },
+    { kind: "pivot", app, pivot, data, basePath: APP_BASE_PATH },
     `${pivot.title} — ${app.title}`,
     stateOnly,
   );

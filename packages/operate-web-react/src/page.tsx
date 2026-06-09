@@ -459,13 +459,13 @@ export function PageRoot({ state, fetcher, writeFetcher, onNavigate }: PageRootP
     case "dashboard":
       return (
         <AppShell app={state.app} basePath={state.basePath}>
-          <DashboardView model={state.dashboard} />
+          <DashboardView model={state.dashboard} widgetData={state.widgetData} />
         </AppShell>
       );
     case "pivot":
       return (
         <AppShell app={state.app} basePath={state.basePath}>
-          <PivotView model={state.pivot} />
+          <PivotView model={state.pivot} data={state.data} />
         </AppShell>
       );
   }

@@ -227,3 +227,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 141 | 0172 | 3,000 | Drafted alongside operate-web SSR pages for map/dashboard/pivot (Phase 3 P3.17) |
 | 142 | 0173 | 3,000 | Drafted alongside operate-web report-data execution for dashboard + pivot (Phase 3 P3.18) |
 | 143 | 0174 | 2,500 | Drafted alongside operate-web route integration sweep over real Postgres (Phase 3 P3.19) |
+| 144 | 0175 | 2,500 | Drafted alongside operate-web SSR pages rendering executed report data (Phase 3 P3.20) |

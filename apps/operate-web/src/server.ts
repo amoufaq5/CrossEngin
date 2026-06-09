@@ -247,10 +247,10 @@ export class OperateWebServer {
       return this.serveMapHtml(rest[0]!, viewer, viewerCtx, query, stateOnly);
     }
     if (rest.length === 2 && rest[1] === "dashboard") {
-      return this.serveDashboardHtml(rest[0]!, viewerCtx, stateOnly);
+      return this.serveDashboardHtml(rest[0]!, viewer, viewerCtx, stateOnly);
     }
     if (rest.length === 2 && rest[1] === "pivot") {
-      return this.servePivotHtml(rest[0]!, viewerCtx, stateOnly);
+      return this.servePivotHtml(rest[0]!, viewer, viewerCtx, stateOnly);
     }
     if (rest.length === 2) {
       return this.serveDetailHtml(rest[0]!, rest[1]!, viewer, viewerCtx, stateOnly);
@@ -632,20 +632,35 @@ export class OperateWebServer {
     return renderMapPage(app, map, data, stateOnly);
   }
 
-  private serveDashboardHtml(entity: string, viewerCtx: ViewerContext, stateOnly: boolean): RawWebResponse {
+  private async serveDashboardHtml(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    stateOnly: boolean,
+  ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
     const dashboard = compileDashboardModel(this.manifest, entity, viewerCtx);
     if (dashboard === null) return problemResponse(404, "Not found", `no dashboard view for '${entity}'`);
-    return renderDashboardPage(compileWebApp(this.manifest, viewerCtx), dashboard, stateOnly);
+    const widgetData: (ReportData | null)[] = [];
+    for (const cell of dashboard.cells) {
+      widgetData.push(cell.widget.report !== undefined ? await this.runReport(cell.widget.report, viewer, viewerCtx) : null);
+    }
+    return renderDashboardPage(compileWebApp(this.manifest, viewerCtx), dashboard, widgetData, stateOnly);
   }
 
-  private servePivotHtml(entity: string, viewerCtx: ViewerContext, stateOnly: boolean): RawWebResponse {
+  private async servePivotHtml(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    stateOnly: boolean,
+  ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
     const pivot = compilePivotModel(this.manifest, entity, viewerCtx);
     if (pivot === null) return problemResponse(404, "Not found", `no pivot view for '${entity}'`);
-    return renderPivotPage(compileWebApp(this.manifest, viewerCtx), pivot, stateOnly);
+    const data = await this.runReport(pivot.reportRef, viewer, viewerCtx);
+    return renderPivotPage(compileWebApp(this.manifest, viewerCtx), pivot, data, stateOnly);
   }
 
   private async serveDetailHtml(

@@ -501,11 +501,15 @@ describe("GET /app/:entity/{map,dashboard,pivot} — SSR pages", () => {
     expect(htmlBody(res)).toContain("ce-map");
   });
 
-  it("renders the dashboard grid page", async () => {
+  it("renders the dashboard grid page with the executed kpi value (P3.20)", async () => {
     const server = await makeServerWithViews();
     const res = await server.dispatch(req("/app/Store/dashboard", "mgr"));
     expect(res.status).toBe(200);
-    expect(htmlBody(res)).toContain("ce-dashboard");
+    const html = htmlBody(res);
+    expect(html).toContain("ce-dashboard");
+    // the kpi report counts the one seeded Product → the value is rendered inline
+    expect(html).toContain("ce-report-kpi");
+    expect(html).toContain(">1<");
   });
 
   it("renders the pivot page", async () => {
