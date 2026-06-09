@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
-import { parseApiKeySpec } from "./principals.js";
+import { buildPrincipalWiring, parseApiKeySpec } from "./principals.js";
+import { buildManifestReportRunner } from "./reports.js";
 import { OperateHttpServer, buildOperateHttpServer, type ExecutionSink } from "./server.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -203,5 +204,50 @@ describe("OperateHttpServer — execution sink wiring (P2.45)", () => {
     expect(res.status).toBe(200);
     expect(errors).toHaveLength(1);
     expect((errors[0] as Error).message).toBe("sink down");
+  });
+});
+
+describe("OperateHttpServer — GET /v1/reports/:report (P3.25)", () => {
+  async function makeReportServer(): Promise<OperateHttpServer> {
+    const store = new InMemoryEntityStore();
+    for (const o of [
+      { order_number: "O1", state: "placed", currency: "AED", total: 100 },
+      { order_number: "O2", state: "placed", currency: "AED", total: 60 },
+    ]) {
+      await store.create(TENANT, "SalesOrder", o);
+    }
+    const reportRunner = buildManifestReportRunner({
+      manifest,
+      store,
+      principalRoles: buildPrincipalWiring(API_KEYS).principalRoles,
+    });
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store,
+      apiKeys: API_KEYS,
+      reportRunner,
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    return httpServer;
+  }
+
+  it("serves executed report data through the gateway (200 kpi)", async () => {
+    const server = await makeReportServer();
+    const res = await server.dispatch(req("GET", "/v1/reports/salesRevenue", "key-manager"), null);
+    expect(res.status).toBe(200);
+    expect(parse(res.body)).toMatchObject({ kind: "kpi", name: "total_revenue", value: 160 });
+  });
+
+  it("404s an unknown report (fail-closed)", async () => {
+    const server = await makeReportServer();
+    const res = await server.dispatch(req("GET", "/v1/reports/ghost", "key-manager"), null);
+    expect(res.status).toBe(404);
+    expect(parse(res.body)["error"]).toBe("report_unavailable");
+  });
+
+  it("401s an unauthenticated report request", async () => {
+    const server = await makeReportServer();
+    const res = await server.dispatch(req("GET", "/v1/reports/salesRevenue", "key-nobody"), null);
+    expect(res.status).toBe(401);
   });
 });

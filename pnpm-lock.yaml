@@ -99,6 +99,9 @@ importers:
       '@crossengin/operate-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/operate-runtime-pg
+      '@crossengin/operate-web':
+        specifier: workspace:*
+        version: link:../../packages/operate-web
       '@crossengin/pack-erp-core':
         specifier: workspace:*
         version: link:../../packages/pack-erp-core

@@ -23,7 +23,12 @@ import {
 } from "@crossengin/observability-runtime-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
-import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+import {
+  ColumnMappedEntityStore,
+  PostgresColumnReportExecutor,
+  PostgresEntityStore,
+  PostgresReportExecutor,
+} from "@crossengin/operate-runtime-pg";
 
 import type { ServeOptions } from "./cli.js";
 import type { RawHttpRequest } from "./http.js";
@@ -31,11 +36,13 @@ import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
+  buildPrincipalWiring,
   parseApiKeySpec,
   parseJwksKeySpec,
   type JwksKeySpec,
   type JwtVerifyConfig,
 } from "./principals.js";
+import { buildManifestReportRunner, type ReportExecutor } from "./reports.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 import {
   OperateSloMonitor,
@@ -263,15 +270,18 @@ async function resolveJwtConfig(
   return { config: { jwksProvider, issuer: options.jwtIssuer, audience: options.jwtAudience }, poller };
 }
 
-async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<EntityStore> {
-  if (options.store === "memory") return new InMemoryEntityStore();
+async function resolveStore(
+  options: ServeOptions,
+  manifest: Manifest,
+): Promise<{ store: EntityStore; conn: PgConnection | null }> {
+  if (options.store === "memory") return { store: new InMemoryEntityStore(), conn: null };
   const conn = createNodePgConnection(parsePgEnvConfig());
   if (options.store === "pg-columns") {
     const store = new ColumnMappedEntityStore(conn, manifest, options.schema !== null ? { schema: options.schema } : {});
     await store.ensureSchema();
-    return store;
+    return { store, conn };
   }
-  return new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
+  return { store: new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {}), conn };
 }
 
 export interface RunningServer {
@@ -290,9 +300,39 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
-  const store = await resolveStore(options, manifest);
+  const { store, conn: storeConn } = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
+
+  // P3.25: serve executed report data at GET /v1/reports/:report under the same
+  // gateway pipeline + auth as the entity routes. With a Postgres store the
+  // aggregation is pushed down to a full-dataset GROUP BY (PostgresReportExecutor
+  // over the JSONB document store for --store pg; PostgresColumnReportExecutor over
+  // the typed per-entity tables for --store pg-columns); --store memory uses the
+  // bounded in-memory engine inside the runner. The runner derives the caller's
+  // field-readability gate from the same principal→role bridge the gateway uses,
+  // so report redaction is identical to the entity routes (fail-closed).
+  const reportExecutor: ReportExecutor | undefined =
+    storeConn === null
+      ? undefined
+      : options.store === "pg-columns"
+        ? (r, t, c) =>
+            new PostgresColumnReportExecutor(
+              storeConn,
+              manifest,
+              options.schema !== null ? { schema: options.schema } : {},
+            ).execute(r, t, c)
+        : (r, t, c) =>
+            new PostgresReportExecutor(
+              storeConn,
+              options.schema !== null ? { schema: options.schema } : {},
+            ).execute(r, t, c);
+  const reportRunner = buildManifestReportRunner({
+    manifest,
+    store,
+    principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+    ...(reportExecutor !== undefined ? { executor: reportExecutor } : {}),
+  });
 
   // Optional gateway request-audit persistence (P2.45 / ADR-0153): record each
   // request's PipelineExecution to meta.gateway_pipeline_executions via the
@@ -322,6 +362,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     store,
     apiKeys,
     defaultScheme: options.defaultScheme,
+    reportRunner,
     ...(jwt !== null ? { jwt } : {}),
     ...(executionSink !== null ? { executionSink } : {}),
     ...(rateLimitChecker !== null ? { rateLimitChecker } : {}),
@@ -396,6 +437,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         sloMonitor?.stop();
         server.close((err) => {
           void Promise.all([
+            storeConn !== null ? storeConn.close() : Promise.resolve(),
             incidentConn !== null ? incidentConn.close() : Promise.resolve(),
             executionConn !== null ? executionConn.close() : Promise.resolve(),
           ]).then(() => (err ? reject(err) : resolve()));

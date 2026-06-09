@@ -3,12 +3,13 @@ import {
   parsePgEnvConfig,
   type PgConnection,
 } from "@crossengin/kernel-pg";
-import { PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+import { PostgresEntityStore, PostgresReportExecutor } from "@crossengin/operate-runtime-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
-import { parseApiKeySpec } from "./principals.js";
+import { buildPrincipalWiring, parseApiKeySpec } from "./principals.js";
+import { buildManifestReportRunner } from "./reports.js";
 import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 
 /**
@@ -143,5 +144,42 @@ suite("operate-server integration (real Postgres)", () => {
       null,
     );
     expect((parse(second.body)["data"] as unknown[]).length).toBe(1);
+  });
+
+  it("serves executed report data via GET /v1/reports/:report with SQL pushdown over the full dataset (P3.25)", async () => {
+    const tenant = await seedTenant();
+    const apiKeys = [parseApiKeySpec(`key-rep:store_manager:${tenant}`)];
+    const store = new PostgresEntityStore(conn);
+    const reportRunner = buildManifestReportRunner({
+      manifest,
+      store,
+      principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+      executor: (r, t, c) => new PostgresReportExecutor(conn).execute(r, t, c),
+    });
+    const { httpServer } = buildOperateHttpServer({ manifest, store, apiKeys, reportRunner });
+    // 3 orders: 2 placed (total 100 + 60), 1 cart (25) → revenue 185, placed revenue 160.
+    for (const o of [
+      { order_number: "RO1", state: "placed", currency: "AED", total: 100 },
+      { order_number: "RO2", state: "placed", currency: "AED", total: 60 },
+      { order_number: "RO3", state: "cart", currency: "AED", total: 25 },
+    ]) {
+      const { raw, bytes } = jsonBody("POST", "/v1/sales-orders", "key-rep", o);
+      const created = await httpServer.dispatch(raw, bytes);
+      expect(created.status).toBe(201);
+    }
+
+    // kpi: SUM(total) over ALL orders, aggregated in Postgres (GROUP BY).
+    const kpi = await httpServer.dispatch(req("GET", "/v1/reports/salesRevenue", "key-rep"), null);
+    expect(kpi.status).toBe(200);
+    expect(parse(kpi.body)).toMatchObject({ kind: "kpi", name: "total_revenue", value: 185 });
+
+    // tabular: orders + revenue grouped by state.
+    const tab = await httpServer.dispatch(req("GET", "/v1/reports/ordersByState", "key-rep"), null);
+    expect(tab.status).toBe(200);
+    const rows = parse(tab.body)["rows"] as Array<Record<string, unknown>>;
+    expect(rows.find((r) => r["state"] === "placed")).toMatchObject({ orders: 2, revenue: 160 });
+
+    // unknown report → fail-closed 404
+    expect((await httpServer.dispatch(req("GET", "/v1/reports/ghost", "key-rep"), null)).status).toBe(404);
   });
 });

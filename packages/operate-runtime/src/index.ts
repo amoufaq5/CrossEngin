@@ -3,4 +3,5 @@ export * from "./store.js";
 export * from "./list-query.js";
 export * from "./operations.js";
 export * from "./handlers.js";
+export * from "./report-routes.js";
 export * from "./compile.js";

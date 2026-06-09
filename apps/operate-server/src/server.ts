@@ -1,7 +1,12 @@
 import type { ForwardedProto, PipelineExecution } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
-import { buildOperateGateway, type EntityStore, type OperateServer } from "@crossengin/operate-runtime";
+import {
+  buildOperateGateway,
+  type EntityStore,
+  type OperateServer,
+  type ReportRunner,
+} from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
@@ -153,6 +158,12 @@ export interface BuildOperateHttpServerOptions {
    * `rateLimitDecisionId` resolvable to a real row.
    */
   readonly rateLimitChecker?: RateLimitChecker;
+  /**
+   * Optional report runner. When set, `GET /v1/reports/:report` serves executed
+   * report data (full-dataset SQL pushdown or bounded in-memory) under the same
+   * gateway pipeline + auth as the entity routes.
+   */
+  readonly reportRunner?: ReportRunner;
 }
 
 export interface BuiltOperateHttpServer {
@@ -181,6 +192,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
       : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
     ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
+    ...(options.reportRunner !== undefined ? { reportRunner: options.reportRunner } : {}),
   });
   const httpServer = new OperateHttpServer({
     gateway,

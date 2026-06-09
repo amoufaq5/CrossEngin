@@ -20,6 +20,12 @@ import {
 
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
+import {
+  REPORT_RUN_OPERATION_ID,
+  buildReportHandler,
+  reportRouteDefinition,
+  type ReportRunner,
+} from "./report-routes.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
 
@@ -28,6 +34,14 @@ export interface OperateRuntimeOptions {
   /** Bridges the gateway's scope-bearing principal to its effective roles. */
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * Optional report runner. When set, a `GET /v1/reports/:report` route is
+   * registered and dispatched to it — so the serving API returns executed report
+   * data (aggregated in Postgres or in-memory) under the same gateway pipeline
+   * (auth, rate-limit, audit) as the entity routes. The runner owns RBAC +
+   * per-field redaction.
+   */
+  readonly reportRunner?: ReportRunner;
 }
 
 export interface CompiledOperateServer {
@@ -61,6 +75,11 @@ export function compileOperateServer(
   for (const spec of routeSpecs) {
     routes.register(routeFromSpec(spec));
     handlers.register(spec.operationId, buildSpecHandler(spec, ctx));
+  }
+
+  if (options.reportRunner !== undefined) {
+    routes.register(reportRouteDefinition());
+    handlers.register(REPORT_RUN_OPERATION_ID, buildReportHandler(options.reportRunner));
   }
 
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
