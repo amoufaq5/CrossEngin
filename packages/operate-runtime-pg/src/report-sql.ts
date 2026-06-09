@@ -1,3 +1,5 @@
+import { qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   reportReferencedFields,
@@ -8,6 +10,12 @@ import {
   type TabularData,
 } from "@crossengin/operate-web";
 
+import {
+  columnIndex,
+  columnPlansForManifest,
+  type ColumnMapping,
+  type EntityTablePlan,
+} from "./column-plan.js";
 import { withTenantContext } from "./tenant-context.js";
 
 /**
@@ -169,6 +177,143 @@ export class PostgresReportExecutor {
     if (built === null) return null;
     const rows = await withTenantContext(this.conn, tenantId, async (tx) => {
       const res = await tx.query<Record<string, unknown>>(built.sql, [tenantId, report.entity]);
+      return res.rows;
+    });
+    if (report.kind === "kpi") {
+      const measure = report.measure;
+      if (measure === undefined) return null;
+      const value = rows.length > 0 ? toNum(rows[0]![measure.name]) : null;
+      return { kind: "kpi", name: measure.name, value };
+    }
+    if (report.kind === "pivot") return rowsToPivot(report, rows);
+    return rowsToTabular(report, rows);
+  }
+}
+
+/**
+ * SQL-pushdown report execution over the **column-mapped** store (P3.24): the
+ * typed-per-entity-table sibling of `buildReportSql` / `PostgresReportExecutor`.
+ * Each entity has its own table (`<schema>.<entity_table>`) with typed columns,
+ * so a dimension/measure aggregates over a real native column (`"unit_price"`)
+ * rather than a JSONB `->>` extraction. It covers the same `tabular` / `kpi` /
+ * `pivot` kinds over the same eight aggregation kinds and returns the identical
+ * `ReportData` shape, reusing the JSONB executor's `rowsToTabular` /
+ * `rowsToPivot` / `toNum` mappers (column aliases are the field names, so the
+ * row→data projection is shared verbatim).
+ */
+
+/** A native column read by name, e.g. `"unit_price"` (identifier-validated). */
+function colExpr(mapping: ColumnMapping): string {
+  return quoteIdent(mapping.column);
+}
+
+/** The numeric form of a native column, e.g. `("unit_price")::numeric`. */
+function colNumExpr(mapping: ColumnMapping): string {
+  return `(${colExpr(mapping)})::numeric`;
+}
+
+/**
+ * The SQL aggregate expression for one aggregation against a typed column,
+ * aliased to its name. Returns `null` when the (non-count) measure's field is
+ * missing from the plan, has an invalid name, or is an encrypted (`BYTEA`)
+ * column — ciphertext can't be aggregated, so the whole report is withheld.
+ */
+function colAggExpr(agg: AggregationSpec, idx: ReadonlyMap<string, ColumnMapping>): string | null {
+  if (agg.kind === "count") return `count(*)::float8 AS "${agg.name}"`;
+  const field = agg.field;
+  if (field === undefined || !FIELD_RE.test(field)) return null;
+  const mapping = idx.get(field);
+  if (mapping === undefined || mapping.encryptAtRest) return null;
+  switch (agg.kind) {
+    case "count_distinct":
+      return `count(distinct ${colExpr(mapping)})::float8 AS "${agg.name}"`;
+    case "sum":
+      return `sum(${colNumExpr(mapping)})::float8 AS "${agg.name}"`;
+    case "avg":
+      return `avg(${colNumExpr(mapping)})::float8 AS "${agg.name}"`;
+    case "min":
+      return `min(${colNumExpr(mapping)})::float8 AS "${agg.name}"`;
+    case "max":
+      return `max(${colNumExpr(mapping)})::float8 AS "${agg.name}"`;
+    case "median":
+      return `percentile_cont(0.5) within group (order by ${colNumExpr(mapping)})::float8 AS "${agg.name}"`;
+    case "p95":
+      return `percentile_cont(0.95) within group (order by ${colNumExpr(mapping)})::float8 AS "${agg.name}"`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Builds the `GROUP BY` SQL for a report over the column-mapped entity table, or
+ * `null` for an unsupported kind / an invalid, missing, or encrypted
+ * dimension/measure field. Each dimension column is aliased to its **field**
+ * name so the shared `rowsToTabular` / `rowsToPivot` mappers read it unchanged.
+ * `tenantId` is the only bound parameter ($1) — the table is per-entity, so
+ * there is no `entity` predicate.
+ */
+export function buildColumnReportSql(report: ReportSpec, plan: EntityTablePlan): BuiltReportSql | null {
+  if (report.kind !== "tabular" && report.kind !== "kpi" && report.kind !== "pivot") return null;
+  const idx = columnIndex(plan);
+  const dims = dimensionsOf(report);
+  const dimMappings: ColumnMapping[] = [];
+  for (const d of dims) {
+    if (!FIELD_RE.test(d)) return null;
+    const mapping = idx.get(d);
+    if (mapping === undefined || mapping.encryptAtRest) return null;
+    dimMappings.push(mapping);
+  }
+  const aggs = aggregationsOf(report);
+  if (aggs.length === 0) return null;
+  const aggSql: string[] = [];
+  for (const a of aggs) {
+    const expr = colAggExpr(a, idx);
+    if (expr === null) return null;
+    aggSql.push(expr);
+  }
+  const dimSelect = dims.map((d: string, i: number) => `${colExpr(dimMappings[i]!)} AS "${d}"`);
+  const select = [...dimSelect, ...aggSql].join(", ");
+  const groupBy =
+    dims.length > 0 ? ` GROUP BY ${dimMappings.map((m: ColumnMapping) => colExpr(m)).join(", ")}` : "";
+  const qualified = qualifyTable(plan.schema, plan.table);
+  const sql = `SELECT ${select} FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1${groupBy}`;
+  return { sql, dimensions: dims };
+}
+
+export interface PostgresColumnReportExecutorOptions {
+  readonly schema?: string;
+}
+
+/**
+ * Executes reports via SQL pushdown over the **column-mapped** per-entity
+ * tables. Drop-in for the in-memory report path and the JSONB
+ * `PostgresReportExecutor`: same `(report, tenantId, canRead)` shape, same
+ * `ReportData` output, same fail-closed redaction. The schema defaults to
+ * `public` (matching `ColumnMappedEntityStore`).
+ */
+export class PostgresColumnReportExecutor {
+  private readonly conn: PgConnection;
+  private readonly plans: ReadonlyMap<string, EntityTablePlan>;
+
+  constructor(conn: PgConnection, manifest: Manifest, opts: PostgresColumnReportExecutorOptions = {}) {
+    this.conn = conn;
+    this.plans = columnPlansForManifest(manifest, { schema: opts.schema ?? "public" });
+  }
+
+  async execute(
+    report: ReportSpec,
+    tenantId: string,
+    canRead: (field: string) => boolean,
+  ): Promise<ReportData | null> {
+    for (const field of reportReferencedFields(report)) {
+      if (!canRead(field)) return null;
+    }
+    const plan = this.plans.get(report.entity);
+    if (plan === undefined) return null;
+    const built = buildColumnReportSql(report, plan);
+    if (built === null) return null;
+    const rows = await withTenantContext(this.conn, tenantId, async (tx) => {
+      const res = await tx.query<Record<string, unknown>>(built.sql, [tenantId]);
       return res.rows;
     });
     if (report.kind === "kpi") {

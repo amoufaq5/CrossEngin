@@ -1,6 +1,11 @@
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
-import { PostgresEntityStore, PostgresReportExecutor } from "@crossengin/operate-runtime-pg";
+import {
+  ColumnMappedEntityStore,
+  PostgresColumnReportExecutor,
+  PostgresEntityStore,
+  PostgresReportExecutor,
+} from "@crossengin/operate-runtime-pg";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -323,6 +328,44 @@ suite("operate-web integration (real Postgres)", () => {
 
     // pivot category × status counts, computed by SQL
     const pivot = body((await sql.dispatch(req("/ui/Product/pivot", "sql"))).body);
+    const cells = (pivot["data"] as { cells: Array<{ rowKey: string[]; colKey: string[]; values: Record<string, number> }> }).cells;
+    const at = (cat: string, st: string): number | undefined =>
+      cells.find((c) => c.rowKey[0] === cat && c.colKey[0] === st)?.values["n"];
+    expect(at("grocery", "active")).toBe(2);
+    expect(at("grocery", "discontinued")).toBe(1);
+    expect(at("home", "active")).toBe(2);
+  });
+
+  it("aggregates dashboard/pivot reports via SQL pushdown over the COLUMN store (P3.24)", async () => {
+    // The typed-per-entity-table store + its native-column SQL report executor.
+    // A dedicated schema keeps the column tables out of `public` (and out of the
+    // JSONB cases above); ensureSchema is idempotent.
+    const schema = `ow_cols_${Math.random().toString(36).slice(2, 8)}`;
+    const colStore = new ColumnMappedEntityStore(conn, withBoard, { schema });
+    await colStore.ensureSchema();
+    const tenant = await seedTenant();
+    const colSql = buildOperateWebServer({
+      manifest: withBoard,
+      store: colStore,
+      apiKeySpecs: [{ key: "col", role: "store_manager", tenantId: tenant }],
+      reportExecutor: (r, t, c) => new PostgresColumnReportExecutor(conn, withBoard, { schema }).execute(r, t, c),
+    });
+    // 5 products: grocery/active ×2, grocery/discontinued ×1, home/active ×2.
+    const seeds = [
+      { sku: "CG1", category: "grocery", status: "active", unit_price: 10 },
+      { sku: "CG2", category: "grocery", status: "active", unit_price: 20 },
+      { sku: "CG3", category: "grocery", status: "discontinued", unit_price: 30 },
+      { sku: "CH1", category: "home", status: "active", unit_price: 40 },
+      { sku: "CH2", category: "home", status: "active", unit_price: 50 },
+    ];
+    for (const s of seeds) await colStore.create(tenant, "Product", product(s));
+
+    // dashboard kpi = count over ALL 5 rows (native-column GROUP BY in PG)
+    const dash = body((await colSql.dispatch(req("/ui/Product/dashboard", "col"))).body);
+    expect((dash["widgetData"] as Array<{ value: number }>)[0]!.value).toBe(5);
+
+    // pivot category × status counts, computed by SQL over the typed table
+    const pivot = body((await colSql.dispatch(req("/ui/Product/pivot", "col"))).body);
     const cells = (pivot["data"] as { cells: Array<{ rowKey: string[]; colKey: string[]; values: Record<string, number> }> }).cells;
     const at = (cat: string, st: string): number | undefined =>
       cells.find((c) => c.rowKey[0] === cat && c.colKey[0] === st)?.values["n"];

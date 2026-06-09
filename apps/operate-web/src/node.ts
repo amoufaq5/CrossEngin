@@ -4,7 +4,13 @@ import { readFile } from "node:fs/promises";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
-import { ColumnMappedEntityStore, PostgresEntityStore, PostgresReportExecutor } from "@crossengin/operate-runtime-pg";
+import type { ReportData, ReportSpec } from "@crossengin/operate-web";
+import {
+  ColumnMappedEntityStore,
+  PostgresColumnReportExecutor,
+  PostgresEntityStore,
+  PostgresReportExecutor,
+} from "@crossengin/operate-runtime-pg";
 
 import type { WebServeOptions } from "./cli.js";
 import type { RawWebRequest } from "./http.js";
@@ -29,6 +35,15 @@ import { OperateWebServer, buildOperateWebServer } from "./server.js";
 export interface ServeJwtDeps {
   readonly fetch?: FetchLike;
   readonly scheduler?: IntervalScheduler;
+}
+
+/**
+ * The structural shape both the JSONB `PostgresReportExecutor` and the
+ * column-store `PostgresColumnReportExecutor` satisfy, so `serve()` can pick one
+ * by `--store` and thread its `execute` into the server's `reportExecutor` seam.
+ */
+interface ReportExecutorLike {
+  execute(report: ReportSpec, tenantId: string, canRead: (field: string) => boolean): Promise<ReportData | null>;
 }
 
 /**
@@ -222,14 +237,19 @@ export async function serve(options: WebServeOptions, deps: ServeJwtDeps = {}): 
   const apiKeySpecs = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options, deps);
   const { store, conn } = await resolveWebStore(options, manifest);
-  // P3.22: with the JSONB document store, aggregate dashboard/pivot reports via
-  // SQL pushdown (full-dataset) instead of the bounded in-memory path. The
-  // pg-columns store uses typed per-entity tables (not operate_entity_records),
-  // so it keeps the in-memory report path.
-  const reportExecutor =
-    conn !== null && options.store === "pg"
-      ? new PostgresReportExecutor(conn, options.schema !== null ? { schema: options.schema } : {})
-      : null;
+  // P3.22 + P3.24: with a Postgres store, aggregate dashboard/pivot reports via
+  // SQL pushdown (full-dataset) instead of the bounded in-memory page. `pg` runs
+  // a `GROUP BY` over the JSONB `operate_entity_records` document store;
+  // `pg-columns` runs it over the typed per-entity tables (a real native-column
+  // aggregation), defaulting to the `public` schema like `ColumnMappedEntityStore`.
+  const reportExecutor: ReportExecutorLike | null =
+    conn === null
+      ? null
+      : options.store === "pg-columns"
+        ? new PostgresColumnReportExecutor(conn, manifest, options.schema !== null ? { schema: options.schema } : {})
+        : options.store === "pg"
+          ? new PostgresReportExecutor(conn, options.schema !== null ? { schema: options.schema } : {})
+          : null;
   const webServer = buildOperateWebServer({
     manifest,
     store,

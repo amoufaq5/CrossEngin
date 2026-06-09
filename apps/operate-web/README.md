@@ -64,8 +64,13 @@ static bundle).
 
 `/ui/:entity` honors the list query params driven by the entity's `ListView`:
 `?limit`, `?cursor`, `?sort=field&order=asc|desc`, typed filters
-(`?field[op]=value`), and `?fields` projection. `dashboard` / `pivot` fetch no
-entity rows (they're report-backed — report-data execution is a deferred item).
+(`?field[op]=value`), and `?fields` projection. `dashboard` / `pivot` are
+report-backed: their widgets/cells carry **executed report data**. Under a
+Postgres store the aggregation is pushed down to a `GROUP BY` over the full
+dataset — `--store pg` aggregates the JSONB document store, `--store pg-columns`
+aggregates the typed per-entity tables — while `--store memory` runs the pure
+in-memory engine over a bounded page. A field a caller can't read withholds the
+report; an encrypted (`phi`/`regulated`) column can't be aggregated.
 
 ### SSR React HTML pages (`/app/...`)
 

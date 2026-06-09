@@ -231,3 +231,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 145 | 0176 | 2,500 | Drafted alongside pack-erp-retail authoring all 8 view kinds + reports/dashboards (Phase 3 P3.21) |
 | 146 | 0177 | 2,500 | Drafted alongside the report aggregation engine + SQL pushdown (Phase 3 P3.22) |
 | 147 | 0178 | 2,000 | Drafted alongside the gated SQL-pushdown report integration test (Phase 3 P3.23) |
+| 148 | 0179 | 2,500 | Drafted alongside SQL-pushdown report aggregation over the column store (Phase 3 P3.24) |
