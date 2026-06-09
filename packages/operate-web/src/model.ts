@@ -268,13 +268,25 @@ export const DashboardModelSchema = z.object({
 });
 export type DashboardModel = z.infer<typeof DashboardModelSchema>;
 
+export const PivotModelSchema = z.object({
+  entity: z.string().min(1),
+  title: z.string().min(1),
+  /** The report id the pivot reads (resolved from the view's reportRef). */
+  reportRef: z.string().min(1),
+  /** Whether the frontend may let the user reshape (re-pivot) the report. */
+  allowReshape: z.boolean(),
+  /** The referenced report's humanized label, when it declares one. */
+  reportLabel: z.string().min(1).optional(),
+});
+export type PivotModel = z.infer<typeof PivotModelSchema>;
+
 export const EntityNavSchema = z.object({
   entity: z.string().min(1),
   label: z.string().min(1),
   /** Path to the entity's list/table surface, e.g. `/ui/Product`. */
   path: z.string().min(1),
   /** The view kinds available for the entity, derived from the manifest + fallbacks. */
-  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar", "map", "dashboard"])),
+  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar", "map", "dashboard", "pivot"])),
 });
 export type EntityNav = z.infer<typeof EntityNavSchema>;
 

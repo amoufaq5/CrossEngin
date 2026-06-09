@@ -24,6 +24,7 @@ import {
   type DashboardWidgetModel,
   type MapLayerModel,
   type MapModel,
+  type PivotModel,
   type RowActionModel,
   type TableModel,
   type TableSort,
@@ -204,9 +205,24 @@ interface DashboardDeclLike {
   readonly cells: ReadonlyArray<{ x: number; y: number; w: number; h: number; widget: WidgetLike }>;
 }
 
-/** The structural shape of a `ReportDeclaration` (only its optional RBAC grant is read here). */
+/** The structural shape of a `ReportDeclaration` (the RBAC grant + label the compiler reads). */
 interface ReportLike {
   readonly permissions?: { readonly roles: readonly string[] };
+  readonly label?: Readonly<Record<string, string>>;
+}
+
+/** The structural shape of a manifest `pivot` view (carrying the reportRef). */
+interface PivotViewLike {
+  readonly kind: "pivot";
+  readonly entity: string;
+  readonly label?: Readonly<Record<string, string>>;
+  readonly reportRef: string;
+  readonly allowReshape?: boolean;
+}
+
+function findPivotView(manifest: Manifest, entity: string): PivotViewLike | undefined {
+  const view = viewsFor(manifest).find((v) => v.kind === "pivot" && v.entity === entity);
+  return view as unknown as PivotViewLike | undefined;
 }
 
 function findDashboardView(manifest: Manifest, entity: string): DashboardViewLike | undefined {
@@ -633,6 +649,37 @@ export function compileDashboardModel(
 }
 
 /**
+ * Compiles an entity's `PivotModel` for a viewer, or `null` when the entity
+ * declares no `pivot` view / the referenced report is missing (no fallback).
+ * Redaction is grant-based + fail-closed: a pivot whose report's `permissions`
+ * the viewer doesn't satisfy is withheld (`null`). The model is the report
+ * reference + reshape flag (+ the report's label); report-data execution is out
+ * of scope, so no rows are fetched here.
+ */
+export function compilePivotModel(
+  manifest: Manifest,
+  entityName: string,
+  viewer: ViewerContext,
+): PivotModel | null {
+  const entity = entityByName(manifest, entityName);
+  if (entity === undefined) throw new Error(`unknown entity '${entityName}'`);
+  const view = findPivotView(manifest, entityName);
+  if (view === undefined) return null;
+  const report = reportsOf(manifest)[view.reportRef];
+  if (report === undefined) return null;
+  if (!viewerSatisfiesGrant(manifest, viewer, report.permissions)) return null;
+
+  const reportLabel = localizedText(report.label);
+  return {
+    entity: entityName,
+    title: labelOr(view.label ?? report.label, entityTitle(entityName)),
+    reportRef: view.reportRef,
+    allowReshape: view.allowReshape ?? true,
+    ...(reportLabel.length > 0 ? { reportLabel } : {}),
+  };
+}
+
+/**
  * Compiles the top-level `WebAppModel` for a viewer: the app title + one
  * `EntityNav` per manifest entity (with its table path + available view kinds).
  * The `table`/`detail`/`form` surfaces always exist (via fallbacks); `kanban` /
@@ -643,11 +690,12 @@ export function compileDashboardModel(
 export function compileWebApp(manifest: Manifest, viewer: ViewerContext): WebAppModel {
   const nav: EntityNav[] = [];
   for (const entity of manifest.entities ?? []) {
-    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar" | "map" | "dashboard"> = ["table", "detail", "form"];
+    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar" | "map" | "dashboard" | "pivot"> = ["table", "detail", "form"];
     if (compileKanbanModel(manifest, entity.name, viewer) !== null) views.push("kanban");
     if (compileCalendarModel(manifest, entity.name, viewer) !== null) views.push("calendar");
     if (compileMapModel(manifest, entity.name, viewer) !== null) views.push("map");
     if (compileDashboardModel(manifest, entity.name, viewer) !== null) views.push("dashboard");
+    if (compilePivotModel(manifest, entity.name, viewer) !== null) views.push("pivot");
     nav.push({
       entity: entity.name,
       label: labelOr(findView(manifest, entity.name, "list")?.label, entityTitle(entity.name)),

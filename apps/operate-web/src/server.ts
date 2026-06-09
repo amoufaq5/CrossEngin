@@ -16,6 +16,7 @@ import {
   compileKanbanModel,
   compileDashboardModel,
   compileMapModel,
+  compilePivotModel,
   compileTableModel,
   compileWebApp,
   entityFields,
@@ -38,7 +39,7 @@ import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type Ra
 import { ApiKeyRegistry, WebPrincipalResolver, type JwtVerifyConfig, type WebViewer } from "./principals.js";
 
 /** The second path segment after `/ui/:entity/` that names a GET sub-route, not a record id. */
-const UI_SUBROUTES = new Set(["new", "kanban", "calendar", "map", "dashboard"]);
+const UI_SUBROUTES = new Set(["new", "kanban", "calendar", "map", "dashboard", "pivot"]);
 
 /** Anything that resolves a request to a viewer (an `ApiKeyRegistry` or a `WebPrincipalResolver`). */
 export interface WebViewerResolver {
@@ -74,6 +75,7 @@ export interface OperateWebServerOptions {
  *   GET    /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
  *   GET    /ui/:entity/map      -> { map, page: { data, nextCursor } } (404 if no map view)
  *   GET    /ui/:entity/dashboard -> { dashboard } (layout + widget descriptors; 404 if none)
+ *   GET    /ui/:entity/pivot    -> { pivot } (report ref + reshape flag; 404 if none)
  *   GET    /ui/:entity/new      -> { form }
  *   GET    /ui/:entity/:id      -> { detail, record }
  *   POST   /ui/:entity          -> 201 { record } (RBAC create + write-mask)
@@ -196,6 +198,9 @@ export class OperateWebServer {
     }
     if (rest.length === 2 && rest[1] === "dashboard") {
       return this.serveDashboard(rest[0]!, viewerCtx);
+    }
+    if (rest.length === 2 && rest[1] === "pivot") {
+      return this.servePivot(rest[0]!, viewerCtx);
     }
     if (rest.length === 2 && rest[1] === "new") {
       return this.serveForm(rest[0]!, viewerCtx);
@@ -472,6 +477,16 @@ export class OperateWebServer {
     // Dashboards are report-backed aggregates; this route serves the redacted
     // layout + widget descriptors (report-data execution is out of scope).
     return jsonResponse(200, { dashboard });
+  }
+
+  private servePivot(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const pivot = compilePivotModel(this.manifest, entity, viewerCtx);
+    if (pivot === null) return problemResponse(404, "Not found", `no pivot view for '${entity}'`);
+    // A pivot reads a report; this route serves the redacted report reference +
+    // reshape flag (report-data execution is out of scope).
+    return jsonResponse(200, { pivot });
   }
 
   private async serveDetail(

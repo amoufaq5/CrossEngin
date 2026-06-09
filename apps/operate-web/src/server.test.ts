@@ -166,6 +166,7 @@ const withBoard = {
       layers: [{ id: "all", label: { en: "All" }, kind: "markers" }],
     },
     storeDashView: { kind: "dashboard", entity: "Store", dashboardRef: "storeDash" },
+    storePivotView: { kind: "pivot", entity: "Store", reportRef: "salesPivot", allowReshape: true },
   },
   dashboards: {
     storeDash: {
@@ -177,7 +178,7 @@ const withBoard = {
       ],
     },
   },
-  reports: { salesKpi: {} },
+  reports: { salesKpi: {}, salesPivot: { label: { en: "Sales pivot" } } },
 } as unknown as Manifest;
 
 async function makeServerWithViews(): Promise<OperateWebServer> {
@@ -371,6 +372,23 @@ describe("GET /ui/:entity/dashboard — dashboard layout model", () => {
   it("404s an entity with no dashboard view", async () => {
     const server = await makeServerWithViews();
     expect((await server.dispatch(req("/ui/Product/dashboard", "mgr"))).status).toBe(404);
+  });
+});
+
+describe("GET /ui/:entity/pivot — pivot model", () => {
+  it("serves the pivot model (report ref + reshape flag + label)", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/ui/Store/pivot", "mgr"));
+    expect(res.status).toBe(200);
+    const out = body(res);
+    expect(out.pivot.reportRef).toBe("salesPivot");
+    expect(out.pivot.allowReshape).toBe(true);
+    expect(out.pivot.reportLabel).toBe("Sales pivot");
+  });
+
+  it("404s an entity with no pivot view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/ui/Product/pivot", "mgr"))).status).toBe(404);
   });
 });
 

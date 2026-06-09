@@ -11,6 +11,7 @@ import {
   compileFormModel,
   compileKanbanModel,
   compileMapModel,
+  compilePivotModel,
   compileTableModel,
   compileWebApp,
   entityTitle,
@@ -24,6 +25,7 @@ import {
   FormModelSchema,
   KanbanModelSchema,
   MapModelSchema,
+  PivotModelSchema,
   TableModelSchema,
   WebAppModelSchema,
 } from "./model.js";
@@ -476,6 +478,58 @@ describe("compileDashboardModel", () => {
     );
     expect(compileWebApp(gated, ADMIN).nav.find((n) => n.entity === "Store")?.views).toContain("dashboard");
     expect(compileWebApp(gated, MANAGER).nav.find((n) => n.entity === "Store")?.views).not.toContain("dashboard");
+  });
+});
+
+const STORE_PIVOT_VIEW = {
+  storePivotView: { kind: "pivot", entity: "Store", reportRef: "salesPivot", allowReshape: false },
+};
+const PIVOT_REPORTS = {
+  salesPivot: { label: { en: "Sales pivot" } },
+  secretPivot: { label: { en: "Secret" }, permissions: { roles: ["retail_admin"] } },
+};
+
+describe("compilePivotModel", () => {
+  const m = withDashboard(retail, STORE_PIVOT_VIEW, {}, PIVOT_REPORTS);
+
+  it("returns null when the entity has no pivot view", () => {
+    expect(compilePivotModel(retail, "Store", MANAGER)).toBeNull();
+  });
+
+  it("compiles a schema-valid pivot with the report ref + reshape flag + label", () => {
+    const pivot = compilePivotModel(m, "Store", MANAGER);
+    expect(pivot).not.toBeNull();
+    expect(() => PivotModelSchema.parse(pivot)).not.toThrow();
+    expect(pivot!.reportRef).toBe("salesPivot");
+    expect(pivot!.allowReshape).toBe(false);
+    expect(pivot!.reportLabel).toBe("Sales pivot");
+  });
+
+  it("withholds the pivot (null) when the report's permissions exclude the viewer — fail-closed", () => {
+    const gated = withDashboard(
+      retail,
+      { storePivotView: { kind: "pivot", entity: "Store", reportRef: "secretPivot", allowReshape: true } },
+      {},
+      PIVOT_REPORTS,
+    );
+    expect(compilePivotModel(gated, "Store", ADMIN)).not.toBeNull();
+    expect(compilePivotModel(gated, "Store", MANAGER)).toBeNull();
+  });
+
+  it("returns null when the referenced report is missing", () => {
+    const dangling = withDashboard(retail, { storePivotView: { kind: "pivot", entity: "Store", reportRef: "ghost", allowReshape: true } }, {}, PIVOT_REPORTS);
+    expect(compilePivotModel(dangling, "Store", MANAGER)).toBeNull();
+  });
+
+  it("exposes pivot in the nav only when it compiles for the viewer", () => {
+    const gated = withDashboard(
+      retail,
+      { storePivotView: { kind: "pivot", entity: "Store", reportRef: "secretPivot", allowReshape: true } },
+      {},
+      PIVOT_REPORTS,
+    );
+    expect(compileWebApp(gated, ADMIN).nav.find((n) => n.entity === "Store")?.views).toContain("pivot");
+    expect(compileWebApp(gated, MANAGER).nav.find((n) => n.entity === "Store")?.views).not.toContain("pivot");
   });
 });
 
