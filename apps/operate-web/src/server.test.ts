@@ -16,6 +16,20 @@ const registry: ManifestRegistry = {
 };
 const retail = await resolveManifest(buildErpRetailPack(), { registry });
 
+// Retail with only its list views + no reports/dashboards — the base for the
+// view-injection fixtures below, since the pack now authors real kanban/calendar/
+// map/dashboard/pivot views (P3.21) that would otherwise collide with injected ones.
+const retailListOnly = {
+  ...retail,
+  views: Object.fromEntries(
+    Object.entries((retail as { views?: Record<string, { kind: string }> }).views ?? {}).filter(
+      ([, v]) => v.kind === "list",
+    ),
+  ),
+  reports: {},
+  dashboards: {},
+} as unknown as Manifest;
+
 async function makeServer(): Promise<OperateWebServer> {
   const store = new InMemoryEntityStore();
   await store.create(TENANT, "Product", {
@@ -135,9 +149,9 @@ describe("GET /ui/:entity/new — form", () => {
 });
 
 const withBoard = {
-  ...retail,
+  ...retailListOnly,
   views: {
-    ...(retail.views ?? {}),
+    ...(retailListOnly.views ?? {}),
     productBoard: {
       kind: "kanban",
       entity: "Product",

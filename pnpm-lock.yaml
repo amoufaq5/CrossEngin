@@ -1487,6 +1487,9 @@ importers:
       '@crossengin/pack-erp-core':
         specifier: workspace:*
         version: link:../pack-erp-core
+      '@crossengin/reporting':
+        specifier: workspace:*
+        version: link:../reporting
       '@crossengin/types':
         specifier: workspace:*
         version: link:../types

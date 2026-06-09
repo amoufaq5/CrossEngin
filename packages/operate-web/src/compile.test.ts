@@ -158,9 +158,9 @@ describe("compileWebApp", () => {
     expect(app.title.length).toBeGreaterThan(0);
   });
 
-  it("lists only table/detail/form when no kanban/calendar view is declared", () => {
+  it("lists only table/detail/form for an entity with no extra views (OrderLine)", () => {
     const app = compileWebApp(retail, MANAGER);
-    expect(app.nav.find((n) => n.entity === "Product")?.views).toEqual(["table", "detail", "form"]);
+    expect(app.nav.find((n) => n.entity === "OrderLine")?.views).toEqual(["table", "detail", "form"]);
   });
 });
 
@@ -168,6 +168,18 @@ describe("compileWebApp", () => {
 function withViews(base: Manifest, views: Record<string, unknown>): Manifest {
   return { ...base, views: { ...(base.views ?? {}), ...views } } as unknown as Manifest;
 }
+
+/**
+ * Retail with only its `list` views — a base for the view-injection tests, since
+ * the pack now authors real kanban/calendar/map/dashboard/pivot views (P3.21)
+ * that would otherwise be found ahead of an injected one.
+ */
+const retailListOnly = {
+  ...retail,
+  views: Object.fromEntries(
+    Object.entries(retail.views ?? {}).filter(([, v]) => (v as { kind: string }).kind === "list"),
+  ),
+} as unknown as Manifest;
 
 const PRODUCT_KANBAN = {
   productBoard: {
@@ -263,7 +275,7 @@ const SALES_ORDER_KANBAN = {
 };
 
 describe("compileKanbanModel — RBAC-gated transitions", () => {
-  const m = withViews(retail, SALES_ORDER_KANBAN);
+  const m = withViews(retailListOnly, SALES_ORDER_KANBAN);
 
   it("resolves allowed transitions to {name,toState,fromStates}, gated by the viewer's grants", () => {
     // place is granted to SELLERS (incl cashier); fulfill only to MANAGERS
@@ -285,10 +297,10 @@ describe("compileKanbanModel — RBAC-gated transitions", () => {
 });
 
 describe("compileCalendarModel", () => {
-  const m = withViews(retail, SALES_ORDER_CALENDAR);
+  const m = withViews(retailListOnly, SALES_ORDER_CALENDAR);
 
   it("returns null when the entity has no calendar view", () => {
-    expect(compileCalendarModel(retail, "SalesOrder", MANAGER)).toBeNull();
+    expect(compileCalendarModel(retailListOnly, "SalesOrder", MANAGER)).toBeNull();
   });
 
   it("compiles a schema-valid calendar with start/title/color + default view", () => {
@@ -302,7 +314,7 @@ describe("compileCalendarModel", () => {
   });
 
   it("omits an unreadable colorField but keeps the calendar", () => {
-    const piiColor = withViews(retail, {
+    const piiColor = withViews(retailListOnly, {
       orderCalendar: { ...SALES_ORDER_CALENDAR.orderCalendar, colorField: "customer_email" },
     });
     const cal = compileCalendarModel(piiColor, "SalesOrder", CASHIER);
@@ -311,7 +323,7 @@ describe("compileCalendarModel", () => {
   });
 
   it("withholds the calendar (null) when the title field is unreadable — fail-closed", () => {
-    const leaky = withViews(retail, {
+    const leaky = withViews(retailListOnly, {
       orderCalendar: { ...SALES_ORDER_CALENDAR.orderCalendar, titleField: "customer_email" },
     });
     expect(compileCalendarModel(leaky, "SalesOrder", CASHIER)).toBeNull();
@@ -336,10 +348,10 @@ const STORE_MAP = {
 };
 
 describe("compileMapModel", () => {
-  const m = withViews(retail, STORE_MAP);
+  const m = withViews(retailListOnly, STORE_MAP);
 
   it("returns null when the entity has no map view", () => {
-    expect(compileMapModel(retail, "Store", MANAGER)).toBeNull();
+    expect(compileMapModel(retailListOnly, "Store", MANAGER)).toBeNull();
   });
 
   it("compiles a schema-valid map with geo + marker fields, layers, bounds", () => {
@@ -424,10 +436,10 @@ const DASHBOARD_REPORTS = {
 };
 
 describe("compileDashboardModel", () => {
-  const m = withDashboard(retail, STORE_DASHBOARD_VIEW, STORE_DASHBOARD, DASHBOARD_REPORTS);
+  const m = withDashboard(retailListOnly, STORE_DASHBOARD_VIEW, STORE_DASHBOARD, DASHBOARD_REPORTS);
 
   it("returns null when the entity has no dashboard view", () => {
-    expect(compileDashboardModel(retail, "Store", MANAGER)).toBeNull();
+    expect(compileDashboardModel(retailListOnly, "Store", MANAGER)).toBeNull();
   });
 
   it("compiles a schema-valid dashboard with layout + cells, dropping a report the viewer can't access", () => {
@@ -451,7 +463,7 @@ describe("compileDashboardModel", () => {
 
   it("withholds the whole dashboard (null) when its permissions exclude the viewer — fail-closed", () => {
     const gated = withDashboard(
-      retail,
+      retailListOnly,
       STORE_DASHBOARD_VIEW,
       { storeDash: { ...STORE_DASHBOARD.storeDash, permissions: { roles: ["retail_admin"] } } },
       DASHBOARD_REPORTS,
@@ -461,7 +473,7 @@ describe("compileDashboardModel", () => {
   });
 
   it("returns null when the referenced dashboard is missing", () => {
-    const dangling = withDashboard(retail, STORE_DASHBOARD_VIEW, {}, DASHBOARD_REPORTS);
+    const dangling = withDashboard(retailListOnly, STORE_DASHBOARD_VIEW, {}, DASHBOARD_REPORTS);
     expect(compileDashboardModel(dangling, "Store", MANAGER)).toBeNull();
   });
 
@@ -471,7 +483,7 @@ describe("compileDashboardModel", () => {
 
   it("exposes dashboard in the nav only when it compiles for the viewer", () => {
     const gated = withDashboard(
-      retail,
+      retailListOnly,
       STORE_DASHBOARD_VIEW,
       { storeDash: { ...STORE_DASHBOARD.storeDash, permissions: { roles: ["retail_admin"] } } },
       DASHBOARD_REPORTS,
@@ -555,5 +567,38 @@ describe("compileWebApp — kanban/calendar nav exposure", () => {
   it("adds map to the entity's nav when a map compiles", () => {
     const app = compileWebApp(withViews(retail, STORE_MAP), MANAGER);
     expect(app.nav.find((n) => n.entity === "Store")?.views).toContain("map");
+  });
+});
+
+describe("authored retail pack views (P3.21) — compiles the pack's real views", () => {
+  it("compiles every view kind the retail pack now declares", () => {
+    // SalesOrder: kanban + calendar; Store: map + dashboard; Product: pivot
+    expect(compileKanbanModel(retail, "SalesOrder", MANAGER)).not.toBeNull();
+    expect(compileCalendarModel(retail, "SalesOrder", MANAGER)).not.toBeNull();
+    expect(compileMapModel(retail, "Store", MANAGER)).not.toBeNull();
+    expect(compileDashboardModel(retail, "Store", MANAGER)).not.toBeNull();
+    expect(compilePivotModel(retail, "Product", MANAGER)).not.toBeNull();
+  });
+
+  it("the SalesOrder board resolves its lifecycle transitions (RBAC-gated)", () => {
+    const board = compileKanbanModel(retail, "SalesOrder", MANAGER);
+    expect(board!.stateField).toBe("state");
+    expect(board!.transitions.map((t) => t.name).sort()).toEqual(["cancel", "fulfill", "mark_returned", "place"]);
+  });
+
+  it("the Store dashboard resolves its widgets + the Product pivot its report", () => {
+    const dash = compileDashboardModel(retail, "Store", MANAGER);
+    expect(dash!.cells.length).toBeGreaterThan(0);
+    expect(dash!.cells.some((c) => c.widget.report === "salesRevenue")).toBe(true);
+    expect(compilePivotModel(retail, "Product", MANAGER)!.reportRef).toBe("productByCategoryStatus");
+  });
+
+  it("the nav exposes all the authored view kinds for the right entities", () => {
+    const app = compileWebApp(retail, MANAGER);
+    expect(app.nav.find((n) => n.entity === "SalesOrder")?.views).toEqual(
+      expect.arrayContaining(["table", "detail", "form", "kanban", "calendar"]),
+    );
+    expect(app.nav.find((n) => n.entity === "Store")?.views).toEqual(expect.arrayContaining(["map", "dashboard"]));
+    expect(app.nav.find((n) => n.entity === "Product")?.views).toContain("pivot");
   });
 });

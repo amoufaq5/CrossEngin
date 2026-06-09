@@ -5,4 +5,6 @@ export * from "./permissions.js";
 export * from "./workflows.js";
 export * from "./jobs.js";
 export * from "./views.js";
+export * from "./reports.js";
+export * from "./dashboards.js";
 export * from "./pack.js";

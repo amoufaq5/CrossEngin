@@ -33,10 +33,24 @@ const registry: ManifestRegistry = {
 };
 const retail = await resolveManifest(buildErpRetailPack(), { registry });
 
-const withBoard = {
+// Retail with only its list views + no reports/dashboards — so the board/map/
+// dashboard/pivot views this suite injects don't collide with the pack's own
+// authored views (P3.21).
+const retailListOnly = {
   ...retail,
+  views: Object.fromEntries(
+    Object.entries((retail as { views?: Record<string, { kind: string }> }).views ?? {}).filter(
+      ([, v]) => v.kind === "list",
+    ),
+  ),
+  reports: {},
+  dashboards: {},
+} as unknown as Manifest;
+
+const withBoard = {
+  ...retailListOnly,
   views: {
-    ...(retail.views ?? {}),
+    ...(retailListOnly.views ?? {}),
     productBoard: {
       kind: "kanban",
       entity: "Product",

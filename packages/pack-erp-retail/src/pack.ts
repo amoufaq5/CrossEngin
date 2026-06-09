@@ -1,10 +1,12 @@
 import { ERP_CORE_PACK_SLUG } from "@crossengin/pack-erp-core";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
+import { ERP_RETAIL_DASHBOARDS } from "./dashboards.js";
 import { ERP_RETAIL_ENTITIES } from "./entities.js";
 import { ERP_RETAIL_JOBS } from "./jobs.js";
 import { ERP_RETAIL_PERMISSIONS } from "./permissions.js";
 import { ERP_RETAIL_RELATIONS } from "./relations.js";
+import { ERP_RETAIL_REPORTS } from "./reports.js";
 import { ERP_RETAIL_ROLES } from "./roles.js";
 import { ERP_RETAIL_VIEWS } from "./views.js";
 import { ERP_RETAIL_WORKFLOWS } from "./workflows.js";
@@ -45,5 +47,7 @@ export function buildErpRetailPack(opts: BuildErpRetailPackOptions = {}): Manife
     workflows: { ...ERP_RETAIL_WORKFLOWS },
     jobs: { ...ERP_RETAIL_JOBS },
     views: { ...ERP_RETAIL_VIEWS },
+    reports: { ...ERP_RETAIL_REPORTS },
+    dashboards: { ...ERP_RETAIL_DASHBOARDS },
   };
 }
