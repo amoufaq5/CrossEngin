@@ -4,4 +4,6 @@ export * from "./list-query.js";
 export * from "./operations.js";
 export * from "./handlers.js";
 export * from "./report-routes.js";
+export * from "./api-descriptor.js";
+export * from "./openapi.js";
 export * from "./compile.js";

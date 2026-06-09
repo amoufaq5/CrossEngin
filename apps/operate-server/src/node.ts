@@ -363,6 +363,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     apiKeys,
     defaultScheme: options.defaultScheme,
     reportRunner,
+    serveApiDescriptor: true,
     ...(jwt !== null ? { jwt } : {}),
     ...(executionSink !== null ? { executionSink } : {}),
     ...(rateLimitChecker !== null ? { rateLimitChecker } : {}),

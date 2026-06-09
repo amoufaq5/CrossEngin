@@ -251,3 +251,46 @@ describe("OperateHttpServer — GET /v1/reports/:report (P3.25)", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("OperateHttpServer — GET /v1/openapi.json (P3.26)", () => {
+  function makeDescribedServer(): OperateHttpServer {
+    const store = new InMemoryEntityStore();
+    const reportRunner = buildManifestReportRunner({
+      manifest,
+      store,
+      principalRoles: buildPrincipalWiring(API_KEYS).principalRoles,
+    });
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store,
+      apiKeys: API_KEYS,
+      reportRunner,
+      serveApiDescriptor: true,
+      openApiInfo: { title: "Retail API", version: "v1" },
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    return httpServer;
+  }
+
+  it("serves a minimal OpenAPI 3.1 document listing entity + report routes", async () => {
+    const server = makeDescribedServer();
+    const res = await server.dispatch(req("GET", "/v1/openapi.json", "key-manager"), null);
+    expect(res.status).toBe(200);
+    const doc = parse(res.body);
+    expect(doc["openapi"]).toBe("3.1.0");
+    expect(doc["info"]).toEqual({ title: "Retail API", version: "v1" });
+    const paths = doc["paths"] as Record<string, Record<string, unknown>>;
+    expect(paths["/v1/products"]?.["get"]).toBeDefined();
+    // the report route is present (reportRunner was wired)
+    expect((paths["/v1/reports/{report}"]?.["get"] as { operationId: string }).operationId).toBe("report.run");
+    // the report catalog rides under x-reports
+    const reports = doc["x-reports"] as Array<{ name: string }>;
+    expect(reports.map((r) => r.name)).toContain("salesRevenue");
+  });
+
+  it("401s an unauthenticated openapi request (it rides the gateway pipeline)", async () => {
+    const server = makeDescribedServer();
+    const res = await server.dispatch(req("GET", "/v1/openapi.json", "key-nobody"), null);
+    expect(res.status).toBe(401);
+  });
+});

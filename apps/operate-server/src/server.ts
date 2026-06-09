@@ -164,6 +164,10 @@ export interface BuildOperateHttpServerOptions {
    * gateway pipeline + auth as the entity routes.
    */
   readonly reportRunner?: ReportRunner;
+  /** When set, register `GET /v1/openapi.json` (the API description). */
+  readonly serveApiDescriptor?: boolean;
+  /** Info block for the served OpenAPI document. */
+  readonly openApiInfo?: { readonly title: string; readonly version: string };
 }
 
 export interface BuiltOperateHttpServer {
@@ -193,6 +197,8 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
     ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
     ...(options.reportRunner !== undefined ? { reportRunner: options.reportRunner } : {}),
+    ...(options.serveApiDescriptor !== undefined ? { serveApiDescriptor: options.serveApiDescriptor } : {}),
+    ...(options.openApiInfo !== undefined ? { openApiInfo: options.openApiInfo } : {}),
   });
   const httpServer = new OperateHttpServer({
     gateway,

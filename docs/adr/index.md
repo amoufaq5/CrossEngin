@@ -233,3 +233,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 147 | 0178 | 2,000 | Drafted alongside the gated SQL-pushdown report integration test (Phase 3 P3.23) |
 | 148 | 0179 | 2,500 | Drafted alongside SQL-pushdown report aggregation over the column store (Phase 3 P3.24) |
 | 149 | 0180 | 3,000 | Drafted alongside report routes on the operate-server serving API (Phase 3 P3.25) |
+| 150 | 0181 | 2,500 | Drafted alongside OpenAPI / report discovery on operate-server (Phase 3 P3.26) |

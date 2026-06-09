@@ -25,6 +25,24 @@ Per request the gateway: authenticates (API key or JWT), resolves the principal
 runs the handler over the store, **redacts classified fields per-caller** at the
 edge, applies security headers, and emits a queryable `PipelineExecution`.
 
+## Routes
+
+| route | purpose |
+|---|---|
+| `GET/POST /v1/<entities>` | list (keyset-paginated) / create |
+| `GET/PATCH/DELETE /v1/<entities>/{id}` | read / update / delete |
+| `POST /v1/<entities>/{id}/<transition>` | fire an `entityLifecycle` transition |
+| `GET /v1/reports/{report}` | run a manifest report → executed `ReportData` (P3.25) |
+| `GET /v1/openapi.json` | the API description — a minimal OpenAPI 3.1 doc (P3.26) |
+
+Report data is aggregated by SQL pushdown under a Postgres store (`--store pg`
+JSONB / `--store pg-columns` typed columns) or a bounded in-memory engine under
+`--store memory`; an unknown report or a field the caller can't read is a
+fail-closed `404`. `GET /v1/openapi.json` lists every operation + the report
+catalog (under `x-reports`), projected from the compiled routes + manifest — it
+rides the gateway, so it authenticates like any route (it is the published API
+*shape*, not tenant data).
+
 ## Stores (`--store`)
 
 | store | binding | use |

@@ -18,7 +18,15 @@ import {
   type RateLimitChecker,
 } from "@crossengin/api-gateway-runtime";
 
+import { buildApiDescriptor, type ApiDescriptor } from "./api-descriptor.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
+import {
+  OPENAPI_OPERATION_ID,
+  buildOpenApiHandler,
+  openApiRouteDefinition,
+  toOpenApiDocument,
+  type OpenApiDocument,
+} from "./openapi.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
 import {
   REPORT_RUN_OPERATION_ID,
@@ -42,6 +50,16 @@ export interface OperateRuntimeOptions {
    * per-field redaction.
    */
   readonly reportRunner?: ReportRunner;
+  /**
+   * When set, a `GET /v1/openapi.json` route is registered serving a minimal
+   * OpenAPI 3.1 document describing every operation (entity CRUD + lifecycle +
+   * the report route when wired) plus the report catalog (`x-reports`). The
+   * computed `apiDescriptor` + `openApiDocument` are always exposed on the
+   * compiled server regardless; this flag only controls serving them over HTTP.
+   */
+  readonly serveApiDescriptor?: boolean;
+  /** Info block for the served OpenAPI document (defaults to a generic title). */
+  readonly openApiInfo?: { readonly title: string; readonly version: string };
 }
 
 export interface CompiledOperateServer {
@@ -49,6 +67,10 @@ export interface CompiledOperateServer {
   readonly handlers: HandlerRegistry;
   readonly redactionRegistry: MapRedactionRegistry;
   readonly routeSpecs: readonly RouteSpec[];
+  /** The serializable description of the served API (operations + report catalog). */
+  readonly apiDescriptor: ApiDescriptor;
+  /** The minimal OpenAPI 3.1 projection of `apiDescriptor`. */
+  readonly openApiDocument: OpenApiDocument;
 }
 
 /**
@@ -77,9 +99,20 @@ export function compileOperateServer(
     handlers.register(spec.operationId, buildSpecHandler(spec, ctx));
   }
 
+  const hasReportRoute = options.reportRunner !== undefined;
   if (options.reportRunner !== undefined) {
     routes.register(reportRouteDefinition());
     handlers.register(REPORT_RUN_OPERATION_ID, buildReportHandler(options.reportRunner));
+  }
+
+  const apiDescriptor = buildApiDescriptor(manifest, routeSpecs, { includeReportRoute: hasReportRoute });
+  const openApiDocument = toOpenApiDocument(
+    apiDescriptor,
+    options.openApiInfo ?? { title: "CrossEngin operate API", version: apiDescriptor.apiVersion },
+  );
+  if (options.serveApiDescriptor === true) {
+    routes.register(openApiRouteDefinition());
+    handlers.register(OPENAPI_OPERATION_ID, buildOpenApiHandler(openApiDocument));
   }
 
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
@@ -88,7 +121,7 @@ export function compileOperateServer(
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
   });
 
-  return { routes, handlers, redactionRegistry, routeSpecs };
+  return { routes, handlers, redactionRegistry, routeSpecs, apiDescriptor, openApiDocument };
 }
 
 export interface OperateGatewayOptions extends OperateRuntimeOptions {
