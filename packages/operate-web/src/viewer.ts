@@ -1,6 +1,7 @@
 import {
   computeClassifiedFieldRedaction,
   rbacCheck,
+  resolveEffectiveRoles,
   validateClassifiedWriteMask,
   type ClassifiedField,
   type EntityPermissions,
@@ -158,6 +159,26 @@ function buildPrincipal(
     abacAttributes: {},
     mfaProofAgeSeconds: null,
   };
+}
+
+/**
+ * Whether a viewer satisfies an optional RBAC grant (a dashboard's or a report's
+ * `permissions`). A `null`/`undefined` grant is open to everyone; otherwise the
+ * viewer's *effective* roles (resolving role inheritance) must intersect the
+ * grant's `roles`. Fail-closed: an unknown viewer role contributes nothing.
+ * Used by the dashboard compiler to gate the whole board + individual widgets.
+ */
+export function viewerSatisfiesGrant(
+  manifest: Manifest,
+  viewer: ViewerContext,
+  grant: { readonly roles: readonly string[] } | null | undefined,
+): boolean {
+  if (grant === null || grant === undefined) return true;
+  const roleDefs = new Map<RoleName, RoleDefinition>(Object.entries(manifest.roles ?? {}));
+  roleDefs.set(ANONYMOUS_ROLE, { name: ANONYMOUS_ROLE });
+  const principal = buildPrincipal(viewer.roles, roleDefs);
+  const effective = resolveEffectiveRoles(principal, roleDefs);
+  return grant.roles.some((r) => effective.has(r));
 }
 
 /** The classified-field list for an entity (field name + optional classification). */

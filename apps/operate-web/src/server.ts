@@ -14,6 +14,7 @@ import {
   compileDetailModel,
   compileFormModel,
   compileKanbanModel,
+  compileDashboardModel,
   compileMapModel,
   compileTableModel,
   compileWebApp,
@@ -37,7 +38,7 @@ import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type Ra
 import { ApiKeyRegistry, WebPrincipalResolver, type JwtVerifyConfig, type WebViewer } from "./principals.js";
 
 /** The second path segment after `/ui/:entity/` that names a GET sub-route, not a record id. */
-const UI_SUBROUTES = new Set(["new", "kanban", "calendar", "map"]);
+const UI_SUBROUTES = new Set(["new", "kanban", "calendar", "map", "dashboard"]);
 
 /** Anything that resolves a request to a viewer (an `ApiKeyRegistry` or a `WebPrincipalResolver`). */
 export interface WebViewerResolver {
@@ -72,6 +73,7 @@ export interface OperateWebServerOptions {
  *   GET    /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
  *   GET    /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
  *   GET    /ui/:entity/map      -> { map, page: { data, nextCursor } } (404 if no map view)
+ *   GET    /ui/:entity/dashboard -> { dashboard } (layout + widget descriptors; 404 if none)
  *   GET    /ui/:entity/new      -> { form }
  *   GET    /ui/:entity/:id      -> { detail, record }
  *   POST   /ui/:entity          -> 201 { record } (RBAC create + write-mask)
@@ -191,6 +193,9 @@ export class OperateWebServer {
     }
     if (rest.length === 2 && rest[1] === "map") {
       return this.serveMap(rest[0]!, viewer, viewerCtx, query);
+    }
+    if (rest.length === 2 && rest[1] === "dashboard") {
+      return this.serveDashboard(rest[0]!, viewerCtx);
     }
     if (rest.length === 2 && rest[1] === "new") {
       return this.serveForm(rest[0]!, viewerCtx);
@@ -457,6 +462,16 @@ export class OperateWebServer {
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
     return jsonResponse(200, { map, page: { data, nextCursor: page.nextCursor } });
+  }
+
+  private serveDashboard(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const dashboard = compileDashboardModel(this.manifest, entity, viewerCtx);
+    if (dashboard === null) return problemResponse(404, "Not found", `no dashboard view for '${entity}'`);
+    // Dashboards are report-backed aggregates; this route serves the redacted
+    // layout + widget descriptors (report-data execution is out of scope).
+    return jsonResponse(200, { dashboard });
   }
 
   private async serveDetail(

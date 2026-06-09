@@ -18,6 +18,10 @@ import {
   type KanbanColumnModel,
   type KanbanModel,
   type KanbanTransitionModel,
+  type DashboardCellModel,
+  type DashboardModel,
+  type DashboardWidgetKind,
+  type DashboardWidgetModel,
   type MapLayerModel,
   type MapModel,
   type RowActionModel,
@@ -29,6 +33,7 @@ import {
 import {
   EntityFieldResolver,
   entityFields,
+  viewerSatisfiesGrant,
   type CompileOptions,
   type FieldAccess,
   type ViewerContext,
@@ -171,6 +176,56 @@ function findCalendarView(manifest: Manifest, entity: string): CalendarViewLike 
 function findMapView(manifest: Manifest, entity: string): MapViewLike | undefined {
   const view = viewsFor(manifest).find((v) => v.kind === "map" && v.entity === entity);
   return view as unknown as MapViewLike | undefined;
+}
+
+/** The structural shape of a manifest `dashboard` view (carrying the dashboardRef). */
+interface DashboardViewLike {
+  readonly kind: "dashboard";
+  readonly entity: string;
+  readonly label?: Readonly<Record<string, string>>;
+  readonly dashboardRef: string;
+}
+
+/** A grid cell's widget (the views/reporting union flattened to the fields the compiler reads). */
+interface WidgetLike {
+  readonly kind: DashboardWidgetKind;
+  readonly report?: string;
+  readonly title?: Readonly<Record<string, string>>;
+  readonly body?: Readonly<Record<string, string>>;
+  readonly label?: Readonly<Record<string, string>>;
+}
+
+/** The structural shape of a `DashboardDeclaration` (manifest.dashboards[ref]). */
+interface DashboardDeclLike {
+  readonly label?: Readonly<Record<string, string>>;
+  readonly layout?: "grid" | "stack";
+  readonly refreshIntervalSeconds?: number;
+  readonly permissions?: { readonly roles: readonly string[] };
+  readonly cells: ReadonlyArray<{ x: number; y: number; w: number; h: number; widget: WidgetLike }>;
+}
+
+/** The structural shape of a `ReportDeclaration` (only its optional RBAC grant is read here). */
+interface ReportLike {
+  readonly permissions?: { readonly roles: readonly string[] };
+}
+
+function findDashboardView(manifest: Manifest, entity: string): DashboardViewLike | undefined {
+  const view = viewsFor(manifest).find((v) => v.kind === "dashboard" && v.entity === entity);
+  return view as unknown as DashboardViewLike | undefined;
+}
+
+function dashboardsOf(manifest: Manifest): Readonly<Record<string, DashboardDeclLike>> {
+  return (manifest as unknown as { dashboards?: Record<string, DashboardDeclLike> }).dashboards ?? {};
+}
+
+function reportsOf(manifest: Manifest): Readonly<Record<string, ReportLike>> {
+  return (manifest as unknown as { reports?: Record<string, ReportLike> }).reports ?? {};
+}
+
+/** Picks the en-ish value from a localized text map (no humanize fallback). */
+function localizedText(loc: Readonly<Record<string, string>> | undefined): string {
+  if (loc === undefined) return "";
+  return loc["en"] ?? Object.values(loc)[0] ?? "";
 }
 
 function readableAccess(
@@ -526,6 +581,58 @@ export function compileMapModel(
 }
 
 /**
+ * Compiles an entity's `DashboardModel` for a viewer, or `null` when the entity
+ * declares no `dashboard` view / the referenced dashboard is missing (no
+ * fallback). Redaction is grant-based + fail-closed: a dashboard whose
+ * `permissions` the viewer doesn't satisfy is withheld entirely (`null`), and a
+ * report-backed widget whose report's `permissions` the viewer lacks is dropped
+ * from the cell list (markdown / divider widgets always render). The model is the
+ * grid *layout* + widget descriptors; report-data execution is out of scope, so
+ * no entity rows are fetched here.
+ */
+export function compileDashboardModel(
+  manifest: Manifest,
+  entityName: string,
+  viewer: ViewerContext,
+): DashboardModel | null {
+  const entity = entityByName(manifest, entityName);
+  if (entity === undefined) throw new Error(`unknown entity '${entityName}'`);
+  const view = findDashboardView(manifest, entityName);
+  if (view === undefined) return null;
+  const dash = dashboardsOf(manifest)[view.dashboardRef];
+  if (dash === undefined) return null;
+  if (!viewerSatisfiesGrant(manifest, viewer, dash.permissions)) return null;
+
+  const reports = reportsOf(manifest);
+  const cells: DashboardCellModel[] = [];
+  for (const cell of dash.cells) {
+    const w = cell.widget;
+    if (w.report !== undefined) {
+      const report = reports[w.report];
+      if (report !== undefined && !viewerSatisfiesGrant(manifest, viewer, report.permissions)) {
+        continue; // the viewer can't see this report — drop the widget
+      }
+    }
+    const widget: DashboardWidgetModel = {
+      kind: w.kind,
+      ...(w.report !== undefined ? { report: w.report } : {}),
+      ...(w.title !== undefined ? { title: localizedText(w.title) || w.kind } : {}),
+      ...(w.body !== undefined ? { body: localizedText(w.body) } : {}),
+      ...(w.label !== undefined ? { label: localizedText(w.label) || w.kind } : {}),
+    };
+    cells.push({ x: cell.x, y: cell.y, w: cell.w, h: cell.h, widget });
+  }
+
+  return {
+    entity: entityName,
+    title: labelOr(view.label ?? dash.label, entityTitle(entityName)),
+    layout: dash.layout ?? "grid",
+    refreshIntervalSeconds: dash.refreshIntervalSeconds ?? 60,
+    cells,
+  };
+}
+
+/**
  * Compiles the top-level `WebAppModel` for a viewer: the app title + one
  * `EntityNav` per manifest entity (with its table path + available view kinds).
  * The `table`/`detail`/`form` surfaces always exist (via fallbacks); `kanban` /
@@ -536,10 +643,11 @@ export function compileMapModel(
 export function compileWebApp(manifest: Manifest, viewer: ViewerContext): WebAppModel {
   const nav: EntityNav[] = [];
   for (const entity of manifest.entities ?? []) {
-    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar" | "map"> = ["table", "detail", "form"];
+    const views: Array<"table" | "detail" | "form" | "kanban" | "calendar" | "map" | "dashboard"> = ["table", "detail", "form"];
     if (compileKanbanModel(manifest, entity.name, viewer) !== null) views.push("kanban");
     if (compileCalendarModel(manifest, entity.name, viewer) !== null) views.push("calendar");
     if (compileMapModel(manifest, entity.name, viewer) !== null) views.push("map");
+    if (compileDashboardModel(manifest, entity.name, viewer) !== null) views.push("dashboard");
     nav.push({
       entity: entity.name,
       label: labelOr(findView(manifest, entity.name, "list")?.label, entityTitle(entity.name)),

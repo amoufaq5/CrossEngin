@@ -219,13 +219,62 @@ export const MapModelSchema = z.object({
 });
 export type MapModel = z.infer<typeof MapModelSchema>;
 
+export const DASHBOARD_WIDGET_KINDS = [
+  "kpi",
+  "tabular",
+  "pivot",
+  "timeseries",
+  "funnel",
+  "cohort",
+  "list",
+  "markdown",
+  "divider",
+] as const;
+export type DashboardWidgetKind = (typeof DASHBOARD_WIDGET_KINDS)[number];
+
+/** A compiled dashboard widget — the layout descriptor (report execution is out of scope). */
+export const DashboardWidgetModelSchema = z.object({
+  kind: z.enum(DASHBOARD_WIDGET_KINDS),
+  /** The report id a report-backed widget reads (absent for markdown / divider). */
+  report: z.string().min(1).optional(),
+  /** A widget title (humanized localized label). */
+  title: z.string().min(1).optional(),
+  /** Markdown body (markdown widgets only). */
+  body: z.string().optional(),
+  /** Divider label (divider widgets only). */
+  label: z.string().min(1).optional(),
+});
+export type DashboardWidgetModel = z.infer<typeof DashboardWidgetModelSchema>;
+
+export const DashboardCellModelSchema = z.object({
+  x: z.number().int().min(0),
+  y: z.number().int().min(0),
+  w: z.number().int().positive(),
+  h: z.number().int().positive(),
+  widget: DashboardWidgetModelSchema,
+});
+export type DashboardCellModel = z.infer<typeof DashboardCellModelSchema>;
+
+export const DASHBOARD_LAYOUTS = ["grid", "stack"] as const;
+export type DashboardLayout = (typeof DASHBOARD_LAYOUTS)[number];
+
+export const DashboardModelSchema = z.object({
+  entity: z.string().min(1),
+  title: z.string().min(1),
+  layout: z.enum(DASHBOARD_LAYOUTS),
+  refreshIntervalSeconds: z.number().int().positive(),
+  /** The grid cells the viewer may see — a report-backed widget the viewer can't access is dropped. */
+  cells: z.array(DashboardCellModelSchema),
+});
+export type DashboardModel = z.infer<typeof DashboardModelSchema>;
+
 export const EntityNavSchema = z.object({
   entity: z.string().min(1),
   label: z.string().min(1),
   /** Path to the entity's list/table surface, e.g. `/ui/Product`. */
   path: z.string().min(1),
   /** The view kinds available for the entity, derived from the manifest + fallbacks. */
-  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar", "map"])),
+  views: z.array(z.enum(["table", "detail", "form", "kanban", "calendar", "map", "dashboard"])),
 });
 export type EntityNav = z.infer<typeof EntityNavSchema>;
 

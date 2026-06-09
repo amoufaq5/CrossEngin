@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   compileCalendarModel,
+  compileDashboardModel,
   compileDetailModel,
   compileFormModel,
   compileKanbanModel,
@@ -18,6 +19,7 @@ import {
 } from "./compile.js";
 import {
   CalendarModelSchema,
+  DashboardModelSchema,
   DetailModelSchema,
   FormModelSchema,
   KanbanModelSchema,
@@ -36,6 +38,7 @@ const healthcare = await resolveManifest(buildErpHealthcarePack(), { registry })
 
 const MANAGER = { roles: ["store_manager"] };
 const CASHIER = { roles: ["cashier"] };
+const ADMIN = { roles: ["retail_admin"] };
 
 function columnFields(roles: { roles: string[] }): string[] {
   return compileTableModel(retail, "Product", roles).columns.map((c) => c.field);
@@ -382,6 +385,97 @@ describe("compileMapModel", () => {
 
   it("throws on an unknown entity", () => {
     expect(() => compileMapModel(m, "Nope", MANAGER)).toThrow(/unknown entity/);
+  });
+});
+
+function withDashboard(
+  base: Manifest,
+  views: Record<string, unknown>,
+  dashboards: Record<string, unknown>,
+  reports: Record<string, unknown>,
+): Manifest {
+  return {
+    ...base,
+    views: { ...(base.views ?? {}), ...views },
+    dashboards: { ...((base as { dashboards?: Record<string, unknown> }).dashboards ?? {}), ...dashboards },
+    reports: { ...((base as { reports?: Record<string, unknown> }).reports ?? {}), ...reports },
+  } as unknown as Manifest;
+}
+
+const STORE_DASHBOARD_VIEW = {
+  storeDashView: { kind: "dashboard", entity: "Store", label: { en: "Store dashboard" }, dashboardRef: "storeDash" },
+};
+const STORE_DASHBOARD = {
+  storeDash: {
+    layout: "grid",
+    refreshIntervalSeconds: 120,
+    cells: [
+      { x: 0, y: 0, w: 4, h: 2, widget: { kind: "kpi", report: "salesKpi", title: { en: "Sales" } } },
+      { x: 4, y: 0, w: 4, h: 2, widget: { kind: "markdown", body: { en: "Welcome" } } },
+      { x: 8, y: 0, w: 4, h: 2, widget: { kind: "tabular", report: "secretReport" } },
+    ],
+  },
+};
+const DASHBOARD_REPORTS = {
+  salesKpi: {},
+  secretReport: { permissions: { roles: ["retail_admin"] } },
+};
+
+describe("compileDashboardModel", () => {
+  const m = withDashboard(retail, STORE_DASHBOARD_VIEW, STORE_DASHBOARD, DASHBOARD_REPORTS);
+
+  it("returns null when the entity has no dashboard view", () => {
+    expect(compileDashboardModel(retail, "Store", MANAGER)).toBeNull();
+  });
+
+  it("compiles a schema-valid dashboard with layout + cells, dropping a report the viewer can't access", () => {
+    const dash = compileDashboardModel(m, "Store", MANAGER);
+    expect(dash).not.toBeNull();
+    expect(() => DashboardModelSchema.parse(dash)).not.toThrow();
+    expect(dash!.layout).toBe("grid");
+    expect(dash!.refreshIntervalSeconds).toBe(120);
+    // manager sees the salesKpi + markdown widgets; secretReport (admin-only) is dropped
+    expect(dash!.cells).toHaveLength(2);
+    expect(dash!.cells.map((c) => c.widget.kind)).toEqual(["kpi", "markdown"]);
+    expect(dash!.cells[0]!.widget.report).toBe("salesKpi");
+    expect(dash!.cells[1]!.widget.body).toBe("Welcome");
+  });
+
+  it("a retail_admin sees the report-gated widget too", () => {
+    const dash = compileDashboardModel(m, "Store", ADMIN);
+    expect(dash!.cells).toHaveLength(3);
+    expect(dash!.cells.map((c) => c.widget.report ?? "")).toContain("secretReport");
+  });
+
+  it("withholds the whole dashboard (null) when its permissions exclude the viewer — fail-closed", () => {
+    const gated = withDashboard(
+      retail,
+      STORE_DASHBOARD_VIEW,
+      { storeDash: { ...STORE_DASHBOARD.storeDash, permissions: { roles: ["retail_admin"] } } },
+      DASHBOARD_REPORTS,
+    );
+    expect(compileDashboardModel(gated, "Store", ADMIN)).not.toBeNull();
+    expect(compileDashboardModel(gated, "Store", MANAGER)).toBeNull();
+  });
+
+  it("returns null when the referenced dashboard is missing", () => {
+    const dangling = withDashboard(retail, STORE_DASHBOARD_VIEW, {}, DASHBOARD_REPORTS);
+    expect(compileDashboardModel(dangling, "Store", MANAGER)).toBeNull();
+  });
+
+  it("throws on an unknown entity", () => {
+    expect(() => compileDashboardModel(m, "Nope", MANAGER)).toThrow(/unknown entity/);
+  });
+
+  it("exposes dashboard in the nav only when it compiles for the viewer", () => {
+    const gated = withDashboard(
+      retail,
+      STORE_DASHBOARD_VIEW,
+      { storeDash: { ...STORE_DASHBOARD.storeDash, permissions: { roles: ["retail_admin"] } } },
+      DASHBOARD_REPORTS,
+    );
+    expect(compileWebApp(gated, ADMIN).nav.find((n) => n.entity === "Store")?.views).toContain("dashboard");
+    expect(compileWebApp(gated, MANAGER).nav.find((n) => n.entity === "Store")?.views).not.toContain("dashboard");
   });
 });
 

@@ -165,7 +165,19 @@ const withBoard = {
       defaultZoom: 6,
       layers: [{ id: "all", label: { en: "All" }, kind: "markers" }],
     },
+    storeDashView: { kind: "dashboard", entity: "Store", dashboardRef: "storeDash" },
   },
+  dashboards: {
+    storeDash: {
+      layout: "grid",
+      refreshIntervalSeconds: 90,
+      cells: [
+        { x: 0, y: 0, w: 6, h: 2, widget: { kind: "kpi", report: "salesKpi", title: { en: "Sales" } } },
+        { x: 6, y: 0, w: 6, h: 2, widget: { kind: "markdown", body: { en: "Welcome" } } },
+      ],
+    },
+  },
+  reports: { salesKpi: {} },
 } as unknown as Manifest;
 
 async function makeServerWithViews(): Promise<OperateWebServer> {
@@ -341,6 +353,24 @@ describe("GET /ui/:entity/map — map model + data page", () => {
   it("404s an entity with no map view", async () => {
     const server = await makeServerWithViews();
     expect((await server.dispatch(req("/ui/SalesOrder/map", "mgr"))).status).toBe(404);
+  });
+});
+
+describe("GET /ui/:entity/dashboard — dashboard layout model", () => {
+  it("serves the dashboard model (layout + widget descriptors)", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/ui/Store/dashboard", "mgr"));
+    expect(res.status).toBe(200);
+    const out = body(res);
+    expect(out.dashboard.layout).toBe("grid");
+    expect(out.dashboard.cells).toHaveLength(2);
+    expect(out.dashboard.cells[0].widget.kind).toBe("kpi");
+    expect(out.dashboard.cells[1].widget.body).toBe("Welcome");
+  });
+
+  it("404s an entity with no dashboard view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/ui/Product/dashboard", "mgr"))).status).toBe(404);
   });
 });
 
