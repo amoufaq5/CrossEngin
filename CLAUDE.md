@@ -22,7 +22,7 @@ P1.11 + P1.12 + P1.13 + P1.14 + P1.15 + P1.16 + P1.17 + P1.18 +
 P1.19 + P1.20 + P1.21 + P1.22 + P2 + P2.1 + P2.2 + P2.3 + P2.4 +
 P2.5 + P2.6 + P2.7 + P2.8 + P2.9 + P2.10 + P2.11 + P2.12 + P2.13 +
 P2.14 + P1.23 + P1.24 + P1.25 + P2.15 + P1.26 + P2.16 + P2.17 +
-P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2 + P3.3 + P3.4 + P2.46 + P3.5 + P2.48 + P2.47 + P2.49 + P3.6 + P3.7 + P3.8 + P3.9 + P3.10 + P3.11 + P3.12 + P3.13 + P3.14 + P3.15** landed: **64 packages + 4 apps, 125
+P1.27 + P1.28 + P2.18 + P2.19 + P2.20 + P2.21 + P2.22 + P2.23 + P2.24 + P2.25 + P2.26 + P2.27 + P2.28 + P2.29 + P2.30 + P2.31 + P2.32 + P2.33 + P2.34 + P2.35 + P2.36 + P2.37 + P2.38 + P2.39 + P2.40 + P2.41 + P2.42 + P2.43 + P2.44 + P3.1 + P2.45 + P3.2 + P3.3 + P3.4 + P2.46 + P3.5 + P2.48 + P2.47 + P2.49 + P3.6 + P3.7 + P3.8 + P3.9 + P3.10 + P3.11 + P3.12 + P3.13 + P3.14 + P3.15 + P3.16** landed: **64 packages + 4 apps, 125
 meta-schema tables, 6,999 offline tests + 46 gated real-Postgres
 integration tests (17 worker + 22 operate-server + 7 operate-web) + five CI gates
 (schema-drift + incident-drift + PHI-encryption + gateway-execution +
@@ -212,6 +212,12 @@ viewer); nav lists `pivot` only when it compiles. `apps/operate-web` added `GET
 calendar/map/dashboard/pivot) — every view a pack can declare has a
 redaction-aware view-model + a `/ui/...` route. Report-data execution (dashboard
 + pivot) + SSR HTML for map/dashboard/pivot stay the follow-ups.
+**P3.16 (docs) rewrote `apps/operate-web/README.md`** to the complete feature set
+— all 8 view kinds + their routes, the write path (POST/PATCH/DELETE + transition
+with RBAC + write-mask), SSR `/app/*` + client interactivity (forms / delete /
+drag-transition / SPA routing) + `build:client`, `--store memory|pg|pg-columns`,
+JWT/JWKS auth, the edge adapter, a deployment recipe, the gated-PG suite, and a
+manual browser-smoke checklist for the deferred DOM behaviors (docs-only; no ADR).
 **Phase 3 P3 (ADR-0080) has begun:** P3.1 added `@crossengin/operate-web` — a
 framework-neutral, redaction-aware view-model renderer (pure
 `compileWebApp`/`compileTableModel`/`compileDetailModel`/`compileFormModel`
