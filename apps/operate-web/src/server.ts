@@ -20,9 +20,12 @@ import {
   compileTableModel,
   compileWebApp,
   entityFields,
+  executeReport,
   redactRecord,
   unwritableFields,
   type CompileOptions,
+  type ReportData,
+  type ReportSpec,
   type ViewerContext,
 } from "@crossengin/operate-web";
 
@@ -77,8 +80,8 @@ export interface OperateWebServerOptions {
  *   GET    /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
  *   GET    /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
  *   GET    /ui/:entity/map      -> { map, page: { data, nextCursor } } (404 if no map view)
- *   GET    /ui/:entity/dashboard -> { dashboard } (layout + widget descriptors; 404 if none)
- *   GET    /ui/:entity/pivot    -> { pivot } (report ref + reshape flag; 404 if none)
+ *   GET    /ui/:entity/dashboard -> { dashboard, widgetData } (layout + executed report data per cell; 404 if none)
+ *   GET    /ui/:entity/pivot    -> { pivot, data } (descriptor + executed pivot data; 404 if none)
  *   GET    /ui/:entity/new      -> { form }
  *   GET    /ui/:entity/:id      -> { detail, record }
  *   POST   /ui/:entity          -> 201 { record } (RBAC create + write-mask)
@@ -200,10 +203,10 @@ export class OperateWebServer {
       return this.serveMap(rest[0]!, viewer, viewerCtx, query);
     }
     if (rest.length === 2 && rest[1] === "dashboard") {
-      return this.serveDashboard(rest[0]!, viewerCtx);
+      return this.serveDashboard(rest[0]!, viewer, viewerCtx);
     }
     if (rest.length === 2 && rest[1] === "pivot") {
-      return this.servePivot(rest[0]!, viewerCtx);
+      return this.servePivot(rest[0]!, viewer, viewerCtx);
     }
     if (rest.length === 2 && rest[1] === "new") {
       return this.serveForm(rest[0]!, viewerCtx);
@@ -481,24 +484,52 @@ export class OperateWebServer {
     return jsonResponse(200, { map, page: { data, nextCursor: page.nextCursor } });
   }
 
-  private serveDashboard(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+  /** The structural report spec from `manifest.reports[ref]`, or null. */
+  private reportSpec(ref: string): ReportSpec | null {
+    const reports = (this.manifest as unknown as { reports?: Record<string, ReportSpec> }).reports ?? {};
+    return reports[ref] ?? null;
+  }
+
+  /**
+   * Executes a report (P3.18) over its entity's records for the caller: builds the
+   * field-readability gate from the report-entity access, fetches a bounded page
+   * (≤500, the in-memory/demo ceiling — full-dataset aggregation via SQL pushdown
+   * is a follow-up), and runs the pure `executeReport`. Returns `null` for an
+   * unknown report / entity, an unsupported report kind, or when a referenced
+   * field is unreadable (fail-closed).
+   */
+  private async runReport(ref: string, viewer: WebViewer, viewerCtx: ViewerContext): Promise<ReportData | null> {
+    const report = this.reportSpec(ref);
+    if (report === null || !this.entityNames.has(report.entity)) return null;
+    const config = listConfigForEntity(this.manifest, report.entity);
+    const page = await this.store.listPage(viewer.tenantId, report.entity, parseListQuery({ limit: "500" }, config));
+    const access = this.accessFor(report.entity, viewerCtx);
+    const canRead = (field: string): boolean => access.get(field)?.read !== false;
+    return executeReport(report, page.records, canRead);
+  }
+
+  private async serveDashboard(entity: string, viewer: WebViewer, viewerCtx: ViewerContext): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
     const dashboard = compileDashboardModel(this.manifest, entity, viewerCtx);
     if (dashboard === null) return problemResponse(404, "Not found", `no dashboard view for '${entity}'`);
-    // Dashboards are report-backed aggregates; this route serves the redacted
-    // layout + widget descriptors (report-data execution is out of scope).
-    return jsonResponse(200, { dashboard });
+    // P3.18: execute each report-backed widget's report, aligned to the cells
+    // (null for markdown/divider, an unsupported kind, or an unreadable field).
+    const widgetData: (ReportData | null)[] = [];
+    for (const cell of dashboard.cells) {
+      widgetData.push(cell.widget.report !== undefined ? await this.runReport(cell.widget.report, viewer, viewerCtx) : null);
+    }
+    return jsonResponse(200, { dashboard, widgetData });
   }
 
-  private servePivot(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+  private async servePivot(entity: string, viewer: WebViewer, viewerCtx: ViewerContext): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
     const pivot = compilePivotModel(this.manifest, entity, viewerCtx);
     if (pivot === null) return problemResponse(404, "Not found", `no pivot view for '${entity}'`);
-    // A pivot reads a report; this route serves the redacted report reference +
-    // reshape flag (report-data execution is out of scope).
-    return jsonResponse(200, { pivot });
+    // P3.18: execute the referenced report (null when unsupported / unreadable).
+    const data = await this.runReport(pivot.reportRef, viewer, viewerCtx);
+    return jsonResponse(200, { pivot, data });
   }
 
   private async serveDetail(

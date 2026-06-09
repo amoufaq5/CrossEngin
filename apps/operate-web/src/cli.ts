@@ -181,8 +181,8 @@ Routes (all GET; auth via x-api-key or Authorization: Bearer <key|jwt>):
     /ui/:entity/kanban   { kanban, page } — board model + cards (404 if no kanban view)
     /ui/:entity/calendar { calendar, page } — calendar model + events (404 if none)
     /ui/:entity/map      { map, page } — map model + markers (404 if no map view)
-    /ui/:entity/dashboard { dashboard } — dashboard layout + widgets (404 if none)
-    /ui/:entity/pivot    { pivot } — report ref + reshape flag (404 if no pivot view)
+    /ui/:entity/dashboard { dashboard, widgetData } — layout + executed report data (404 if none)
+    /ui/:entity/pivot    { pivot, data } — descriptor + executed pivot data (404 if no pivot view)
     /ui/:entity/new      { form } — the create form model
     /ui/:entity/:id      { detail, record } — record view + the record
   SSR React HTML pages (hydrated by /assets/operate-web-client.js) —

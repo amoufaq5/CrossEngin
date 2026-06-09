@@ -178,7 +178,17 @@ const withBoard = {
       ],
     },
   },
-  reports: { salesKpi: {}, salesPivot: { label: { en: "Sales pivot" } } },
+  reports: {
+    salesKpi: { kind: "kpi", entity: "Product", measure: { name: "n", kind: "count" } },
+    salesPivot: {
+      kind: "pivot",
+      entity: "Product",
+      label: { en: "Sales pivot" },
+      rows: ["category"],
+      columns: ["status"],
+      measures: [{ name: "n", kind: "count" }],
+    },
+  },
 } as unknown as Manifest;
 
 async function makeServerWithViews(): Promise<OperateWebServer> {
@@ -369,6 +379,14 @@ describe("GET /ui/:entity/dashboard — dashboard layout model", () => {
     expect(out.dashboard.cells[1].widget.body).toBe("Welcome");
   });
 
+  it("executes report-backed widgets (P3.18): the kpi widget counts the seeded Product", async () => {
+    const server = await makeServerWithViews();
+    const out = body(await server.dispatch(req("/ui/Store/dashboard", "mgr")));
+    // widgetData aligns to cells: [kpi report, markdown → null]
+    expect(out.widgetData[0]).toMatchObject({ kind: "kpi", value: 1 });
+    expect(out.widgetData[1]).toBeNull();
+  });
+
   it("404s an entity with no dashboard view", async () => {
     const server = await makeServerWithViews();
     expect((await server.dispatch(req("/ui/Product/dashboard", "mgr"))).status).toBe(404);
@@ -384,6 +402,16 @@ describe("GET /ui/:entity/pivot — pivot model", () => {
     expect(out.pivot.reportRef).toBe("salesPivot");
     expect(out.pivot.allowReshape).toBe(true);
     expect(out.pivot.reportLabel).toBe("Sales pivot");
+  });
+
+  it("executes the pivot report (P3.18): cells over the seeded Product's category × status", async () => {
+    const server = await makeServerWithViews();
+    const out = body(await server.dispatch(req("/ui/Store/pivot", "mgr")));
+    expect(out.data.kind).toBe("pivot");
+    expect(out.data.rowFields).toEqual(["category"]);
+    // the one seeded Product (category "home", status "active") → one cell, count 1
+    const cell = out.data.cells.find((c: { rowKey: string[]; colKey: string[] }) => c.rowKey[0] === "home" && c.colKey[0] === "active");
+    expect(cell.values.n).toBe(1);
   });
 
   it("404s an entity with no pivot view", async () => {
