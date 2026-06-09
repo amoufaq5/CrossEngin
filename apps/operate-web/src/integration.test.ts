@@ -48,6 +48,33 @@ const withBoard = {
       cardFields: ["sku", "name", "unit_cost"],
       allowedTransitions: [],
     },
+    productMap: {
+      kind: "map",
+      entity: "Product",
+      geoField: "sku",
+      markerLabelField: "name",
+      defaultZoom: 6,
+      layers: [{ id: "all", label: { en: "All" }, kind: "markers" }],
+    },
+    productDashView: { kind: "dashboard", entity: "Product", dashboardRef: "productDash" },
+    productPivotView: { kind: "pivot", entity: "Product", reportRef: "productPivot", allowReshape: true },
+  },
+  dashboards: {
+    productDash: {
+      layout: "grid",
+      refreshIntervalSeconds: 60,
+      cells: [{ x: 0, y: 0, w: 6, h: 2, widget: { kind: "kpi", report: "productKpi", title: { en: "Count" } } }],
+    },
+  },
+  reports: {
+    productKpi: { kind: "kpi", entity: "Product", measure: { name: "n", kind: "count" } },
+    productPivot: {
+      kind: "pivot",
+      entity: "Product",
+      rows: ["category"],
+      columns: ["status"],
+      measures: [{ name: "n", kind: "count" }],
+    },
   },
 } as unknown as Manifest;
 
@@ -212,5 +239,37 @@ suite("operate-web integration (real Postgres)", () => {
     expect(cshCards).not.toContain("unit_cost");
     const cshRow = (csh["page"] as { data: Array<Record<string, unknown>> }).data.find((r) => r["sku"] === "KAN-1");
     expect(cshRow !== undefined && "unit_cost" in cshRow).toBe(false);
+  });
+
+  it("serves the map / dashboard / pivot routes over real PG (incl. executed report data)", async () => {
+    await store.create(tenantA, "Product", product({ id: "p-rep", sku: "REP-1", category: "grocery", status: "active" }));
+
+    // map — markers + layers over the persisted rows
+    const map = body((await boardServer.dispatch(req("/ui/Product/map", "mgr-a"))).body);
+    expect((map["map"] as { geoField: string }).geoField).toBe("sku");
+    expect((map["page"] as { data: unknown[] }).data.length).toBeGreaterThan(0);
+
+    // dashboard — the kpi widget's report runs over PG (counts the persisted Products)
+    const dash = body((await boardServer.dispatch(req("/ui/Product/dashboard", "mgr-a"))).body);
+    const widget0 = (dash["widgetData"] as Array<Record<string, unknown> | null>)[0];
+    expect(widget0).toMatchObject({ kind: "kpi" });
+    expect((widget0 as { value: number }).value).toBeGreaterThan(0);
+
+    // pivot — category × status cells computed over PG
+    const pivot = body((await boardServer.dispatch(req("/ui/Product/pivot", "mgr-a"))).body);
+    expect((pivot["data"] as { kind: string }).kind).toBe("pivot");
+    const cells = (pivot["data"] as { cells: Array<{ rowKey: string[]; values: Record<string, number> }> }).cells;
+    expect(cells.some((c) => c.rowKey[0] === "grocery" && c.values["n"] >= 1)).toBe(true);
+  });
+
+  it("serves SSR /app HTML + ?__state SPA JSON over real PG", async () => {
+    const html = await boardServer.dispatch(req("/app/Product", "mgr-a"));
+    expect(html.status).toBe(200);
+    expect(html.headers["content-type"]).toContain("text/html");
+    expect(new TextDecoder().decode(html.body ?? new Uint8Array()).startsWith("<!doctype html>")).toBe(true);
+
+    const state = body((await boardServer.dispatch(req("/app/Product?__state=1", "mgr-a"))).body);
+    expect(state["kind"]).toBe("table");
+    expect((state["table"] as { entity: string }).entity).toBe("Product");
   });
 });
