@@ -344,6 +344,41 @@ describe("GET /ui/:entity/map — map model + data page", () => {
   });
 });
 
+describe("GET /app/...?__state=1 — SPA navigation (WebPageState JSON)", () => {
+  it("returns the WebPageState as JSON instead of HTML", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(req("/app/Product?__state=1", "mgr"));
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("application/json");
+    const state = body(res);
+    expect(state.kind).toBe("table");
+    expect(state.table.entity).toBe("Product");
+    expect(state.rows[0].sku).toBe("ABC-1");
+    // it is NOT an HTML document
+    expect(htmlBody(res).startsWith("<!doctype html>")).toBe(false);
+  });
+
+  it("a detail __state carries the RBAC affordance flags + the redacted record", async () => {
+    const server = await makeServer();
+    const mgr = body(await server.dispatch(req("/app/Product/p1?__state=1", "mgr")));
+    expect(mgr.kind).toBe("detail");
+    expect(mgr.canEdit).toBe(true); // store_manager may update Product
+    expect(mgr.canDelete).toBe(false); // delete is admin-only
+    expect(mgr.record.unit_cost).toBe(4.2);
+
+    const csh = body(await server.dispatch(req("/app/Product/p1?__state=1", "csh")));
+    expect(csh.canEdit).toBe(false);
+    expect("unit_cost" in csh.record).toBe(false);
+  });
+
+  it("still serves HTML without the flag", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(req("/app/Product", "mgr"));
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(htmlBody(res).startsWith("<!doctype html>")).toBe(true);
+  });
+});
+
 describe("GET /app/:entity/kanban — SSR board page", () => {
   it("renders the board HTML with the seeded card; a manager sees unit_cost, a cashier doesn't", async () => {
     const server = await makeServerWithViews();

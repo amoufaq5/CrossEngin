@@ -208,26 +208,30 @@ export class OperateWebServer {
     viewerCtx: ViewerContext,
     query: Record<string, string | string[]>,
   ): RawWebResponse | Promise<RawWebResponse> {
+    // `?__state=1` is a SPA-navigation request: return the WebPageState as JSON
+    // (the same compiled + redacted models the HTML page embeds) so the client
+    // router can swap pages without a full reload.
+    const stateOnly = query["__state"] === "1";
     if (rest.length === 0) {
-      return renderAppPage(compileWebApp(this.manifest, viewerCtx));
+      return renderAppPage(compileWebApp(this.manifest, viewerCtx), stateOnly);
     }
     if (rest.length === 1) {
-      return this.serveTableHtml(rest[0]!, viewer, viewerCtx, query);
+      return this.serveTableHtml(rest[0]!, viewer, viewerCtx, query, stateOnly);
     }
     if (rest.length === 2 && rest[1] === "new") {
-      return this.serveFormHtml(rest[0]!, viewerCtx);
+      return this.serveFormHtml(rest[0]!, viewerCtx, stateOnly);
     }
     if (rest.length === 2 && rest[1] === "kanban") {
-      return this.serveKanbanHtml(rest[0]!, viewer, viewerCtx, query);
+      return this.serveKanbanHtml(rest[0]!, viewer, viewerCtx, query, stateOnly);
     }
     if (rest.length === 2 && rest[1] === "calendar") {
-      return this.serveCalendarHtml(rest[0]!, viewer, viewerCtx, query);
+      return this.serveCalendarHtml(rest[0]!, viewer, viewerCtx, query, stateOnly);
     }
     if (rest.length === 2) {
-      return this.serveDetailHtml(rest[0]!, rest[1]!, viewer, viewerCtx);
+      return this.serveDetailHtml(rest[0]!, rest[1]!, viewer, viewerCtx, stateOnly);
     }
     if (rest.length === 3 && rest[2] === "edit") {
-      return this.serveEditFormHtml(rest[0]!, rest[1]!, viewer, viewerCtx);
+      return this.serveEditFormHtml(rest[0]!, rest[1]!, viewer, viewerCtx, stateOnly);
     }
     return problemResponse(404, "Not found", `no route for ${path}`);
   }
@@ -483,6 +487,7 @@ export class OperateWebServer {
     viewer: WebViewer,
     viewerCtx: ViewerContext,
     query: Record<string, string | string[]>,
+    stateOnly: boolean,
   ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
@@ -494,7 +499,7 @@ export class OperateWebServer {
     const page = await this.store.listPage(viewer.tenantId, entity, listQuery);
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
-    return renderTablePage(app, table, data, page.nextCursor);
+    return renderTablePage(app, table, data, page.nextCursor, stateOnly);
   }
 
   private async serveKanbanHtml(
@@ -502,6 +507,7 @@ export class OperateWebServer {
     viewer: WebViewer,
     viewerCtx: ViewerContext,
     query: Record<string, string | string[]>,
+    stateOnly: boolean,
   ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
@@ -512,7 +518,7 @@ export class OperateWebServer {
     const page = await this.store.listPage(viewer.tenantId, entity, parseListQuery(query, config));
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
-    return renderKanbanPage(app, kanban, data);
+    return renderKanbanPage(app, kanban, data, stateOnly);
   }
 
   private async serveCalendarHtml(
@@ -520,6 +526,7 @@ export class OperateWebServer {
     viewer: WebViewer,
     viewerCtx: ViewerContext,
     query: Record<string, string | string[]>,
+    stateOnly: boolean,
   ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
@@ -530,7 +537,7 @@ export class OperateWebServer {
     const page = await this.store.listPage(viewer.tenantId, entity, parseListQuery(query, config));
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
-    return renderCalendarPage(app, calendar, data);
+    return renderCalendarPage(app, calendar, data, stateOnly);
   }
 
   private async serveDetailHtml(
@@ -538,6 +545,7 @@ export class OperateWebServer {
     id: string,
     viewer: WebViewer,
     viewerCtx: ViewerContext,
+    stateOnly: boolean,
   ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
@@ -554,15 +562,15 @@ export class OperateWebServer {
       canEdit: resolver.canPerform("update").allowed,
       canDelete: resolver.canPerform("delete").allowed,
     };
-    return renderDetailPage(app, detail, redacted, permissions);
+    return renderDetailPage(app, detail, redacted, permissions, stateOnly);
   }
 
-  private serveFormHtml(entity: string, viewerCtx: ViewerContext): RawWebResponse {
+  private serveFormHtml(entity: string, viewerCtx: ViewerContext, stateOnly: boolean): RawWebResponse {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
     const app = compileWebApp(this.manifest, viewerCtx);
     const form = compileFormModel(this.manifest, entity, viewerCtx, "create", this.compileOptions);
-    return renderFormPage(app, form);
+    return renderFormPage(app, form, undefined, stateOnly);
   }
 
   private async serveEditFormHtml(
@@ -570,6 +578,7 @@ export class OperateWebServer {
     id: string,
     viewer: WebViewer,
     viewerCtx: ViewerContext,
+    stateOnly: boolean,
   ): Promise<RawWebResponse> {
     const miss = this.unknownEntity(entity);
     if (miss !== null) return miss;
@@ -579,7 +588,7 @@ export class OperateWebServer {
     const redacted = redactRecord(record, access);
     const app = compileWebApp(this.manifest, viewerCtx);
     const form = compileFormModel(this.manifest, entity, viewerCtx, "edit", this.compileOptions);
-    return renderFormPage(app, form, { entityId: id, values: redacted });
+    return renderFormPage(app, form, { entityId: id, values: redacted }, stateOnly);
   }
 }
 

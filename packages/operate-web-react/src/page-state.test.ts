@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   PAGE_STATE_GLOBAL,
+  appStateUrl,
   buildListQueryUrl,
   buildTransitionUrl,
   buildWriteUrl,
   coerceFormValues,
+  fetchPageState,
+  isInternalAppHref,
   parsePageState,
   planCardTransition,
   serializePageState,
@@ -236,5 +239,34 @@ describe("buildTransitionUrl / planCardTransition", () => {
     expect(planCardTransition(transitions, "cart", "fulfilled")).toBeNull();
     // dropping on the same column is a no-op
     expect(planCardTransition(transitions, "cart", "cart")).toBeNull();
+  });
+});
+
+describe("SPA navigation helpers", () => {
+  it("appStateUrl adds __state=1 preserving existing query", () => {
+    expect(appStateUrl("/app/Product")).toBe("/app/Product?__state=1");
+    expect(appStateUrl("/app/Product?cursor=c1")).toBe("/app/Product?cursor=c1&__state=1");
+    expect(appStateUrl("https://app.example/app/Product/p1")).toBe("/app/Product/p1?__state=1");
+  });
+
+  it("isInternalAppHref accepts same-origin /app links, rejects others", () => {
+    const origin = "https://app.example";
+    expect(isInternalAppHref("/app", origin)).toBe(true);
+    expect(isInternalAppHref("/app/Product/p1", origin)).toBe(true);
+    expect(isInternalAppHref("/ui/Product", origin)).toBe(false);
+    expect(isInternalAppHref("/apple", origin)).toBe(false);
+    expect(isInternalAppHref("https://evil.example/app/x", origin)).toBe(false);
+    expect(isInternalAppHref("https://app.example/app/Product", origin)).toBe(true);
+  });
+
+  it("fetchPageState fetches the __state JSON via the injected fetcher", async () => {
+    const calls: string[] = [];
+    const state: WebPageState = { kind: "app", app: { title: "T", nav: [] }, basePath: "/app" };
+    const got = await fetchPageState("/app/Product/p1", async (url) => {
+      calls.push(url);
+      return state;
+    });
+    expect(calls).toEqual(["/app/Product/p1?__state=1"]);
+    expect(got).toBe(state);
   });
 });

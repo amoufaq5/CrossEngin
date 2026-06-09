@@ -221,3 +221,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 135 | 0166 | 3,000 | Drafted alongside operate-web SSR kanban + calendar pages (Phase 3 P3.10) |
 | 136 | 0167 | 2,500 | Drafted alongside operate-web map view models (Phase 3 P3.11) |
 | 137 | 0168 | 3,000 | Drafted alongside operate-web interactive kanban — drag → transition (Phase 3 P3.12) |
+| 138 | 0169 | 3,000 | Drafted alongside operate-web client-side SPA routing (Phase 3 P3.13) |

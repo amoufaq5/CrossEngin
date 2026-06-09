@@ -130,6 +130,51 @@ export function buildWriteUrl(entity: string, id?: string | null): string {
 }
 
 /**
+ * Adds the `__state=1` query flag to an `/app/*` href so the server returns the
+ * `WebPageState` as JSON (for SPA navigation) instead of a full HTML page,
+ * preserving any existing query params. Accepts a path or absolute URL.
+ */
+export function appStateUrl(href: string): string {
+  const url = new URL(href, "http://placeholder.invalid");
+  url.searchParams.set("__state", "1");
+  const qs = url.searchParams.toString();
+  return `${url.pathname}${qs.length > 0 ? `?${qs}` : ""}`;
+}
+
+/** Fetches a page's `WebPageState` (the `?__state=1` JSON); injectable for tests. */
+export type PageStateFetcher = (url: string) => Promise<WebPageState>;
+
+const defaultPageStateFetcher: PageStateFetcher = async (url) => {
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`page-state fetch failed: ${res.status.toString()}`);
+  return (await res.json()) as WebPageState;
+};
+
+/** Fetches the `WebPageState` for an `/app/*` href via its `?__state=1` JSON form. */
+export async function fetchPageState(
+  href: string,
+  fetcher: PageStateFetcher = defaultPageStateFetcher,
+): Promise<WebPageState> {
+  return fetcher(appStateUrl(href));
+}
+
+/**
+ * Decides whether an in-page navigation to `href` should be handled by the SPA
+ * router (a same-origin `/app/...` link) rather than a full browser navigation.
+ * External links, downloads, and non-`/app` paths fall through to the browser.
+ */
+export function isInternalAppHref(href: string, origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(href, origin);
+  } catch {
+    return false;
+  }
+  if (url.origin !== origin) return false;
+  return url.pathname === "/app" || url.pathname.startsWith("/app/");
+}
+
+/**
  * Coerces raw form values (strings from inputs, booleans from checkboxes) into a
  * typed write payload per the form model's field render hints. Read-only fields
  * are dropped (the server would 422 them anyway, and the control is disabled);

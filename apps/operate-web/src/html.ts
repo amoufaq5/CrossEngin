@@ -9,7 +9,7 @@ import type {
   WebAppModel,
 } from "@crossengin/operate-web";
 
-import type { RawWebResponse } from "./http.js";
+import { jsonResponse, type RawWebResponse } from "./http.js";
 
 /** The base path the SSR'd pages + the hydrated client build their links under. */
 const APP_BASE_PATH = "/app";
@@ -27,14 +27,20 @@ export function htmlResponse(status: number, html: string): RawWebResponse {
   };
 }
 
-/** Renders a `WebPageState` to a hydratable HTML page (`#root` + state + client). */
-function pageFor(state: WebPageState, title: string): RawWebResponse {
-  return htmlResponse(200, renderHydratablePage(state, { title }));
+/**
+ * Renders a `WebPageState` for an `/app/*` route. By default it's a hydratable
+ * HTML page (`#root` + embedded state + the client script); when `stateOnly` is
+ * set (the `?__state=1` SPA-navigation request) it returns the *same*
+ * already-compiled + redacted `WebPageState` as JSON, so the client router can
+ * swap pages without a full reload — reusing the exact server compile/redaction.
+ */
+function pageFor(state: WebPageState, title: string, stateOnly: boolean): RawWebResponse {
+  return stateOnly ? jsonResponse(200, state) : htmlResponse(200, renderHydratablePage(state, { title }));
 }
 
 /** Renders the app shell (chrome + per-entity nav) to a hydratable HTML page. */
-export function renderAppPage(app: WebAppModel): RawWebResponse {
-  return pageFor({ kind: "app", app, basePath: APP_BASE_PATH }, app.title);
+export function renderAppPage(app: WebAppModel, stateOnly = false): RawWebResponse {
+  return pageFor({ kind: "app", app, basePath: APP_BASE_PATH }, app.title, stateOnly);
 }
 
 /** Renders an entity table (model + a redacted data page) to a hydratable HTML page. */
@@ -43,10 +49,12 @@ export function renderTablePage(
   table: TableModel,
   rows: readonly Readonly<Record<string, unknown>>[],
   nextCursor: string | null = null,
+  stateOnly = false,
 ): RawWebResponse {
   return pageFor(
     { kind: "table", app, table, rows, nextCursor, basePath: APP_BASE_PATH },
     `${table.title} — ${app.title}`,
+    stateOnly,
   );
 }
 
@@ -55,10 +63,12 @@ export function renderKanbanPage(
   app: WebAppModel,
   kanban: KanbanModel,
   rows: readonly Readonly<Record<string, unknown>>[],
+  stateOnly = false,
 ): RawWebResponse {
   return pageFor(
     { kind: "kanban", app, kanban, rows, basePath: APP_BASE_PATH },
     `${kanban.title} — ${app.title}`,
+    stateOnly,
   );
 }
 
@@ -67,10 +77,12 @@ export function renderCalendarPage(
   app: WebAppModel,
   calendar: CalendarModel,
   rows: readonly Readonly<Record<string, unknown>>[],
+  stateOnly = false,
 ): RawWebResponse {
   return pageFor(
     { kind: "calendar", app, calendar, rows, basePath: APP_BASE_PATH },
     `${calendar.title} — ${app.title}`,
+    stateOnly,
   );
 }
 
@@ -80,6 +92,7 @@ export function renderDetailPage(
   detail: DetailModel,
   record: Readonly<Record<string, unknown>>,
   permissions: { canEdit: boolean; canDelete: boolean } = { canEdit: false, canDelete: false },
+  stateOnly = false,
 ): RawWebResponse {
   return pageFor(
     {
@@ -92,6 +105,7 @@ export function renderDetailPage(
       canDelete: permissions.canDelete,
     },
     `${detail.title} — ${app.title}`,
+    stateOnly,
   );
 }
 
@@ -104,6 +118,7 @@ export function renderFormPage(
   app: WebAppModel,
   form: FormModel,
   edit?: { entityId: string; values: Readonly<Record<string, unknown>> },
+  stateOnly = false,
 ): RawWebResponse {
   return pageFor(
     {
@@ -114,5 +129,6 @@ export function renderFormPage(
       ...(edit !== undefined ? { entityId: edit.entityId, values: edit.values } : {}),
     },
     `${form.title} — ${app.title}`,
+    stateOnly,
   );
 }
