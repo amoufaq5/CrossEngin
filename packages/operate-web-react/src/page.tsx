@@ -1,7 +1,7 @@
 import type { FormModel, KanbanModel, TableModel } from "@crossengin/operate-web";
 import { useState, type DragEvent, type FormEvent, type JSX } from "react";
 
-import { AppShell, CalendarView, DetailView, FormView, TableView, displayValue } from "./components.js";
+import { AppShell, CalendarView, DashboardView, DetailView, FormView, MapView, PivotView, TableView, displayValue } from "./components.js";
 import {
   buildListQueryUrl,
   coerceFormValues,
@@ -448,6 +448,24 @@ export function PageRoot({ state, fetcher, writeFetcher, onNavigate }: PageRootP
       return (
         <AppShell app={state.app} basePath={state.basePath}>
           <CalendarView model={state.calendar} rows={state.rows} basePath={state.basePath} />
+        </AppShell>
+      );
+    case "map":
+      return (
+        <AppShell app={state.app} basePath={state.basePath}>
+          <MapView model={state.map} rows={state.rows} basePath={state.basePath} />
+        </AppShell>
+      );
+    case "dashboard":
+      return (
+        <AppShell app={state.app} basePath={state.basePath}>
+          <DashboardView model={state.dashboard} />
+        </AppShell>
+      );
+    case "pivot":
+      return (
+        <AppShell app={state.app} basePath={state.basePath}>
+          <PivotView model={state.pivot} />
         </AppShell>
       );
   }

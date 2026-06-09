@@ -2,9 +2,12 @@ import { renderHydratablePage } from "@crossengin/operate-web-react";
 import type { WebPageState } from "@crossengin/operate-web-react";
 import type {
   CalendarModel,
+  DashboardModel,
   DetailModel,
   FormModel,
   KanbanModel,
+  MapModel,
+  PivotModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -82,6 +85,38 @@ export function renderCalendarPage(
   return pageFor(
     { kind: "calendar", app, calendar, rows, basePath: APP_BASE_PATH },
     `${calendar.title} — ${app.title}`,
+    stateOnly,
+  );
+}
+
+/** Renders a map (model + a redacted marker data page) to a hydratable HTML page. */
+export function renderMapPage(
+  app: WebAppModel,
+  map: MapModel,
+  rows: readonly Readonly<Record<string, unknown>>[],
+  stateOnly = false,
+): RawWebResponse {
+  return pageFor(
+    { kind: "map", app, map, rows, basePath: APP_BASE_PATH },
+    `${map.title} — ${app.title}`,
+    stateOnly,
+  );
+}
+
+/** Renders a dashboard (the redacted layout + widget descriptors) to a hydratable HTML page. */
+export function renderDashboardPage(app: WebAppModel, dashboard: DashboardModel, stateOnly = false): RawWebResponse {
+  return pageFor(
+    { kind: "dashboard", app, dashboard, basePath: APP_BASE_PATH },
+    `${dashboard.title} — ${app.title}`,
+    stateOnly,
+  );
+}
+
+/** Renders a pivot (the redacted report reference + reshape flag) to a hydratable HTML page. */
+export function renderPivotPage(app: WebAppModel, pivot: PivotModel, stateOnly = false): RawWebResponse {
+  return pageFor(
+    { kind: "pivot", app, pivot, basePath: APP_BASE_PATH },
+    `${pivot.title} — ${app.title}`,
     stateOnly,
   );
 }

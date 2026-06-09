@@ -1,15 +1,29 @@
 import type {
   CalendarModel,
+  DashboardModel,
   DetailModel,
   FormModel,
   KanbanModel,
+  MapModel,
+  PivotModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { AppShell, CalendarView, DetailView, FormView, KanbanView, TableView, displayValue } from "./components.js";
+import {
+  AppShell,
+  CalendarView,
+  DashboardView,
+  DetailView,
+  FormView,
+  KanbanView,
+  MapView,
+  PivotView,
+  TableView,
+  displayValue,
+} from "./components.js";
 
 const APP_MODEL: WebAppModel = {
   title: "Acme Operate",
@@ -230,5 +244,67 @@ describe("CalendarView", () => {
     const noColor: CalendarModel = { entity: "SalesOrder", title: "Cal", startField: "placed_at", titleField: "order_number", defaultView: "week" };
     const html = renderToStaticMarkup(<CalendarView model={noColor} rows={rows} />);
     expect(html).not.toContain("ce-calendar-color");
+  });
+});
+
+const MAP_MODEL: MapModel = {
+  entity: "Store",
+  title: "Store map",
+  geoField: "region",
+  markerColorField: "status",
+  markerLabelField: "code",
+  defaultZoom: 8,
+  layers: [{ id: "all", label: "All", kind: "markers" }],
+};
+
+const DASHBOARD_MODEL: DashboardModel = {
+  entity: "Store",
+  title: "Store dashboard",
+  layout: "grid",
+  refreshIntervalSeconds: 60,
+  cells: [
+    { x: 0, y: 0, w: 6, h: 2, widget: { kind: "kpi", report: "salesKpi", title: "Sales" } },
+    { x: 6, y: 0, w: 6, h: 2, widget: { kind: "markdown", body: "Hello team" } },
+  ],
+};
+
+const PIVOT_MODEL: PivotModel = {
+  entity: "Store",
+  title: "Store pivot",
+  reportRef: "salesPivot",
+  allowReshape: true,
+  reportLabel: "Sales pivot",
+};
+
+describe("MapView", () => {
+  it("renders layers + a marker list linking to detail", () => {
+    const rows = [{ id: "s1", region: "north", code: "ST-1", status: "open" }];
+    const html = renderToStaticMarkup(<MapView model={MAP_MODEL} rows={rows} />);
+    expect(html).toContain('data-geo-field="region"');
+    expect(html).toContain('data-layer="all"');
+    expect(html).toContain('data-geo="north"');
+    expect(html).toContain("ST-1"); // markerLabelField
+    expect(html).toContain("/app/Store/s1");
+  });
+});
+
+describe("DashboardView", () => {
+  it("renders a grid of widget placeholders (report ref + markdown body)", () => {
+    const html = renderToStaticMarkup(<DashboardView model={DASHBOARD_MODEL} />);
+    expect(html).toContain("ce-dashboard");
+    expect(html).toContain('data-widget="kpi"');
+    expect(html).toContain('data-report="salesKpi"');
+    expect(html).toContain("Hello team");
+    // grid placement from x/y/w/h
+    expect(html).toContain("span 6");
+  });
+});
+
+describe("PivotView", () => {
+  it("renders the report reference + reshape flag", () => {
+    const html = renderToStaticMarkup(<PivotView model={PIVOT_MODEL} />);
+    expect(html).toContain('data-report="salesPivot"');
+    expect(html).toContain('data-reshape="true"');
+    expect(html).toContain("Sales pivot");
   });
 });

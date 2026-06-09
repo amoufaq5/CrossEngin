@@ -224,3 +224,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 138 | 0169 | 3,000 | Drafted alongside operate-web client-side SPA routing (Phase 3 P3.13) |
 | 139 | 0170 | 3,000 | Drafted alongside operate-web dashboard view models (Phase 3 P3.14) |
 | 140 | 0171 | 2,500 | Drafted alongside operate-web pivot view models — compiler reaches 8/8 (Phase 3 P3.15) |
+| 141 | 0172 | 3,000 | Drafted alongside operate-web SSR pages for map/dashboard/pivot (Phase 3 P3.17) |

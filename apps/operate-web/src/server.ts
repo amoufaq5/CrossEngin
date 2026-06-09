@@ -30,9 +30,12 @@ import { CLIENT_BUNDLE_PATH, serveClientBundle, type BundleLoader } from "./asse
 import {
   renderAppPage,
   renderCalendarPage,
+  renderDashboardPage,
   renderDetailPage,
   renderFormPage,
   renderKanbanPage,
+  renderMapPage,
+  renderPivotPage,
   renderTablePage,
 } from "./html.js";
 import { jsonResponse, problemResponse, splitTarget, type RawWebRequest, type RawWebResponse } from "./http.js";
@@ -236,6 +239,15 @@ export class OperateWebServer {
     }
     if (rest.length === 2 && rest[1] === "calendar") {
       return this.serveCalendarHtml(rest[0]!, viewer, viewerCtx, query, stateOnly);
+    }
+    if (rest.length === 2 && rest[1] === "map") {
+      return this.serveMapHtml(rest[0]!, viewer, viewerCtx, query, stateOnly);
+    }
+    if (rest.length === 2 && rest[1] === "dashboard") {
+      return this.serveDashboardHtml(rest[0]!, viewerCtx, stateOnly);
+    }
+    if (rest.length === 2 && rest[1] === "pivot") {
+      return this.servePivotHtml(rest[0]!, viewerCtx, stateOnly);
     }
     if (rest.length === 2) {
       return this.serveDetailHtml(rest[0]!, rest[1]!, viewer, viewerCtx, stateOnly);
@@ -568,6 +580,41 @@ export class OperateWebServer {
     const access = this.accessFor(entity, viewerCtx);
     const data = page.records.map((r) => redactRecord(r, access));
     return renderCalendarPage(app, calendar, data, stateOnly);
+  }
+
+  private async serveMapHtml(
+    entity: string,
+    viewer: WebViewer,
+    viewerCtx: ViewerContext,
+    query: Record<string, string | string[]>,
+    stateOnly: boolean,
+  ): Promise<RawWebResponse> {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const map = compileMapModel(this.manifest, entity, viewerCtx, this.compileOptions);
+    if (map === null) return problemResponse(404, "Not found", `no map view for '${entity}'`);
+    const app = compileWebApp(this.manifest, viewerCtx);
+    const config = listConfigForEntity(this.manifest, entity);
+    const page = await this.store.listPage(viewer.tenantId, entity, parseListQuery(query, config));
+    const access = this.accessFor(entity, viewerCtx);
+    const data = page.records.map((r) => redactRecord(r, access));
+    return renderMapPage(app, map, data, stateOnly);
+  }
+
+  private serveDashboardHtml(entity: string, viewerCtx: ViewerContext, stateOnly: boolean): RawWebResponse {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const dashboard = compileDashboardModel(this.manifest, entity, viewerCtx);
+    if (dashboard === null) return problemResponse(404, "Not found", `no dashboard view for '${entity}'`);
+    return renderDashboardPage(compileWebApp(this.manifest, viewerCtx), dashboard, stateOnly);
+  }
+
+  private servePivotHtml(entity: string, viewerCtx: ViewerContext, stateOnly: boolean): RawWebResponse {
+    const miss = this.unknownEntity(entity);
+    if (miss !== null) return miss;
+    const pivot = compilePivotModel(this.manifest, entity, viewerCtx);
+    if (pivot === null) return problemResponse(404, "Not found", `no pivot view for '${entity}'`);
+    return renderPivotPage(compileWebApp(this.manifest, viewerCtx), pivot, stateOnly);
   }
 
   private async serveDetailHtml(

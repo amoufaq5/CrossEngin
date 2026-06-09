@@ -464,6 +464,36 @@ describe("GET /app/:entity/calendar — SSR agenda page", () => {
   });
 });
 
+describe("GET /app/:entity/{map,dashboard,pivot} — SSR pages", () => {
+  it("renders the map marker-list page", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/app/Product/map", "mgr"));
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(htmlBody(res)).toContain("ce-map");
+  });
+
+  it("renders the dashboard grid page", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/app/Store/dashboard", "mgr"));
+    expect(res.status).toBe(200);
+    expect(htmlBody(res)).toContain("ce-dashboard");
+  });
+
+  it("renders the pivot page", async () => {
+    const server = await makeServerWithViews();
+    const res = await server.dispatch(req("/app/Store/pivot", "mgr"));
+    expect(res.status).toBe(200);
+    expect(htmlBody(res)).toContain("ce-pivot");
+  });
+
+  it("404s an entity without the declared view", async () => {
+    const server = await makeServerWithViews();
+    expect((await server.dispatch(req("/app/SalesOrder/map", "mgr"))).status).toBe(404);
+    expect((await server.dispatch(req("/app/Product/dashboard", "mgr"))).status).toBe(404);
+  });
+});
+
 describe("POST /ui/:entity/:id/transition — workflow transition (RBAC + from-state)", () => {
   async function seedOrder(server: OperateWebServer): Promise<void> {
     await server.entityStore.create(TENANT, "SalesOrder", { id: "o1", state: "cart", order_number: "SO-1", currency: "AED" });

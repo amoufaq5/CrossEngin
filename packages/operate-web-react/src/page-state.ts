@@ -1,9 +1,12 @@
 import type {
   CalendarModel,
+  DashboardModel,
   DetailModel,
   FormModel,
   KanbanModel,
   KanbanTransitionModel,
+  MapModel,
+  PivotModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -60,6 +63,25 @@ export type WebPageState =
       readonly app: WebAppModel;
       readonly calendar: CalendarModel;
       readonly rows: readonly Readonly<Record<string, unknown>>[];
+      readonly basePath: string;
+    }
+  | {
+      readonly kind: "map";
+      readonly app: WebAppModel;
+      readonly map: MapModel;
+      readonly rows: readonly Readonly<Record<string, unknown>>[];
+      readonly basePath: string;
+    }
+  | {
+      readonly kind: "dashboard";
+      readonly app: WebAppModel;
+      readonly dashboard: DashboardModel;
+      readonly basePath: string;
+    }
+  | {
+      readonly kind: "pivot";
+      readonly app: WebAppModel;
+      readonly pivot: PivotModel;
       readonly basePath: string;
     };
 

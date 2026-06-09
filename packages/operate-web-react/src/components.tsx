@@ -1,9 +1,12 @@
 import type {
   CalendarModel,
+  DashboardModel,
   DetailModel,
   FormFieldModel,
   FormModel,
   KanbanModel,
+  MapModel,
+  PivotModel,
   TableModel,
   WebAppModel,
 } from "@crossengin/operate-web";
@@ -231,6 +234,109 @@ export function CalendarView({ model, rows, basePath = "/app" }: CalendarViewPro
           );
         })}
       </ul>
+    </section>
+  );
+}
+
+export interface MapViewProps {
+  readonly model: MapModel;
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  readonly basePath?: string;
+}
+
+/**
+ * Renders a `MapModel` + a page of records as the SSR baseline: the declared
+ * layers + a marker list (one entry per record, showing its geo value, optional
+ * label / color, linked to detail). A tiled map needs a client renderer
+ * (Leaflet/MapLibre) — the accessible list is the framework-neutral fallback the
+ * server can produce, and the hook a client map enhances.
+ */
+export function MapView({ model, rows, basePath = "/app" }: MapViewProps): JSX.Element {
+  return (
+    <section className="ce-map" data-entity={model.entity} data-geo-field={model.geoField} data-zoom={String(model.defaultZoom)}>
+      <h2 className="ce-map-title">{model.title}</h2>
+      <ul className="ce-map-layers" aria-label="Layers">
+        {model.layers.map((l) => (
+          <li key={l.id} className="ce-map-layer" data-layer={l.id} data-kind={l.kind}>{l.label}</li>
+        ))}
+      </ul>
+      <ul className="ce-map-markers">
+        {rows.map((row, index) => {
+          const id = displayValue(row["id"]);
+          const geo = displayValue(row[model.geoField]);
+          const label = model.markerLabelField !== undefined ? displayValue(row[model.markerLabelField]) : geo;
+          const color = model.markerColorField !== undefined ? displayValue(row[model.markerColorField]) : "";
+          return (
+            <li key={id.length > 0 ? id : `marker-${String(index)}`} className="ce-map-marker" data-id={id} data-geo={geo}>
+              {color.length > 0 ? <span className="ce-map-marker-color" data-color={color} /> : null}
+              {id.length > 0 ? <a href={`${basePath}/${model.entity}/${id}`}>{label}</a> : label}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+export interface DashboardViewProps {
+  readonly model: DashboardModel;
+}
+
+/**
+ * Renders a `DashboardModel` as a 12-column CSS grid of widget placeholders.
+ * Each cell is positioned from its `x/y/w/h`; a report-backed widget shows its
+ * kind + report id (the data isn't executed server-side — report-data execution
+ * is a deferred item), a markdown widget its body, a divider its label. Only the
+ * cells the viewer may see are present (the compiler dropped the rest).
+ */
+export function DashboardView({ model }: DashboardViewProps): JSX.Element {
+  return (
+    <section className="ce-dashboard" data-entity={model.entity} data-layout={model.layout}>
+      <h2 className="ce-dashboard-title">{model.title}</h2>
+      <div
+        className="ce-dashboard-grid"
+        style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: "0.5rem" }}
+      >
+        {model.cells.map((cell, index) => (
+          <div
+            key={`${String(cell.x)}-${String(cell.y)}-${String(index)}`}
+            className="ce-dashboard-cell"
+            data-widget={cell.widget.kind}
+            style={{
+              gridColumn: `${String(cell.x + 1)} / span ${String(cell.w)}`,
+              gridRow: `${String(cell.y + 1)} / span ${String(cell.h)}`,
+            }}
+          >
+            <div className="ce-widget" data-kind={cell.widget.kind}>
+              {cell.widget.title !== undefined ? <h3 className="ce-widget-title">{cell.widget.title}</h3> : null}
+              {cell.widget.report !== undefined ? (
+                <p className="ce-widget-report" data-report={cell.widget.report}>{`${cell.widget.kind}: ${cell.widget.report}`}</p>
+              ) : null}
+              {cell.widget.body !== undefined ? <div className="ce-widget-markdown">{cell.widget.body}</div> : null}
+              {cell.widget.label !== undefined ? <hr className="ce-widget-divider" aria-label={cell.widget.label} /> : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export interface PivotViewProps {
+  readonly model: PivotModel;
+}
+
+/**
+ * Renders a `PivotModel` as a placeholder referencing its report + reshape flag.
+ * The pivot aggregation isn't executed server-side (report-data execution is a
+ * deferred item); this is the SSR descriptor a client pivot table enhances.
+ */
+export function PivotView({ model }: PivotViewProps): JSX.Element {
+  return (
+    <section className="ce-pivot" data-entity={model.entity} data-report={model.reportRef} data-reshape={model.allowReshape ? "true" : "false"}>
+      <h2 className="ce-pivot-title">{model.title}</h2>
+      <p className="ce-pivot-report">{model.reportLabel ?? model.reportRef}</p>
+      <p className="ce-pivot-reshape">{model.allowReshape ? "Reshape: allowed" : "Reshape: locked"}</p>
     </section>
   );
 }
