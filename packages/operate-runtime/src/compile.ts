@@ -19,6 +19,7 @@ import {
 } from "@crossengin/api-gateway-runtime";
 
 import { buildApiDescriptor, type ApiDescriptor } from "./api-descriptor.js";
+import { entitySchemasFromManifest } from "./schemas.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import {
   OPENAPI_OPERATION_ID,
@@ -107,18 +108,22 @@ export function compileOperateServer(
 
   const apiDescriptor = buildApiDescriptor(manifest, routeSpecs, { includeReportRoute: hasReportRoute });
   const openApiInfo = options.openApiInfo ?? { title: "CrossEngin operate API", version: apiDescriptor.apiVersion };
-  const openApiDocument = toOpenApiDocument(apiDescriptor, openApiInfo);
+  // P3.32: typed component schemas per entity (+ the ReportData union), embedded
+  // under components.schemas and referenced from each operation's request/response.
+  const schemaOptions = { entitySchemas: entitySchemasFromManifest(manifest) };
+  const openApiDocument = toOpenApiDocument(apiDescriptor, openApiInfo, schemaOptions);
   if (options.serveApiDescriptor === true) {
     routes.register(openApiRouteDefinition());
     // P3.28: the served document is per-caller — RBAC-filtered to the operations
     // the principal may invoke (the exposed `openApiDocument` stays the full one).
     handlers.register(
       OPENAPI_OPERATION_ID,
-      buildPerCallerOpenApiHandler(apiDescriptor, openApiInfo, {
-        permissions: ctx.permissions,
-        roles: ctx.roles,
-        principalRoles: options.principalRoles,
-      }),
+      buildPerCallerOpenApiHandler(
+        apiDescriptor,
+        openApiInfo,
+        { permissions: ctx.permissions, roles: ctx.roles, principalRoles: options.principalRoles },
+        schemaOptions,
+      ),
     );
   }
 

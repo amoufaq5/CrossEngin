@@ -5,5 +5,6 @@ export * from "./operations.js";
 export * from "./handlers.js";
 export * from "./report-routes.js";
 export * from "./api-descriptor.js";
+export * from "./schemas.js";
 export * from "./openapi.js";
 export * from "./compile.js";

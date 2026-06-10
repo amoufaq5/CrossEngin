@@ -10,14 +10,16 @@ import type { ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import type { ApiDescriptor, ApiOperation } from "./api-descriptor.js";
+import { REPORT_DATA_SCHEMA, REPORT_DATA_SCHEMA_NAME, type OpenApiSchema } from "./schemas.js";
 import { routeId } from "./slugs.js";
 
 /**
  * A minimal but valid OpenAPI 3.1 document projected from the `ApiDescriptor`.
  * It carries the path/operation surface (operationIds, methods, path parameters,
- * tags) — enough for SDK generators + API explorers to discover every endpoint —
- * without per-operation request/response component schemas (those are a deferred
- * enrichment). The report catalog rides under the `x-reports` extension.
+ * tags) plus — when entity schemas are supplied (P3.32) — `components.schemas`
+ * (a typed schema per entity + the `ReportData` union) referenced from each
+ * operation's request/response bodies. The report catalog rides under the
+ * `x-reports` extension.
  */
 export interface OpenApiInfo {
   readonly title: string;
@@ -31,19 +33,44 @@ export interface OpenApiParameter {
   readonly schema: { readonly type: "string" };
 }
 
+export interface OpenApiMediaType {
+  readonly schema: OpenApiSchema;
+}
+
+export interface OpenApiRequestBody {
+  readonly required: boolean;
+  readonly content: Readonly<Record<string, OpenApiMediaType>>;
+}
+
+export interface OpenApiResponse {
+  readonly description: string;
+  readonly content?: Readonly<Record<string, OpenApiMediaType>>;
+}
+
 export interface OpenApiOperationObject {
   readonly operationId: string;
   readonly summary: string;
   readonly tags: readonly string[];
   readonly parameters?: readonly OpenApiParameter[];
-  readonly responses: Readonly<Record<string, { readonly description: string }>>;
+  readonly requestBody?: OpenApiRequestBody;
+  readonly responses: Readonly<Record<string, OpenApiResponse>>;
+}
+
+export interface OpenApiComponents {
+  readonly schemas: Readonly<Record<string, OpenApiSchema>>;
 }
 
 export interface OpenApiDocument {
   readonly openapi: "3.1.0";
   readonly info: OpenApiInfo;
   readonly paths: Readonly<Record<string, Readonly<Record<string, OpenApiOperationObject>>>>;
+  readonly components?: OpenApiComponents;
   readonly "x-reports": ApiDescriptor["reports"];
+}
+
+/** Options for `toOpenApiDocument`: the entity schemas to embed + reference. */
+export interface ToOpenApiOptions {
+  readonly entitySchemas?: Readonly<Record<string, OpenApiSchema>>;
 }
 
 const HTTP_METHOD_KEYS: Readonly<Record<string, string>> = {
@@ -67,36 +94,126 @@ function summaryFor(op: ApiOperation): string {
   return `${op.kind} ${op.entity ?? ""}`.trim();
 }
 
-function operationObject(op: ApiOperation): OpenApiOperationObject {
+function jsonContent(schema: OpenApiSchema): Readonly<Record<string, OpenApiMediaType>> {
+  return { "application/json": { schema } };
+}
+
+function ref(name: string): OpenApiSchema {
+  return { $ref: `#/components/schemas/${name}` };
+}
+
+/** The transition request body schema (`{ transition: string }`). */
+const TRANSITION_REQUEST: OpenApiSchema = {
+  type: "object",
+  properties: { transition: { type: "string" } },
+  required: ["transition"],
+};
+
+/**
+ * Builds an operation object. When an entity schema is available (its name is in
+ * `schemaNames`), the request/response bodies reference it (or the `ReportData`
+ * union for report ops); otherwise it falls back to description-only responses.
+ */
+function operationObject(op: ApiOperation, schemaNames: ReadonlySet<string>): OpenApiOperationObject {
   const params = pathParams(op.path).map<OpenApiParameter>((name) => ({
     name,
     in: "path",
     required: true,
     schema: { type: "string" },
   }));
-  const responses: Record<string, { description: string }> =
-    op.kind === "report"
-      ? { "200": { description: "Report data" }, "404": { description: "Unknown or unreadable report" } }
-      : { "200": { description: "OK" } };
+  const hasEntitySchema = op.entity !== undefined && schemaNames.has(op.entity);
+  const entityRef = hasEntitySchema ? ref(op.entity!) : null;
+
+  let requestBody: OpenApiRequestBody | undefined;
+  const responses: Record<string, OpenApiResponse> = {};
+
+  switch (op.kind) {
+    case "report":
+      responses["200"] = schemaNames.has(REPORT_DATA_SCHEMA_NAME)
+        ? { description: "Report data", content: jsonContent(ref(REPORT_DATA_SCHEMA_NAME)) }
+        : { description: "Report data" };
+      responses["404"] = { description: "Unknown or unreadable report" };
+      break;
+    case "list":
+      responses["200"] = {
+        description: "OK",
+        content: jsonContent({
+          type: "object",
+          properties: {
+            data: { type: "array", items: entityRef ?? { type: "object", additionalProperties: true } },
+            page: {
+              type: "object",
+              properties: { limit: { type: "integer" }, nextCursor: { type: ["string", "null"] } },
+            },
+          },
+        }),
+      };
+      break;
+    case "read":
+      responses["200"] = entityRef !== null ? { description: "OK", content: jsonContent(entityRef) } : { description: "OK" };
+      break;
+    case "create":
+      if (entityRef !== null) requestBody = { required: true, content: jsonContent(entityRef) };
+      responses["201"] = entityRef !== null ? { description: "Created", content: jsonContent(entityRef) } : { description: "Created" };
+      break;
+    case "update":
+      if (entityRef !== null) requestBody = { required: true, content: jsonContent(entityRef) };
+      responses["200"] = entityRef !== null ? { description: "OK", content: jsonContent(entityRef) } : { description: "OK" };
+      break;
+    case "delete":
+      responses["204"] = { description: "Deleted" };
+      break;
+    case "transition":
+      requestBody = { required: true, content: jsonContent(TRANSITION_REQUEST) };
+      responses["200"] = entityRef !== null ? { description: "OK", content: jsonContent(entityRef) } : { description: "OK" };
+      break;
+    default:
+      responses["200"] = { description: "OK" };
+  }
+
   return {
     operationId: op.operationId,
     summary: summaryFor(op),
     tags: [op.kind === "report" ? "reports" : (op.entity ?? "default")],
     ...(params.length > 0 ? { parameters: params } : {}),
+    ...(requestBody !== undefined ? { requestBody } : {}),
     responses,
   };
 }
 
-/** Projects an `ApiDescriptor` to a minimal OpenAPI 3.1 document. */
-export function toOpenApiDocument(descriptor: ApiDescriptor, info: OpenApiInfo): OpenApiDocument {
+/**
+ * Projects an `ApiDescriptor` to a minimal OpenAPI 3.1 document. When
+ * `options.entitySchemas` is supplied, they are embedded under
+ * `components.schemas` (+ the `ReportData` union when a report op is present) and
+ * referenced from each operation's request/response bodies.
+ */
+export function toOpenApiDocument(
+  descriptor: ApiDescriptor,
+  info: OpenApiInfo,
+  options: ToOpenApiOptions = {},
+): OpenApiDocument {
+  const entitySchemas = options.entitySchemas ?? {};
+  const hasReportOp = descriptor.operations.some((op) => op.kind === "report");
+  const schemas: Record<string, OpenApiSchema> = { ...entitySchemas };
+  if (hasReportOp) schemas[REPORT_DATA_SCHEMA_NAME] = REPORT_DATA_SCHEMA;
+  const schemaNames = new Set(Object.keys(schemas));
+
   const paths: Record<string, Record<string, OpenApiOperationObject>> = {};
   for (const op of descriptor.operations) {
     const methodKey = HTTP_METHOD_KEYS[op.method];
     if (methodKey === undefined) continue;
     const bucket = paths[op.path] ?? (paths[op.path] = {});
-    bucket[methodKey] = operationObject(op);
+    bucket[methodKey] = operationObject(op, schemaNames);
   }
-  return { openapi: "3.1.0", info, paths, "x-reports": descriptor.reports };
+
+  const hasComponents = Object.keys(schemas).length > 0;
+  return {
+    openapi: "3.1.0",
+    info,
+    paths,
+    ...(hasComponents ? { components: { schemas } } : {}),
+    "x-reports": descriptor.reports,
+  };
 }
 
 /** The operationId the OpenAPI document route dispatches to. */
@@ -216,7 +333,8 @@ export function buildPerCallerOpenApiHandler(
   descriptor: ApiDescriptor,
   info: OpenApiInfo,
   rbac: OpenApiRbacContext,
+  options: ToOpenApiOptions = {},
 ): Handler {
   return ({ principal }) =>
-    json(200, toOpenApiDocument(filterDescriptorForPrincipal(descriptor, principal, rbac), info));
+    json(200, toOpenApiDocument(filterDescriptorForPrincipal(descriptor, principal, rbac), info, options));
 }

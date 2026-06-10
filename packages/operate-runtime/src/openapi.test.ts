@@ -47,6 +47,51 @@ describe("toOpenApiDocument", () => {
     expect(report.parameters).toEqual([{ name: "report", in: "path", required: true, schema: { type: "string" } }]);
     expect(doc["x-reports"]).toEqual(descriptor.reports);
   });
+
+  it("has no components when no entity schemas are supplied (report op still adds ReportData)", () => {
+    // with a report op present, ReportData is added even without entity schemas
+    expect(doc.components?.schemas["ReportData"]).toBeDefined();
+    expect(doc.components?.schemas["Product"]).toBeUndefined();
+  });
+});
+
+describe("toOpenApiDocument — component schemas (P3.32)", () => {
+  const entitySchemas = {
+    Product: {
+      type: "object",
+      properties: { id: { type: "string" }, sku: { type: "string" }, unit_price: { type: "number" } },
+      required: ["sku"],
+    },
+  };
+  const doc = toOpenApiDocument(descriptor, { title: "T", version: "v1" }, { entitySchemas });
+
+  it("embeds the entity schema + the ReportData union under components.schemas", () => {
+    expect(doc.components?.schemas["Product"]).toEqual(entitySchemas.Product);
+    expect(doc.components?.schemas["ReportData"]).toBeDefined();
+  });
+
+  it("references the entity schema from read/create request + responses", () => {
+    const read = doc.paths["/v1/products/{id}"]!["get"]!;
+    expect(read.responses["200"]?.content?.["application/json"].schema).toEqual({ $ref: "#/components/schemas/Product" });
+    const create = doc.paths["/v1/products"]!["post"]!;
+    expect(create.requestBody?.content["application/json"].schema).toEqual({ $ref: "#/components/schemas/Product" });
+    expect(create.responses["201"]?.content?.["application/json"].schema).toEqual({ $ref: "#/components/schemas/Product" });
+  });
+
+  it("wraps the list response (data array of the entity ref + page)", () => {
+    const list = doc.paths["/v1/products"]!["get"]!;
+    const schema = list.responses["200"]?.content?.["application/json"].schema as {
+      properties: { data: { items: unknown } };
+    };
+    expect(schema.properties.data.items).toEqual({ $ref: "#/components/schemas/Product" });
+  });
+
+  it("references ReportData from the report operation's 200", () => {
+    const report = doc.paths["/v1/reports/{report}"]!["get"]!;
+    expect(report.responses["200"]?.content?.["application/json"].schema).toEqual({
+      $ref: "#/components/schemas/ReportData",
+    });
+  });
 });
 
 describe("openApiRouteDefinition + buildOpenApiHandler", () => {

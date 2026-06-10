@@ -294,6 +294,19 @@ describe("OperateHttpServer — GET /v1/openapi.json (P3.26)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("embeds component schemas + references them from operations (P3.32)", async () => {
+    const server = makeDescribedServer();
+    const doc = parse((await server.dispatch(req("GET", "/v1/openapi.json", "key-manager"), null)).body);
+    const components = doc["components"] as { schemas: Record<string, { properties?: Record<string, unknown> }> };
+    // a typed schema per entity (Product carries its fields) + the ReportData union
+    expect(components.schemas["Product"]?.properties).toBeDefined();
+    expect(Object.keys(components.schemas["Product"]!.properties!)).toContain("unit_price");
+    expect(components.schemas["ReportData"]).toBeDefined();
+    // the create operation's requestBody + response reference the Product schema
+    const post = (doc["paths"] as Record<string, Record<string, { requestBody?: { content: Record<string, { schema: unknown }> } }>>)["/v1/products"]?.["post"];
+    expect(post?.requestBody?.content["application/json"].schema).toEqual({ $ref: "#/components/schemas/Product" });
+  });
+
   it("filters the document per caller's RBAC — a cashier's omits the create it can't perform (P3.28)", async () => {
     const server = makeDescribedServer();
     const mgr = parse((await server.dispatch(req("GET", "/v1/openapi.json", "key-manager"), null)).body);

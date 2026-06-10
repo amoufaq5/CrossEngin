@@ -33,15 +33,18 @@ edge, applies security headers, and emits a queryable `PipelineExecution`.
 | `GET/PATCH/DELETE /v1/<entities>/{id}` | read / update / delete |
 | `POST /v1/<entities>/{id}/<transition>` | fire an `entityLifecycle` transition |
 | `GET /v1/reports/{report}` | run a manifest report → executed `ReportData` (P3.25) |
-| `GET /v1/openapi.json` | the API description — a minimal OpenAPI 3.1 doc (P3.26) |
+| `GET /v1/openapi.json` | the API description — an OpenAPI 3.1 doc with typed component schemas (P3.26, P3.32) |
 
 Report data is aggregated by SQL pushdown under a Postgres store (`--store pg`
 JSONB / `--store pg-columns` typed columns) or a bounded in-memory engine under
 `--store memory`; an unknown report or a field the caller can't read is a
 fail-closed `404`. `GET /v1/openapi.json` lists every operation + the report
-catalog (under `x-reports`), projected from the compiled routes + manifest — it
-rides the gateway, so it authenticates like any route (it is the published API
-*shape*, not tenant data).
+catalog (under `x-reports`) + typed `components.schemas` (one per entity, derived
+from the manifest fields, plus the `ReportData` union, `$ref`'d from each
+operation's request/response), projected from the compiled routes + manifest. It
+rides the gateway, so it authenticates like any route and is **RBAC-filtered per
+caller** (a caller's document lists only the operations they may invoke); the
+document is the published API *shape*, not tenant data.
 
 ## Stores (`--store`)
 

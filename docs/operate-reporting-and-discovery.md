@@ -70,11 +70,15 @@ supplies the manifest-aware pieces.
 
 ### `GET /v1/openapi.json` (P3.26, P3.28)
 
-- **operate-runtime** (`api-descriptor.ts` + `openapi.ts`): `buildApiDescriptor`
-  projects the compiled `routeSpecs` + `manifest.reports` (read structurally) into
-  an `ApiDescriptor`; `toOpenApiDocument` renders a minimal OpenAPI 3.1 document
-  (paths grouped by template, `{param}` path parameters, the report catalog under
-  `x-reports`).
+- **operate-runtime** (`api-descriptor.ts` + `openapi.ts` + `schemas.ts`):
+  `buildApiDescriptor` projects the compiled `routeSpecs` + `manifest.reports`
+  (read structurally) into an `ApiDescriptor`; `toOpenApiDocument` renders an
+  OpenAPI 3.1 document (paths grouped by template, `{param}` path parameters, the
+  report catalog under `x-reports`). **Component schemas (P3.32):** `schemas.ts`
+  derives a typed schema per entity from the manifest fields
+  (`entitySchemasFromManifest`) + the `ReportData` union, embedded under
+  `components.schemas` and `$ref`'d from each operation's request/response bodies —
+  so the document is codegen-grade, not just paths.
 - **Per-caller (P3.28):** the served document is RBAC-filtered —
   `buildPerCallerOpenApiHandler` + `filterDescriptorForPrincipal` keep an entity
   operation only when `rbacCheck` allows the caller's role (no-entity ops like the
