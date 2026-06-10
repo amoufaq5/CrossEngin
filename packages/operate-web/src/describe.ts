@@ -9,6 +9,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Field } from "@crossengin/types/meta-schema";
 
 import { compileWebApp } from "./compile.js";
+import { webModelSchemas } from "./model-schema.js";
 import { EntityFieldResolver, entityFields, type CompileOptions, type ViewerContext } from "./viewer.js";
 
 /**
@@ -66,6 +67,13 @@ export interface WebApiDescriptor {
   /** Entity-independent routes (`/ui/app`, `/ui/_describe`). */
   readonly routes: readonly WebRouteDescriptor[];
   readonly entities: readonly WebEntityDescriptor[];
+  /**
+   * The view-model *shapes* (`TableModel` / `DetailModel` / `FormModel` / …) as
+   * OpenAPI schemas (P3.35), so a UI client can type the `/ui` route envelopes.
+   * Caller-independent — the model shape is the same for every viewer (the data
+   * + which fields appear are redacted per-caller).
+   */
+  readonly models: Readonly<Record<string, OpenApiSchema>>;
 }
 
 /** Maps a view kind → its concrete route path for an entity. */
@@ -200,5 +208,6 @@ export function describeWebApi(
       { kind: "describe", method: "GET", path: WEB_DESCRIBE_PATH },
     ],
     entities,
+    models: webModelSchemas(),
   };
 }

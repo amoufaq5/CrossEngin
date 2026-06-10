@@ -242,3 +242,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 156 | 0187 | 2,500 | Drafted alongside OpenAPI component schemas (Phase 3 P3.32) |
 | 157 | 0188 | 2,000 | Drafted alongside OpenAPI schema refinements — nullability + error responses (Phase 3 P3.33) |
 | 158 | 0189 | 1,500 | Drafted alongside operate-web discovery field schemas (Phase 3 P3.34) |
+| 159 | 0190 | 2,000 | Drafted alongside operate-web view-model schemas in discovery (Phase 3 P3.35) |

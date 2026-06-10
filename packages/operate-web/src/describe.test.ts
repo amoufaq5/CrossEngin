@@ -117,6 +117,14 @@ describe("describeWebApi", () => {
     expect(cshTransitions).not.toContain("fulfill");
   });
 
+  it("publishes the view-model shapes under `models` (P3.35)", () => {
+    const d = describeWebApi(retailListOnly, MANAGER);
+    expect(Object.keys(d.models)).toContain("TableModel");
+    expect(d.models["TableModel"]!.type).toBe("object");
+    expect(d.models["TableModel"]!.properties!["columns"]!.type).toBe("array");
+    expect(d.models["FormModel"]).toBeDefined();
+  });
+
   it("carries a redaction-aware field schema per entity (P3.34)", () => {
     const mgr = entityOf(describeWebApi(retailListOnly, MANAGER), "Product");
     expect(mgr.schema.type).toBe("object");

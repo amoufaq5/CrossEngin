@@ -124,6 +124,15 @@ describe("GET /ui/_describe — per-caller route discovery (P3.27)", () => {
     expect(product.routes).toContainEqual({ kind: "kanban", method: "GET", path: "/ui/Product/kanban", entity: "Product" });
   });
 
+  it("publishes the view-model shapes under `models` (P3.35)", async () => {
+    const server = await makeServer();
+    const d = body(await server.dispatch(req("/ui/_describe", "mgr")));
+    expect(Object.keys(d.models)).toContain("TableModel");
+    expect(d.models.TableModel.type).toBe("object");
+    expect(d.models.TableModel.properties.columns.type).toBe("array");
+    expect(d.models.FormModel).toBeDefined();
+  });
+
   it("carries a redaction-aware field schema per entity, dropping fields the caller can't read (P3.34)", async () => {
     const server = await makeServer();
     const mgr = body(await server.dispatch(req("/ui/_describe", "mgr")));
