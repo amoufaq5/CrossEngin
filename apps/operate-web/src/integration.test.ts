@@ -373,4 +373,45 @@ suite("operate-web integration (real Postgres)", () => {
     expect(at("grocery", "discontinued")).toBe(1);
     expect(at("home", "active")).toBe(2);
   });
+
+  it("renders SSR /app dashboard + pivot HTML pages over the COLUMN store with SQL-aggregated report data (P3.30)", async () => {
+    const schema = `ow_ssr_${Math.random().toString(36).slice(2, 8)}`;
+    const colStore = new ColumnMappedEntityStore(conn, withBoard, { schema });
+    await colStore.ensureSchema();
+    const tenant = await seedTenant();
+    const colSql = buildOperateWebServer({
+      manifest: withBoard,
+      store: colStore,
+      apiKeySpecs: [{ key: "ssr", role: "store_manager", tenantId: tenant }],
+      reportExecutor: (r, t, c) => new PostgresColumnReportExecutor(conn, withBoard, { schema }).execute(r, t, c),
+    });
+    // 4 products: grocery/active ×2, grocery/discontinued ×1, home/active ×1.
+    for (const s of [
+      { sku: "SG1", category: "grocery", status: "active", unit_price: 10 },
+      { sku: "SG2", category: "grocery", status: "active", unit_price: 20 },
+      { sku: "SG3", category: "grocery", status: "discontinued", unit_price: 30 },
+      { sku: "SH1", category: "home", status: "active", unit_price: 40 },
+    ]) {
+      await colStore.create(tenant, "Product", product(s));
+    }
+    const text = (bytes: Uint8Array | null): string => new TextDecoder().decode(bytes ?? new Uint8Array());
+
+    // SSR dashboard page: HTML carrying the kpi value (count = 4) computed by SQL
+    const dash = await colSql.dispatch(req("/app/Product/dashboard", "ssr"));
+    expect(dash.status).toBe(200);
+    expect(dash.headers["content-type"]).toContain("text/html");
+    const dashHtml = text(dash.body);
+    expect(dashHtml.startsWith("<!doctype html>")).toBe(true);
+    expect(dashHtml).toContain('ce-kpi-value">4</span>');
+
+    // SSR pivot page: HTML pivot table with SQL-computed category × status counts
+    const pivot = await colSql.dispatch(req("/app/Product/pivot", "ssr"));
+    expect(pivot.status).toBe(200);
+    expect(pivot.headers["content-type"]).toContain("text/html");
+    const pivotHtml = text(pivot.body);
+    expect(pivotHtml).toContain("ce-report-pivot");
+    expect(pivotHtml).toContain("grocery");
+    expect(pivotHtml).toContain("n=2"); // grocery/active = 2
+    expect(pivotHtml).toContain("n=1"); // grocery/discontinued = 1 (and home/active = 1)
+  });
 });

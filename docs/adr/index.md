@@ -237,3 +237,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 151 | 0182 | 2,000 | Drafted alongside the operate-web discovery endpoint (Phase 3 P3.27) |
 | 152 | 0183 | 2,500 | Drafted alongside RBAC-gated mutation routes in the discovery descriptors (Phase 3 P3.28) |
 | 153 | 0184 | 2,000 | Drafted alongside report sort + limit SQL pushdown (Phase 3 P3.29) |
+| 154 | 0185 | 1,500 | Drafted alongside the gated SSR report-page test over the column store (Phase 3 P3.30) |
