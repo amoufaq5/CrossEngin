@@ -293,4 +293,18 @@ describe("OperateHttpServer — GET /v1/openapi.json (P3.26)", () => {
     const res = await server.dispatch(req("GET", "/v1/openapi.json", "key-nobody"), null);
     expect(res.status).toBe(401);
   });
+
+  it("filters the document per caller's RBAC — a cashier's omits the create it can't perform (P3.28)", async () => {
+    const server = makeDescribedServer();
+    const mgr = parse((await server.dispatch(req("GET", "/v1/openapi.json", "key-manager"), null)).body);
+    const csh = parse((await server.dispatch(req("GET", "/v1/openapi.json", "key-cashier"), null)).body);
+    const mgrPaths = mgr["paths"] as Record<string, Record<string, unknown>>;
+    const cshPaths = csh["paths"] as Record<string, Record<string, unknown>>;
+    // a store_manager can create products → POST present; a cashier cannot → absent
+    expect(mgrPaths["/v1/products"]?.["post"]).toBeDefined();
+    expect(cshPaths["/v1/products"]?.["post"]).toBeUndefined();
+    // both can still read products (GET present for each)
+    expect(mgrPaths["/v1/products"]?.["get"]).toBeDefined();
+    expect(cshPaths["/v1/products"]?.["get"]).toBeDefined();
+  });
 });

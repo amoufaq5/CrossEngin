@@ -22,7 +22,7 @@ import { buildApiDescriptor, type ApiDescriptor } from "./api-descriptor.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import {
   OPENAPI_OPERATION_ID,
-  buildOpenApiHandler,
+  buildPerCallerOpenApiHandler,
   openApiRouteDefinition,
   toOpenApiDocument,
   type OpenApiDocument,
@@ -106,13 +106,20 @@ export function compileOperateServer(
   }
 
   const apiDescriptor = buildApiDescriptor(manifest, routeSpecs, { includeReportRoute: hasReportRoute });
-  const openApiDocument = toOpenApiDocument(
-    apiDescriptor,
-    options.openApiInfo ?? { title: "CrossEngin operate API", version: apiDescriptor.apiVersion },
-  );
+  const openApiInfo = options.openApiInfo ?? { title: "CrossEngin operate API", version: apiDescriptor.apiVersion };
+  const openApiDocument = toOpenApiDocument(apiDescriptor, openApiInfo);
   if (options.serveApiDescriptor === true) {
     routes.register(openApiRouteDefinition());
-    handlers.register(OPENAPI_OPERATION_ID, buildOpenApiHandler(openApiDocument));
+    // P3.28: the served document is per-caller — RBAC-filtered to the operations
+    // the principal may invoke (the exposed `openApiDocument` stays the full one).
+    handlers.register(
+      OPENAPI_OPERATION_ID,
+      buildPerCallerOpenApiHandler(apiDescriptor, openApiInfo, {
+        permissions: ctx.permissions,
+        roles: ctx.roles,
+        principalRoles: options.principalRoles,
+      }),
+    );
   }
 
   const redactionRegistry = redactionRegistryFromManifest(manifest, {

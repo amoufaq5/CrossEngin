@@ -213,7 +213,7 @@ export class OperateWebServer {
     // /v1/openapi.json) — intercepted before the generic `:entity` route since
     // `_describe` is not an entity name.
     if (rest.length === 1 && rest[0] === "_describe") {
-      return jsonResponse(200, describeWebApi(this.manifest, viewerCtx));
+      return jsonResponse(200, describeWebApi(this.manifest, viewerCtx, this.compileOptions));
     }
     if (rest.length === 1) {
       return this.serveTable(rest[0]!, viewer, viewerCtx, query);

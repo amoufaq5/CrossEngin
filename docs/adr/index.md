@@ -235,3 +235,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 149 | 0180 | 3,000 | Drafted alongside report routes on the operate-server serving API (Phase 3 P3.25) |
 | 150 | 0181 | 2,500 | Drafted alongside OpenAPI / report discovery on operate-server (Phase 3 P3.26) |
 | 151 | 0182 | 2,000 | Drafted alongside the operate-web discovery endpoint (Phase 3 P3.27) |
+| 152 | 0183 | 2,500 | Drafted alongside RBAC-gated mutation routes in the discovery descriptors (Phase 3 P3.28) |

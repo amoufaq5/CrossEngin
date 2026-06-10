@@ -44,6 +44,7 @@ const withBoard = {
 } as unknown as Manifest;
 
 const MANAGER = { roles: ["store_manager"] };
+const CASHIER = { roles: ["cashier"] };
 
 function entityOf(d: ReturnType<typeof describeWebApi>, name: string): WebEntityDescriptor {
   const e = d.entities.find((x) => x.entity === name);
@@ -65,11 +66,9 @@ describe("describeWebApi", () => {
     const d = describeWebApi(retailListOnly, MANAGER);
     const product = entityOf(d, "Product");
     expect(product.views).toEqual(["table", "detail", "form"]);
-    expect(product.routes).toEqual([
-      { kind: "table", method: "GET", path: "/ui/Product", entity: "Product" },
-      { kind: "detail", method: "GET", path: "/ui/Product/{id}", entity: "Product" },
-      { kind: "form", method: "GET", path: "/ui/Product/new", entity: "Product" },
-    ]);
+    expect(product.routes).toContainEqual({ kind: "table", method: "GET", path: "/ui/Product", entity: "Product" });
+    expect(product.routes).toContainEqual({ kind: "detail", method: "GET", path: "/ui/Product/{id}", entity: "Product" });
+    expect(product.routes).toContainEqual({ kind: "form", method: "GET", path: "/ui/Product/new", entity: "Product" });
   });
 
   it("includes the kanban route only when a board compiles for the caller", () => {
@@ -85,5 +84,36 @@ describe("describeWebApi", () => {
       path: "/ui/SalesOrder/kanban",
       entity: "SalesOrder",
     });
+  });
+
+  it("lists RBAC-gated mutation routes the caller may invoke (P3.28)", () => {
+    // A store_manager can create + update Product; a cashier can do neither.
+    const mgrProduct = entityOf(describeWebApi(retailListOnly, MANAGER), "Product");
+    expect(mgrProduct.routes).toContainEqual({ kind: "create", method: "POST", path: "/ui/Product", entity: "Product" });
+    expect(mgrProduct.routes).toContainEqual({ kind: "update", method: "PATCH", path: "/ui/Product/{id}", entity: "Product" });
+
+    const cshProduct = entityOf(describeWebApi(retailListOnly, CASHIER), "Product");
+    expect(cshProduct.routes.some((r) => r.kind === "create")).toBe(false);
+    expect(cshProduct.routes.some((r) => r.kind === "update")).toBe(false);
+  });
+
+  it("lists transition routes the caller may fire, gated per transition", () => {
+    // place is granted to sellers (incl. cashier); fulfill is managers-only.
+    const mgr = entityOf(describeWebApi(retailListOnly, MANAGER), "SalesOrder");
+    const mgrTransitions = mgr.routes.filter((r) => r.kind === "transition").map((r) => r.transition);
+    expect(mgrTransitions).toContain("place");
+    expect(mgrTransitions).toContain("fulfill");
+    expect(mgr.routes).toContainEqual({
+      kind: "transition",
+      method: "POST",
+      path: "/ui/SalesOrder/{id}/transition",
+      entity: "SalesOrder",
+      transition: "place",
+    });
+
+    const csh = entityOf(describeWebApi(retailListOnly, CASHIER), "SalesOrder");
+    const cshTransitions = csh.routes.filter((r) => r.kind === "transition").map((r) => r.transition);
+    expect(cshTransitions).toContain("place");
+    expect(cshTransitions).not.toContain("fulfill");
   });
 });

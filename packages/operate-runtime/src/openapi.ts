@@ -1,5 +1,13 @@
-import type { RouteDefinition } from "@crossengin/api-gateway";
-import type { Handler, HandlerOutput } from "@crossengin/api-gateway-runtime";
+import {
+  rbacCheck,
+  type Operation,
+  type PermissionMap,
+  type Principal,
+  type RoleDefinition,
+  type RoleName,
+} from "@crossengin/auth";
+import type { ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
+import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import type { ApiDescriptor, ApiOperation } from "./api-descriptor.js";
 import { routeId } from "./slugs.js";
@@ -128,4 +136,87 @@ function json(status: number, body: unknown): HandlerOutput {
  */
 export function buildOpenApiHandler(document: OpenApiDocument): Handler {
   return () => json(200, document);
+}
+
+/** The RBAC context a per-caller OpenAPI handler needs to filter operations. */
+export interface OpenApiRbacContext {
+  readonly permissions: PermissionMap;
+  readonly roles: ReadonlyMap<RoleName, RoleDefinition>;
+  readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
+}
+
+/** The RBAC `Operation` an entity-bound API operation requires, or null (no entity gate). */
+function authOperationFor(op: ApiOperation): Operation | null {
+  switch (op.kind) {
+    case "list":
+    case "read":
+    case "create":
+    case "update":
+    case "delete":
+      return op.kind;
+    case "transition":
+      return op.transition !== undefined ? { kind: "transition", name: op.transition } : null;
+    default:
+      return null;
+  }
+}
+
+function authPrincipalFrom(
+  resolved: ResolvedPrincipal | null,
+  principalRoles: OpenApiRbacContext["principalRoles"],
+): Principal {
+  const { primaryRole, secondaryRoles } = principalRoles(resolved);
+  return {
+    kind: "user",
+    tenantId: (resolved?.tenantId ?? "") as Principal["tenantId"],
+    userId: (resolved?.principalId ?? null) as Principal["userId"],
+    primaryRole,
+    secondaryRoles: secondaryRoles ?? [],
+    abacAttributes: {},
+    mfaProofAgeSeconds: resolved?.mfaProofAgeSeconds ?? null,
+  };
+}
+
+/**
+ * Filters a descriptor's operations to those the principal is RBAC-granted
+ * (P3.28): entity-bound operations are kept only when `rbacCheck` allows the
+ * caller's role for that entity + operation; operations with no entity (the
+ * report route) are always kept. So a caller who can't create/update/delete an
+ * entity won't see those operations in their OpenAPI document — it reflects what
+ * they can actually do.
+ */
+export function filterDescriptorForPrincipal(
+  descriptor: ApiDescriptor,
+  principal: ResolvedPrincipal | null,
+  rbac: OpenApiRbacContext,
+): ApiDescriptor {
+  const authPrincipal = authPrincipalFrom(principal, rbac.principalRoles);
+  const operations = descriptor.operations.filter((op) => {
+    if (op.entity === undefined) return true;
+    const operation = authOperationFor(op);
+    if (operation === null) return true;
+    return rbacCheck({
+      principal: authPrincipal,
+      permissions: rbac.permissions,
+      roles: rbac.roles,
+      entity: op.entity,
+      operation,
+    }).allowed;
+  });
+  return { ...descriptor, operations };
+}
+
+/**
+ * Builds a **per-caller** OpenAPI handler: each request's document lists only the
+ * operations the caller is RBAC-granted (via `filterDescriptorForPrincipal`),
+ * projected fresh per request. The full (unfiltered) `openApiDocument` stays on
+ * the compiled server for programmatic use.
+ */
+export function buildPerCallerOpenApiHandler(
+  descriptor: ApiDescriptor,
+  info: OpenApiInfo,
+  rbac: OpenApiRbacContext,
+): Handler {
+  return ({ principal }) =>
+    json(200, toOpenApiDocument(filterDescriptorForPrincipal(descriptor, principal, rbac), info));
 }
