@@ -303,8 +303,13 @@ describe("OperateHttpServer — GET /v1/openapi.json (P3.26)", () => {
     expect(Object.keys(components.schemas["Product"]!.properties!)).toContain("unit_price");
     expect(components.schemas["ReportData"]).toBeDefined();
     // the create operation's requestBody + response reference the Product schema
-    const post = (doc["paths"] as Record<string, Record<string, { requestBody?: { content: Record<string, { schema: unknown }> } }>>)["/v1/products"]?.["post"];
+    const post = (doc["paths"] as Record<string, Record<string, { requestBody?: { content: Record<string, { schema: unknown }> }; responses: Record<string, { content?: Record<string, { schema: unknown }> }> }>>)["/v1/products"]?.["post"];
     expect(post?.requestBody?.content["application/json"].schema).toEqual({ $ref: "#/components/schemas/Product" });
+    // P3.33: RFC 9457 error responses reference ProblemDetails (always present)
+    expect(components.schemas["ProblemDetails"]).toBeDefined();
+    expect(post?.responses["403"]?.content?.["application/problem+json"].schema).toEqual({
+      $ref: "#/components/schemas/ProblemDetails",
+    });
   });
 
   it("filters the document per caller's RBAC — a cashier's omits the create it can't perform (P3.28)", async () => {

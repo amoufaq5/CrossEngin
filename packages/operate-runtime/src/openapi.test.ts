@@ -43,9 +43,46 @@ describe("toOpenApiDocument", () => {
   it("tags the report route + documents its 404, and carries x-reports", () => {
     const report = doc.paths["/v1/reports/{report}"]!["get"]!;
     expect(report.tags).toEqual(["reports"]);
-    expect(Object.keys(report.responses).sort()).toEqual(["200", "404"]);
+    // 200 + the report's own 404 + the always-on 401 (P3.33)
+    expect(Object.keys(report.responses).sort()).toEqual(["200", "401", "404"]);
     expect(report.parameters).toEqual([{ name: "report", in: "path", required: true, schema: { type: "string" } }]);
     expect(doc["x-reports"]).toEqual(descriptor.reports);
+  });
+
+  it("attaches RFC 9457 error responses per operation (P3.33)", () => {
+    const create = doc.paths["/v1/products"]!["post"]!;
+    // create: 401 + 403, each application/problem+json referencing ProblemDetails
+    expect(create.responses["401"]?.content?.["application/problem+json"].schema).toEqual({
+      $ref: "#/components/schemas/ProblemDetails",
+    });
+    expect(create.responses["403"]).toBeDefined();
+    expect(create.responses["404"]).toBeUndefined(); // no record id on create
+    // read (has {id}) documents 404; report documents 404 but not 403
+    expect(doc.paths["/v1/products/{id}"]!["get"]!.responses["404"]).toBeDefined();
+    expect(doc.paths["/v1/reports/{report}"]!["get"]!.responses["403"]).toBeUndefined();
+    // the ProblemDetails schema is always present
+    expect(doc.components?.schemas["ProblemDetails"]).toBeDefined();
+  });
+
+  it("a transition operation documents 404 + 409", () => {
+    const td = toOpenApiDocument(
+      {
+        apiVersion: "v1",
+        operations: [
+          { operationId: "so.place", method: "POST", path: "/v1/sales-orders/{id}/place", kind: "transition", entity: "SalesOrder", transition: "place" },
+        ],
+        reports: [],
+      },
+      { title: "T", version: "v1" },
+    );
+    const op = td.paths["/v1/sales-orders/{id}/place"]!["post"]!;
+    expect(op.responses["409"]).toBeDefined();
+    expect(op.responses["404"]).toBeDefined();
+    expect(op.requestBody?.content["application/json"].schema).toEqual({
+      type: "object",
+      properties: { transition: { type: "string" } },
+      required: ["transition"],
+    });
   });
 
   it("has no components when no entity schemas are supplied (report op still adds ReportData)", () => {

@@ -78,7 +78,10 @@ supplies the manifest-aware pieces.
   derives a typed schema per entity from the manifest fields
   (`entitySchemasFromManifest`) + the `ReportData` union, embedded under
   `components.schemas` and `$ref`'d from each operation's request/response bodies —
-  so the document is codegen-grade, not just paths.
+  so the document is codegen-grade, not just paths. **Refinements (P3.33):**
+  optional fields are nullable (`type: [..., "null"]`), and a `ProblemDetails`
+  (RFC 9457) schema is `$ref`'d from per-operation error responses
+  (`401`/`403`/`404`/`409` as applicable).
 - **Per-caller (P3.28):** the served document is RBAC-filtered —
   `buildPerCallerOpenApiHandler` + `filterDescriptorForPrincipal` keep an entity
   operation only when `rbacCheck` allows the caller's role (no-entity ops like the

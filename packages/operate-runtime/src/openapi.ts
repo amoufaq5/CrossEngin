@@ -10,7 +10,13 @@ import type { ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import type { ApiDescriptor, ApiOperation } from "./api-descriptor.js";
-import { REPORT_DATA_SCHEMA, REPORT_DATA_SCHEMA_NAME, type OpenApiSchema } from "./schemas.js";
+import {
+  PROBLEM_SCHEMA,
+  PROBLEM_SCHEMA_NAME,
+  REPORT_DATA_SCHEMA,
+  REPORT_DATA_SCHEMA_NAME,
+  type OpenApiSchema,
+} from "./schemas.js";
 import { routeId } from "./slugs.js";
 
 /**
@@ -109,6 +115,27 @@ const TRANSITION_REQUEST: OpenApiSchema = {
   required: ["transition"],
 };
 
+/** A `application/problem+json` error response referencing the ProblemDetails schema. */
+function problemResponse(description: string): OpenApiResponse {
+  return { description, content: { "application/problem+json": { schema: ref(PROBLEM_SCHEMA_NAME) } } };
+}
+
+/**
+ * The RFC 9457 error responses an operation can emit (P3.33): every operation can
+ * 401 (unauthenticated); entity ops add 403 (RBAC); ops with a record id
+ * (read/update/delete/transition) add 404; transitions add 409 (invalid
+ * from-state). The report op documents its own 404 in `operationObject`.
+ */
+function errorResponses(op: ApiOperation): Record<string, OpenApiResponse> {
+  const out: Record<string, OpenApiResponse> = { "401": problemResponse("Unauthenticated") };
+  if (op.kind === "report") return out;
+  out["403"] = problemResponse("Forbidden");
+  const hasId = op.kind === "read" || op.kind === "update" || op.kind === "delete" || op.kind === "transition";
+  if (hasId) out["404"] = problemResponse("Not found");
+  if (op.kind === "transition") out["409"] = problemResponse("Invalid transition for the current state");
+  return out;
+}
+
 /**
  * Builds an operation object. When an entity schema is available (its name is in
  * `schemaNames`), the request/response bodies reference it (or the `ReportData`
@@ -177,7 +204,7 @@ function operationObject(op: ApiOperation, schemaNames: ReadonlySet<string>): Op
     tags: [op.kind === "report" ? "reports" : (op.entity ?? "default")],
     ...(params.length > 0 ? { parameters: params } : {}),
     ...(requestBody !== undefined ? { requestBody } : {}),
-    responses,
+    responses: { ...responses, ...errorResponses(op) },
   };
 }
 
@@ -196,6 +223,9 @@ export function toOpenApiDocument(
   const hasReportOp = descriptor.operations.some((op) => op.kind === "report");
   const schemas: Record<string, OpenApiSchema> = { ...entitySchemas };
   if (hasReportOp) schemas[REPORT_DATA_SCHEMA_NAME] = REPORT_DATA_SCHEMA;
+  // P3.33: the RFC 9457 error body is referenced from every operation's error
+  // responses, so the schema is always present.
+  if (descriptor.operations.length > 0) schemas[PROBLEM_SCHEMA_NAME] = PROBLEM_SCHEMA;
   const schemaNames = new Set(Object.keys(schemas));
 
   const paths: Record<string, Record<string, OpenApiOperationObject>> = {};

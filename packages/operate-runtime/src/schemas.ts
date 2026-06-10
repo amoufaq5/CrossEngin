@@ -10,7 +10,7 @@ import type { Entity, Field, FieldType, PrimitiveFieldType } from "@crossengin/t
 export interface OpenApiSchema {
   readonly type?: string | readonly string[];
   readonly format?: string;
-  readonly enum?: readonly string[];
+  readonly enum?: readonly (string | null)[];
   readonly items?: OpenApiSchema;
   readonly properties?: Readonly<Record<string, OpenApiSchema>>;
   readonly required?: readonly string[];
@@ -73,18 +73,40 @@ export function fieldTypeToSchema(type: FieldType): OpenApiSchema {
 }
 
 /**
+ * Widens a schema to be nullable (P3.33): its `type` gains `"null"`, and an `enum`
+ * gains a `null` member (so a nullable enum's `null` value validates). Used for
+ * optional (non-required) fields, which the stores may return as `null`.
+ */
+export function nullableSchema(schema: OpenApiSchema): OpenApiSchema {
+  const t = schema.type;
+  const type: string | readonly string[] | undefined =
+    t === undefined ? undefined : Array.isArray(t) ? (t.includes("null") ? t : [...t, "null"]) : [t as string, "null"];
+  const out: OpenApiSchema = { ...schema, ...(type !== undefined ? { type } : {}) };
+  if (schema.enum !== undefined && !schema.enum.includes(null)) {
+    return { ...out, enum: [...schema.enum, null] };
+  }
+  return out;
+}
+
+/**
  * Derives the OpenAPI object schema for one entity: a property per field (typed
  * from the manifest), plus a string `id`, with `required` listing the fields the
- * manifest marks required. Note: field-level classification redaction is a
- * *runtime* concern (per-caller), so the schema describes the full entity shape —
- * the published contract.
+ * manifest marks required. Optional (non-required) fields are **nullable** (P3.33)
+ * — the stores may return `null` for an unset value. Note: field-level
+ * classification redaction is a *runtime* concern (per-caller), so the schema
+ * describes the full entity shape — the published contract.
  */
 export function entitySchemaFor(entity: Entity): OpenApiSchema {
   const properties: Record<string, OpenApiSchema> = { id: { type: "string" } };
   const required: string[] = [];
   for (const field of entity.fields as readonly Field[]) {
-    properties[field.name] = fieldTypeToSchema(field.type);
-    if (field.required === true) required.push(field.name);
+    const base = fieldTypeToSchema(field.type);
+    if (field.required === true) {
+      properties[field.name] = base;
+      required.push(field.name);
+    } else {
+      properties[field.name] = nullableSchema(base);
+    }
   }
   return { type: "object", properties, ...(required.length > 0 ? { required } : {}) };
 }
@@ -144,4 +166,22 @@ export const REPORT_DATA_SCHEMA: OpenApiSchema = {
       required: ["kind", "rowFields", "columnFields", "cells"],
     },
   ],
+};
+
+/** The component-schema name for the RFC 9457 problem-details error body. */
+export const PROBLEM_SCHEMA_NAME = "ProblemDetails";
+
+/**
+ * The RFC 9457 problem-details schema (P3.33) — the API's declared error format,
+ * referenced from each operation's error responses (`application/problem+json`).
+ */
+export const PROBLEM_SCHEMA: OpenApiSchema = {
+  type: "object",
+  properties: {
+    type: { type: "string", format: "uri", description: "a URI identifying the problem type" },
+    title: { type: "string" },
+    status: { type: "integer" },
+    detail: { type: "string" },
+    instance: { type: "string" },
+  },
 };

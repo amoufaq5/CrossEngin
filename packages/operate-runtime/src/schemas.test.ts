@@ -55,9 +55,11 @@ describe("entitySchemaFor", () => {
     const schema = entitySchemaFor(ENTITY);
     expect(schema.type).toBe("object");
     expect(schema.properties!["id"]).toEqual({ type: "string" });
-    expect(schema.properties!["sku"]).toEqual({ type: "string" });
+    expect(schema.properties!["sku"]).toEqual({ type: "string" }); // required → not nullable
     expect(schema.properties!["unit_price"]).toEqual({ type: "number" });
-    expect(schema.properties!["status"]).toEqual({ type: "string", enum: ["active", "discontinued"] });
+    // optional fields are nullable (P3.33): type gains "null", enum gains null
+    expect(schema.properties!["status"]).toEqual({ type: ["string", "null"], enum: ["active", "discontinued", null] });
+    expect(schema.properties!["notes"]).toEqual({ type: ["string", "null"] });
     expect(schema.required).toEqual(["sku", "unit_price"]);
   });
 
