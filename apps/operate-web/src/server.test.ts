@@ -123,6 +123,17 @@ describe("GET /ui/_describe — per-caller route discovery (P3.27)", () => {
     expect(product.views).toContain("kanban");
     expect(product.routes).toContainEqual({ kind: "kanban", method: "GET", path: "/ui/Product/kanban", entity: "Product" });
   });
+
+  it("carries a redaction-aware field schema per entity, dropping fields the caller can't read (P3.34)", async () => {
+    const server = await makeServer();
+    const mgr = body(await server.dispatch(req("/ui/_describe", "mgr")));
+    const csh = body(await server.dispatch(req("/ui/_describe", "csh")));
+    const mgrProduct = mgr.entities.find((e: { entity: string }) => e.entity === "Product");
+    const cshProduct = csh.entities.find((e: { entity: string }) => e.entity === "Product");
+    expect(mgrProduct.schema.properties.unit_cost).toBeDefined();
+    expect(cshProduct.schema.properties.unit_cost).toBeUndefined();
+    expect(cshProduct.schema.properties.sku).toBeDefined();
+  });
 });
 
 describe("GET /ui/:entity — table + redacted data page", () => {

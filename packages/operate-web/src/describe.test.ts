@@ -116,4 +116,18 @@ describe("describeWebApi", () => {
     expect(cshTransitions).toContain("place");
     expect(cshTransitions).not.toContain("fulfill");
   });
+
+  it("carries a redaction-aware field schema per entity (P3.34)", () => {
+    const mgr = entityOf(describeWebApi(retailListOnly, MANAGER), "Product");
+    expect(mgr.schema.type).toBe("object");
+    expect(mgr.schema.properties!["id"]).toEqual({ type: "string" });
+    // a manager can read the commercial_sensitive unit_cost → present + typed
+    expect(mgr.schema.properties!["unit_cost"]).toBeDefined();
+    expect(mgr.schema.properties!["sku"]).toBeDefined();
+
+    // a cashier can't read unit_cost → dropped from the schema (parity with model/data redaction)
+    const csh = entityOf(describeWebApi(retailListOnly, CASHIER), "Product");
+    expect(csh.schema.properties!["unit_cost"]).toBeUndefined();
+    expect(csh.schema.properties!["sku"]).toBeDefined();
+  });
 });

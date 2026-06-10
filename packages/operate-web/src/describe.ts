@@ -1,8 +1,15 @@
-import { manifestRouteSpecs, type TransitionSpec } from "@crossengin/operate-runtime";
+import {
+  fieldTypeToSchema,
+  manifestRouteSpecs,
+  nullableSchema,
+  type OpenApiSchema,
+  type TransitionSpec,
+} from "@crossengin/operate-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
+import type { Entity, Field } from "@crossengin/types/meta-schema";
 
 import { compileWebApp } from "./compile.js";
-import { EntityFieldResolver, type CompileOptions, type ViewerContext } from "./viewer.js";
+import { EntityFieldResolver, entityFields, type CompileOptions, type ViewerContext } from "./viewer.js";
 
 /**
  * Discovery descriptor for the operate-web view-model API (the parity sibling of
@@ -45,6 +52,13 @@ export interface WebEntityDescriptor {
   readonly label: string;
   readonly views: readonly WebViewKind[];
   readonly routes: readonly WebRouteDescriptor[];
+  /**
+   * The OpenAPI object schema of the fields the caller can **read** (P3.34) — the
+   * redaction-aware, per-caller parity of operate-server's component schema. A
+   * field the viewer can't read is dropped, so a cashier's `Product` schema omits
+   * `unit_cost` while a manager's includes it. Optional fields are nullable.
+   */
+  readonly schema: OpenApiSchema;
 }
 
 export interface WebApiDescriptor {
@@ -116,11 +130,41 @@ function mutationRoutes(
 }
 
 /**
+ * Builds the redaction-aware OpenAPI object schema for an entity (P3.34): a typed
+ * property per field the viewer can **read** (via `EntityFieldResolver`), plus a
+ * string `id`. A field the caller can't read is dropped (parity with the
+ * model/data redaction); optional fields are nullable. Reuses operate-runtime's
+ * `fieldTypeToSchema` so the field→schema mapping is identical to operate-server.
+ */
+function entitySchemaForViewer(
+  manifest: Manifest,
+  entity: Entity,
+  viewer: ViewerContext,
+  options: CompileOptions,
+): OpenApiSchema {
+  const access = new EntityFieldResolver(manifest, entity.name, viewer, options).resolve(entityFields(entity));
+  const properties: Record<string, OpenApiSchema> = { id: { type: "string" } };
+  const required: string[] = [];
+  for (const field of entity.fields as readonly Field[]) {
+    if (access.get(field.name)?.read === false) continue;
+    const base = fieldTypeToSchema(field.type);
+    if (field.required === true) {
+      properties[field.name] = base;
+      required.push(field.name);
+    } else {
+      properties[field.name] = nullableSchema(base);
+    }
+  }
+  return { type: "object", properties, ...(required.length > 0 ? { required } : {}) };
+}
+
+/**
  * Builds the per-caller discovery descriptor: every entity (with its
  * caller-available view-model routes + the RBAC-gated mutation routes it may
- * invoke) plus the global routes. Read routes reuse `compileWebApp` (so they
- * can't drift); write routes are gated by `EntityFieldResolver` — the same RBAC
- * the server enforces, so the descriptor reflects exactly what the caller can do.
+ * invoke + the redaction-aware field schema) plus the global routes. Read routes
+ * reuse `compileWebApp` (so they can't drift); write routes are gated by
+ * `EntityFieldResolver` — the same RBAC the server enforces, so the descriptor
+ * reflects exactly what the caller can do + see.
  */
 export function describeWebApi(
   manifest: Manifest,
@@ -129,18 +173,26 @@ export function describeWebApi(
 ): WebApiDescriptor {
   const app = compileWebApp(manifest, viewer);
   const transitions = transitionsByEntity(manifest);
-  const entities: WebEntityDescriptor[] = app.nav.map((nav) => ({
-    entity: nav.entity,
-    label: nav.label,
-    views: [...nav.views],
-    routes: [
-      ...nav.views.map((view): WebRouteDescriptor => {
-        const r = VIEW_ROUTE[view]!(nav.entity);
-        return { kind: r.kind, method: "GET", path: r.path, entity: nav.entity };
-      }),
-      ...mutationRoutes(manifest, nav.entity, viewer, options, transitions.get(nav.entity) ?? []),
-    ],
-  }));
+  const entitiesByName = new Map((manifest.entities ?? []).map((e) => [e.name, e]));
+  const entities: WebEntityDescriptor[] = app.nav.map((nav) => {
+    const entity = entitiesByName.get(nav.entity);
+    return {
+      entity: nav.entity,
+      label: nav.label,
+      views: [...nav.views],
+      routes: [
+        ...nav.views.map((view): WebRouteDescriptor => {
+          const r = VIEW_ROUTE[view]!(nav.entity);
+          return { kind: r.kind, method: "GET", path: r.path, entity: nav.entity };
+        }),
+        ...mutationRoutes(manifest, nav.entity, viewer, options, transitions.get(nav.entity) ?? []),
+      ],
+      schema:
+        entity !== undefined
+          ? entitySchemaForViewer(manifest, entity, viewer, options)
+          : { type: "object", properties: { id: { type: "string" } } },
+    };
+  });
   return {
     title: app.title,
     routes: [
