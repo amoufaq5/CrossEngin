@@ -19,6 +19,7 @@ import {
   compilePivotModel,
   compileTableModel,
   compileWebApp,
+  describeWebApi,
   entityFields,
   executeReport,
   redactRecord,
@@ -91,6 +92,7 @@ export type ReportExecutor = (
  *
  * Routes:
  *   GET    /ui/app              -> WebAppModel
+ *   GET    /ui/_describe        -> WebApiDescriptor (per-caller route discovery)
  *   GET    /ui/:entity          -> { table, page: { data, nextCursor } }
  *   GET    /ui/:entity/kanban   -> { kanban, page: { data, nextCursor } } (404 if no board)
  *   GET    /ui/:entity/calendar -> { calendar, page: { data, nextCursor } } (404 if none)
@@ -206,6 +208,12 @@ export class OperateWebServer {
     // Reads (GET).
     if (rest.length === 1 && rest[0] === "app") {
       return jsonResponse(200, compileWebApp(this.manifest, viewerCtx));
+    }
+    // P3.27: the per-caller discovery descriptor (parity with operate-server's
+    // /v1/openapi.json) — intercepted before the generic `:entity` route since
+    // `_describe` is not an entity name.
+    if (rest.length === 1 && rest[0] === "_describe") {
+      return jsonResponse(200, describeWebApi(this.manifest, viewerCtx));
     }
     if (rest.length === 1) {
       return this.serveTable(rest[0]!, viewer, viewerCtx, query);

@@ -49,6 +49,7 @@ static bundle).
 | Method · Route | Returns |
 |---|---|
 | `GET /ui/app` | the `WebAppModel` (title + per-entity nav — only the view kinds the caller can see) |
+| `GET /ui/_describe` | the `WebApiDescriptor` — per-caller route discovery (entities × available view routes + global routes) |
 | `GET /ui/:entity` | `{ table, page: { data, nextCursor } }` — `TableModel` + a redacted, keyset-paginated data page |
 | `GET /ui/:entity/kanban` | `{ kanban, page }` — board model + cards (404 if no kanban view) |
 | `GET /ui/:entity/calendar` | `{ calendar, page }` — calendar model + events (404 if none) |

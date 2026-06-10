@@ -98,6 +98,33 @@ describe("GET /ui/app", () => {
   });
 });
 
+describe("GET /ui/_describe — per-caller route discovery (P3.27)", () => {
+  it("401s an unauthenticated caller", async () => {
+    const server = await makeServer();
+    expect((await server.dispatch(req("/ui/_describe"))).status).toBe(401);
+  });
+
+  it("lists global routes + every entity's table/detail/form routes", async () => {
+    const server = await makeServer();
+    const d = body(await server.dispatch(req("/ui/_describe", "mgr")));
+    expect(d.routes).toContainEqual({ kind: "app", method: "GET", path: "/ui/app" });
+    expect(d.routes).toContainEqual({ kind: "describe", method: "GET", path: "/ui/_describe" });
+    const product = d.entities.find((e: { entity: string }) => e.entity === "Product");
+    expect(product.routes.map((r: { kind: string }) => r.kind)).toEqual(expect.arrayContaining(["table", "detail", "form"]));
+    expect(product.routes).toContainEqual({ kind: "table", method: "GET", path: "/ui/Product", entity: "Product" });
+    expect(product.routes).toContainEqual({ kind: "detail", method: "GET", path: "/ui/Product/{id}", entity: "Product" });
+    expect(product.routes).toContainEqual({ kind: "form", method: "GET", path: "/ui/Product/new", entity: "Product" });
+  });
+
+  it("surfaces the kanban route once a board is authored for the caller", async () => {
+    const server = await makeServerWithViews();
+    const d = body(await server.dispatch(req("/ui/_describe", "mgr")));
+    const product = d.entities.find((e: { entity: string }) => e.entity === "Product");
+    expect(product.views).toContain("kanban");
+    expect(product.routes).toContainEqual({ kind: "kanban", method: "GET", path: "/ui/Product/kanban", entity: "Product" });
+  });
+});
+
 describe("GET /ui/:entity — table + redacted data page", () => {
   it("manager's product table includes the list-view columns and a data row", async () => {
     const server = await makeServer();
