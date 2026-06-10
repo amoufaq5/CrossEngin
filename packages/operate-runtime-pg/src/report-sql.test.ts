@@ -70,6 +70,37 @@ describe("buildReportSql", () => {
   it("returns null when there are no aggregations/measures", () => {
     expect(buildReportSql({ kind: "tabular", entity: "Sale", groupBy: ["region"], aggregations: [] })).toBeNull();
   });
+
+  it("pushes a tabular report's sort + limit into ORDER BY + LIMIT (P3.29)", () => {
+    const built = buildReportSql({
+      kind: "tabular",
+      entity: "Sale",
+      groupBy: ["region"],
+      aggregations: [{ name: "rev", kind: "sum", field: "revenue" }],
+      sort: [{ field: "rev", direction: "desc" }, { field: "region" }],
+      limit: 5,
+    });
+    expect(built!.sql).toMatch(/ ORDER BY "rev" DESC, "region" ASC LIMIT 5$/);
+  });
+
+  it("skips a sort field that isn't a dimension/aggregation name, ignores a bad limit", () => {
+    const built = buildReportSql({
+      kind: "tabular",
+      entity: "Sale",
+      groupBy: ["region"],
+      aggregations: [{ name: "n", kind: "count" }],
+      sort: [{ field: "ghost", direction: "desc" }],
+      limit: -3,
+    });
+    expect(built!.sql).not.toContain("ORDER BY");
+    expect(built!.sql).not.toContain("LIMIT");
+  });
+
+  it("does not add ORDER BY/LIMIT to a kpi report", () => {
+    const built = buildReportSql({ kind: "kpi", entity: "Sale", measure: { name: "n", kind: "count" } });
+    expect(built!.sql).not.toContain("ORDER BY");
+    expect(built!.sql).not.toContain("LIMIT");
+  });
 });
 
 const PRODUCT_PLAN: EntityTablePlan = {
@@ -173,5 +204,20 @@ describe("buildColumnReportSql", () => {
     expect(
       buildColumnReportSql({ kind: "tabular", entity: "Product", groupBy: ["category"], aggregations: [] }, PRODUCT_PLAN),
     ).toBeNull();
+  });
+
+  it("pushes sort + limit into ORDER BY + LIMIT over the typed table (P3.29)", () => {
+    const built = buildColumnReportSql(
+      {
+        kind: "tabular",
+        entity: "Product",
+        groupBy: ["category"],
+        aggregations: [{ name: "total", kind: "sum", field: "unitPrice" }],
+        sort: [{ field: "total", direction: "desc" }],
+        limit: 3,
+      },
+      PRODUCT_PLAN,
+    );
+    expect(built!.sql).toMatch(/ ORDER BY "total" DESC LIMIT 3$/);
   });
 });

@@ -78,6 +78,34 @@ function dimensionsOf(report: ReportSpec): readonly string[] {
   return report.groupBy ?? [];
 }
 
+/**
+ * The ` ORDER BY … LIMIT n` tail for a tabular report (P3.29), pushing the
+ * report's `sort` + `limit` into SQL so the aggregation is ordered + capped in
+ * Postgres (matching the in-memory engine) instead of returning every group. Sort
+ * fields reference the output aliases — a group-by dimension (aliased to its field
+ * name) or an aggregation (aliased to its name); both stores use those same
+ * aliases, so the clause is shared. A sort field that isn't a known dim/agg name
+ * (or isn't a safe identifier) is skipped, and a non-integer/negative limit is
+ * ignored — fail-safe. Empty for non-tabular reports (kpi has one value; the pivot
+ * spec carries no sort/limit).
+ */
+function tabularOrderLimit(report: ReportSpec): string {
+  if (report.kind !== "tabular") return "";
+  const dims = new Set(report.groupBy ?? []);
+  const aggNames = new Set((report.aggregations ?? []).map((a: AggregationSpec) => a.name));
+  const order: string[] = [];
+  for (const s of report.sort ?? []) {
+    if (!FIELD_RE.test(s.field)) continue;
+    if (!dims.has(s.field) && !aggNames.has(s.field)) continue;
+    order.push(`"${s.field}" ${s.direction === "desc" ? "DESC" : "ASC"}`);
+  }
+  let clause = order.length > 0 ? ` ORDER BY ${order.join(", ")}` : "";
+  if (typeof report.limit === "number" && Number.isInteger(report.limit) && report.limit >= 0) {
+    clause += ` LIMIT ${report.limit}`;
+  }
+  return clause;
+}
+
 export interface BuiltReportSql {
   readonly sql: string;
   readonly dimensions: readonly string[];
@@ -105,7 +133,7 @@ export function buildReportSql(report: ReportSpec, schema = "meta"): BuiltReport
   const dimSelect = dims.map((d: string) => `${textExpr(d)} AS "${d}"`);
   const select = [...dimSelect, ...aggSql].join(", ");
   const groupBy = dims.length > 0 ? ` GROUP BY ${dims.map((d: string) => textExpr(d)).join(", ")}` : "";
-  const sql = `SELECT ${select} FROM ${schema}.operate_entity_records WHERE tenant_id = $1 AND entity = $2${groupBy}`;
+  const sql = `SELECT ${select} FROM ${schema}.operate_entity_records WHERE tenant_id = $1 AND entity = $2${groupBy}${tabularOrderLimit(report)}`;
   return { sql, dimensions: dims };
 }
 
@@ -276,7 +304,7 @@ export function buildColumnReportSql(report: ReportSpec, plan: EntityTablePlan):
   const groupBy =
     dims.length > 0 ? ` GROUP BY ${dimMappings.map((m: ColumnMapping) => colExpr(m)).join(", ")}` : "";
   const qualified = qualifyTable(plan.schema, plan.table);
-  const sql = `SELECT ${select} FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1${groupBy}`;
+  const sql = `SELECT ${select} FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1${groupBy}${tabularOrderLimit(report)}`;
   return { sql, dimensions: dims };
 }
 

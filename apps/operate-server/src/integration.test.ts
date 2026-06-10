@@ -173,11 +173,14 @@ suite("operate-server integration (real Postgres)", () => {
     expect(kpi.status).toBe(200);
     expect(parse(kpi.body)).toMatchObject({ kind: "kpi", name: "total_revenue", value: 185 });
 
-    // tabular: orders + revenue grouped by state.
+    // tabular: orders + revenue grouped by state, sorted by revenue desc (the
+    // report's `sort` pushed into SQL ORDER BY, P3.29).
     const tab = await httpServer.dispatch(req("GET", "/v1/reports/ordersByState", "key-rep"), null);
     expect(tab.status).toBe(200);
     const rows = parse(tab.body)["rows"] as Array<Record<string, unknown>>;
     expect(rows.find((r) => r["state"] === "placed")).toMatchObject({ orders: 2, revenue: 160 });
+    // ORDER BY revenue DESC: placed (160) sorts before cart (25)
+    expect(rows.map((r) => r["state"])).toEqual(["placed", "cart"]);
 
     // unknown report → fail-closed 404
     expect((await httpServer.dispatch(req("GET", "/v1/reports/ghost", "key-rep"), null)).status).toBe(404);
