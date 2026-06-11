@@ -9,12 +9,14 @@ import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core"
 import { ERP_RETAIL_PACK_SLUG, buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { ERP_HEALTHCARE_PACK_SLUG, buildErpHealthcarePack } from "@crossengin/pack-erp-healthcare";
 import { ERP_GROCERY_PACK_SLUG, buildErpGroceryPack } from "@crossengin/pack-erp-grocery";
+import { ERP_CONSTRUCTION_PACK_SLUG, buildErpConstructionPack } from "@crossengin/pack-erp-construction";
 
 const PACK_BUILDERS: Record<string, () => Manifest> = {
   [ERP_CORE_PACK_SLUG]: () => buildErpCorePack(),
   [ERP_RETAIL_PACK_SLUG]: () => buildErpRetailPack(),
   [ERP_HEALTHCARE_PACK_SLUG]: () => buildErpHealthcarePack(),
   [ERP_GROCERY_PACK_SLUG]: () => buildErpGroceryPack(),
+  [ERP_CONSTRUCTION_PACK_SLUG]: () => buildErpConstructionPack(),
 };
 
 /** Short `--pack <name>` aliases mapped to their canonical slugs. */
@@ -23,6 +25,7 @@ export const PACK_ALIASES: Record<string, string> = {
   "erp-retail": ERP_RETAIL_PACK_SLUG,
   "erp-healthcare": ERP_HEALTHCARE_PACK_SLUG,
   "erp-grocery": ERP_GROCERY_PACK_SLUG,
+  "erp-construction": ERP_CONSTRUCTION_PACK_SLUG,
 };
 
 export const BUILTIN_PACK_NAMES: readonly string[] = Object.keys(PACK_ALIASES);

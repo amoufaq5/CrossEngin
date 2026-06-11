@@ -29,9 +29,24 @@ describe("loadBuiltinPack", () => {
     expect((manifest.entities ?? []).map((e) => e.name)).toContain("Invoice");
   });
 
+  it("resolves the construction pack against core (Project + Account)", async () => {
+    const manifest = await loadBuiltinPack("erp-construction");
+    const entityNames = (manifest.entities ?? []).map((e) => e.name);
+    expect(entityNames).toContain("Project"); // construction
+    expect(entityNames).toContain("ChangeOrder"); // construction
+    expect(entityNames).toContain("Account"); // core
+    // both construction lifecycles + the core invoice lifecycle resolve
+    expect(Object.keys(manifest.workflows ?? {}).sort()).toEqual([
+      "change_order_lifecycle",
+      "invoice_lifecycle",
+      "project_lifecycle",
+    ]);
+  });
+
   it("lists the built-in pack names", () => {
     expect(BUILTIN_PACK_NAMES).toContain("erp-retail");
     expect(BUILTIN_PACK_NAMES).toContain("erp-grocery");
+    expect(BUILTIN_PACK_NAMES).toContain("erp-construction");
   });
 
   it("throws on an unknown pack", async () => {

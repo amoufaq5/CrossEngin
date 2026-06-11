@@ -37,6 +37,7 @@
     "@crossengin/operate-runtime": "workspace:*",
     "@crossengin/operate-runtime-pg": "workspace:*",
     "@crossengin/operate-web": "workspace:*",
+    "@crossengin/pack-erp-construction": "workspace:*",
     "@crossengin/pack-erp-core": "workspace:*",
     "@crossengin/pack-erp-grocery": "workspace:*",
     "@crossengin/pack-erp-healthcare": "workspace:*",

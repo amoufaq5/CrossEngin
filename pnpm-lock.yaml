@@ -102,6 +102,9 @@ importers:
       '@crossengin/operate-web':
         specifier: workspace:*
         version: link:../../packages/operate-web
+      '@crossengin/pack-erp-construction':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-construction
       '@crossengin/pack-erp-core':
         specifier: workspace:*
         version: link:../../packages/pack-erp-core
@@ -166,6 +169,9 @@ importers:
       '@crossengin/operate-web-react':
         specifier: workspace:*
         version: link:../../packages/operate-web-react
+      '@crossengin/pack-erp-construction':
+        specifier: workspace:*
+        version: link:../../packages/pack-erp-construction
       '@crossengin/pack-erp-core':
         specifier: workspace:*
         version: link:../../packages/pack-erp-core
@@ -1361,6 +1367,49 @@ importers:
       '@types/react-dom':
         specifier: ^18.3.1
         version: 18.3.7(@types/react@18.3.31)
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/pack-erp-construction:
+    dependencies:
+      '@crossengin/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@crossengin/pack-erp-core':
+        specifier: workspace:*
+        version: link:../pack-erp-core
+      '@crossengin/reporting':
+        specifier: workspace:*
+        version: link:../reporting
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
+      '@crossengin/views':
+        specifier: workspace:*
+        version: link:../views
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
