@@ -4,6 +4,7 @@ import {
   InMemoryEntityStore,
   compileOperateServer,
   emitOperateClientModule,
+  emitOperateGoClient,
   emitOperatePythonClient,
 } from "@crossengin/operate-runtime";
 import type { OpenApiDocument } from "@crossengin/operate-runtime";
@@ -38,6 +39,10 @@ async function regenerateRetailPythonClient(): Promise<string> {
   return emitOperatePythonClient(await retailDoc(), { className: "RetailClient" });
 }
 
+async function regenerateRetailGoClient(): Promise<string> {
+  return emitOperateGoClient(await retailDoc(), { packageName: "retailclient" });
+}
+
 describe("generated retail reference client", () => {
   it("matches the committed src/generated/retail-client.ts (regenerate to update)", async () => {
     const committed = readFileSync(new URL("./generated/retail-client.ts", import.meta.url), "utf8");
@@ -65,5 +70,20 @@ describe("generated retail Python reference client (P3.40)", () => {
     expect(out).toContain("class Product(TypedDict):");
     expect(out).toContain("def product_list(self, query: dict | None = None) -> ListResult:");
     expect(out).toContain("def sales_order_place(self, id: str, body: dict[str, Any], query: dict | None = None) -> SalesOrder:");
+  });
+});
+
+describe("generated retail Go reference client (P3.41)", () => {
+  it("matches the committed src/generated/retail_client.go (regenerate to update)", async () => {
+    const committed = readFileSync(new URL("./generated/retail_client.go", import.meta.url), "utf8");
+    expect(await regenerateRetailGoClient()).toBe(committed);
+  });
+
+  it("exposes a struct-typed, stdlib Go client", async () => {
+    const out = await regenerateRetailGoClient();
+    expect(out).toContain("package retailclient");
+    expect(out).toContain("type Product struct {");
+    expect(out).toContain("func (c *Client) ProductList(query url.Values) (ListResult[Product], error) {");
+    expect(out).toContain("func (c *Client) SalesOrderPlace(id string, body map[string]interface{}, query url.Values) (SalesOrder, error) {");
   });
 });

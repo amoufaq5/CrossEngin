@@ -88,12 +88,16 @@ operate-server openapi-client --pack erp-retail --out ./src/retail-client.ts
 
 # Python (3.11+, stdlib only): --lang python
 operate-server openapi-client --pack erp-retail --lang python --out ./retail_client.py
+
+# Go (1.18+, stdlib only): --lang go (--client-name sets the package name)
+operate-server openapi-client --pack erp-retail --lang go --client-name retailclient --out ./retail_client.go
 ```
 
 Committed examples: `apps/operate-server/src/generated/retail-client.ts` (TS,
-typechecked) and `retail_client.py` (Python, `py_compile`-validated) — both
-drift-guarded in CI. `--lang ts` (default) emits a TypeScript fetch client;
-`--lang python` emits a stdlib `urllib` client of `TypedDict`s.
+typechecked), `retail_client.py` (Python, `py_compile`-validated), and
+`retail_client.go` (Go, `gofmt`+`go build`-validated) — all drift-guarded in CI.
+`--lang ts` (default) emits a TypeScript fetch client; `--lang python` a stdlib
+`urllib` client of `TypedDict`s; `--lang go` a stdlib `net/http` client of structs.
 
 **Or any OpenAPI 3.1 toolchain** — the document is intentionally vanilla:
 
