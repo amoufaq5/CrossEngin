@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 
 import { PostgresPipelineExecutionStore, PostgresRateLimitChecker } from "@crossengin/api-gateway-pg";
 import {
@@ -22,7 +22,12 @@ import {
   type SloQuerySource,
 } from "@crossengin/observability-runtime-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
+import {
+  InMemoryEntityStore,
+  compileOperateServer,
+  emitOperateClientModule,
+  type EntityStore,
+} from "@crossengin/operate-runtime";
 import {
   ColumnMappedEntityStore,
   PostgresColumnReportExecutor,
@@ -31,6 +36,7 @@ import {
 } from "@crossengin/operate-runtime-pg";
 
 import type { ServeOptions } from "./cli.js";
+import type { OpenApiClientOptions } from "./openapi-client-cli.js";
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
@@ -295,6 +301,37 @@ export interface RunningServer {
  * (pack or file), builds the entity store (in-memory or Postgres), wires the
  * API keys, and starts listening. Returns a handle for graceful shutdown.
  */
+/**
+ * `operate-server openapi-client` (P3.38): load the manifest, compile its served
+ * OpenAPI document (over an in-memory store — the doc is the published shape, not
+ * data), emit a typed TypeScript client, and write it to `--out` (or stdout). The
+ * emitter is pure (`@crossengin/operate-runtime`); this just wires the manifest in.
+ */
+export async function executeOpenApiClient(options: OpenApiClientOptions): Promise<number> {
+  const manifest =
+    options.manifestPath !== null
+      ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
+      : await loadBuiltinPack(options.pack ?? "");
+  const compiled = compileOperateServer(manifest, {
+    store: new InMemoryEntityStore(),
+    principalRoles: buildPrincipalWiring([]).principalRoles,
+    // A no-op runner (never invoked here) so the generated doc includes the
+    // GET /v1/reports/:report route + ReportData — matching what serve() exposes.
+    reportRunner: { run: () => Promise.resolve(null) },
+  });
+  const moduleSource = emitOperateClientModule(
+    compiled.openApiDocument,
+    options.clientName !== null ? { clientName: options.clientName } : {},
+  );
+  if (options.out !== null) {
+    await writeFile(options.out, moduleSource, "utf8");
+    process.stdout.write(`wrote ${options.out}\n`);
+  } else {
+    process.stdout.write(moduleSource);
+  }
+  return 0;
+}
+
 export async function serve(options: ServeOptions): Promise<RunningServer> {
   const manifest =
     options.manifestPath !== null

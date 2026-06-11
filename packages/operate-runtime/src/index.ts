@@ -7,4 +7,5 @@ export * from "./report-routes.js";
 export * from "./api-descriptor.js";
 export * from "./schemas.js";
 export * from "./openapi.js";
+export * from "./openapi-codegen.js";
 export * from "./compile.js";

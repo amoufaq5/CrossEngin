@@ -78,7 +78,19 @@ It is a standard OpenAPI 3.1 document:
 
 ### 2. Generate types
 
-Feed it to any OpenAPI 3.1 toolchain — it is intentionally vanilla:
+**Built-in (no external tool, P3.38):** operate-server ships a pure TypeScript
+client emitter — one self-contained, dependency-free module (typed interfaces +
+a `fetch`-based `createOperateClient` factory):
+
+```bash
+operate-server openapi-client --pack erp-retail --out ./src/retail-client.ts
+# or --manifest <file>, and --client-name <name> for the factory
+```
+
+A committed example lives at `apps/operate-server/src/generated/retail-client.ts`
+(typechecked + drift-guarded in CI).
+
+**Or any OpenAPI 3.1 toolchain** — the document is intentionally vanilla:
 
 ```bash
 # types only (TypeScript)

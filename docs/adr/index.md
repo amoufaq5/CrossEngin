@@ -245,3 +245,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 159 | 0190 | 2,000 | Drafted alongside operate-web view-model schemas in discovery (Phase 3 P3.35) |
 | 160 | 0191 | 1,500 | Drafted alongside operate-web route envelope schemas (Phase 3 P3.36) |
 | 161 | 0192 | 1,000 | Drafted alongside the typed client author's guide (Phase 3 P3.37) |
+| 162 | 0193 | 2,500 | Drafted alongside OpenAPI-driven TypeScript client codegen (Phase 3 P3.38) |
