@@ -46,6 +46,13 @@ export interface WebRouteDescriptor {
   readonly entity?: string;
   /** For a `transition` route: the lifecycle transition name (the request body's `transition`). */
   readonly transition?: string;
+  /**
+   * The response envelope schema (P3.36) — the shape the route returns, with the
+   * view model referenced via a `$ref` into the descriptor's `models` map (e.g. a
+   * table route → `{ table: $ref TableModel, page }`). Absent for routes with no
+   * body (`delete` → 204, `describe`).
+   */
+  readonly responseSchema?: OpenApiSchema;
 }
 
 export interface WebEntityDescriptor {
@@ -104,6 +111,71 @@ function transitionsByEntity(manifest: Manifest): ReadonlyMap<string, readonly T
   return out;
 }
 
+/** A `$ref` into the descriptor's own `models` map (P3.36). */
+function modelRef(name: string): OpenApiSchema {
+  return { $ref: `#/models/${name}` };
+}
+
+/** The keyset `page` wrapper shared by the list-bearing view routes. */
+const PAGE_SCHEMA: OpenApiSchema = {
+  type: "object",
+  properties: {
+    data: { type: "array", items: { type: "object", additionalProperties: true } },
+    nextCursor: { type: ["string", "null"] },
+  },
+};
+
+/** A redacted record (the precise field shape is the per-caller entity `schema`). */
+const RECORD_SCHEMA: OpenApiSchema = { type: "object", additionalProperties: true };
+
+function withModelAndPage(key: string, model: string): OpenApiSchema {
+  return { type: "object", properties: { [key]: modelRef(model), page: PAGE_SCHEMA }, required: [key, "page"] };
+}
+
+/**
+ * The response envelope a route returns (P3.36), with the view model referenced
+ * via a `$ref` into the descriptor's `models` map — so a client can resolve the
+ * full model shape. Mirrors exactly what `apps/operate-web`'s server returns.
+ * `delete` (204) and `describe` (self) have no body schema.
+ */
+function envelopeSchemaFor(kind: WebViewKind): OpenApiSchema | undefined {
+  switch (kind) {
+    case "app":
+      return modelRef("WebAppModel");
+    case "table":
+      return withModelAndPage("table", "TableModel");
+    case "kanban":
+      return withModelAndPage("kanban", "KanbanModel");
+    case "calendar":
+      return withModelAndPage("calendar", "CalendarModel");
+    case "map":
+      return withModelAndPage("map", "MapModel");
+    case "dashboard":
+      return {
+        type: "object",
+        properties: { dashboard: modelRef("DashboardModel"), widgetData: { type: "object", additionalProperties: true } },
+        required: ["dashboard", "widgetData"],
+      };
+    case "pivot":
+      return {
+        type: "object",
+        properties: { pivot: modelRef("PivotModel"), data: { type: "object", additionalProperties: true } },
+        required: ["pivot", "data"],
+      };
+    case "detail":
+      return { type: "object", properties: { detail: modelRef("DetailModel"), record: RECORD_SCHEMA }, required: ["detail", "record"] };
+    case "form":
+      return { type: "object", properties: { form: modelRef("FormModel") }, required: ["form"] };
+    case "create":
+    case "update":
+    case "transition":
+      return { type: "object", properties: { record: RECORD_SCHEMA }, required: ["record"] };
+    case "delete":
+    case "describe":
+      return undefined;
+  }
+}
+
 /**
  * The RBAC-gated mutation routes the caller may invoke on an entity (P3.28):
  * `create` (POST), `update` (PATCH), `delete` (DELETE) per
@@ -121,17 +193,24 @@ function mutationRoutes(
   const resolver = new EntityFieldResolver(manifest, entity, viewer, options);
   const routes: WebRouteDescriptor[] = [];
   if (resolver.canPerform("create").allowed) {
-    routes.push({ kind: "create", method: "POST", path: `/ui/${entity}`, entity });
+    routes.push({ kind: "create", method: "POST", path: `/ui/${entity}`, entity, responseSchema: envelopeSchemaFor("create") });
   }
   if (resolver.canPerform("update").allowed) {
-    routes.push({ kind: "update", method: "PATCH", path: `/ui/${entity}/{id}`, entity });
+    routes.push({ kind: "update", method: "PATCH", path: `/ui/${entity}/{id}`, entity, responseSchema: envelopeSchemaFor("update") });
   }
   if (resolver.canPerform("delete").allowed) {
     routes.push({ kind: "delete", method: "DELETE", path: `/ui/${entity}/{id}`, entity });
   }
   for (const t of transitions) {
     if (resolver.canTransition(t.name).allowed) {
-      routes.push({ kind: "transition", method: "POST", path: `/ui/${entity}/{id}/transition`, entity, transition: t.name });
+      routes.push({
+        kind: "transition",
+        method: "POST",
+        path: `/ui/${entity}/{id}/transition`,
+        entity,
+        transition: t.name,
+        responseSchema: envelopeSchemaFor("transition"),
+      });
     }
   }
   return routes;
@@ -191,7 +270,8 @@ export function describeWebApi(
       routes: [
         ...nav.views.map((view): WebRouteDescriptor => {
           const r = VIEW_ROUTE[view]!(nav.entity);
-          return { kind: r.kind, method: "GET", path: r.path, entity: nav.entity };
+          const responseSchema = envelopeSchemaFor(r.kind);
+          return { kind: r.kind, method: "GET", path: r.path, entity: nav.entity, ...(responseSchema !== undefined ? { responseSchema } : {}) };
         }),
         ...mutationRoutes(manifest, nav.entity, viewer, options, transitions.get(nav.entity) ?? []),
       ],
@@ -204,7 +284,7 @@ export function describeWebApi(
   return {
     title: app.title,
     routes: [
-      { kind: "app", method: "GET", path: "/ui/app" },
+      { kind: "app", method: "GET", path: "/ui/app", responseSchema: envelopeSchemaFor("app") },
       { kind: "describe", method: "GET", path: WEB_DESCRIBE_PATH },
     ],
     entities,

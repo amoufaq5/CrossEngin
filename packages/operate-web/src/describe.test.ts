@@ -55,7 +55,7 @@ function entityOf(d: ReturnType<typeof describeWebApi>, name: string): WebEntity
 describe("describeWebApi", () => {
   it("lists the global routes (app + describe)", () => {
     const d = describeWebApi(retailListOnly, MANAGER);
-    expect(d.routes).toEqual([
+    expect(d.routes.map((r) => ({ kind: r.kind, method: r.method, path: r.path }))).toEqual([
       { kind: "app", method: "GET", path: "/ui/app" },
       { kind: "describe", method: "GET", path: WEB_DESCRIBE_PATH },
     ]);
@@ -66,9 +66,9 @@ describe("describeWebApi", () => {
     const d = describeWebApi(retailListOnly, MANAGER);
     const product = entityOf(d, "Product");
     expect(product.views).toEqual(["table", "detail", "form"]);
-    expect(product.routes).toContainEqual({ kind: "table", method: "GET", path: "/ui/Product", entity: "Product" });
-    expect(product.routes).toContainEqual({ kind: "detail", method: "GET", path: "/ui/Product/{id}", entity: "Product" });
-    expect(product.routes).toContainEqual({ kind: "form", method: "GET", path: "/ui/Product/new", entity: "Product" });
+    expect(product.routes).toContainEqual(expect.objectContaining({ kind: "table", method: "GET", path: "/ui/Product", entity: "Product" }));
+    expect(product.routes).toContainEqual(expect.objectContaining({ kind: "detail", method: "GET", path: "/ui/Product/{id}", entity: "Product" }));
+    expect(product.routes).toContainEqual(expect.objectContaining({ kind: "form", method: "GET", path: "/ui/Product/new", entity: "Product" }));
   });
 
   it("includes the kanban route only when a board compiles for the caller", () => {
@@ -78,19 +78,16 @@ describe("describeWebApi", () => {
 
     const withIt = entityOf(describeWebApi(withBoard, MANAGER), "SalesOrder");
     expect(withIt.views).toContain("kanban");
-    expect(withIt.routes).toContainEqual({
-      kind: "kanban",
-      method: "GET",
-      path: "/ui/SalesOrder/kanban",
-      entity: "SalesOrder",
-    });
+    expect(withIt.routes).toContainEqual(
+      expect.objectContaining({ kind: "kanban", method: "GET", path: "/ui/SalesOrder/kanban", entity: "SalesOrder" }),
+    );
   });
 
   it("lists RBAC-gated mutation routes the caller may invoke (P3.28)", () => {
     // A store_manager can create + update Product; a cashier can do neither.
     const mgrProduct = entityOf(describeWebApi(retailListOnly, MANAGER), "Product");
-    expect(mgrProduct.routes).toContainEqual({ kind: "create", method: "POST", path: "/ui/Product", entity: "Product" });
-    expect(mgrProduct.routes).toContainEqual({ kind: "update", method: "PATCH", path: "/ui/Product/{id}", entity: "Product" });
+    expect(mgrProduct.routes).toContainEqual(expect.objectContaining({ kind: "create", method: "POST", path: "/ui/Product", entity: "Product" }));
+    expect(mgrProduct.routes).toContainEqual(expect.objectContaining({ kind: "update", method: "PATCH", path: "/ui/Product/{id}", entity: "Product" }));
 
     const cshProduct = entityOf(describeWebApi(retailListOnly, CASHIER), "Product");
     expect(cshProduct.routes.some((r) => r.kind === "create")).toBe(false);
@@ -103,18 +100,53 @@ describe("describeWebApi", () => {
     const mgrTransitions = mgr.routes.filter((r) => r.kind === "transition").map((r) => r.transition);
     expect(mgrTransitions).toContain("place");
     expect(mgrTransitions).toContain("fulfill");
-    expect(mgr.routes).toContainEqual({
-      kind: "transition",
-      method: "POST",
-      path: "/ui/SalesOrder/{id}/transition",
-      entity: "SalesOrder",
-      transition: "place",
-    });
+    expect(mgr.routes).toContainEqual(
+      expect.objectContaining({
+        kind: "transition",
+        method: "POST",
+        path: "/ui/SalesOrder/{id}/transition",
+        entity: "SalesOrder",
+        transition: "place",
+      }),
+    );
 
     const csh = entityOf(describeWebApi(retailListOnly, CASHIER), "SalesOrder");
     const cshTransitions = csh.routes.filter((r) => r.kind === "transition").map((r) => r.transition);
     expect(cshTransitions).toContain("place");
     expect(cshTransitions).not.toContain("fulfill");
+  });
+
+  it("attaches a response envelope schema per route, $ref'ing the models (P3.36)", () => {
+    const d = describeWebApi(retailListOnly, MANAGER);
+    const appRoute = d.routes.find((r) => r.kind === "app")!;
+    expect(appRoute.responseSchema).toEqual({ $ref: "#/models/WebAppModel" });
+    expect(d.routes.find((r) => r.kind === "describe")!.responseSchema).toBeUndefined();
+
+    const product = entityOf(d, "Product");
+    const table = product.routes.find((r) => r.kind === "table")!;
+    expect(table.responseSchema!.properties!["table"]).toEqual({ $ref: "#/models/TableModel" });
+    expect(table.responseSchema!.properties!["page"]!.type).toBe("object");
+    // the model ref resolves into the descriptor's own models map
+    const refName = table.responseSchema!.properties!["table"]!.$ref!.replace("#/models/", "");
+    expect(d.models[refName]).toBeDefined();
+
+    const detail = product.routes.find((r) => r.kind === "detail")!;
+    expect(detail.responseSchema!.properties!["detail"]).toEqual({ $ref: "#/models/DetailModel" });
+    expect(detail.responseSchema!.properties!["record"]).toBeDefined();
+  });
+
+  it("a mutation route returns `{ record }`; delete carries no body schema (P3.36)", () => {
+    const so = entityOf(describeWebApi(retailListOnly, MANAGER), "SalesOrder");
+    const create = so.routes.find((r) => r.kind === "create");
+    if (create !== undefined) {
+      expect(create.responseSchema).toEqual({
+        type: "object",
+        properties: { record: { type: "object", additionalProperties: true } },
+        required: ["record"],
+      });
+    }
+    const del = so.routes.find((r) => r.kind === "delete");
+    if (del !== undefined) expect(del.responseSchema).toBeUndefined();
   });
 
   it("publishes the view-model shapes under `models` (P3.35)", () => {

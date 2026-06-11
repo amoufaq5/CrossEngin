@@ -120,7 +120,11 @@ available view-model routes (`table`/`detail`/`form` always; `kanban`/`calendar`
 RBAC-gated mutation routes the caller may invoke (`create`/`update`/`delete` via
 `EntityFieldResolver.canPerform`, one `transition` route per lifecycle transition
 via `canTransition`). It can't drift from what's served because it's derived from
-the same compile + RBAC the routes use.
+the same compile + RBAC the routes use. The descriptor also carries typed schemas:
+a per-entity redaction-aware field `schema` (P3.34), the view-model `models` map
+(P3.35 — `TableModel`/… converted from the zod source), and a per-route
+`responseSchema` (P3.36 — the envelope each route returns, `$ref`'ing into
+`models`, e.g. `table` → `{ table: $ref TableModel, page }`).
 
 ---
 
