@@ -91,13 +91,17 @@ operate-server openapi-client --pack erp-retail --lang python --out ./retail_cli
 
 # Go (1.18+, stdlib only): --lang go (--client-name sets the package name)
 operate-server openapi-client --pack erp-retail --lang go --client-name retailclient --out ./retail_client.go
+
+# PHP (8.1+, stdlib curl+json): --lang php (--client-name sets the class name)
+operate-server openapi-client --pack erp-retail --lang php --client-name RetailClient --out ./retail_client.php
 ```
 
 Committed examples: `apps/operate-server/src/generated/retail-client.ts` (TS,
-typechecked), `retail_client.py` (Python, `py_compile`-validated), and
-`retail_client.go` (Go, `gofmt`+`go build`-validated) — all drift-guarded in CI.
-`--lang ts` (default) emits a TypeScript fetch client; `--lang python` a stdlib
-`urllib` client of `TypedDict`s; `--lang go` a stdlib `net/http` client of structs.
+typechecked), `retail_client.py` (Python, `py_compile`-validated), `retail_client.go`
+(Go, `gofmt`+`go build`-validated), and `retail_client.php` (PHP, `php -l`-validated)
+— all drift-guarded in CI. `--lang ts` (default) emits a TypeScript fetch client;
+`--lang python` a stdlib `urllib` client of `TypedDict`s; `--lang go` a stdlib
+`net/http` client of structs; `--lang php` a stdlib `curl`+`json` client of classes.
 
 For a release pipeline, add `--emit-run`: it also writes the `@crossengin/sdk-clients`
 `GenerationRun` record (a `succeeded` run carrying the artifact's `sha256`

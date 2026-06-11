@@ -20,17 +20,18 @@ const NOW = new Date("2026-06-11T00:00:00.000Z");
 
 describe("clientLanguageSupported", () => {
   it("is true for ts/python/go, false for others", () => {
-    expect(SUPPORTED_CLIENT_LANGUAGES).toEqual(["typescript", "python", "go"]);
+    expect(SUPPORTED_CLIENT_LANGUAGES).toEqual(["typescript", "python", "go", "php"]);
     expect(clientLanguageSupported("typescript")).toBe(true);
     expect(clientLanguageSupported("python")).toBe(true);
     expect(clientLanguageSupported("go")).toBe(true);
+    expect(clientLanguageSupported("php")).toBe(true);
     expect(clientLanguageSupported("java")).toBe(false);
     expect(clientLanguageSupported("rust")).toBe(false);
   });
 });
 
 describe("generateClient", () => {
-  for (const language of ["typescript", "python", "go"] as const) {
+  for (const language of ["typescript", "python", "go", "php"] as const) {
     it(`produces a schema-valid succeeded GenerationRun + source for ${language}`, () => {
       const { run, source } = generateClient(DOC, language, { triggeredBy: "ci", now: NOW });
       // the run round-trips through the contract schema

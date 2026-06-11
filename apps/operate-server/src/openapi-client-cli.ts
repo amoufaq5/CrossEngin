@@ -5,7 +5,7 @@ import { CliUsageError } from "./cli.js";
  * client projected from the manifest's served OpenAPI document. Exactly one of
  * `--pack` / `--manifest`; `--out` writes to a file (else stdout).
  */
-export type ClientLang = "ts" | "python" | "go";
+export type ClientLang = "ts" | "python" | "go" | "php";
 
 export interface OpenApiClientOptions {
   readonly pack: string | null;
@@ -54,7 +54,9 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
       i += consumed();
     } else if (arg === "--lang" || arg.startsWith("--lang=")) {
       const raw = takeValue(arg, next, "--lang");
-      if (raw !== "ts" && raw !== "python" && raw !== "go") throw new CliUsageError(`invalid --lang: ${raw} (ts|python|go)`);
+      if (raw !== "ts" && raw !== "python" && raw !== "go" && raw !== "php") {
+        throw new CliUsageError(`invalid --lang: ${raw} (ts|python|go|php)`);
+      }
       lang = raw;
       i += consumed();
     } else if (arg === "--out" || arg.startsWith("--out=")) {
@@ -93,7 +95,7 @@ Usage:
 Flags:
   --pack <alias>         built-in vertical pack (erp-core | erp-retail | erp-healthcare | erp-grocery)
   --manifest <file>      a pre-resolved manifest JSON
-  --lang <ts|python|go>  target language (default ts)
+  --lang <ts|python|go|php>  target language (default ts)
   --out <file>           write the client module to a file (default: stdout)
   --client-name <name>   factory/class name (ts/python); for go, the package name
   --emit-run             also emit the sdk-clients GenerationRun record (<out>.run.json, or stdout)

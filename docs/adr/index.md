@@ -251,3 +251,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 165 | 0196 | 2,000 | Drafted alongside Go client codegen (Phase 3 P3.41) |
 | 166 | 0197 | 2,000 | Drafted alongside the sdk-clients generation bridge (Phase 3 P3.42) |
 | 167 | 0198 | 2,000 | Drafted alongside the client release + compatibility pipeline (Phase 3 P3.43) |
+| 168 | 0199 | 2,000 | Drafted alongside PHP client codegen (Phase 3 P3.44) |

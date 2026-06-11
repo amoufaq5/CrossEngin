@@ -5,6 +5,7 @@ import {
   compileOperateServer,
   emitOperateClientModule,
   emitOperateGoClient,
+  emitOperatePhpClient,
   emitOperatePythonClient,
 } from "@crossengin/operate-runtime";
 import type { OpenApiDocument } from "@crossengin/operate-runtime";
@@ -41,6 +42,10 @@ async function regenerateRetailPythonClient(): Promise<string> {
 
 async function regenerateRetailGoClient(): Promise<string> {
   return emitOperateGoClient(await retailDoc(), { packageName: "retailclient" });
+}
+
+async function regenerateRetailPhpClient(): Promise<string> {
+  return emitOperatePhpClient(await retailDoc(), { className: "RetailClient" });
 }
 
 describe("generated retail reference client", () => {
@@ -85,5 +90,20 @@ describe("generated retail Go reference client (P3.41)", () => {
     expect(out).toContain("type Product struct {");
     expect(out).toContain("func (c *Client) ProductList(query url.Values) (ListResult[Product], error) {");
     expect(out).toContain("func (c *Client) SalesOrderPlace(id string, body map[string]interface{}, query url.Values) (SalesOrder, error) {");
+  });
+});
+
+describe("generated retail PHP reference client (P3.44)", () => {
+  it("matches the committed src/generated/retail_client.php (regenerate to update)", async () => {
+    const committed = readFileSync(new URL("./generated/retail_client.php", import.meta.url), "utf8");
+    expect(await regenerateRetailPhpClient()).toBe(committed);
+  });
+
+  it("exposes a class-typed, stdlib PHP client", async () => {
+    const out = await regenerateRetailPhpClient();
+    expect(out).toContain("final class RetailClient");
+    expect(out).toContain("final class Product");
+    expect(out).toContain("public function productList(array $query = []): array");
+    expect(out).toContain("public function salesOrderPlace(string $id, array $body, array $query = []): SalesOrder");
   });
 });
