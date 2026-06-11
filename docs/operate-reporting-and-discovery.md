@@ -1,8 +1,12 @@
 # Operate reporting & API discovery
 
 A map of the report-execution and API-discovery surface that landed across
-Phase 3 P3.22–P3.30, spanning two serving apps. Read this to understand how a
+Phase 3 P3.22–P3.36, spanning two serving apps. Read this to understand how a
 manifest's reports become data on the wire, and how a client discovers the API.
+
+> **Building a client?** See the task-oriented
+> [typed client author's guide](./typed-client-authors-guide.md) — how to generate
+> types and call the API from either discovery document.
 
 The two serving apps play different roles:
 
@@ -151,5 +155,6 @@ published API *shape*, not tenant data, but still requires a credential.
   proving full-dataset aggregation, ordering, SSR rendering, and per-caller
   redaction/RBAC end-to-end.
 
-See `CLAUDE.md` (the P3.22–P3.30 narratives) and ADR-0177–0185 for the
-increment-by-increment detail.
+See `CLAUDE.md` (the P3.22–P3.36 narratives) and ADR-0177–0191 for the
+increment-by-increment detail, and the
+[typed client author's guide](./typed-client-authors-guide.md) to consume it.
