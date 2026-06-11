@@ -9453,6 +9453,49 @@ export const META_INCIDENT_METRIC_SNAPSHOTS: TableDefinition = {
   ],
 };
 
+// Platform-wide SDK compatibility ledger (P3.45): the per-(language, client
+// version, API version) compatibility matrix produced alongside a release. No
+// tenant_id — SDK clients are platform artifacts (like sdk_client_releases), so no
+// RLS. The release ledger itself is the pre-existing meta.sdk_client_releases.
+export const META_SDK_COMPATIBILITY_ENTRIES: TableDefinition = {
+  schema: "meta",
+  name: "sdk_compatibility_entries",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "entry_key",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "sdk_compatibility_entries_entry_key_key" },
+    },
+    {
+      name: "language",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "language IN ('typescript', 'python', 'go', 'java', 'csharp', 'ruby', 'rust', 'php', 'swift', 'kotlin')",
+    },
+    { name: "client_version", type: "TEXT", notNull: true },
+    { name: "api_version", type: "TEXT", notNull: true },
+    {
+      name: "level",
+      type: "TEXT",
+      notNull: true,
+      check: "level IN ('fully_compatible','compatible_with_warnings','deprecated_supported','unsupported','blocked')",
+    },
+    { name: "warning_count", type: "INTEGER", notNull: true, default: "0", check: "warning_count >= 0" },
+    { name: "notes", type: "TEXT" },
+    { name: "determined_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "record", type: "JSONB", notNull: true },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_sdk_compatibility_entries_lang_client", columns: ["language", "client_version"] },
+    { name: "idx_sdk_compatibility_entries_api", columns: ["api_version"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9579,4 +9622,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_OPERATE_ENTITY_RECORDS,
   META_WORKER_HEARTBEATS,
   META_INCIDENT_METRIC_SNAPSHOTS,
+  META_SDK_COMPATIBILITY_ENTRIES,
 ];

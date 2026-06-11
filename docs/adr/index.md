@@ -252,3 +252,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 166 | 0197 | 2,000 | Drafted alongside the sdk-clients generation bridge (Phase 3 P3.42) |
 | 167 | 0198 | 2,000 | Drafted alongside the client release + compatibility pipeline (Phase 3 P3.43) |
 | 168 | 0199 | 2,000 | Drafted alongside PHP client codegen (Phase 3 P3.44) |
+| 169 | 0200 | 2,500 | Drafted alongside the persisted SDK release ledger — sdk-clients-pg (Phase 3 P3.45) |

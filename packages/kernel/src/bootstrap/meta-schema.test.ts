@@ -123,8 +123,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 125 tables", () => {
-    expect(META_TABLES).toHaveLength(125);
+  it("contains 126 tables", () => {
+    expect(META_TABLES).toHaveLength(126);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -234,6 +234,7 @@ describe("META_TABLES", () => {
       "scim_provisioning",
       "sdk_client_installations",
       "sdk_client_releases",
+      "sdk_compatibility_entries",
       "slo_enforcement_actions",
       "slo_evaluations",
       "slo_latency_evaluations",
