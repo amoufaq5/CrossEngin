@@ -25,9 +25,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   InMemoryEntityStore,
   compileOperateServer,
-  emitOperateClientModule,
-  emitOperateGoClient,
-  emitOperatePythonClient,
+  generateClient,
   type EntityStore,
 } from "@crossengin/operate-runtime";
 import {
@@ -322,17 +320,26 @@ export async function executeOpenApiClient(options: OpenApiClientOptions): Promi
     reportRunner: { run: () => Promise.resolve(null) },
   });
   const doc = compiled.openApiDocument;
-  let moduleSource: string;
-  if (options.lang === "python") {
-    moduleSource = emitOperatePythonClient(doc, options.clientName !== null ? { className: options.clientName } : {});
-  } else if (options.lang === "go") {
-    moduleSource = emitOperateGoClient(doc, options.clientName !== null ? { packageName: options.clientName } : {});
-  } else {
-    moduleSource = emitOperateClientModule(doc, options.clientName !== null ? { clientName: options.clientName } : {});
-  }
+  // Run through the sdk-clients generation bridge (P3.42), so the same call yields
+  // both the emitted source and a schema-valid GenerationRun lifecycle record.
+  const targetLang = options.lang === "ts" ? "typescript" : options.lang;
+  const { run, source } = generateClient(doc, targetLang, {
+    triggeredBy: "operate-server-cli",
+    ...(options.clientName !== null ? { clientName: options.clientName } : {}),
+  });
+  const moduleSource = source ?? "";
+
   if (options.out !== null) {
     await writeFile(options.out, moduleSource, "utf8");
-    process.stdout.write(`wrote ${options.out}\n`);
+    if (options.emitRun) {
+      const runPath = `${options.out}.run.json`;
+      await writeFile(runPath, `${JSON.stringify(run, null, 2)}\n`, "utf8");
+      process.stdout.write(`wrote ${options.out} + ${runPath}\n`);
+    } else {
+      process.stdout.write(`wrote ${options.out}\n`);
+    }
+  } else if (options.emitRun) {
+    process.stdout.write(`${JSON.stringify(run, null, 2)}\n`);
   } else {
     process.stdout.write(moduleSource);
   }

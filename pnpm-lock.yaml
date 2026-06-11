@@ -1195,9 +1195,15 @@ importers:
       '@crossengin/auth':
         specifier: workspace:*
         version: link:../auth
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@crossengin/sdk-clients':
+        specifier: workspace:*
+        version: link:../sdk-clients
       '@crossengin/types':
         specifier: workspace:*
         version: link:../types

@@ -13,6 +13,8 @@ export interface OpenApiClientOptions {
   readonly lang: ClientLang;
   readonly out: string | null;
   readonly clientName: string | null;
+  /** Also produce the sdk-clients `GenerationRun` record (to `<out>.run.json`, or stdout). */
+  readonly emitRun: boolean;
   readonly help: boolean;
 }
 
@@ -28,6 +30,7 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   let lang: ClientLang = "ts";
   let out: string | null = null;
   let clientName: string | null = null;
+  let emitRun = false;
   let help = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -54,6 +57,8 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
     } else if (arg === "--client-name" || arg.startsWith("--client-name=")) {
       clientName = takeValue(arg, next, "--client-name");
       i += consumed();
+    } else if (arg === "--emit-run") {
+      emitRun = true;
     } else {
       throw new CliUsageError(`unknown flag: ${arg}`);
     }
@@ -62,7 +67,7 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   if (!help && (pack === null) === (manifestPath === null)) {
     throw new CliUsageError("exactly one of --pack / --manifest is required");
   }
-  return { pack, manifestPath, lang, out, clientName, help };
+  return { pack, manifestPath, lang, out, clientName, emitRun, help };
 }
 
 export const openApiClientHelpText = `operate-server openapi-client — emit a typed TypeScript client from the OpenAPI document
@@ -76,5 +81,6 @@ Flags:
   --lang <ts|python|go>  target language (default ts)
   --out <file>           write the client module to a file (default: stdout)
   --client-name <name>   factory/class name (ts/python); for go, the package name
+  --emit-run             also emit the sdk-clients GenerationRun record (<out>.run.json, or stdout)
   --help / -h
 `;

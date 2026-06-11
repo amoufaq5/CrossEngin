@@ -99,6 +99,11 @@ typechecked), `retail_client.py` (Python, `py_compile`-validated), and
 `--lang ts` (default) emits a TypeScript fetch client; `--lang python` a stdlib
 `urllib` client of `TypedDict`s; `--lang go` a stdlib `net/http` client of structs.
 
+For a release pipeline, add `--emit-run`: it also writes the `@crossengin/sdk-clients`
+`GenerationRun` record (a `succeeded` run carrying the artifact's `sha256`
+build-proof, generator config, and spec source) to `<out>.run.json` — so the
+generated client and its contract-typed lifecycle record are produced together.
+
 **Or any OpenAPI 3.1 toolchain** — the document is intentionally vanilla:
 
 ```bash

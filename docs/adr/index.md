@@ -249,3 +249,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 163 | 0194 | 2,000 | Drafted alongside WebApiDescriptor TypeScript client codegen (Phase 3 P3.39) |
 | 164 | 0195 | 2,000 | Drafted alongside multi-language (Python) client codegen (Phase 3 P3.40) |
 | 165 | 0196 | 2,000 | Drafted alongside Go client codegen (Phase 3 P3.41) |
+| 166 | 0197 | 2,000 | Drafted alongside the sdk-clients generation bridge (Phase 3 P3.42) |

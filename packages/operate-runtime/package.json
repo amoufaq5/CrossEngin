@@ -24,7 +24,9 @@
     "@crossengin/api-gateway": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
     "@crossengin/auth": "workspace:*",
+    "@crossengin/crypto": "workspace:*",
     "@crossengin/kernel": "workspace:*",
+    "@crossengin/sdk-clients": "workspace:*",
     "@crossengin/types": "workspace:*",
     "zod": "^3.23.0"
   },
