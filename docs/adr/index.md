@@ -256,3 +256,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 170 | 0201 | 1,500 | Drafted alongside SDK ledger CLI persistence (Phase 3 P3.46) |
 | 171 | 0202 | 2,000 | Drafted alongside Ruby client codegen (Phase 3 P3.47) |
 | 172 | 0203 | 2,000 | Drafted alongside the sdk-releases read + verify CLI (Phase 3 P3.48) |
+| 173 | 0204 | 1,500 | Drafted alongside the SDK-ledger drift CI gate (Phase 3 P3.49) |

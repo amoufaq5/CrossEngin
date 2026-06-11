@@ -117,3 +117,14 @@ jobs:
         # (ongoing/recovered-without-open, duplicate-open, paged-without-channels,
         # kill-switch-without-flag). An empty table verifies clean (exit 0).
         run: node packages/observability-runtime-pg/dist/bin/crossengin-slo.js slo verify --since 2000-01-01
+      - name: SDK ledger drift gate
+        # The operate-server gated SDK-ledger suite (openapi-client --persist, P3.46)
+        # writes ClientRelease + CompatibilityEntry rows to meta.sdk_client_releases /
+        # meta.sdk_compatibility_entries. `sdk-releases verify` runs the pure
+        # verifySdkLedger cross-table sweep (P3.48) and EXITS 1 on any drift: a
+        # published release without a matching compatibility entry, a compatibility
+        # entry with no matching release, or a published release marked
+        # unsupported/blocked. An empty ledger verifies clean (exit 0); the gated
+        # suite's draft release + fully_compatible entry are consistent, so this is
+        # non-vacuous yet green. Run after the gated suites so it sees what they wrote.
+        run: node apps/operate-server/dist/bin/operate-server.js sdk-releases verify --limit 1000
