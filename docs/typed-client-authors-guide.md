@@ -94,14 +94,19 @@ operate-server openapi-client --pack erp-retail --lang go --client-name retailcl
 
 # PHP (8.1+, stdlib curl+json): --lang php (--client-name sets the class name)
 operate-server openapi-client --pack erp-retail --lang php --client-name RetailClient --out ./retail_client.php
+
+# Ruby (3.x, stdlib net/http+json): --lang ruby (--client-name sets the class name)
+operate-server openapi-client --pack erp-retail --lang ruby --client-name RetailClient --out ./retail_client.rb
 ```
 
 Committed examples: `apps/operate-server/src/generated/retail-client.ts` (TS,
 typechecked), `retail_client.py` (Python, `py_compile`-validated), `retail_client.go`
-(Go, `gofmt`+`go build`-validated), and `retail_client.php` (PHP, `php -l`-validated)
-— all drift-guarded in CI. `--lang ts` (default) emits a TypeScript fetch client;
-`--lang python` a stdlib `urllib` client of `TypedDict`s; `--lang go` a stdlib
-`net/http` client of structs; `--lang php` a stdlib `curl`+`json` client of classes.
+(Go, `gofmt`+`go build`-validated), `retail_client.php` (PHP, `php -l`-validated),
+and `retail_client.rb` (Ruby, `ruby -c`-validated) — all drift-guarded in CI.
+`--lang ts` (default) emits a TypeScript fetch client; `--lang python` a stdlib
+`urllib` client of `TypedDict`s; `--lang go` a stdlib `net/http` client of structs;
+`--lang php` a stdlib `curl`+`json` client of classes; `--lang ruby` a stdlib
+`net/http`+`json` client of classes.
 
 For a release pipeline, add `--emit-run`: it also writes the `@crossengin/sdk-clients`
 `GenerationRun` record (a `succeeded` run carrying the artifact's `sha256`

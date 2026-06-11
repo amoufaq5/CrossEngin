@@ -11,5 +11,6 @@ export * from "./openapi-codegen.js";
 export * from "./openapi-codegen-py.js";
 export * from "./openapi-codegen-go.js";
 export * from "./openapi-codegen-php.js";
+export * from "./openapi-codegen-rb.js";
 export * from "./client-generation.js";
 export * from "./compile.js";

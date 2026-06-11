@@ -15,6 +15,7 @@ import {
 
 import { emitOperateGoClient } from "./openapi-codegen-go.js";
 import { emitOperatePhpClient } from "./openapi-codegen-php.js";
+import { emitOperateRubyClient } from "./openapi-codegen-rb.js";
 import { emitOperatePythonClient } from "./openapi-codegen-py.js";
 import { emitOperateClientModule } from "./openapi-codegen.js";
 import type { OpenApiDocument } from "./openapi.js";
@@ -28,7 +29,7 @@ import type { OpenApiDocument } from "./openapi.js";
  * Languages without a built-in emitter yield a `failed` run (no source). Pure +
  * deterministic given a fixed `now`.
  */
-export type SupportedClientLanguage = "typescript" | "python" | "go" | "php";
+export type SupportedClientLanguage = "typescript" | "python" | "go" | "php" | "ruby";
 
 /** The built-in emitters keyed by sdk-clients `TargetLanguage`. */
 const EMITTERS: Readonly<Record<SupportedClientLanguage, (doc: OpenApiDocument, name?: string) => string>> = {
@@ -36,10 +37,11 @@ const EMITTERS: Readonly<Record<SupportedClientLanguage, (doc: OpenApiDocument, 
   python: (doc, name) => emitOperatePythonClient(doc, name !== undefined ? { className: name } : {}),
   go: (doc, name) => emitOperateGoClient(doc, name !== undefined ? { packageName: name } : {}),
   php: (doc, name) => emitOperatePhpClient(doc, name !== undefined ? { className: name } : {}),
+  ruby: (doc, name) => emitOperateRubyClient(doc, name !== undefined ? { className: name } : {}),
 };
 
 /** The languages with a built-in emitter. */
-export const SUPPORTED_CLIENT_LANGUAGES: readonly SupportedClientLanguage[] = ["typescript", "python", "go", "php"];
+export const SUPPORTED_CLIENT_LANGUAGES: readonly SupportedClientLanguage[] = ["typescript", "python", "go", "php", "ruby"];
 
 /** Whether a `TargetLanguage` has a built-in emitter. */
 export function clientLanguageSupported(language: TargetLanguage): language is SupportedClientLanguage {

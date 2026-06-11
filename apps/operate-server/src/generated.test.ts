@@ -6,6 +6,7 @@ import {
   emitOperateClientModule,
   emitOperateGoClient,
   emitOperatePhpClient,
+  emitOperateRubyClient,
   emitOperatePythonClient,
 } from "@crossengin/operate-runtime";
 import type { OpenApiDocument } from "@crossengin/operate-runtime";
@@ -46,6 +47,10 @@ async function regenerateRetailGoClient(): Promise<string> {
 
 async function regenerateRetailPhpClient(): Promise<string> {
   return emitOperatePhpClient(await retailDoc(), { className: "RetailClient" });
+}
+
+async function regenerateRetailRubyClient(): Promise<string> {
+  return emitOperateRubyClient(await retailDoc(), { className: "RetailClient" });
 }
 
 describe("generated retail reference client", () => {
@@ -105,5 +110,20 @@ describe("generated retail PHP reference client (P3.44)", () => {
     expect(out).toContain("final class Product");
     expect(out).toContain("public function productList(array $query = []): array");
     expect(out).toContain("public function salesOrderPlace(string $id, array $body, array $query = []): SalesOrder");
+  });
+});
+
+describe("generated retail Ruby reference client (P3.47)", () => {
+  it("matches the committed src/generated/retail_client.rb (regenerate to update)", async () => {
+    const committed = readFileSync(new URL("./generated/retail_client.rb", import.meta.url), "utf8");
+    expect(await regenerateRetailRubyClient()).toBe(committed);
+  });
+
+  it("exposes a class-typed, stdlib Ruby client", async () => {
+    const out = await regenerateRetailRubyClient();
+    expect(out).toContain("class RetailClient");
+    expect(out).toContain("class Product");
+    expect(out).toContain("def product_list(query: {})");
+    expect(out).toContain("def sales_order_place(id, body, query: {})");
   });
 });
