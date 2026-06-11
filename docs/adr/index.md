@@ -247,3 +247,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 161 | 0192 | 1,000 | Drafted alongside the typed client author's guide (Phase 3 P3.37) |
 | 162 | 0193 | 2,500 | Drafted alongside OpenAPI-driven TypeScript client codegen (Phase 3 P3.38) |
 | 163 | 0194 | 2,000 | Drafted alongside WebApiDescriptor TypeScript client codegen (Phase 3 P3.39) |
+| 164 | 0195 | 2,000 | Drafted alongside multi-language (Python) client codegen (Phase 3 P3.40) |

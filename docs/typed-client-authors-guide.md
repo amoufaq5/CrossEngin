@@ -85,10 +85,15 @@ a `fetch`-based `createOperateClient` factory):
 ```bash
 operate-server openapi-client --pack erp-retail --out ./src/retail-client.ts
 # or --manifest <file>, and --client-name <name> for the factory
+
+# Python (3.11+, stdlib only): --lang python
+operate-server openapi-client --pack erp-retail --lang python --out ./retail_client.py
 ```
 
-A committed example lives at `apps/operate-server/src/generated/retail-client.ts`
-(typechecked + drift-guarded in CI).
+Committed examples: `apps/operate-server/src/generated/retail-client.ts` (TS,
+typechecked) and `retail_client.py` (Python, `py_compile`-validated) — both
+drift-guarded in CI. `--lang ts` (default) emits a TypeScript fetch client;
+`--lang python` emits a stdlib `urllib` client of `TypedDict`s.
 
 **Or any OpenAPI 3.1 toolchain** — the document is intentionally vanilla:
 

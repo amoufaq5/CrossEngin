@@ -5,9 +5,12 @@ import { CliUsageError } from "./cli.js";
  * client projected from the manifest's served OpenAPI document. Exactly one of
  * `--pack` / `--manifest`; `--out` writes to a file (else stdout).
  */
+export type ClientLang = "ts" | "python";
+
 export interface OpenApiClientOptions {
   readonly pack: string | null;
   readonly manifestPath: string | null;
+  readonly lang: ClientLang;
   readonly out: string | null;
   readonly clientName: string | null;
   readonly help: boolean;
@@ -22,6 +25,7 @@ function takeValue(arg: string, next: string | undefined, flag: string): string 
 export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOptions {
   let pack: string | null = null;
   let manifestPath: string | null = null;
+  let lang: ClientLang = "ts";
   let out: string | null = null;
   let clientName: string | null = null;
   let help = false;
@@ -39,6 +43,11 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
     } else if (arg === "--manifest" || arg.startsWith("--manifest=")) {
       manifestPath = takeValue(arg, next, "--manifest");
       i += consumed();
+    } else if (arg === "--lang" || arg.startsWith("--lang=")) {
+      const raw = takeValue(arg, next, "--lang");
+      if (raw !== "ts" && raw !== "python") throw new CliUsageError(`invalid --lang: ${raw} (ts|python)`);
+      lang = raw;
+      i += consumed();
     } else if (arg === "--out" || arg.startsWith("--out=")) {
       out = takeValue(arg, next, "--out");
       i += consumed();
@@ -53,7 +62,7 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   if (!help && (pack === null) === (manifestPath === null)) {
     throw new CliUsageError("exactly one of --pack / --manifest is required");
   }
-  return { pack, manifestPath, out, clientName, help };
+  return { pack, manifestPath, lang, out, clientName, help };
 }
 
 export const openApiClientHelpText = `operate-server openapi-client — emit a typed TypeScript client from the OpenAPI document
@@ -64,7 +73,8 @@ Usage:
 Flags:
   --pack <alias>         built-in vertical pack (erp-core | erp-retail | erp-healthcare | erp-grocery)
   --manifest <file>      a pre-resolved manifest JSON
+  --lang <ts|python>     target language (default ts)
   --out <file>           write the client module to a file (default: stdout)
-  --client-name <name>   exported factory name (default: createOperateClient)
+  --client-name <name>   factory/class name (default: createOperateClient / OperateClient)
   --help / -h
 `;

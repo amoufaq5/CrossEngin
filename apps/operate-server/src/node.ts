@@ -26,6 +26,7 @@ import {
   InMemoryEntityStore,
   compileOperateServer,
   emitOperateClientModule,
+  emitOperatePythonClient,
   type EntityStore,
 } from "@crossengin/operate-runtime";
 import {
@@ -319,10 +320,16 @@ export async function executeOpenApiClient(options: OpenApiClientOptions): Promi
     // GET /v1/reports/:report route + ReportData — matching what serve() exposes.
     reportRunner: { run: () => Promise.resolve(null) },
   });
-  const moduleSource = emitOperateClientModule(
-    compiled.openApiDocument,
-    options.clientName !== null ? { clientName: options.clientName } : {},
-  );
+  const moduleSource =
+    options.lang === "python"
+      ? emitOperatePythonClient(
+          compiled.openApiDocument,
+          options.clientName !== null ? { className: options.clientName } : {},
+        )
+      : emitOperateClientModule(
+          compiled.openApiDocument,
+          options.clientName !== null ? { clientName: options.clientName } : {},
+        );
   if (options.out !== null) {
     await writeFile(options.out, moduleSource, "utf8");
     process.stdout.write(`wrote ${options.out}\n`);
