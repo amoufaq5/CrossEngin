@@ -112,8 +112,11 @@ To go all the way to a release, add `--release-version <semver>` (and
 `--publish-by <actor>` to publish rather than draft): the CLI also emits
 `{ release, compatibility }` to `<out>.release.json` — a `ClientRelease` (semver +
 channel + the artifact sha + a `generationRunId` back-link) plus a
-`fully_compatible` `CompatibilityEntry`. The full chain off one document is:
-OpenAPI → emit → `GenerationRun` → `ClientRelease` + `CompatibilityEntry`.
+`fully_compatible` `CompatibilityEntry`. Add `--persist` (with `--release-version`)
+to write the release + compatibility entry to the meta SDK ledger
+(`meta.sdk_client_releases` / `meta.sdk_compatibility_entries`, via `PG*` env) — the
+durable, queryable history. The full chain off one document is:
+OpenAPI → emit → `GenerationRun` → `ClientRelease` + `CompatibilityEntry` → ledger.
 
 **Or any OpenAPI 3.1 toolchain** — the document is intentionally vanilla:
 

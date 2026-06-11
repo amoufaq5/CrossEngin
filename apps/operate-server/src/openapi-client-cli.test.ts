@@ -45,6 +45,12 @@ describe("parseOpenApiClientArgs", () => {
     expect(() => parseOpenApiClientArgs(["--pack", "x", "--publish-by", "bot"])).toThrow(CliUsageError);
   });
 
+  it("parses --persist (requires --release-version)", () => {
+    const o = parseOpenApiClientArgs(["--pack", "erp-retail", "--release-version", "1.0.0", "--persist"]);
+    expect(o.persist).toBe(true);
+    expect(() => parseOpenApiClientArgs(["--pack", "x", "--persist"])).toThrow(CliUsageError);
+  });
+
   it("does not require a manifest source for --help", () => {
     expect(parseOpenApiClientArgs(["--help"]).help).toBe(true);
   });

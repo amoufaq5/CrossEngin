@@ -19,6 +19,8 @@ export interface OpenApiClientOptions {
   readonly releaseVersion: string | null;
   /** When set with `--release-version`, the release is `published` by this actor (else a `draft`). */
   readonly publishBy: string | null;
+  /** When set with `--release-version`, persist the release + compatibility entry to the meta ledger. */
+  readonly persist: boolean;
   readonly help: boolean;
 }
 
@@ -37,6 +39,7 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   let emitRun = false;
   let releaseVersion: string | null = null;
   let publishBy: string | null = null;
+  let persist = false;
   let help = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -73,6 +76,8 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
     } else if (arg === "--publish-by" || arg.startsWith("--publish-by=")) {
       publishBy = takeValue(arg, next, "--publish-by");
       i += consumed();
+    } else if (arg === "--persist") {
+      persist = true;
     } else {
       throw new CliUsageError(`unknown flag: ${arg}`);
     }
@@ -84,7 +89,10 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   if (publishBy !== null && releaseVersion === null) {
     throw new CliUsageError("--publish-by requires --release-version");
   }
-  return { pack, manifestPath, lang, out, clientName, emitRun, releaseVersion, publishBy, help };
+  if (persist && releaseVersion === null) {
+    throw new CliUsageError("--persist requires --release-version");
+  }
+  return { pack, manifestPath, lang, out, clientName, emitRun, releaseVersion, publishBy, persist, help };
 }
 
 export const openApiClientHelpText = `operate-server openapi-client — emit a typed TypeScript client from the OpenAPI document
@@ -101,5 +109,6 @@ Flags:
   --emit-run             also emit the sdk-clients GenerationRun record (<out>.run.json, or stdout)
   --release-version <v>  also plan a ClientRelease + compatibility entry at semver <v> (<out>.release.json, or stdout)
   --publish-by <actor>   with --release-version, mark the release published by <actor> (else a draft)
+  --persist              with --release-version, persist the release + compatibility entry to the meta ledger (uses PG* env)
   --help / -h
 `;

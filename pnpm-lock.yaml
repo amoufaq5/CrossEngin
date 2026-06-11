@@ -114,6 +114,9 @@ importers:
       '@crossengin/pack-erp-retail':
         specifier: workspace:*
         version: link:../../packages/pack-erp-retail
+      '@crossengin/sdk-clients-pg':
+        specifier: workspace:*
+        version: link:../../packages/sdk-clients-pg
       zod:
         specifier: ^3.23.0
         version: 3.25.76

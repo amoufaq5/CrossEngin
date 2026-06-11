@@ -10,6 +10,7 @@ import {
   type IncidentsCliOptions,
 } from "@crossengin/incident-response-pg";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+import { PostgresClientReleaseStore, PostgresSdkCompatibilityStore } from "@crossengin/sdk-clients-pg";
 import {
   PostgresSloEnforcementActionStore,
   PostgresSloLatencyEvaluationStore,
@@ -360,6 +361,20 @@ export async function executeOpenApiClient(options: OpenApiClientOptions): Promi
     process.stdout.write(`${JSON.stringify(run, null, 2)}\n`);
   } else {
     process.stdout.write(moduleSource);
+  }
+
+  // P3.46: persist the planned release + compatibility entry to the meta ledger
+  // (queryable SDK history). Drafts persist without a user actor; a published
+  // release's `publishedBy` must reference a meta.users row (the FK).
+  if (options.persist && plan !== null) {
+    const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+    try {
+      await new PostgresClientReleaseStore(conn).record(plan.release);
+      await new PostgresSdkCompatibilityStore(conn).record(plan.compatibility);
+      process.stdout.write(`persisted release ${plan.release.id} + compatibility to the SDK ledger\n`);
+    } finally {
+      await conn.close();
+    }
   }
   return 0;
 }
