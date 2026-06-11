@@ -39,6 +39,7 @@
     "@crossengin/operate-web": "workspace:*",
     "@crossengin/pack-erp-construction": "workspace:*",
     "@crossengin/pack-erp-core": "workspace:*",
+    "@crossengin/pack-erp-education": "workspace:*",
     "@crossengin/pack-erp-grocery": "workspace:*",
     "@crossengin/pack-erp-healthcare": "workspace:*",
     "@crossengin/pack-erp-retail": "workspace:*",

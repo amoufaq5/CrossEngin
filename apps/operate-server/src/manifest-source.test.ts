@@ -43,10 +43,19 @@ describe("loadBuiltinPack", () => {
     ]);
   });
 
+  it("resolves the education pack against core (Course + Enrollment + regulated grade)", async () => {
+    const manifest = await loadBuiltinPack("erp-education");
+    const entityNames = (manifest.entities ?? []).map((e) => e.name);
+    expect(entityNames).toContain("Course"); // education
+    expect(entityNames).toContain("Enrollment"); // education
+    expect(entityNames).toContain("Account"); // core
+  });
+
   it("lists the built-in pack names", () => {
     expect(BUILTIN_PACK_NAMES).toContain("erp-retail");
     expect(BUILTIN_PACK_NAMES).toContain("erp-grocery");
     expect(BUILTIN_PACK_NAMES).toContain("erp-construction");
+    expect(BUILTIN_PACK_NAMES).toContain("erp-education");
   });
 
   it("throws on an unknown pack", async () => {
