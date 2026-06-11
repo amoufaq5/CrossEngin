@@ -1,10 +1,10 @@
 import { createServer, type Server } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
-import type { ReportData, ReportSpec } from "@crossengin/operate-web";
+import { describeWebApi, emitWebClientModule, type ReportData, type ReportSpec } from "@crossengin/operate-web";
 import {
   ColumnMappedEntityStore,
   PostgresColumnReportExecutor,
@@ -13,6 +13,7 @@ import {
 } from "@crossengin/operate-runtime-pg";
 
 import type { WebServeOptions } from "./cli.js";
+import type { WebClientOptions } from "./web-client-cli.js";
 import type { RawWebRequest } from "./http.js";
 import {
   JwksRefreshPoller,
@@ -229,6 +230,31 @@ export interface RunningServer {
  * graceful shutdown (and the `OperateWebServer` so a caller can seed the
  * in-memory store). `deps` is a test-only seam for hermetic poller wiring.
  */
+/**
+ * `operate-web web-client` (P3.39): load the manifest, build the per-caller
+ * `/ui/_describe` descriptor for the given `--role`s, emit a typed view-model
+ * client, and write it to `--out` (or stdout). The emitter is pure
+ * (`@crossengin/operate-web`); this just wires the manifest + viewer in.
+ */
+export async function executeWebClient(options: WebClientOptions): Promise<number> {
+  const manifest =
+    options.manifestPath !== null
+      ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
+      : await loadBuiltinPack(options.pack ?? "");
+  const descriptor = describeWebApi(manifest, { roles: [...options.roles] });
+  const moduleSource = emitWebClientModule(
+    descriptor,
+    options.clientName !== null ? { clientName: options.clientName } : {},
+  );
+  if (options.out !== null) {
+    await writeFile(options.out, moduleSource, "utf8");
+    process.stdout.write(`wrote ${options.out}\n`);
+  } else {
+    process.stdout.write(moduleSource);
+  }
+  return 0;
+}
+
 export async function serve(options: WebServeOptions, deps: ServeJwtDeps = {}): Promise<RunningServer> {
   const manifest =
     options.manifestPath !== null

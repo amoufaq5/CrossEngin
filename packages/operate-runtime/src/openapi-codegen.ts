@@ -94,8 +94,8 @@ function tsPropKey(key: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
 }
 
-/** Emits the `export interface`/`export type` for one named component schema. */
-function emitNamedSchema(name: string, schema: OpenApiSchema): string {
+/** Emits the `export interface`/`export type` for one named schema (reused by the operate-web emitter). */
+export function emitNamedTsType(name: string, schema: OpenApiSchema): string {
   if (schema.oneOf !== undefined) {
     return `export type ${name} =\n  | ${schema.oneOf.map(schemaToTsType).join("\n  | ")};`;
   }
@@ -204,7 +204,7 @@ export function emitOperateClientModule(doc: OpenApiDocument, options: EmitClien
   const schemas = doc.components?.schemas ?? {};
 
   const interfaces = Object.entries(schemas)
-    .map(([name, schema]) => emitNamedSchema(name, schema))
+    .map(([name, schema]) => emitNamedTsType(name, schema))
     .join("\n\n");
 
   const methods: string[] = [];

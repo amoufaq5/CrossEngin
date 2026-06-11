@@ -1,11 +1,33 @@
 #!/usr/bin/env node
 
 import { CliUsageError, helpText, parseWebArgs } from "../src/cli.js";
-import { serve } from "../src/node.js";
+import { parseWebClientArgs, webClientHelpText } from "../src/web-client-cli.js";
+import { executeWebClient, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
+async function runWebClientCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseWebClientArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${webClientHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(webClientHelpText);
+    return 0;
+  }
+  return executeWebClient(options);
+}
+
 async function main(): Promise<number> {
+  if (process.argv[2] === "web-client") {
+    return runWebClientCommand(process.argv.slice(3));
+  }
   let options;
   try {
     options = parseWebArgs(process.argv.slice(2));

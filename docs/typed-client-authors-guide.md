@@ -179,6 +179,20 @@ Authorization: Bearer <token>
 }
 ```
 
+### 1a. Generate a client (built-in, P3.39)
+
+operate-web ships a pure view-model client emitter — one self-contained module
+(typed view-model + entity interfaces + a `createWebClient` factory):
+
+```bash
+operate-web web-client --pack erp-retail --role retail_admin --out ./src/web-client.ts
+# --role repeats (the descriptor is per-caller); --client-name sets the factory name
+```
+
+A committed example lives at `apps/operate-web/src/generated/retail-web-client.ts`
+(typechecked + drift-guarded in CI). The sections below explain the descriptor the
+emitter consumes, for hand-rolled clients.
+
 ### 2. The three schema layers
 
 The descriptor carries everything a client needs to type its calls:
