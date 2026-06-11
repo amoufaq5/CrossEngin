@@ -4,8 +4,9 @@ import { CliUsageError, helpText, parseServeArgs } from "../src/cli.js";
 import { incidentsHelpText, parseIncidentsArgs } from "../src/incidents-cli.js";
 import { openApiClientHelpText, parseOpenApiClientArgs } from "../src/openapi-client-cli.js";
 import { parseSdkReleasesArgs, sdkReleasesHelpText } from "../src/sdk-releases-cli.js";
+import { marketplaceHelpText, parseMarketplaceArgs } from "../src/marketplace-cli.js";
 import { parseSloArgs, sloHelpText } from "../src/slo-cli.js";
-import { executeIncidents, executeOpenApiClient, executeSdkReleases, executeSlo, serve } from "../src/node.js";
+import { executeIncidents, executeMarketplace, executeOpenApiClient, executeSdkReleases, executeSlo, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -43,6 +44,24 @@ async function runSloCommand(argv: readonly string[]): Promise<number> {
     return 0;
   }
   return executeSlo(options);
+}
+
+async function runMarketplaceCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseMarketplaceArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${marketplaceHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(marketplaceHelpText);
+    return 0;
+  }
+  return executeMarketplace(options);
 }
 
 async function runSdkReleasesCommand(argv: readonly string[]): Promise<number> {
@@ -97,6 +116,9 @@ async function main(): Promise<number> {
   }
   if (process.argv[2] === "sdk-releases") {
     return runSdkReleasesCommand(process.argv.slice(3));
+  }
+  if (process.argv[2] === "marketplace") {
+    return runMarketplaceCommand(process.argv.slice(3));
   }
 
   let options;

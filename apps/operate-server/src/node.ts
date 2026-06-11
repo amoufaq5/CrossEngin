@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 import { PostgresPipelineExecutionStore, PostgresRateLimitChecker } from "@crossengin/api-gateway-pg";
 import {
@@ -16,6 +17,7 @@ import {
   runSdkReleases,
   type SdkLedgerSource,
 } from "@crossengin/sdk-clients-pg";
+import { PostgresPackInstallationStore, runMarketplace } from "@crossengin/marketplace-pg";
 import {
   PostgresSloEnforcementActionStore,
   PostgresSloLatencyEvaluationStore,
@@ -45,6 +47,7 @@ import {
 import type { ServeOptions } from "./cli.js";
 import type { OpenApiClientOptions } from "./openapi-client-cli.js";
 import type { SdkReleasesCliOptions } from "./sdk-releases-cli.js";
+import type { MarketplaceCliOptions } from "./marketplace-cli.js";
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
@@ -271,6 +274,27 @@ export async function executeSdkReleases(
       listCompatibility: (q) => compatStore.list(q),
     };
     const { exitCode } = await runSdkReleases(options, source, out);
+    return exitCode;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * `operate-server marketplace <list|verify|install|uninstall>` (P5.1): drive +
+ * query the per-tenant pack install ledger (meta.pack_installations). The
+ * `PostgresPackInstallationStore` is the install source (every op tenant-scoped via
+ * set_config so RLS confines it); `install`/`uninstall` drive the lifecycle engine
+ * and persist, `verify` exits 1 on ledger drift.
+ */
+export async function executeMarketplace(
+  options: MarketplaceCliOptions,
+  out: (line: string) => void = (line) => void process.stdout.write(`${line}\n`),
+): Promise<number> {
+  const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const store = new PostgresPackInstallationStore(conn);
+    const { exitCode } = await runMarketplace(options, store, out, { now: () => new Date(), newId: () => randomUUID() });
     return exitCode;
   } finally {
     await conn.close();
