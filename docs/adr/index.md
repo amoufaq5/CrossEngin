@@ -259,3 +259,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 173 | 0204 | 1,500 | Drafted alongside the SDK-ledger drift CI gate (Phase 3 P3.49) |
 | 174 | 0205 | 2,500 | Drafted alongside pack-erp-construction — fourth meta.extends vertical (Phase 3 P4) |
 | 175 | 0206 | 2,500 | Drafted alongside pack-erp-education — fifth meta.extends vertical, first regulated-on-non-health (Phase 3 P4.1) |
+| 176 | 0081 | 2,500 | Drafted alongside the marketplace install runtime — marketplace-pg (Phase 3 P5) |
